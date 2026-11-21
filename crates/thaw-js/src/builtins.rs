@@ -151,9 +151,13 @@ pub(crate) const PRELUDE: &str = r#"
     for (var i = s; i < e; i++) this[i] = v; return this;
   });
   def(AP, 'sort', function (cmp) {
+    'use strict';
     var a = this, defined = [], undef = 0, holes = 0;
     if (a.length > 1 && Array.isArray(a) && Object.isFrozen(a)) throw new TypeError("Cannot assign to read only property '0' of object '[object Array]'");
-    for (var i = 0; i < a.length; i++) { if (!(i in a)) holes++; else if (a[i] === undefined) undef++; else defined.push(a[i]); }
+    if (a == null) throw new TypeError('Array.prototype.sort called on null or undefined');
+    // read from a snapshot (`slice` refuses a sparse tail, see `sparse_unsupported`): the reads precede every call of `cmp`
+    var snap = Array.prototype.slice.call(a);
+    for (var i = 0; i < snap.length; i++) { if (!(i in snap)) holes++; else if (snap[i] === undefined) undef++; else defined.push(snap[i]); }
     var f = cmp === undefined ? function (x, y) { x = String(x); y = String(y); return x < y ? -1 : x > y ? 1 : 0; } : cmp;
     var n = defined.length, src = defined, dst = new Array(n);
     for (var w = 1; w < n; w *= 2) {
@@ -1218,14 +1222,13 @@ impl Interp {
         let arr_current = match &*o.kind.borrow() {
             Kind::Array(items) if key == "length" => Some(Prop {
                 key: key.into(),
-                slot: Slot::Data(Value::Number(items.len() as f64)),
+                slot: Slot::Data(Value::Number(array_length(o, items.len()))),
                 enumerable: false,
                 writable: o.len_writable(),
                 configurable: false,
             }),
             Kind::Array(items) => array_index(key)
-                .and_then(|i| items.get(i))
-                .filter(|v| !matches!(v, Value::Hole))
+                .and_then(|i| array_elem(o, items, i))
                 .map(|v| Prop {
                     key: key.into(),
                     slot: Slot::Data(v.clone()),
@@ -1241,7 +1244,7 @@ impl Interp {
                 && d.value.is_some());
         // a read-only `length` also refuses new elements past it
         let len_blocks = o.len_ro.get()
-            && matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(key).is_some_and(|i| i >= items.len()));
+            && matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(key).is_some_and(|i| i as f64 >= array_length(o, items.len())));
         o.force_key(key);
         // A closure's synthesized `name`/`length` is an existing configurable own property: make it real
         // first, or a nonextensible closure refuses to redefine it as if it were a new key.
@@ -1359,6 +1362,18 @@ impl Interp {
         let from = rel(self, arg(args, 0), 0)?;
         let to = rel(self, arg(args, 1), len)?;
         Ok((from, to.max(from)))
+    }
+
+    /// The guard for a builtin that still reads an array's dense slots directly (`array_items`, `items`).
+    /// An array with a sparse tail would silently lose its elements past the dense slots, so it throws the
+    /// stopgap RangeError instead until that builtin works on the generic (live Get/Has) path.
+    pub(crate) fn sparse_unsupported(&mut self, v: &Value) -> R<()> {
+        match v {
+            Value::Object(o) if array_has_sparse_tail(o) => {
+                self.throw_error("RangeError", "Invalid array length")
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Like [`Self::array_items`] but array holes stay `Value::Hole` (callers must not leak them).
@@ -1938,6 +1953,7 @@ impl Interp {
                 Ok(Value::Object(d))
             });
             self.set_native(o, "freeze", |it, _, args| {
+                it.sparse_unsupported(&arg(args, 0))?;
                 if let Value::Object(o) = arg(args, 0) {
                     if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.cur_len() > 0) {
                         return it.throw_error(
@@ -1964,7 +1980,8 @@ impl Interp {
                 }
                 Ok(arg(args, 0))
             });
-            self.set_native(o, "seal", |_, _, args| {
+            self.set_native(o, "seal", |it, _, args| {
+                it.sparse_unsupported(&arg(args, 0))?;
                 if let Value::Object(o) = arg(args, 0) {
                     seal_obj(&o);
                 }
@@ -2019,7 +2036,10 @@ impl Interp {
         self.set_native(&fp, "apply", |it, this, args| {
             let list = match arg(args, 1) {
                 Value::Undefined | Value::Null => Vec::new(),
-                v => it.array_items(&v),
+                v => {
+                    it.sparse_unsupported(&v)?;
+                    it.array_items(&v)
+                }
             };
             it.call(this, &arg(args, 0), &list)
         });
@@ -2117,15 +2137,20 @@ impl Interp {
         let array = self.native(|it, _, args| {
             let made = match args {
                 [Value::Number(n)] => {
-                    // ToUint32(n) must equal n (a RangeError otherwise), and dense storage has a ceiling
-                    if n.fract() != 0.0
-                        || *n < 0.0
-                        || *n > 4294967295.0
-                        || *n >= MAX_DENSE_ARRAY_LEN as f64
-                    {
+                    // ToUint32(n) must equal n (a RangeError otherwise)
+                    if n.fract() != 0.0 || *n < 0.0 || *n > 4294967295.0 {
                         return it.throw_error("RangeError", "Invalid array length");
                     }
-                    it.array(vec![Value::Hole; *n as usize])
+                    if *n as usize >= MAX_DENSE_ARRAY_LEN {
+                        // past the dense ceiling: no slots, the length is all there is
+                        let made = it.array(Vec::new());
+                        if let Value::Object(o) = &made {
+                            set_exotic_len(o, *n as u32);
+                        }
+                        made
+                    } else {
+                        it.array(vec![Value::Hole; *n as usize])
+                    }
                 }
                 _ => it.array(args.to_vec()),
             };
@@ -2149,6 +2174,7 @@ impl Interp {
                         .map(|c| Value::Str(c.to_string().into()))
                         .collect(),
                     Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
+                        it.sparse_unsupported(&src)?;
                         it.array_items(&src)
                     }
                     Value::Object(_) => match it.iter_protocol(&src)? {
@@ -2156,6 +2182,10 @@ impl Interp {
                         None => {
                             let n = it.get(&src, "length")?;
                             let n = it.num(&n);
+                            // ArrayCreate(len): a length past 2^32 - 1 is a RangeError before any element is read
+                            if n > 4294967295.0 {
+                                return it.throw_error("RangeError", "Invalid array length");
+                            }
                             let mut v = Vec::new();
                             for i in 0..(if n.is_nan() { 0 } else { n as usize }) {
                                 v.push(it.get(&src, &i.to_string())?);
@@ -2195,6 +2225,9 @@ impl Interp {
             }
             if o.len_ro.get() {
                 return it.throw_error("TypeError", RO_LENGTH);
+            }
+            if o.is_exotic() {
+                return push_generic(it, this, args);
             }
             let n = match &*o.kind.borrow() {
                 Kind::Array(items) => Some(items.len()),
@@ -2236,6 +2269,9 @@ impl Interp {
                     it.set(this, "length", Value::Number((n - 1) as f64))?;
                     return Ok(v);
                 }
+                if o.is_exotic() {
+                    return pop_generic(it, this, o);
+                }
                 let n = match &*o.kind.borrow() {
                     Kind::Array(items) => Some(items.len()),
                     _ => None,
@@ -2252,6 +2288,7 @@ impl Interp {
             Ok(Value::Undefined)
         });
         self.set_native(&ap, "shift", |it, this, _| {
+            it.sparse_unsupported(this)?;
             if let Value::Object(o) = this {
                 // ponytail: throws before mutating; Node shifts the element first, then its length Set throws
                 if o.len_ro.get() {
@@ -2276,6 +2313,7 @@ impl Interp {
             Ok(Value::Undefined)
         });
         self.set_native(&ap, "unshift", |it, this, args| {
+            it.sparse_unsupported(this)?;
             if let Value::Object(o) = this {
                 if o.len_ro.get() {
                     return it.throw_error("TypeError", RO_LENGTH);
@@ -2294,6 +2332,7 @@ impl Interp {
             Ok(Value::Undefined)
         });
         self.set_native(&ap, "reverse", |it, this, _| {
+            it.sparse_unsupported(this)?;
             if let Value::Object(o) = this {
                 // a frozen array refuses the first write (index 0) when there are two or more elements
                 if o.frozen.get()
@@ -2308,6 +2347,7 @@ impl Interp {
             Ok(this.clone())
         });
         self.set_native(&ap, "splice", |it, this, args| {
+            it.sparse_unsupported(this)?;
             let Value::Object(o) = this else {
                 return Ok(Value::Undefined);
             };
@@ -2353,6 +2393,11 @@ impl Interp {
         });
         for (name, last) in [("indexOf", false), ("lastIndexOf", true)] {
             self.set_native(&ap, name, move |it, this, args| {
+                if let Value::Object(o) = this {
+                    if array_has_sparse_tail(o) {
+                        return Ok(Value::Number(sparse_search(it, o, args, last)));
+                    }
+                }
                 let needle = arg(args, 0);
                 let items = it.array_items_raw(this);
                 let len = items.len() as f64;
@@ -2399,6 +2444,7 @@ impl Interp {
             });
         }
         self.set_native(&ap, "includes", |it, this, args| {
+            it.sparse_unsupported(this)?;
             let needle = arg(args, 0);
             let same_zero = |v: &Value| strict_equals(v, &needle) || matches!((v, &needle), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan());
             let items = it.array_items(this);
@@ -2417,6 +2463,7 @@ impl Interp {
             let is_array =
                 matches!(this, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
             if is_array {
+                it.sparse_unsupported(this)?;
                 let items = it.array_items_raw(this);
                 let (from, to) = it.range(args, items.len())?;
                 return Ok(it.array(items[from..to].to_vec()));
@@ -2441,10 +2488,12 @@ impl Interp {
             Ok(it.array(out))
         });
         self.set_native(&ap, "concat", |it, this, args| {
+            it.sparse_unsupported(this)?;
             let mut items = it.array_items_raw(this);
             for v in args {
                 match v {
                     Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
+                        it.sparse_unsupported(v)?;
                         items.extend(it.array_items_raw(v))
                     }
                     Value::Object(_) => {
@@ -3548,7 +3597,7 @@ impl Interp {
             Value::Object(o) => {
                 crate::typed::typed_own_key(o, &key).unwrap_or_else(|| find_own(o, &key).is_some()
                     || synth_fn_own(o, &key).is_some()
-                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))) || *key == *"length"))
+                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| array_elem(o, items, i).is_some()) || *key == *"length"))
             }
             Value::Str(s) => array_index(&key).is_some_and(|i| i < str_len(s)),
             _ => false,
@@ -3568,7 +3617,7 @@ impl Interp {
         Ok(match target {
             Value::Object(o) => crate::typed::typed_own_key(o, &key).unwrap_or_else(|| {
                 find_own(o, &key).is_some_and(|(_, e)| e)
-                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| items.get(i).is_some_and(|v| !matches!(v, Value::Hole))))
+                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| array_elem(o, items, i).is_some()))
             }),
             _ => false,
         })
@@ -3605,9 +3654,10 @@ pub(crate) fn test_integrity(o: &Obj, frozen: bool) -> bool {
         return false;
     }
     let elements_ok = if frozen { o.frozen.get() } else { sealed };
-    if !elements_ok
-        && matches!(&*o.kind.borrow(), Kind::Array(items) if items.iter().any(|v| !matches!(v, Value::Hole)))
-    {
+    // an exotic array's present elements past the dense slots count too (its sparse tail)
+    let has_elements = matches!(&*o.kind.borrow(), Kind::Array(items) if items.iter().any(|v| !matches!(v, Value::Hole)))
+        || o.sparse.get().is_some_and(|s| !s.borrow().elems.is_empty());
+    if !elements_ok && has_elements {
         return false;
     }
     o.props()
@@ -3687,6 +3737,90 @@ fn arr_fail<T>(it: &mut Interp, f: ArrFail) -> R<T> {
         ArrFail::Len => RO_LENGTH.to_string(),
     };
     it.throw_error("TypeError", &msg)
+}
+
+/// `push` on an exotic array (its length may sit past the dense slots, so no dense splice applies): the spec's
+/// generic steps, Set each index then `length` (spec 23.1.3.20). A length past 2^32 - 1 fails in that last Set.
+// ponytail: unlike V8 this is not sped up for huge sparse arrays; it is O(args) here anyway
+fn push_generic(it: &mut Interp, this: &Value, args: &[Value]) -> R<Value> {
+    let len = it.get(this, "length")?;
+    let mut n = it.num(&len).max(0.0).trunc();
+    if n + args.len() as f64 > 9007199254740991.0 {
+        let msg = format!(
+            "Pushing {} elements on an array-like of length {} is disallowed, as the total surpasses 2**53-1",
+            args.len(),
+            n
+        );
+        return it.throw_error("TypeError", &msg);
+    }
+    for v in args {
+        it.set(this, &(n as u64).to_string(), v.clone())?;
+        n += 1.0;
+    }
+    it.set(this, "length", Value::Number(n))?;
+    Ok(Value::Number(n))
+}
+
+/// `pop` on an exotic array: the spec's generic steps (Get the last index, Delete it, then Set `length`).
+fn pop_generic(it: &mut Interp, this: &Value, o: &Obj) -> R<Value> {
+    let len = it.get(this, "length")?;
+    let n = it.num(&len).max(0.0).trunc();
+    if n == 0.0 {
+        it.set(this, "length", Value::Number(0.0))?;
+        return Ok(Value::Undefined);
+    }
+    let key = ((n - 1.0) as u64).to_string();
+    let v = it.get(this, &key)?;
+    if !crate::reflect::delete_own(it, o, &key)? {
+        return it.throw_error(
+            "TypeError",
+            &format!("Cannot delete property '{key}' of [object Array]"),
+        );
+    }
+    it.set(this, "length", Value::Number(n - 1.0))?;
+    Ok(v)
+}
+
+/// The `fromIndex` of `indexOf` (or `lastIndexOf`) over `len` elements; a negative result means no search.
+fn search_start(it: &mut Interp, v: &Value, len: f64, last: bool) -> f64 {
+    match v {
+        Value::Undefined => {
+            if last {
+                len - 1.0
+            } else {
+                0.0
+            }
+        }
+        v => {
+            let n = it.num(v);
+            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+            match (last, n < 0.0) {
+                (true, true) => len + n,
+                (true, false) => n.min(len - 1.0),
+                (false, true) => (len + n).max(0.0),
+                (false, false) => n,
+            }
+        }
+    }
+}
+
+/// `indexOf` / `lastIndexOf` on an array with a sparse tail: holes never match, so only the present
+/// elements are compared (not every index up to `length`). Returns the index, or -1.
+fn sparse_search(it: &mut Interp, o: &Obj, args: &[Value], last: bool) -> f64 {
+    let (len, present) = array_present(o);
+    let needle = arg(args, 0);
+    let from = search_start(it, &arg(args, 1), len, last);
+    let hit = if last {
+        present
+            .iter()
+            .rev()
+            .find(|(k, v)| *k <= from && strict_equals(v, &needle))
+    } else {
+        present
+            .iter()
+            .find(|(k, v)| *k >= from && strict_equals(v, &needle))
+    };
+    hit.map_or(-1.0, |(k, _)| *k)
 }
 
 /// Frozen, or non-extensible (sealed implies non-extensible): writes and deletes can be refused, so
@@ -3791,10 +3925,7 @@ fn splice_restricted(it: &mut Interp, o: &Obj, s: usize, d: usize, ins: &[Value]
 fn own_array_elem(o: &Obj, key: &str) -> bool {
     match &*o.kind.borrow() {
         Kind::Array(items) => {
-            key == "length"
-                || array_index(key)
-                    .and_then(|i| items.get(i))
-                    .is_some_and(|v| !matches!(v, Value::Hole))
+            key == "length" || array_index(key).is_some_and(|i| array_elem(o, items, i).is_some())
         }
         _ => false,
     }

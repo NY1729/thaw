@@ -48,6 +48,7 @@ impl Interp {
                 f if f.is_callable() => replacer = Some(f),
                 Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
                     let mut keys: Vec<Rc<str>> = Vec::new();
+                    it.sparse_unsupported(&Value::Object(o.clone()))?;
                     for item in it.array_items(&Value::Object(o.clone())) {
                         if matches!(item, Value::Str(_) | Value::Number(_)) {
                             let k = it.to_str(&item).into_rc();
@@ -259,6 +260,7 @@ impl Interp {
                     let items = if is_proxy {
                         self.proxy_array_items(&v)?
                     } else {
+                        self.sparse_unsupported(&v)?;
                         self.array_items(&v)
                     };
                     for (i, item) in items.into_iter().enumerate() {

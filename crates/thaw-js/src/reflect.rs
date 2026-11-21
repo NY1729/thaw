@@ -27,7 +27,10 @@ fn obj(it: &mut Interp, name: &str, v: &Value) -> R<Obj> {
 /// numeric `length` only).
 fn list_from(it: &mut Interp, v: &Value) -> R<Vec<Value>> {
     match v {
-        Value::Object(_) => Ok(it.array_items(v)),
+        Value::Object(_) => {
+            it.sparse_unsupported(v)?;
+            Ok(it.array_items(v))
+        }
         _ => it.throw_error("TypeError", "CreateListFromArrayLike called on non-object"),
     }
 }
@@ -58,14 +61,12 @@ fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
     if let Kind::Array(items) = &*o.kind.borrow() {
         if key == "length" {
             return Some((
-                Slot::Data(Value::Number(items.len() as f64)),
+                Slot::Data(Value::Number(array_length(o, items.len()))),
                 o.len_writable(),
             ));
         }
-        if let Some(v) = array_index(key).and_then(|i| items.get(i)) {
-            if !matches!(v, Value::Hole) {
-                return Some((Slot::Data(v.clone()), writable));
-            }
+        if let Some(v) = array_index(key).and_then(|i| array_elem(o, items, i)) {
+            return Some((Slot::Data(v), writable));
         }
     }
     o.force_key(key);
@@ -287,8 +288,15 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
         if key == "length" {
             return Ok(false);
         }
-        if let Some(slot) = array_index(key).and_then(|i| items.get_mut(i)) {
-            *slot = Value::Hole;
+        if let Some(i) = array_index(key) {
+            match items.get_mut(i) {
+                Some(slot) => *slot = Value::Hole,
+                None => {
+                    if let Some(s) = o.sparse.get() {
+                        s.borrow_mut().elems.remove(&(i as u32));
+                    }
+                }
+            }
         }
     }
     if let Some(i) = o.position(key) {
