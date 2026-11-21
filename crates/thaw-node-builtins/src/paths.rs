@@ -1,6 +1,7 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
-        "path" => Some(r#"
+        "path" => Some(
+            r#"
 function received(value) {
   if (value === null || value === undefined) return String(value);
   if (typeof value === 'function') return 'function ' + value.name;
@@ -229,13 +230,10 @@ function winRelative(from, to) {
 var win32 = { resolve: winResolve, join: winJoin, dirname: winDirname, basename: winBasename, extname: winExtname, normalize: winNormalize, relative: winRelative, isAbsolute: winIsAbsolute, parse: winParse, format: function(value) { return formatPath(formatArg(value), '\\'); }, toNamespacedPath: toNamespacedPath, sep: '\\', delimiter: ';' };
 posix.posix = posix; posix.win32 = win32; win32.posix = posix; win32.win32 = win32;
 module.exports = posix;
-"#),
-        "path/posix" => Some(
-            "module.exports = require('node:path').posix;\n",
+"#,
         ),
-        "path/win32" => Some(
-            "module.exports = require('node:path').win32;\n",
-        ),
+        "path/posix" => Some("module.exports = require('node:path').posix;\n"),
+        "path/win32" => Some("module.exports = require('node:path').win32;\n"),
         _ => None,
     }
 }
