@@ -53,6 +53,7 @@ mod gc;
 mod gc_registry;
 mod generators;
 mod heap_limit;
+mod heapsnap;
 mod hints;
 pub mod host;
 #[cfg(feature = "intl")]

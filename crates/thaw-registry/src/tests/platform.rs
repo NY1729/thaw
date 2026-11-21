@@ -77,7 +77,8 @@ fn v8_heap_space_statistics_lists_node_spaces_in_order() {
     let empty_node_modules = temp_registry("builtin_v8_spaces_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
+    // index.js plus the node:stream and node:fs modules the v8 module now requires (snapshot writer)
+    assert_eq!(file_count, 5);
     assert_eq!(
         run_js(&bundle),
         r#"[11,"read_only_space,new_space,old_space,code_space,shared_space,trusted_space,new_large_object_space,large_object_space,code_large_object_space,shared_large_object_space,trusted_large_object_space","space_name,space_size,space_used_size,space_available_size,physical_space_size",true,false]"#
@@ -98,8 +99,133 @@ fn v8_cached_data_version_tag_is_a_stable_nonzero_u32() {
     let empty_node_modules = temp_registry("builtin_v8_tag_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
+    // index.js plus the node:stream and node:fs modules the v8 module now requires (snapshot writer)
+    assert_eq!(file_count, 5);
     assert_eq!(run_js(&bundle), "[true,true,true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+// v8.getHeapSnapshot() (Node 22.23.1, 3 runs: 8 top-level keys; snapshot.meta is the literal below; node_count 43.3k-43.7k
+// (thaw's registry graph is much smaller by design, D3, so only > 0 and the array-length invariants are asserted); the first
+// node is the synthetic root (type 9, name index 1 = "", id 1); a setEncoding('utf8') stream yields strings, default yields Buffers)
+#[test]
+fn v8_get_heap_snapshot_is_valid_json_with_nodes_meta() {
+    let dir = temp_registry("builtin_v8_snapshot");
+    fs::write(
+        dir.join("index.js"),
+        r##"var v8 = require('node:v8');
+var NODE_META = '{"node_fields":["type","name","id","self_size","edge_count","trace_node_id","detachedness"],"node_types":[["hidden","array","string","object","code","closure","regexp","number","native","synthetic","concatenated string","sliced string","symbol","bigint","object shape"],"string","number","number","number","number","number"],"edge_fields":["type","name_or_index","to_node"],"edge_types":[["context","element","property","internal","hidden","shortcut","weak"],"string_or_number","node"],"trace_function_info_fields":["function_id","name","script_name","script_id","line","column"],"trace_node_fields":["id","function_info_index","count","size","children"],"sample_fields":["timestamp_us","last_assigned_id"],"location_fields":["object_index","script_id","line","column"]}';
+module.exports = async function () {
+  var stream = v8.getHeapSnapshot();
+  stream.setEncoding('utf8');
+  var text = '', kinds = {};
+  for await (var chunk of stream) { kinds[typeof chunk] = true; text += chunk; }
+  var snap = JSON.parse(text), s = snap.snapshot, strings = snap.strings;
+  var nodeNamesOk = snap.nodes.every(function (value, i) { return i % 7 !== 1 || (Number.isInteger(value) && value >= 0 && value < strings.length); });
+  var nodeTypesOk = snap.nodes.every(function (value, i) { return i % 7 !== 0 || (Number.isInteger(value) && value >= 0 && value < 15); });
+  var edgesOk = snap.edges.every(function (value, i) { return i % 3 !== 2 || (value % 7 === 0 && value < snap.nodes.length); });
+  var root = snap.nodes.slice(0, 7);
+  return [
+    Object.keys(snap).join(','),
+    JSON.stringify(s.meta) === NODE_META,
+    Object.keys(s).join(','),
+    s.node_count > 0,
+    s.edge_count >= 0,
+    snap.nodes.length === 7 * s.node_count,
+    snap.edges.length === 3 * s.edge_count,
+    edgesOk,
+    nodeNamesOk,
+    nodeTypesOk,
+    Array.isArray(strings) && strings.every(function (name) { return typeof name === 'string'; }),
+    root[0] === 9 && strings[root[1]] === '' && root[2] === 1 && root[5] === 0 && root[6] === 0,
+    Object.keys(kinds).join(',')
+  ];
+};
+"##,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_v8_snapshot_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        run_js(&bundle),
+        r#"["snapshot,nodes,edges,trace_function_infos,trace_tree,samples,locations,strings",true,"meta,node_count,edge_count,trace_function_count",true,true,true,true,true,true,true,true,true,"string"]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+// v8.getHeapSnapshot() streams 64 KiB Buffers by default (Node 22.23.1: on('data') gives 67 chunks, 65536 bytes each but the last)
+#[test]
+fn v8_get_heap_snapshot_streams_buffers_in_64_kib_chunks() {
+    let dir = temp_registry("builtin_v8_snapshot_chunks");
+    fs::write(
+        dir.join("index.js"),
+        r#"var v8 = require('node:v8'), once = require('node:events').once;
+module.exports = async function () {
+  var stream = v8.getHeapSnapshot(), chunks = [];
+  stream.on('data', function (chunk) { chunks.push(chunk); });
+  await once(stream, 'end');
+  var text = Buffer.concat(chunks).toString('utf8');
+  return [chunks.length > 1, chunks.every(Buffer.isBuffer), chunks.every(function (c) { return c.length <= 65536; }), JSON.parse(text).snapshot.node_count > 0];
+};
+"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_v8_snapshot_chunks_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "[true,true,true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+// v8.writeHeapSnapshot(file) writes the snapshot text and returns the file name (Node 22.23.1)
+#[test]
+fn v8_write_heap_snapshot_writes_a_parseable_file() {
+    let dir = temp_registry("builtin_v8_write_snapshot");
+    let target = dir.join("out.heapsnapshot");
+    fs::write(
+        dir.join("index.js"),
+        format!(
+            "var v8 = require('node:v8'), fs = require('node:fs');\nmodule.exports = function () {{\n  var returned = v8.writeHeapSnapshot('{}');\n  var snap = JSON.parse(fs.readFileSync('{}', 'utf8'));\n  return [returned === '{}', typeof returned, snap.snapshot.node_count > 0, snap.nodes.length === 7 * snap.snapshot.node_count];\n}};\n",
+            target.display(),
+            target.display(),
+            target.display()
+        ),
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_v8_write_snapshot_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "[true,\"string\",true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+// v8.writeHeapSnapshot() with no name: Heap.<YYYYMMDD>.<HHMMSS>.<pid>.<thread>.<seq>.heapsnapshot, seq counts per process
+#[test]
+fn v8_write_heap_snapshot_default_name_follows_node_pattern_and_increments() {
+    let dir = temp_registry("builtin_v8_write_default");
+    fs::write(
+        dir.join("index.js"),
+        r#"var v8 = require('node:v8'), fs = require('node:fs');
+module.exports = function () {
+  var first = v8.writeHeapSnapshot(), second = v8.writeHeapSnapshot();
+  var pattern = /^Heap\.\d{8}\.\d{6}\.\d+\.0\.\d{3}\.heapsnapshot$/;
+  var result = [pattern.test(first), pattern.test(second), first !== second, fs.existsSync(first), fs.existsSync(second)];
+  fs.unlinkSync(first);
+  fs.unlinkSync(second);
+  return result;
+};
+"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_v8_write_default_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "[true,true,true,true,true]");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -116,7 +242,8 @@ fn v8_heap_code_statistics_has_node_keys_and_positive_sizes() {
     let empty_node_modules = temp_registry("builtin_v8_code_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
+    // index.js plus the node:stream and node:fs modules the v8 module now requires (snapshot writer)
+    assert_eq!(file_count, 5);
     assert_eq!(
         run_js(&bundle),
         r#"["code_and_metadata_size,bytecode_and_metadata_size,external_script_source_size,cpu_profiler_metadata_size",true,true,true,true,true,true]"#
@@ -144,7 +271,8 @@ fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
     let empty_node_modules = temp_registry("builtin_v8_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
+    // index.js plus the node:stream and node:fs modules the v8 module now requires (snapshot writer)
+    assert_eq!(file_count, 5);
     let script = format!(
             "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
