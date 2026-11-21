@@ -2289,17 +2289,10 @@ fn native_esm_failed_link_never_marks_source_linked() {
 }
 }
 
-// qjs_pending: fails on thaw-js: Package route ERROR: Cannot find module './native.mjs'; script route needs __thaw_register_native_bundle
-mod qjs_pending_bundling_commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() {
-    // Unrun: a CommonJS main enters a native ESM dependency synchronously.
-    // The native star getter must read the final module.exports after the
-    // provisional CommonJS object was replaced later in the same cycle.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1: the entry's first require enters native.mjs, whose `export * from './index.cjs'` imports the
+    // entry while it is still loading. That import throws ERR_REQUIRE_CYCLE_MODULE, so the entry's load fails.
     let root = temp_registry("cjs-first-native-cycle");
     let modules = root.join("node_modules");
     let package = modules.join("cjs-first-native-pkg");
@@ -2307,13 +2300,69 @@ fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() 
     fs::write(package.join("index.cjs"), "exports.value = 1; var first = require('./native.mjs'); var second = require('./native.mjs'); var created = require('node:module').createRequire(__filename)('./native.mjs'); module.exports = { value: 2, same: first === second && second === created, read: function() { return first.value; } };").unwrap();
     fs::write(package.join("native.mjs"), "export * from './index.cjs';").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-first-native-pkg", &package, "index.cjs").unwrap();
-    assert!(bundle.contains("evalNativeSync"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.cjsFirstNativeResult = function() {{ return [module.exports.same, module.exports.read()]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"cjsFirstNativeResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,2]");
+    let outcome = run_js_get(&bundle, "");
+    assert!(outcome.starts_with("ERROR: "), "{outcome}");
+    assert!(outcome.contains("Cannot import CommonJS Module ./index.cjs in a cycle."), "{outcome}");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn commonjs_require_of_an_acyclic_native_module_returns_one_namespace() {
+    // Node 22.23.1: three requires of one ESM module give the same namespace object, and its live value.
+    let root = temp_registry("cjs-native-namespace-identity");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-native-identity-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "var first = require('./native.mjs'); var second = require('./native.mjs'); var created = require('node:module').createRequire(__filename)('./native.mjs'); module.exports = [first.value, first === second, second === created];").unwrap();
+    fs::write(package.join("native.mjs"), "export const value = 5; export default 1;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-native-identity-pkg", &package, "index.cjs").unwrap();
+    assert_eq!(run_js_get(&bundle, ""), "[5,true,true]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_require_of_an_esm_module_under_evaluation_throws_cycle_error() {
+    // Node 22.23.1: b.mjs imports c.cjs, which requires b.mjs while b.mjs is still evaluating. That require throws
+    // ERR_REQUIRE_CYCLE_MODULE ("Cannot require() ES Module ... in a cycle."); c.cjs catches it and the graph finishes.
+    let root = temp_registry("esm-under-evaluation-cycle");
+    let modules = root.join("node_modules");
+    let package = modules.join("esm-cycle-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "var b = require('./b.mjs'); var c = require('./c.cjs'); module.exports = [b.x, c.code, c.first];").unwrap();
+    fs::write(package.join("b.mjs"), "import './c.cjs';\nexport const x = 1;").unwrap();
+    fs::write(package.join("c.cjs"), "exports.code = 'unset'; try { require('./b.mjs'); exports.code = 'ok'; } catch (e) { exports.code = e.code; exports.first = e.message.split('\\n')[0]; }").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "esm-cycle-pkg", &package, "index.cjs").unwrap();
+    let result = run_js_get(&bundle, "");
+    assert!(result.starts_with("[1,\"ERR_REQUIRE_CYCLE_MODULE\",\"Cannot require() ES Module "), "{result}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_cycle_between_cjs_modules_keeps_partial_exports() {
+    // Node 22.23.1: a CommonJS cycle is not an error; the re-entered module sees the partial exports.
+    let root = temp_registry("cjs-partial-cycle");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-partial-cycle-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "exports.early = 1; var b = require('./b.cjs'); module.exports = { early: 1, sawA: b.sawA, late: 2 };").unwrap();
+    fs::write(package.join("b.cjs"), "var a = require('./index.cjs'); exports.sawA = JSON.stringify(a);").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-partial-cycle-pkg", &package, "index.cjs").unwrap();
+    assert_eq!(run_js_get(&bundle, ""), "{\"early\":1,\"sawA\":\"{\\\"early\\\":1}\",\"late\":2}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_require_of_a_failed_esm_module_rethrows_the_cycle_error_each_time() {
+    // Node 22.23.1: the failed native.mjs is cached as failed; each later require throws ERR_REQUIRE_CYCLE_MODULE again.
+    let root = temp_registry("cjs-failed-native-rethrow");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-failed-native-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "exports.value = 1; var seen = []; for (var i = 0; i < 2; i++) { try { require('./native.mjs'); seen.push('ok'); } catch (e) { seen.push(e.code); } } module.exports = seen;").unwrap();
+    fs::write(package.join("native.mjs"), "export * from './index.cjs';").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-failed-native-pkg", &package, "index.cjs").unwrap();
+    assert_eq!(run_js_get(&bundle, ""), "[\"ERR_REQUIRE_CYCLE_MODULE\",\"ERR_REQUIRE_CYCLE_MODULE\"]");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
