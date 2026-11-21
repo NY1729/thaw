@@ -12245,3 +12245,11 @@ fn non_directive_before_use_strict_ends_the_prologue() {
     assert_eq!(fn_body_strict("'a' + 'b'; 'use strict';"), "false");
     assert_eq!(fn_body_strict("('use strict');"), "false");
 }
+
+/// Node: a top-level script's `this` is globalThis (`node -e "this === globalThis"` prints true).
+#[test]
+fn top_level_script_this_is_the_global_object() {
+    let mut it = Interp::new();
+    let result = it.run("this === globalThis").unwrap();
+    assert!(matches!(result, Value::Bool(true)));
+}
