@@ -10,7 +10,9 @@ pub(crate) const EXTRAS: &str = r#"
   var AP = Array.prototype;
   if (!AP.flatMap) def(AP, 'flatMap', function (f, t) {
     var r = [];
+    Array.prototype.slice.call(this); // refuses a sparse tail (`sparse_unsupported`): the loop below is dense-only in cost
     for (var i = 0; i < this.length; i++) {
+      if (!(i in this)) continue;
       var v = f.call(t, this[i], i, this);
       if (Array.isArray(v)) { for (var j = 0; j < v.length; j++) r.push(v[j]); } else r.push(v);
     }
@@ -28,19 +30,47 @@ pub(crate) const EXTRAS: &str = r#"
     d = d === undefined ? 1 : d;
     var r = [];
     (function walk(a, depth) {
+      if (Array.isArray(a)) Array.prototype.slice.call(a); // refuses a sparse tail (`sparse_unsupported`)
       for (var i = 0; i < a.length; i++) {
+        if (!(i in a)) continue;
         if (Array.isArray(a[i]) && depth > 0) walk(a[i], depth - 1); else r.push(a[i]);
       }
     })(this, d);
     return r;
   });
-  def(AP, 'toReversed', function () { return this.slice().reverse(); });
-  def(AP, 'toSorted', function (c) { return this.slice().sort(c); });
-  def(AP, 'toSpliced', function () { var c = this.slice(); c.splice.apply(c, arguments); return c; });
+  // The copying methods start from `slice` (which refuses a sparse tail) and turn each hole into undefined:
+  // the spec reads every index through Get, so their result has no holes.
+  def(AP, 'toReversed', function () {
+    'use strict';
+    if (this == null) throw new TypeError('Array.prototype.toReversed called on null or undefined');
+    var c = Array.prototype.slice.call(this), n = c.length;
+    for (var h = 0; h < n; h++) if (!(h in c)) c[h] = undefined;
+    return c.reverse();
+  });
+  def(AP, 'toSorted', function (cmp) {
+    'use strict';
+    if (this == null) throw new TypeError('Array.prototype.toSorted called on null or undefined');
+    var c = Array.prototype.slice.call(this), n = c.length;
+    for (var h = 0; h < n; h++) if (!(h in c)) c[h] = undefined;
+    return c.sort(cmp);
+  });
+  def(AP, 'toSpliced', function () {
+    'use strict';
+    if (this == null) throw new TypeError('Array.prototype.toSpliced called on null or undefined');
+    var c = Array.prototype.slice.call(this), n = c.length;
+    for (var h = 0; h < n; h++) if (!(h in c)) c[h] = undefined;
+    c.splice.apply(c, arguments);
+    return c;
+  });
   def(AP, 'with', function (i, v) {
+    'use strict';
+    if (this == null) throw new TypeError('Array.prototype.with called on null or undefined');
     if (i < 0) i += this.length;
     if (i < 0 || i >= this.length) throw new RangeError('Invalid index : ' + i);
-    var c = this.slice(); c[i] = v; return c;
+    var c = Array.prototype.slice.call(this), n = c.length;
+    for (var h = 0; h < n; h++) if (!(h in c)) c[h] = undefined;
+    c[i] = v;
+    return c;
   });
   // ponytail: no subclass `this` constructor; always a plain Array.
   def(Array, 'fromAsync', async function fromAsync(items, mapfn, thisArg) {
@@ -294,13 +324,22 @@ pub(crate) const EXTRAS: &str = r#"
   def(Map.prototype, Symbol.toStringTag, 'Map');
   def(Set.prototype, Symbol.toStringTag, 'Set');
   def(AP, 'copyWithin', function (target, start, end) {
+    'use strict';
+    // ToLength(Symbol) throws; thaw's arithmetic on a Symbol does not yet, so this step is explicit
+    if (typeof this.length === 'symbol') throw new TypeError('Cannot convert a Symbol value to a number');
     var len = this.length;
     var to = target < 0 ? Math.max(len + target, 0) : Math.min(target, len);
     var from = start === undefined ? 0 : start < 0 ? Math.max(len + start, 0) : Math.min(start, len);
     var fin = end === undefined ? len : end < 0 ? Math.max(len + end, 0) : Math.min(end, len);
-    var count = Math.min(fin - from, len - to), copy = this.slice(from, from + count);
+    var count = Math.min(fin - from, len - to), copy = [], has = [];
+    if (Array.isArray(this)) Array.prototype.slice.call(this, 0, 0); // refuses a sparse tail (`sparse_unsupported`)
     if (count > 0 && Array.isArray(this) && Object.isFrozen(this)) throw new TypeError("Cannot assign to read only property '" + (from < to && to < from + count ? to + count - 1 : to) + "' of object '[object Array]'");
-    for (var i = 0; i < count; i++) this[to + i] = copy[i];
+    // the source's presence is read before any write (HasProperty); a hole deletes the target, it does not copy undefined
+    for (var k = 0; k < count; k++) { has[k] = (from + k) in this; copy[k] = this[from + k]; }
+    for (var i = 0; i < count; i++) {
+      if (has[i]) this[to + i] = copy[i];
+      else if (!delete this[to + i]) throw new TypeError("Cannot delete property '" + (to + i) + "' of [object Array]");
+    }
     return this;
   });
   def(SP, 'matchAll', function (re) {

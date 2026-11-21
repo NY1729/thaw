@@ -12520,8 +12520,7 @@ fn to_property_descriptor_validates_its_fields() {
 }
 
 /// Huge lengths, indices and bit counts are catchable errors, not allocation aborts or hangs. The expected
-/// lines are Node 22's messages. Where Node succeeds with a length past the dense ceiling
-/// (`MAX_DENSE_ARRAY_LEN`, sparse arrays are not implemented) the line is the RangeError thaw gives.
+/// lines are Node 22's messages.
 #[test]
 fn huge_lengths_and_radix_are_range_errors_not_aborts() {
     let src = r#"
@@ -12553,8 +12552,8 @@ fn huge_lengths_and_radix_are_range_errors_not_aborts() {
       t('bits-symbol', function () { return BigInt.asIntN(Symbol(), 0n); });
       console.log(out.join('\n'));
     "#;
-    // Node 22 messages, recorded over three runs. Node prints `ok 4294967295` for `length-ceiling` and
-    // `index-ceiling`; thaw's dense ceiling makes those two RangeErrors instead.
+    // Node 22 messages, recorded over three runs. `length-ceiling` and `index-ceiling` are sparse arrays now
+    // (`array_exotic_tests`), so they print `ok 4294967295` as Node does.
     assert_eq!(
         run(src).join("\n"),
         [
@@ -12571,8 +12570,8 @@ fn huge_lengths_and_radix_are_range_errors_not_aborts() {
             "new-Array--1 RangeError Invalid array length",
             "new-Array-1.5 RangeError Invalid array length",
             "length-2^32 RangeError Invalid array length",
-            "length-ceiling RangeError Invalid array length",
-            "index-ceiling RangeError Invalid array length",
+            "length-ceiling ok 4294967295",
+            "index-ceiling ok 4294967295",
             "map-2^32 RangeError Invalid array length",
             "slice-2^32 RangeError Invalid array length",
             "concat-max-safe TypeError Invalid array length",

@@ -232,3 +232,32 @@ fn napi_graph_encode_round_trips_through_the_decoder() {
     .unwrap();
     assert_eq!(text, "true|1");
 }
+
+// A sparse array (its element at 2 ** 26) fails closed at the N-API boundary: the encoder reads dense slots only.
+#[test]
+fn napi_graph_encode_refuses_sparse_array_root_and_nested() {
+    let msg = "sparse array cannot cross the N-API boundary";
+    for (source, name) in [
+        ("var sp = []; sp[2 ** 26] = 'x';", "sp"),
+        ("var holder = { v: [] }; holder.v[2 ** 26] = 'x';", "holder"),
+    ] {
+        let err = encode_global(source, name, false, 0, None).unwrap_err();
+        assert!(
+            err.contains("RangeError") && err.contains(msg),
+            "{name}: {err}"
+        );
+    }
+}
+
+// Live mode copies only the root: a sparse array below it stays behind its handle, so it is not read.
+#[test]
+fn napi_graph_encode_live_sparse_child_stays_a_handle() {
+    let wire = encode_ok(
+        "var sp = []; sp[2 ** 26] = 'x'; var root = [sp];",
+        "root",
+        true,
+        0,
+        None,
+    );
+    assert!(wire.contains("\"hdl\""), "{wire}");
+}

@@ -367,6 +367,10 @@ pub(crate) struct NapiWireOut {
     symbol_handles: HashMap<*const ObjData, u64>,
 }
 
+/// N-API marshalling reads an array's dense slots only, so a sparse array fails closed at the boundary (both the
+/// graph encoder and the property helpers in `napi_props`); the message is shared with them.
+pub(crate) const SPARSE_NAPI: &str = "sparse array cannot cross the N-API boundary";
+
 /// The Error a value with no graph form raises (runtime.js `Unsupported native callback graph value`).
 fn unsupported_value() -> HostError {
     HostError::Thrown("TypeError: Unsupported native callback graph value".into())
@@ -686,6 +690,9 @@ impl NapiWireOut {
         if (self.live && index != 0) || value.is_callable() {
             return Ok(self.hdl(&value));
         }
+        if o.is_exotic() {
+            return Err(HostError::Thrown(format!("RangeError: {SPARSE_NAPI}")));
+        }
         let bytes = match &*o.kind.borrow() {
             Kind::ArrayBuffer(bytes) => Some(bytes.borrow().clone()),
             // ponytail: ledgered, not implemented: napi typedarray kinds for BigInt64Array (9) / BigUint64Array (10);
@@ -787,6 +794,9 @@ impl NapiWireOut {
         root: &Value,
         handle_mask: u32,
     ) -> Result<String, HostError> {
+        if matches!(root, Value::Object(o) if o.is_exotic()) {
+            return Err(HostError::Thrown(format!("RangeError: {SPARSE_NAPI}")));
+        }
         let root_forced = self.force.as_ref().is_some_and(|f| strict_equals(f, root));
         if handle_mask == 0 && self.live && root_forced && matches!(root, Value::Object(_)) {
             let id = self.lease(root);

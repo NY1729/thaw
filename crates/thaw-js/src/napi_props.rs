@@ -13,7 +13,7 @@ use crate::host::{
     classify, cstr, decode_wire, graph_result, handle_result, json_key, on_handle_strict,
     store_handle, HandleResult, HostError, Native, ThawResult, WireOut,
 };
-use crate::napi_graph::{decode_napi_wire, encode_napi_graph};
+use crate::napi_graph::{decode_napi_wire, encode_napi_graph, SPARSE_NAPI};
 use crate::napi_ops::{handle_value, prototype_of};
 use crate::{
     array_index, builtins, find_own, order_keys, push_prop, Ctl, Interp, Kind, Obj, Prop, Slot,
@@ -129,6 +129,9 @@ fn reflect_set(
     receiver: &Value,
     receiver_data: bool,
 ) -> R<bool> {
+    if target.is_exotic() {
+        return it.throw_error("RangeError", SPARSE_NAPI);
+    }
     if matches!(&*target.kind.borrow(), Kind::Proxy(_)) {
         let Some((inner, handler, trap)) = it.proxy_trap(target, "set")? else {
             return Ok(false);
@@ -315,6 +318,9 @@ fn proxy_attributes(it: &mut Interp, o: &Obj, key: &str) -> R<Option<u32>> {
         return Ok(None);
     };
     if !trap.is_callable() {
+        if inner.is_exotic() {
+            return it.throw_error("RangeError", SPARSE_NAPI);
+        }
         return Ok(own_entries(&inner)
             .into_iter()
             .find(|(k, _)| **k == *key)
@@ -337,6 +343,9 @@ fn proxy_attributes(it: &mut Interp, o: &Obj, key: &str) -> R<Option<u32>> {
 /// `Reflect.ownKeys` with attributes for `o`, a proxy included.
 fn own_keys_with_attributes(it: &mut Interp, o: &Obj) -> R<Vec<(Rc<str>, u32)>> {
     if !matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+        if o.is_exotic() {
+            return it.throw_error("RangeError", SPARSE_NAPI);
+        }
         return Ok(own_entries(o));
     }
     let keys = it.proxy_own_keys(o, false)?.unwrap_or_default();
@@ -646,6 +655,9 @@ pub(crate) fn define_slot(
     let Value::Object(o) = target else {
         return it.throw_error("TypeError", "Object.defineProperty called on non-object");
     };
+    if o.is_exotic() {
+        return it.throw_error("RangeError", SPARSE_NAPI);
+    }
     if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
         let Some((inner, handler, trap)) = it.proxy_trap(o, "defineProperty")? else {
             return Ok(());

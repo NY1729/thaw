@@ -105,6 +105,8 @@ struct Side {
     /// This worker's port token, and the port token of the main thread that spawned it (the hub).
     token: u64,
     hub: u64,
+    /// The port token of the realm that spawned this worker (the hub itself for a child of the main thread).
+    parent: u64,
     /// This worker's thread id (its `threadId`, the key of its THREADS entry).
     thread_id: u32,
     /// The thread-id counter of the tree (shared with every worker it spawns, see `thread_ids`).
@@ -137,6 +139,21 @@ pub(crate) struct WorkerState {
     bundles: Vec<LoadedBundle>,
     /// The tree's thread-id counter, used when this Interp is the main thread (a worker uses its `Side`'s).
     ids: Arc<AtomicU32>,
+    /// The main thread's inbox for `postMessageToThread` from threads below its children (registered as (hub, 0) in
+    /// THREADS when the first worker is spawned). Its messages are drained by `pump`.
+    inbox: Option<Receiver<Cmd>>,
+}
+
+impl Drop for WorkerState {
+    fn drop(&mut self) {
+        // the main thread's inbox leaves the thread table with its Interp; what is still queued in it is released
+        if let Some(inbox) = self.inbox.take() {
+            locked(&THREADS).remove(&(self.token, 0));
+            for cmd in inbox.try_iter() {
+                release_cmd(&cmd);
+            }
+        }
+    }
 }
 
 /// A registry bundle loaded into this realm: its package name, its text (one copy per loaded package, made once at
@@ -261,10 +278,15 @@ struct Route {
 /// two Interps in one process never meet. `PORT_ROUTES` holds the owner and peer of each address that is live or in
 /// flight. `PORT_FLIGHT` holds the ends whose wire is encoded but not yet decoded by its reader: a released wire (its
 /// reader ended, or nothing took it) hangs up their peers through `PORT_HANGUPS` (owner, peer), which the owner's
-/// poll delivers.
+/// poll delivers. `PORT_PARENT` maps each live worker's port token to the token of the realm that spawned it, so a
+/// port event finds the child on the path to its owner (`child_toward`) at any depth.
+///
+/// Lock order: THREADS, PORT_ROUTES, PORT_FLIGHT, PORT_HANGUPS and PORT_PARENT are each locked alone (a guard is never
+/// held while another of these is taken), and no send or route happens under one of them.
 static PORT_ROUTES: Mutex<BTreeMap<u64, Route>> = Mutex::new(BTreeMap::new());
 static PORT_FLIGHT: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 static PORT_HANGUPS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+static PORT_PARENT: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 static PORT_NEXT: AtomicU64 = AtomicU64::new(1);
 
 fn locked<T>(table: &'static Mutex<T>) -> MutexGuard<'static, T> {
@@ -346,9 +368,53 @@ fn port_item(addr: u64, wire: Option<&str>) -> String {
     }
 }
 
-/// Routes a port event (`wire`, or None for a hang-up) to the thread that owns `addr`. Main thread only: the item for
-/// this realm is returned (owner 0), a worker gets the command; with no route the wire is released.
-fn route_port(it: &Interp, addr: u64, wire: Option<String>) -> Option<String> {
+/// The port token of this Interp's thread: a worker's (its `Side`), else the main thread's own (0 until allocated).
+fn my_token(it: &Interp) -> u64 {
+    it.worker
+        .side
+        .as_ref()
+        .map_or(it.worker.token, |side| side.token)
+}
+
+/// The direct child of thread `me` whose subtree holds thread `owner`; None when `owner` is not below `me`.
+fn child_toward(me: u64, owner: u64) -> Option<u64> {
+    let parents = locked(&PORT_PARENT);
+    let mut at = owner;
+    while let Some(&parent) = parents.get(&at) {
+        if parent == me {
+            return Some(at);
+        }
+        at = parent;
+    }
+    None
+}
+
+/// The routes a finished thread owned go with it: returns their peers, which must hear a close.
+fn close_owned_ports(token: u64) -> Vec<u64> {
+    let mut routes = locked(&PORT_ROUTES);
+    let owned: Vec<u64> = routes
+        .iter()
+        .filter(|(_, r)| r.owner == token)
+        .map(|(addr, _)| *addr)
+        .collect();
+    owned
+        .into_iter()
+        .filter_map(|addr| routes.remove(&addr))
+        .map(|r| r.peer)
+        .collect()
+}
+
+/// Drops the parent entry of a thread that has exited or was stopped (its children's entries went when it stopped them).
+fn forget_port_parent(token: u64) {
+    locked(&PORT_PARENT).remove(&token);
+}
+
+/// Routes a port event (`wire`, or None for a hang-up) to the thread that owns `addr`. The owner is this thread: the item
+/// for this realm is returned. The owner is below one of this thread's children: the command goes to that child, which
+/// routes it on (`from_above`). Otherwise a worker passes it up to its parent, unless it came from above; with no route
+/// (or no way on) the wire is released.
+fn route_port(it: &Interp, addr: u64, wire: Option<String>, from_above: bool) -> Option<String> {
+    let me = my_token(it);
     let owner = locked(&PORT_ROUTES).get(&addr).map(|r| r.owner);
     let Some(owner) = owner else {
         if let Some(v) = &wire {
@@ -356,22 +422,38 @@ fn route_port(it: &Interp, addr: u64, wire: Option<String>) -> Option<String> {
         }
         return None;
     };
-    if owner == it.worker.token {
+    if owner == me {
         return Some(port_item(addr, wire.as_deref()));
     }
-    match it.worker.workers.values().find(|w| w.token == owner) {
-        Some(w) => send_cmd(
-            w,
-            match wire {
-                Some(v) => Cmd::Port(addr, v),
-                None => Cmd::PortClose(addr),
-            },
-        ),
-        None => {
-            if let Some(v) = &wire {
-                release_wire(v);
+    if let Some(child) = child_toward(me, owner) {
+        match it.worker.workers.values().find(|w| w.token == child) {
+            Some(w) => send_cmd(
+                w,
+                match wire {
+                    Some(v) => Cmd::Port(addr, v),
+                    None => Cmd::PortClose(addr),
+                },
+            ),
+            None => {
+                if let Some(v) = &wire {
+                    release_wire(v);
+                }
             }
         }
+        return None;
+    }
+    if !from_above && is_worker(it) {
+        to_parent(
+            it,
+            match wire {
+                Some(v) => Evt::Port(addr, v),
+                None => Evt::PortClose(addr),
+            },
+        );
+        return None;
+    }
+    if let Some(v) = &wire {
+        release_wire(v);
     }
     None
 }
@@ -408,6 +490,15 @@ fn thread_id_of(it: &Interp) -> u32 {
     it.worker.side.as_ref().map_or(0, |side| side.thread_id)
 }
 
+/// Whether this Interp is a worker that the main thread spawned (depth 1): the main thread is then reached, and answers
+/// come back, through its parent channel. Deeper workers reach it through its inbox in THREADS (`(hub, 0)`).
+fn child_of_main(it: &Interp) -> bool {
+    it.worker
+        .side
+        .as_ref()
+        .is_some_and(|side| side.parent == side.hub)
+}
+
 /// The thread-id counter of this Interp's tree: a worker shares its spawner's, so ids are unique across nesting levels.
 fn thread_ids(it: &Interp) -> Arc<AtomicU32> {
     match &it.worker.side {
@@ -416,11 +507,11 @@ fn thread_ids(it: &Interp) -> Arc<AtomicU32> {
     }
 }
 
-/// Sends a `postMessageToThread` to thread `target`, from this Interp. A worker's send to 0 goes to the main thread
-/// through its parent channel. False when the thread is not there (it never existed, or has left): the wire is released
-/// and the sender settles FAILED.
+/// Sends a `postMessageToThread` to thread `target`, from this Interp. A child of the main thread sends to 0 through its
+/// parent channel; a deeper worker (and every other send to 0) goes through the main thread's inbox (`(hub, 0)`). False
+/// when the thread is not there (it never existed, or has left): the wire is released and the sender settles FAILED.
 fn thread_send(it: &mut Interp, target: u32, ack: u32, wire: String) -> bool {
-    if target == 0 && is_worker(it) {
+    if target == 0 && child_of_main(it) {
         to_parent(it, Evt::Thread(ack, wire));
         return true;
     }
@@ -442,10 +533,10 @@ fn thread_send(it: &mut Interp, target: u32, ack: u32, wire: String) -> bool {
     }
 }
 
-/// Answers a `postMessageToThread` that came from thread `source`: the main thread (0) through the parent channel, or the
-/// sending worker by its entry. A sender that has left is not answered.
+/// Answers a `postMessageToThread` that came from thread `source`: the main thread (0) through the parent channel (a child
+/// of the main thread) or its inbox, or the sending worker by its entry. A sender that has left is not answered.
 fn thread_reply(it: &mut Interp, source: u32, ack: u32, status: String, wire: String) {
-    if source == 0 {
+    if source == 0 && child_of_main(it) {
         to_parent(it, Evt::ThreadAck(ack, status, wire));
         return;
     }
@@ -506,6 +597,21 @@ fn spawn(
     } else {
         private_env_table()
     };
+    // the spawning realm's port token: the parent of this worker's ports (PORT_PARENT, removed when it stops)
+    let parent = realm_token(it);
+    if it.worker.side.is_none() && it.worker.inbox.is_none() {
+        // the main thread's inbox: threads below its children reach the main thread (0) through it
+        let (inbox_tx, inbox_rx) = mpsc::channel();
+        locked(&THREADS).insert(
+            (parent, 0),
+            ThreadEntry {
+                tx: inbox_tx,
+                token: parent,
+            },
+        );
+        it.worker.inbox = Some(inbox_rx);
+    }
+    locked(&PORT_PARENT).insert(tokens.0, parent);
     // registered before the thread starts, so a send from now on is queued for it (or fails once it has left)
     locked(&THREADS).insert(
         (tokens.1, thread_id),
@@ -519,6 +625,7 @@ fn spawn(
         tx: evt_tx,
         token: tokens.0,
         hub: tokens.1,
+        parent,
         thread_id,
         ids,
         interrupt: interrupt.clone(),
@@ -645,12 +752,27 @@ pub(crate) fn capture_bytes(it: &Interp, fd: u8, bytes: &[u8]) -> bool {
 // ponytail: one fixed grace per child, not a shared budget; a child stuck forever keeps its thread until process exit.
 const STOP_GRACE: Duration = Duration::from_secs(1);
 
+/// The events a stopping worker still gets from a child: its port events go up (the parent routes them, and a port the
+/// child owned closes for its peer before this worker's own Exit); everything else is released.
+fn stop_event(it: &Interp, evt: Evt) {
+    match evt {
+        Evt::Port(addr, wire) => to_parent(it, Evt::Port(addr, wire)),
+        Evt::PortClose(addr) => to_parent(it, Evt::PortClose(addr)),
+        other => release_evt(&other),
+    }
+}
+
 /// Before this Interp is dropped (or its script panicked): each child it still has is terminated and joined, so no child
 /// thread outlives the state it reports to. Its own `Exit` is the last event it sends, which ends the drain. A child that
 /// does not stop within `STOP_GRACE` is detached instead, with a diagnostic. No 'exit' events are delivered for these
-/// children.
+/// children. The child's port table entries go with it: the peers of the ports it owned hear a close.
 fn stop_children(it: &mut Interp) {
-    for mut w in std::mem::take(&mut it.worker.workers).into_values() {
+    // one child at a time, taken out of the table as it stops: the ones still running stay routable meanwhile
+    let handles: Vec<u32> = it.worker.workers.keys().copied().collect();
+    for handle in handles {
+        let Some(mut w) = it.worker.workers.remove(&handle) else {
+            continue;
+        };
         let mut stuck = false;
         if !w.exited {
             w.interrupt.store(true, Ordering::Relaxed);
@@ -663,7 +785,7 @@ fn stop_children(it: &mut Interp) {
                 {
                     Ok(evt) => {
                         let exit = matches!(evt, Evt::Exit(_));
-                        release_evt(&evt);
+                        stop_event(it, evt);
                         if exit {
                             break;
                         }
@@ -677,7 +799,12 @@ fn stop_children(it: &mut Interp) {
             }
         }
         while let Ok(evt) = w.rx.try_recv() {
-            release_evt(&evt);
+            stop_event(it, evt);
+        }
+        forget_port_parent(w.token);
+        for peer in close_owned_ports(w.token) {
+            // a peer owned by this thread is dropped with it; any other goes up (or down to a sibling)
+            let _ = route_port(it, peer, None, false);
         }
         if let Some(join) = w.join.take() {
             if stuck {
@@ -831,10 +958,10 @@ pub(crate) fn active(it: &Interp) -> bool {
 }
 
 /// One pending item of a poll, in arrival order: a dispatch JSON item, or a port event to route once the loop over
-/// the workers is done (`None` is a hang-up).
+/// the workers is done (`None` is a hang-up; `from_above` is a command from the parent, which routes it on only downward).
 enum Item {
     Json(String),
-    Route(u64, Option<String>),
+    Route(u64, Option<String>, bool),
 }
 
 /// Whether a dispatch item is a port delivery (`port_item`): the only kind a synchronous read may take.
@@ -892,11 +1019,11 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
                     quoted(&v)
                 ),
                 Evt::Port(addr, v) => {
-                    items.push(Item::Route(addr, Some(v)));
+                    items.push(Item::Route(addr, Some(v), false));
                     continue;
                 }
                 Evt::PortClose(addr) => {
-                    items.push(Item::Route(addr, None));
+                    items.push(Item::Route(addr, None, false));
                     continue;
                 }
                 Evt::Cpu(ack, user, system) => format!(
@@ -909,22 +1036,39 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
             items.push(Item::Json(json));
         }
     }
-    // a worker that exited takes its ports down: each peer hangs up (its owner's routes go with it)
-    for token in exited_tokens {
-        let mut routes = locked(&PORT_ROUTES);
-        let owned: Vec<u64> = routes
-            .iter()
-            .filter(|(_, r)| r.owner == token)
-            .map(|(addr, _)| *addr)
-            .collect();
-        for addr in owned {
-            if let Some(route) = routes.remove(&addr) {
-                items.push(Item::Route(route.peer, None));
-            }
+    // thread messages from threads below the main thread's children, and the answers to its own sends (main thread
+    // only; see `spawn`): the same records a worker gets from its parent, with no handle
+    if let Some(inbox) = &it.worker.inbox {
+        for cmd in inbox.try_iter() {
+            let json = match cmd {
+                Cmd::Thread(source, ack, v) => format!(
+                    r#"{{"type":"thread","source":{source},"ack":{ack},"value":{}}}"#,
+                    quoted(&v)
+                ),
+                Cmd::ThreadAck(ack, status, v) => format!(
+                    r#"{{"type":"threadAck","ack":{ack},"status":{},"value":{}}}"#,
+                    quoted(&status),
+                    quoted(&v)
+                ),
+                other => {
+                    release_cmd(&other);
+                    continue;
+                }
+            };
+            items.push(Item::Json(json));
         }
     }
-    // the hang-ups this Interp owns (its main token, or one of its workers): others' stay for their own poll
-    let mine: Vec<u64> = std::iter::once(it.worker.token)
+    // a worker that exited takes its ports down: each peer hangs up (its owner's routes go with it)
+    for token in exited_tokens {
+        forget_port_parent(token);
+        items.extend(
+            close_owned_ports(token)
+                .into_iter()
+                .map(|peer| Item::Route(peer, None, false)),
+        );
+    }
+    // the hang-ups this Interp owns (its own token, or one of its workers): others' stay for their own poll
+    let mine: Vec<u64> = std::iter::once(my_token(it))
         .chain(it.worker.workers.values().map(|w| w.token))
         .collect();
     let mut hangups = locked(&PORT_HANGUPS);
@@ -934,7 +1078,7 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
     *hangups = rest;
     drop(hangups);
     for (_, peer) in ours {
-        items.push(Item::Route(peer, None));
+        items.push(Item::Route(peer, None, false));
     }
     it.worker.workers.retain(|_, w| {
         if w.exited {
@@ -966,8 +1110,15 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
                     quoted(&status),
                     quoted(&v)
                 ),
-                Cmd::Port(addr, v) => port_item(addr, Some(&v)),
-                Cmd::PortClose(addr) => port_item(addr, None),
+                // a port event from the parent: this thread owns it, or routes it on to the child below it
+                Cmd::Port(addr, v) => {
+                    items.push(Item::Route(addr, Some(v), true));
+                    continue;
+                }
+                Cmd::PortClose(addr) => {
+                    items.push(Item::Route(addr, None, true));
+                    continue;
+                }
                 // the parent already set the flag; setting it here too covers a command sent alone
                 Cmd::Terminate => {
                     side.interrupt.store(true, Ordering::Relaxed);
@@ -982,7 +1133,9 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
         match item {
             Item::Json(json) if ports_only && !is_port_item(&json) => it.worker.local.push(json),
             Item::Json(json) => out.push(json),
-            Item::Route(addr, wire) => out.extend(route_port(it, addr, wire)),
+            Item::Route(addr, wire, from_above) => {
+                out.extend(route_port(it, addr, wire, from_above));
+            }
         }
     }
     format!("[{}]", out.join(","))
@@ -1201,7 +1354,7 @@ pub(crate) fn install(it: &mut Interp) {
         let wire = it.to_str(&arg(a, 1)).to_string();
         if is_worker(it) {
             to_parent(it, Evt::Port(addr, wire));
-        } else if let Some(item) = route_port(it, addr, Some(wire)) {
+        } else if let Some(item) = route_port(it, addr, Some(wire), false) {
             it.worker.local.push(item);
         }
         Ok(Value::Undefined)
@@ -1214,7 +1367,7 @@ pub(crate) fn install(it: &mut Interp) {
         if notify {
             if is_worker(it) {
                 to_parent(it, Evt::PortClose(peer));
-            } else if let Some(item) = route_port(it, peer, None) {
+            } else if let Some(item) = route_port(it, peer, None, false) {
                 it.worker.local.push(item);
             }
         }
@@ -1255,7 +1408,7 @@ mod teardown_tests {
                 interrupt: Arc::new(AtomicBool::new(false)),
                 refd: true,
                 exited: false,
-                token: 0,
+                token: port_address(),
                 join: Some(join),
                 cpu: Arc::new(CpuProbe::default()),
             },
@@ -1267,6 +1420,39 @@ mod teardown_tests {
             "teardown waited {:?} for a child that never stopped",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn a_stopped_child_leaves_no_port_entries_and_its_peer_hears_a_close() {
+        // a child (under `parent`) owns one end; its peer is the parent's. Stopping the child drops its route and its parent
+        // entry, and returns the peer for the close. The entries are tokens of this test alone (the tables are shared).
+        let (grandchild, child, parent, owned, peer) = (
+            port_address(),
+            port_address(),
+            port_address(),
+            port_address(),
+            port_address(),
+        );
+        locked(&PORT_PARENT).insert(grandchild, child);
+        locked(&PORT_PARENT).insert(child, parent);
+        assert_eq!(child_toward(parent, grandchild), Some(child));
+        assert_eq!(child_toward(child, grandchild), Some(grandchild));
+        assert_eq!(child_toward(grandchild, parent), None);
+        locked(&PORT_ROUTES).insert(owned, Route { owner: child, peer });
+        locked(&PORT_ROUTES).insert(
+            peer,
+            Route {
+                owner: parent,
+                peer: owned,
+            },
+        );
+        assert_eq!(close_owned_ports(child), vec![peer]);
+        forget_port_parent(child);
+        assert!(!locked(&PORT_ROUTES).contains_key(&owned));
+        assert!(!locked(&PORT_PARENT).contains_key(&child));
+        assert_eq!(child_toward(parent, grandchild), None);
+        locked(&PORT_ROUTES).remove(&peer);
+        locked(&PORT_PARENT).remove(&grandchild);
     }
 }
 
