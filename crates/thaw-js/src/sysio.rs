@@ -517,6 +517,9 @@ impl Interp {
         // Upgrade path: move the object list with `host::park_host_tls` like `heap_limit::take`.
         let f = self.native(|it, _, _| Ok(Value::str(&memory_usage_json(it))));
         g.declare("__thaw_memory_usage", f, true);
+        // This thread's heap snapshot as Node's `.heapsnapshot` JSON text (`heapsnap.rs`); the v8 module chunks it.
+        let f = self.native(|_, _, _| Ok(Value::str(&crate::heapsnap::snapshot_json())));
+        g.declare("__thaw_heap_snapshot", f, true);
         // (fd, raw) -> whether the terminal took the mode; registry tty.ReadStream.setRawMode calls it for its own fd
         let f = self.native(|it, _, a| {
             let fd = it.num(&arg(a, 0)) as i32;
