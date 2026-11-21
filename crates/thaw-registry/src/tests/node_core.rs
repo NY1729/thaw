@@ -2745,6 +2745,59 @@ fn path_join_skips_empty_segments_before_normalizing() {
 }
 
 #[test]
+fn path_argument_validation_matches_node_error_table() {
+    let dir = temp_registry("builtin_path_arg_validation");
+    fs::write(
+        dir.join("index.js"),
+        r#"var path = require('node:path');
+var RECV = ['null', 'undefined', 'type number (1)', 'an instance of Object', 'an instance of Array', 'type boolean (true)', 'type symbol (Symbol(s))', 'type bigint (10n)', 'function f'];
+var VALUES = [null, undefined, 1, {}, [], true, Symbol('s'), BigInt(10), function f() {}];
+function outcome(f) { try { f(); return 'no throw'; } catch (e) { return e.code + ' | ' + e.message; } }
+function stringErr(name, i) { return 'ERR_INVALID_ARG_TYPE | The "' + name + '" argument must be of type string. Received ' + RECV[i]; }
+function objectErr(name, i) { return 'ERR_INVALID_ARG_TYPE | The "' + name + '" argument must be of type object. Received ' + RECV[i]; }
+module.exports = function () {
+  var checked = 0, mismatches = [];
+  function expect(label, actual, want) { checked++; if (actual !== want) mismatches.push(label + ': ' + actual + ' (want ' + want + ')'); }
+  ['posix', 'win32'].forEach(function (platform) {
+    var p = path[platform];
+    VALUES.forEach(function (v, i) {
+      var tag = platform + ' ' + i + ' ';
+      ['dirname', 'basename', 'extname', 'normalize', 'isAbsolute', 'parse'].forEach(function (fn) {
+        expect(tag + fn, outcome(function () { p[fn](v); }), stringErr('path', i));
+      });
+      expect(tag + 'join', outcome(function () { p.join(v); }), stringErr('path', i));
+      expect(tag + 'resolve', outcome(function () { p.resolve(v); }), stringErr('paths[0]', i));
+      expect(tag + 'relative from', outcome(function () { p.relative(v, 'a'); }), stringErr('from', i));
+      expect(tag + 'relative to', outcome(function () { p.relative('a', v); }), stringErr('to', i));
+      if (i === 3) expect(tag + 'format {}', outcome(function () { p.format(v); }), 'no throw');
+      else expect(tag + 'format', outcome(function () { p.format(v); }), objectErr('pathObject', i));
+      expect(tag + 'toNamespacedPath', p.toNamespacedPath(v) === v ? 'same' : 'changed', 'same');
+    });
+    expect(platform + ' basename suffix null', outcome(function () { p.basename('a', null); }), stringErr('suffix', 0));
+    expect(platform + ' basename suffix checked before path', outcome(function () { p.basename(null, 1); }), stringErr('suffix', 2));
+    expect(platform + ' basename undefined suffix', outcome(function () { p.basename('a', undefined); }), 'no throw');
+    expect(platform + ' relative none', outcome(function () { p.relative(); }), stringErr('from', 1));
+    expect(platform + ' relative one', outcome(function () { p.relative('a'); }), stringErr('to', 1));
+    expect(platform + ' resolve index', outcome(function () { p.resolve('/x', 1); }), stringErr('paths[1]', 2));
+    expect(platform + ' join none', outcome(function () { p.join(); }), 'no throw');
+  });
+  expect('posix resolve stops at absolute', outcome(function () { path.posix.resolve(1, '/x'); }), 'no throw');
+  expect('win32 resolve validates left of absolute', outcome(function () { path.win32.resolve(1, '/x'); }), stringErr('paths[0]', 2));
+  return JSON.stringify({ checked: checked, mismatches: mismatches });
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_path_arg_validation_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let result = run_js(&bundle);
+    assert_eq!(result, r#"{"checked":232,"mismatches":[]}"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn wasi_validates_command_and_optional_reactor_entrypoints() {
     let dir = temp_registry("builtin_wasi_entrypoints");
     fs::write(
