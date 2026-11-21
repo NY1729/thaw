@@ -1985,7 +1985,7 @@ fn thaw_js_builtin_bare_namespace_is_the_module_handle_not_a_member_list() {
             ("basename".to_string(), "__thaw_path_basename".to_string()),
             (
                 module_graph::BARE_NAMESPACE_EXPORT.to_string(),
-                "__thaw_value_node_path_default".to_string(),
+                "__thaw_value_node_path___namespace".to_string(),
             ),
         ]),
     )]);
@@ -1995,7 +1995,7 @@ fn thaw_js_builtin_bare_namespace_is_the_module_handle_not_a_member_list() {
         exports,
     );
     assert!(!idents.contains(&"M".to_string()), "{idents:?}");
-    assert!(idents.contains(&"__thaw_value_node_path_default".to_string()), "{idents:?}");
+    assert!(idents.contains(&"__thaw_value_node_path___namespace".to_string()), "{idents:?}");
     // No per-function references: the handle stands for every export, so none is linked as a value.
     assert!(!idents.contains(&"__thaw_path_join".to_string()), "{idents:?}");
     assert!(!idents.contains(&"__thaw_path_basename".to_string()), "{idents:?}");
