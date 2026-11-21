@@ -257,7 +257,7 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 const V8_DEFAULT_HEAP_LIMIT: usize = 4 << 30;
 
 /// The `__thaw_memory_usage` figures of this thread (also served to `worker.getHeapStatistics()` by the worker itself).
-pub(crate) fn memory_usage_json() -> String {
+pub(crate) fn memory_usage_json(it: &Interp) -> String {
     let used: usize = crate::gc_registry::live_objs()
         .iter()
         .map(|o| crate::estimate_bytes(o))
@@ -267,7 +267,54 @@ pub(crate) fn memory_usage_json() -> String {
     } else {
         V8_DEFAULT_HEAP_LIMIT.max(used)
     };
-    format!("{{\"malloc_size\":{used},\"malloc_limit\":{limit},\"memory_used_size\":{used},\"js_func_code_size\":0}}")
+    let (code, bytecode, source) = code_figures(it);
+    format!("{{\"malloc_size\":{used},\"malloc_limit\":{limit},\"memory_used_size\":{used},\"js_func_code_size\":{code},\"bytecode_size\":{bytecode},\"source_size\":{source}}}")
+}
+
+/// The v8 code figures of this thread as `(code_and_metadata, bytecode_and_metadata, source)` bytes. Each live function
+/// (deduplicated by its `FuncDef`) counts its AST share (the struct and its source span); once compiled it also counts
+/// its compiled body. Bytecode is the AST share of functions not yet compiled. Source is the text of every run.
+// ponytail: the compiled body is counted at its top level (each statement and expression box's inline captures, not
+// the boxes nested inside them); the AST share is the source span, not the parser's node tree. Upgrade path: walk the
+// compiled tree when these figures must track V8's more closely.
+fn code_figures(it: &Interp) -> (usize, usize, usize) {
+    let mut seen = std::collections::HashSet::new();
+    let (mut code, mut bytecode) = (0usize, 0usize);
+    for o in crate::gc_registry::live_objs().iter() {
+        let kind = o.kind.borrow();
+        let crate::Kind::Closure { def, .. } = &*kind else {
+            continue;
+        };
+        if !seen.insert(std::rc::Rc::as_ptr(def)) {
+            continue;
+        }
+        let ast =
+            std::mem::size_of::<crate::FuncDef>() + def.src.2.saturating_sub(def.src.1) as usize;
+        let compiled = match def.cstate.try_borrow() {
+            Ok(state) => match &*state {
+                crate::compile::CState::Compiled(c) => Some(compiled_bytes(c)),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        code += ast + compiled.unwrap_or(0);
+        if compiled.is_none() {
+            bytecode += ast;
+        }
+    }
+    let source = it.sources.values().map(|text| text.len()).sum();
+    (code, bytecode, source)
+}
+
+fn compiled_bytes(c: &crate::compile::CompiledFn) -> usize {
+    std::mem::size_of::<crate::compile::CompiledFn>()
+        + c.body
+            .iter()
+            .map(|st| std::mem::size_of_val(&**st))
+            .sum::<usize>()
+        + c.expr_body
+            .as_ref()
+            .map_or(0, |ex| std::mem::size_of_val(&**ex))
 }
 
 /// The compiler's dynamic-value helpers (`getDynamicValue("__thaw_...")`) the QuickJS realm defines in its
@@ -468,7 +515,7 @@ impl Interp {
         // ponytail: the registry is per OS thread. Under the thread coroutine backend (THAW_JS_CO=thread, the default
         // off Linux x86_64/aarch64) an object built on a coroutine thread is missed by a read on another thread.
         // Upgrade path: move the object list with `host::park_host_tls` like `heap_limit::take`.
-        let f = self.native(|_, _, _| Ok(Value::str(&memory_usage_json())));
+        let f = self.native(|it, _, _| Ok(Value::str(&memory_usage_json(it))));
         g.declare("__thaw_memory_usage", f, true);
         // (fd, raw) -> whether the terminal took the mode; registry tty.ReadStream.setRawMode calls it for its own fd
         let f = self.native(|it, _, a| {
