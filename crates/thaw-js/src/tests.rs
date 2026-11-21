@@ -4899,6 +4899,59 @@ setTimeout(function () {{ console.log(logs.join(',')); }}, 300);"
     assert!(out.contains("stdout:hi|"), "{out}");
 }
 
+/// Node 22 (3 probe runs, non-root uid 1000): a credential the kernel refuses (uid 0 from a non-root caller) is a
+/// SYNCHRONOUS throw from spawn/exec/execFile/fork with code 'EPERM', syscall 'spawn', errno -1, message
+/// 'spawn EPERM'; the child never starts. spawnSync reports it on result.error instead.
+#[test]
+fn child_process_refused_credential_throws_synchronously_like_node() {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // a root caller may setuid(0): Node's EPERM case needs a non-root process
+    }
+    let src = format!(
+        "{CHILD_SHIM}
+try {{ console.log('returned', __thaw_child_process_spawn('/bin/true', '[]', JSON.stringify({{uid: 0}}))); }}
+catch (e) {{ console.log('threw', e.code, e.syscall, e.errno, e.message); }}
+var r = JSON.parse(__thaw_child_process_sync('/bin/true', '[]', JSON.stringify({{gid: 0}})));
+console.log('sync', r.code, r.error !== undefined);
+setTimeout(function () {{ console.log(logs.join(',')); }}, 100);"
+    );
+    let out = run_loop(&src);
+    assert!(
+        out.starts_with("threw EPERM spawn -1 spawn EPERM|"),
+        "{out}"
+    );
+    assert!(out.contains("sync EPERM true|"), "{out}");
+    // the start never happened: no 'spawn' event and no async 'error' event
+    assert!(
+        !out.contains("spawn,") && !out.contains("error:EPERM"),
+        "{out}"
+    );
+}
+
+/// Node 22: uid/gid equal to the caller's own ids start normally (setuid/setgid to self succeed for any user).
+/// uid -1 is a synchronous EINVAL (errno -22) in Node.
+#[test]
+fn child_process_own_credentials_start_and_minus_one_is_einval_like_node() {
+    // SAFETY: getuid/getgid have no preconditions.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let src = format!(
+        "{CHILD_SHIM}
+var h = __thaw_child_process_spawn('/bin/true', '[]', JSON.stringify({{uid: {uid}, gid: {gid}}}));
+console.log('started', h > 0);
+try {{ __thaw_child_process_spawn('/bin/true', '[]', JSON.stringify({{uid: -1}})); console.log('returned'); }}
+catch (e) {{ console.log('threw', e.code, e.syscall, e.errno, e.message); }}
+console.log('sync', JSON.parse(__thaw_child_process_sync('/bin/true', '[]', JSON.stringify({{uid: -1}}))).code);
+setTimeout(function () {{ console.log(logs.join(',')); }}, 100);"
+    );
+    let out = run_loop(&src);
+    assert!(
+        out.starts_with("started true|threw EINVAL spawn -22 spawn EINVAL|sync EINVAL|"),
+        "{out}"
+    );
+    assert!(out.contains("exit:0/null"), "{out}");
+}
+
 #[test]
 fn scan_knows_fetch_globals_and_tolerates_service_worker_listener() {
     let blocked = MINI.replace(
