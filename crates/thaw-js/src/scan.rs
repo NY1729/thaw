@@ -815,7 +815,7 @@ impl Walker {
         }
         if let a::Expr::Member(m) = e {
             if let (a::Expr::Ident(o), a::MemberProp::Ident(p)) = (&*m.obj, &m.prop) {
-                if &*o.sym == "globalThis" {
+                if matches!(&*o.sym, "globalThis" | "global") {
                     self.probed_members.insert(p.sym.to_string());
                 }
             }
@@ -1484,19 +1484,25 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
                 add(&mut report, format!("global:{r}"), 1, key);
             }
         }
-        for (g, p) in &w.builtin_members {
+        for (g0, p) in &w.builtin_members {
+            // `global === globalThis` on Node and on thaw-js: `global.X` is judged as `globalThis.X`
+            let g = if g0 == "global" {
+                "globalThis"
+            } else {
+                g0.as_str()
+            };
             // Node-parity (R4): a member Node 22 lacks is undefined on Node too. A root the Node data does not
             // model (`Math`, `Array`, ...) keeps the old flag: the data cannot tell that Node lacks the member.
             // Carve-out: a `__`-prefixed member (`globalThis.__thaw_*`) is host-internal, so it stays a blocker.
             if interp.is_builtin_global(g)
-                && !w.declared.contains(g)
+                && !w.declared.contains(g0)
                 && !interp.builtin_member_exists(g, p)
                 && (!node_global_covered(g) || node_global_has(g, p) || is_host_internal(p))
                 // the package creates its own `globalThis.x` slot (`globalThis.x ??= {}`)
                 && !(g == "globalThis" && (defined.contains(p) || w.probed_members.contains(p)))
                 && !(module_loader && g == "globalThis" && p == "__thaw_bundle_create_require")
             {
-                add(&mut report, format!("builtin:{g}.{p}"), 1, key);
+                add(&mut report, format!("builtin:{g0}.{p}"), 1, key);
             }
         }
         for m in &w.called {

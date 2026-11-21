@@ -4136,6 +4136,33 @@ fn scan_keeps_double_underscore_globals_flagged_while_node_lacked_members_stay_c
 }
 
 #[test]
+fn scan_treats_global_as_globalthis_for_members() {
+    // `global === globalThis` on Node and on thaw-js: `global.X` is judged exactly like `globalThis.X` (R4)
+    for code in [
+        "exports.a = function () { return global.TESTING_WINDOWS; };",
+        "exports.a = function () { return typeof global.Y === 'function'; };",
+        "exports.a = function () { global.Z = 1; return global.Z; };",
+    ] {
+        let report = crate::scan::scan_bundle(&one_module_bundle(code, ""))
+            .ok()
+            .unwrap();
+        assert!(report.is_clean(), "{code}: {:?}", report.blockers);
+    }
+    // the `__`-prefixed carve-out applies through `global` too
+    let report = crate::scan::scan_bundle(&one_module_bundle(
+        "exports.a = function () { return global.__thaw_x; };",
+        "",
+    ))
+    .ok()
+    .unwrap();
+    assert!(
+        report.blockers.contains_key("builtin:global.__thaw_x"),
+        "{:?}",
+        report.blockers
+    );
+}
+
+#[test]
 fn scan_does_not_flag_this_calls_inside_a_class_without_extends() {
     // drizzle QueryPromise: `execute` is an abstract method implemented by subclasses in other modules
     let abstract_base = one_module_bundle(
