@@ -256,6 +256,20 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 /// The v8 `heap_size_limit` when no resourceLimits cap is set: 4 GiB, the registry's own fallback figure.
 const V8_DEFAULT_HEAP_LIMIT: usize = 4 << 30;
 
+/// The `__thaw_memory_usage` figures of this thread (also served to `worker.getHeapStatistics()` by the worker itself).
+pub(crate) fn memory_usage_json() -> String {
+    let used: usize = crate::gc_registry::live_objs()
+        .iter()
+        .map(|o| crate::estimate_bytes(o))
+        .sum();
+    let limit = if crate::heap_limit::enabled() {
+        crate::heap_limit::limit().max(used)
+    } else {
+        V8_DEFAULT_HEAP_LIMIT.max(used)
+    };
+    format!("{{\"malloc_size\":{used},\"malloc_limit\":{limit},\"memory_used_size\":{used},\"js_func_code_size\":0}}")
+}
+
 /// The compiler's dynamic-value helpers (`getDynamicValue("__thaw_...")`) the QuickJS realm defines in its
 /// runtime prelude; only the ones that are plain JavaScript.
 // ponytail: graph-origin identity (`__thaw_strict_equal_dynamic` on shadow containers) and native-callback
@@ -454,11 +468,7 @@ impl Interp {
         // ponytail: the registry is per OS thread. Under the thread coroutine backend (THAW_JS_CO=thread, the default
         // off Linux x86_64/aarch64) an object built on a coroutine thread is missed by a read on another thread.
         // Upgrade path: move the object list with `host::park_host_tls` like `heap_limit::take`.
-        let f = self.native(|_, _, _| {
-            let used: usize = crate::gc_registry::live_objs().iter().map(|o| crate::estimate_bytes(o)).sum();
-            let limit = if crate::heap_limit::enabled() { crate::heap_limit::limit().max(used) } else { V8_DEFAULT_HEAP_LIMIT.max(used) };
-            Ok(Value::str(&format!("{{\"malloc_size\":{used},\"malloc_limit\":{limit},\"memory_used_size\":{used},\"js_func_code_size\":0}}")))
-        });
+        let f = self.native(|_, _, _| Ok(Value::str(&memory_usage_json())));
         g.declare("__thaw_memory_usage", f, true);
         // (fd, raw) -> whether the terminal took the mode; registry tty.ReadStream.setRawMode calls it for its own fd
         let f = self.native(|it, _, a| {

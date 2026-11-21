@@ -313,19 +313,49 @@
       const state = states.get(this);
       if (prev) checkCpuPrev(prev);
       const base = prev ? { user: prev.user, system: prev.system } : undefined;
-      return new Promise((resolve, reject) => {
-        if (!state.online || state.exited) return reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
-        const ack = nextCpuAck++;
-        state.cpuPending.set(ack, {
-          resolve: usage => resolve(base === undefined ? usage : { user: usage.user - base.user, system: usage.system - base.system }),
-          reject,
-        });
-        if (!__thaw_worker_cpu(state.handle, ack)) {
-          state.cpuPending.delete(ack);
-          reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
-        }
-      });
+      return askWorker(state, __thaw_worker_cpu, usage => (base === undefined ? usage : { user: usage.user - base.user, system: usage.system - base.system }));
     }
+
+    // Node: resolves the v8.getHeapStatistics() keys for the worker's own heap (the figures of worker.rs `serve_cpu`)
+    getHeapStatistics() {
+      return askWorker(states.get(this), __thaw_worker_heap, heapStatisticsOf);
+    }
+  }
+
+  // Asks the worker thread for a figure, served from its interrupt check; `done` shapes the answer. Rejects
+  // ERR_WORKER_NOT_RUNNING before 'online', after exit, and when the request cannot be queued.
+  function askWorker(state, native, done) {
+    return new Promise((resolve, reject) => {
+      if (!state.online || state.exited) return reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+      const ack = nextCpuAck++;
+      state.cpuPending.set(ack, { resolve: answer => resolve(done(answer)), reject });
+      if (!native(state.handle, ack)) {
+        state.cpuPending.delete(ack);
+        reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+      }
+    });
+  }
+
+  // The v8.getHeapStatistics() object of a thread's `__thaw_memory_usage` figures (the same native the main thread's
+  // v8 module reads, see registry runtime.rs). Node's key order and types; peak is the current figure (no history here).
+  function heapStatisticsOf(usage) {
+    const limit = usage.malloc_limit > 0 && usage.malloc_limit < Number.MAX_SAFE_INTEGER ? usage.malloc_limit : 4294967296;
+    return {
+      total_heap_size: usage.malloc_size,
+      total_heap_size_executable: usage.js_func_code_size,
+      total_physical_size: usage.malloc_size,
+      total_available_size: Math.max(0, limit - usage.memory_used_size),
+      used_heap_size: usage.memory_used_size,
+      heap_size_limit: limit,
+      malloced_memory: usage.malloc_size,
+      peak_malloced_memory: usage.malloc_size,
+      does_zap_garbage: false,
+      number_of_native_contexts: 1,
+      number_of_detached_contexts: 0,
+      total_global_handles_size: 0,
+      used_global_handles_size: 0,
+      external_memory: 0,
+    };
   }
 
   // Events from the Rust poll (worker.rs `poll`), delivered by the event loop: [{handle, type, ...}].
@@ -340,11 +370,11 @@
       if (event.type === 'online') {
         state.online = true;
         worker.emit('online');
-      } else if (event.type === 'cpu') {
+      } else if (event.type === 'cpu' || event.type === 'heap') {
         const request = state.cpuPending.get(event.ack);
         if (request !== undefined) {
           state.cpuPending.delete(event.ack);
-          request.resolve({ user: event.user, system: event.system });
+          request.resolve(event.type === 'cpu' ? { user: event.user, system: event.system } : event.usage);
         }
       } else if (event.type === 'message') {
         let value;
