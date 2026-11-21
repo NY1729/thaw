@@ -161,12 +161,8 @@ fn obj_shape(o: &Obj, stack: &mut Vec<N>) -> String {
                     Ok(st) => {
                         if let Some(st) = st.as_ref() {
                             s += &format!("f{}", vrepr(&st.f, stack));
-                            stack.push(N::Scope(st.scope.clone()));
-                            s += &format!("sc{:x}", ptr_of(&st.scope));
-                            s += &format!("this{}", vrepr(&st.this, stack));
-                            for a in &st.args {
-                                s += &vrepr(a, stack);
-                            }
+                            stack.push(N::Scope(st.frame.clone()));
+                            s += &format!("fr{:x}", ptr_of(&st.frame));
                         }
                     }
                     Err(_) => s += "startBORROWED",

@@ -166,17 +166,14 @@ pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
                 }
             }
         }
-        // Only the cells of `gen_cells` (a sole-owned, not-running generator): its unstarted arguments (`f`, the
-        // scope, `this`, each argument; `def` is no node) and its queued requests (the value and the promise).
+        // Only the cells of `gen_cells` (a sole-owned, not-running generator): its unstarted function and its bound
+        // frame (`this`, `arguments` and the parameters are its bindings; `def` is no node) and its queued requests
+        // (the value and the promise).
         Kind::Generator(_) => {
             if let Some((start, queue)) = gen_cells.as_ref() {
                 if let Some(st) = start.as_ref() {
                     value_edge(&mut buf, &st.f);
-                    buf.push(Edge::Scope(&st.scope));
-                    value_edge(&mut buf, &st.this);
-                    for a in &st.args {
-                        value_edge(&mut buf, a);
-                    }
+                    buf.push(Edge::Scope(&st.frame));
                 }
                 for (_, v, p) in queue.iter() {
                     value_edge(&mut buf, v);
@@ -275,7 +272,7 @@ impl Graph {
             Edge::Scope(s) => {
                 let j = s.reg_idx.get();
                 (j < self.scopes.len() && self.scopes[j].as_ref().is_some_and(|x| Rc::ptr_eq(x, s)))
-                    .then_some(self.objs.len() + j)
+                    .then(|| self.objs.len() + j)
             }
         }
     }

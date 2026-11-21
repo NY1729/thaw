@@ -1384,7 +1384,7 @@ fn gc_edges_match_rc_clones_control_kinds() {
         &mut it,
         "ctl",
         "globalThis.t=function(){}; globalThis.P=new Promise(function(){}); globalThis.Q=P.then(t,t); \
-         globalThis.G=(function*(){}).call(t,t,t);",
+         globalThis.G=(function*(a,b){ void this; }).call(t,t,t);",
     );
     let g = it.global_object.clone();
     let get = |it: &mut Interp, k: &str| match ok(it.get(&Value::Object(g.clone()), k), k) {
@@ -1396,15 +1396,25 @@ fn gc_edges_match_rc_clones_control_kinds() {
     let q = get(&mut it, "Q");
     let gen = get(&mut it, "G");
 
-    // Holders of `t`: the global property, this test's handle, two reactions, and the generator's `this` and two
-    // arguments. The promise and the generator each yield exactly their share.
+    // Holders of `t`: the global property, this test's handle, two reactions, and the generator's frame, which
+    // binds `this` and the two parameters `a`, `b`. The generator has no direct edge to `t`: its bindings are
+    // reached through its bound frame (`GenStart::frame`), a registered scope.
     let p_edges = count_edges_to(|f| obj_edges(&p, f), &t);
     assert_eq!(p_edges, 2, "promise: on_ful and on_rej");
     let g_edges = count_edges_to(|f| obj_edges(&gen, f), &t);
-    assert_eq!(g_edges, 3, "unstarted generator: this and two args");
+    assert_eq!(
+        g_edges, 0,
+        "unstarted generator: no direct edge (was 3: this and two args)"
+    );
+    let frame = match &*gen.kind.borrow() {
+        Kind::Generator(gd) => gd.start.borrow().as_ref().expect("unstarted").frame.clone(),
+        _ => panic!("G is not a generator"),
+    };
+    let frame_edges = count_edges_to(|f| scope_edges(&frame, f), &t);
+    assert_eq!(frame_edges, 3, "bound frame: this, a, b");
     assert_eq!(
         Rc::strong_count(&t),
-        2 + p_edges + g_edges,
+        2 + p_edges + frame_edges,
         "t: global + test handle + every edge"
     );
 
