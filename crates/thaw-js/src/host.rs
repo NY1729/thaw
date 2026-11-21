@@ -461,7 +461,21 @@ fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
 }
 
 fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
-    let cached = loader.cache.borrow().get(key).cloned();
+    // A CommonJS file module is cached only in `require.cache` (by filename), so deleting its entry makes the next
+    // require run the factory again, as in Node. ESM keys and builtins stay in `loader.cache`.
+    let commonjs = !key.starts_with("node:") && !loader.esm_keys.contains(key);
+    let file = format!("/thaw_modules/{key}");
+    if commonjs {
+        let cached = it.get(&loader.cache_obj, &file)?;
+        if let Value::Object(_) = cached {
+            return it.get(&cached, "exports");
+        }
+    }
+    let cached = if commonjs {
+        None
+    } else {
+        loader.cache.borrow().get(key).cloned()
+    };
     if let Some(m) = cached {
         // a failed ES module stays failed: every later require rethrows its evaluation error (Node caches it)
         let failed = loader.failed.borrow().get(key).cloned();
@@ -486,7 +500,6 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     };
     // The virtual file path and its directory mirror the QuickJS lane (`render.rs`, `__thaw_bundle_load`), so
     // `import.meta.url` (`'file://' + __filename`) is an absolute `file:///thaw_modules/...` URL.
-    let file = format!("/thaw_modules/{key}");
     let dir = match file.rfind('/') {
         Some(slash) => file[..slash].to_string(),
         None => ".".to_string(),
@@ -495,13 +508,14 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     let exports = Value::Object(it.plain());
     it.set(&module, "exports", exports.clone())?;
     it.set(&module, "filename", Value::str(&file))?;
-    loader
-        .cache
-        .borrow_mut()
-        .insert(key.to_string(), module.clone());
-    // the shared `require.cache`: CommonJS file modules by filename (ESM and builtins are not cached, as in Node)
-    if !key.starts_with("node:") && !loader.esm_keys.contains(key) {
+    if commonjs {
+        // the shared `require.cache`: CommonJS file modules by filename (ESM and builtins are not cached, as in Node)
         it.set(&loader.cache_obj, &file, module.clone())?;
+    } else {
+        loader
+            .cache
+            .borrow_mut()
+            .insert(key.to_string(), module.clone());
     }
     let (l, k) = (loader.clone(), key.to_string());
     let require = it.native(move |it, _, args| {
@@ -582,11 +596,22 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         Ok(result) if it.is_promise(result) => Some(result.clone()),
         _ => None,
     };
-    if let Err(Ctl::Throw(reason)) = &ran {
-        loader
-            .failed
-            .borrow_mut()
-            .insert(key.to_string(), reason.clone());
+    match &ran {
+        Err(Ctl::Throw(reason)) => {
+            loader
+                .failed
+                .borrow_mut()
+                .insert(key.to_string(), reason.clone());
+            // Node evicts a CommonJS module whose factory threw, so its next require runs it again
+            if let (true, Value::Object(cache)) = (commonjs, &loader.cache_obj) {
+                crate::reflect::delete_own(it, cache, &file)?;
+            }
+        }
+        // a later run that succeeds clears the failure, so import() resolves again
+        Ok(_) if commonjs => {
+            loader.failed.borrow_mut().remove(key);
+        }
+        _ => {}
     }
     if let Some(promise) = &pending {
         loader
