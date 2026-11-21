@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -103,6 +103,8 @@ struct Side {
     hub: u64,
     /// This worker's thread id (its `threadId`, the key of its THREADS entry).
     thread_id: u32,
+    /// The thread-id counter of the tree (shared with every worker it spawns, see `thread_ids`).
+    ids: Arc<AtomicU32>,
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
     alive: Arc<AtomicBool>,
@@ -129,6 +131,8 @@ pub(crate) struct WorkerState {
     local: Vec<String>,
     /// The registry bundles this realm loaded, in load order: a worker whose file is one of their modules runs it.
     bundles: Vec<LoadedBundle>,
+    /// The tree's thread-id counter, used when this Interp is the main thread (a worker uses its `Side`'s).
+    ids: Arc<AtomicU32>,
 }
 
 /// A registry bundle loaded into this realm: its package name, its text (one copy per loaded package, made once at
@@ -400,6 +404,14 @@ fn thread_id_of(it: &Interp) -> u32 {
     it.worker.side.as_ref().map_or(0, |side| side.thread_id)
 }
 
+/// The thread-id counter of this Interp's tree: a worker shares its spawner's, so ids are unique across nesting levels.
+fn thread_ids(it: &Interp) -> Arc<AtomicU32> {
+    match &it.worker.side {
+        Some(side) => side.ids.clone(),
+        None => it.worker.ids.clone(),
+    }
+}
+
 /// Sends a `postMessageToThread` to thread `target`, from this Interp. A worker's send to 0 goes to the main thread
 /// through its parent channel. False when the thread is not there (it never existed, or has left): the wire is released
 /// and the sender settles FAILED.
@@ -479,6 +491,7 @@ fn spawn(
 ) -> u32 {
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
+    let ids = thread_ids(it);
     let interrupt = Arc::new(AtomicBool::new(false));
     let cpu = Arc::new(CpuProbe::default());
     let stack = stack_bytes(stack_mb);
@@ -503,6 +516,7 @@ fn spawn(
         token: tokens.0,
         hub: tokens.1,
         thread_id,
+        ids,
         interrupt: interrupt.clone(),
         alive: Arc::new(AtomicBool::new(false)),
         cpu: cpu.clone(),
@@ -613,6 +627,31 @@ pub(crate) fn capture_bytes(it: &Interp, fd: u8, bytes: &[u8]) -> bool {
     true
 }
 
+/// Before this Interp is dropped: each child it still has is terminated and joined, so no child thread outlives the
+/// state it reports to. Its own `Exit` is the last event it sends, which ends the drain. A child that is stuck in a
+/// synchronous native (Atomics.wait) holds the join. ponytail: no 'exit' events are delivered for these children.
+fn stop_children(it: &mut Interp) {
+    for mut w in std::mem::take(&mut it.worker.workers).into_values() {
+        if !w.exited {
+            w.interrupt.store(true, Ordering::Relaxed);
+            let _ = w.tx.send(Cmd::Terminate);
+            while let Ok(evt) = w.rx.recv() {
+                let exit = matches!(evt, Evt::Exit(_));
+                release_evt(&evt);
+                if exit {
+                    break;
+                }
+            }
+        }
+        while let Ok(evt) = w.rx.try_recv() {
+            release_evt(&evt);
+        }
+        if let Some(join) = w.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 /// Runs on the worker thread: the script, then its event loop; always ends with an `Exit` event.
 fn run_worker(
     source: &str,
@@ -637,6 +676,7 @@ fn run_worker(
         it.worker.side = Some(side);
         it.worker.env_table = Some(env);
         let code = run_script(&mut it, source, opts, main);
+        stop_children(&mut it);
         // leaving the thread table and taking the queue happen under one lock: a send either queued before this (its
         // wire is released here) or finds no thread. Messages the parent sent that this worker never read still carry
         // their blocks; so does a workerData the bootstrap never reached (its wire is inside the spawn options)
@@ -921,9 +961,10 @@ pub(crate) fn install(it: &mut Interp) {
         let heap_mb = it.num(&arg(a, 2));
         // arg 4 is `env: SHARE_ENV` (the worker shares this realm's environment table)
         let share_env = arg(a, 4).truthy();
-        // arg 5 is the worker's port token (its port routes name it as their owner); this realm is the hub
+        // arg 5 is the worker's port token (its port routes name it as their owner); the tree's hub (the main thread's
+        // token) is the hub, so a nested worker's ports and thread messages stay in the one namespace
         let token = it.num(&arg(a, 5)) as u64;
-        let hub = realm_token(it);
+        let hub = hub_of(it);
         // arg 6 is the file a non-eval Worker runs (undefined for eval): a bundled module's path runs from the bundle
         let file = match arg(a, 6) {
             Value::Undefined => None,
@@ -986,6 +1027,13 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Number(token.map_or(-1.0, |t| t as f64)))
     });
     g.declare("__thaw_thread_token", f, true);
+    // the next `threadId` of this tree (1, 2, ...; the main thread is 0)
+    let f = it.native(|it, _, _| {
+        Ok(Value::Number(f64::from(
+            thread_ids(it).fetch_add(1, Ordering::Relaxed) + 1,
+        )))
+    });
+    g.declare("__thaw_thread_next", f, true);
     let f = it.native(|it, _, a| {
         let (target, ack) = (it.num(&arg(a, 0)) as u32, it.num(&arg(a, 1)) as u32);
         let wire = it.to_str(&arg(a, 2)).to_string();

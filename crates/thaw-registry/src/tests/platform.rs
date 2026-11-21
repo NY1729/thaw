@@ -1600,21 +1600,15 @@ fn worker_thread_id_becomes_minus_one_after_routing_cleanup() {
 }
 
 
-// qjs_pending: fails on thaw-js: "ERROR: Error: worker_threads Worker is not supported inside a worker yet"
-mod qjs_pending_platform_native_worker_can_run_a_fallback_nested_worker_until_exit {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
-fn native_worker_can_run_a_fallback_nested_worker_until_exit() {
-    use std::ffi::{CStr, CString};
-
-    let dir = temp_registry("native_worker_fallback_nested_lifetime");
+fn nested_worker_runs_to_exit_and_reports_child_exit_code() {
+    // Node 22.23.1: [0,0] (the child's exit code, then the parent's exit code)
+    let dir = temp_registry("nested_worker_runs_to_exit");
     fs::write(
         dir.join("index.js"),
         r#"var Worker = require('node:worker_threads').Worker;
         module.exports = async function() {
-            var source = "globalThis.__thaw_worker_spawn = undefined; var wt = require('node:worker_threads'), child = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('exit', function(code) { wt.parentPort.postMessage(code); wt.parentPort.close(); });";
+            var source = "var wt = require('node:worker_threads'), child = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('exit', function(code) { wt.parentPort.postMessage(code); wt.parentPort.close(); });";
             var worker = new Worker(source, { eval: true });
             var message = await new Promise(function(resolve, reject) {
                 worker.on('message', resolve);
@@ -1625,143 +1619,108 @@ fn native_worker_can_run_a_fallback_nested_worker_until_exit() {
         };"#,
     )
     .unwrap();
-    let node_modules = temp_registry("native_worker_fallback_nested_lifetime_node_modules");
-    let (bundle, _, _, _) =
-        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseNativeFallbackNestedWorker = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        c"exerciseNativeFallbackNestedWorker".as_ptr(),
-        c"[]".as_ptr(),
-    );
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[0,0]");
+    let node_modules = temp_registry("nested_worker_runs_to_exit_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "[0,0]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
-}
-
-// qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
-mod qjs_pending_platform_fallback_nested_workers_keep_their_parent_alive_and_release_it {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
-fn fallback_nested_workers_keep_their_parent_alive_and_release_it() {
-    use std::ffi::{CStr, CString};
-
-    let dir = temp_registry("fallback_nested_worker_lifetime");
+fn nested_workers_keep_parent_alive_unref_releases_it_and_failed_ctor_is_caught() {
+    // Node 22.23.1: [0,[0,[0,"replacement:0"]],0] (a failed constructor is caught, a ref'd child keeps its parent
+    // alive, an unref'd child does not)
+    let dir = temp_registry("nested_worker_lifetime");
     fs::write(
         dir.join("index.js"),
         r#"var Worker = require('node:worker_threads').Worker;
         module.exports = async function() {
-            var spawn = globalThis.__thaw_worker_spawn;
-            globalThis.__thaw_worker_spawn = undefined;
-            try {
-                function run(source, captureMessage) {
-                    var worker = new Worker(source, { eval: true });
-                    return new Promise(function(resolve) {
-                        var done = false, messages = [], timer = setTimeout(function() {
-                            if (done) return;
-                            done = true;
-                            resolve(-1);
-                            worker.terminate();
-                        }, 200);
-                        worker.on('message', function(value) { messages.push(value); });
-                        worker.on('exit', function(code) {
-                            if (done) return;
-                            done = true;
-                            clearTimeout(timer);
-                            resolve(captureMessage ? [code, messages] : code);
-                        });
+            function run(source, captureMessage) {
+                var worker = new Worker(source, { eval: true });
+                return new Promise(function(resolve) {
+                    var done = false, messages = [], timer = setTimeout(function() {
+                        if (done) return;
+                        done = true;
+                        resolve(-1);
+                        worker.terminate();
+                    }, 5000);
+                    worker.on('message', function(value) { messages.push(value); });
+                    worker.on('exit', function(code) {
+                        if (done) return;
+                        done = true;
+                        clearTimeout(timer);
+                        resolve(captureMessage ? [code, messages] : code);
                     });
-                }
-                var failedConstructor = "var wt = require('node:worker_threads'); try { new wt.Worker('void 0', { eval: true, workerData: function() {} }); } catch (error) {}";
-                var nestedChild = "var wt = require('node:worker_threads'), child = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('exit', function(code) { wt.parentPort.postMessage(code); var replacement = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); replacement.on('exit', function(replacementCode) { wt.parentPort.postMessage('replacement:' + replacementCode); wt.parentPort.close(); }); }); child.unref(); child.ref();";
-                var unrefChild = "var wt = require('node:worker_threads'), child = new wt.Worker(\"setTimeout(function() { require('node:worker_threads').parentPort.close(); }, 50);\", { eval: true }); child.unref();";
-                return [await run(failedConstructor), await run(nestedChild, true), await run(unrefChild)];
-            } finally {
-                globalThis.__thaw_worker_spawn = spawn;
+                });
             }
+            var failedConstructor = "var wt = require('node:worker_threads'); try { new wt.Worker('void 0', { eval: true, workerData: function() {} }); } catch (error) {}";
+            var nestedChild = "var wt = require('node:worker_threads'), child = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('exit', function(code) { wt.parentPort.postMessage(code); var replacement = new wt.Worker(\"require('node:worker_threads').parentPort.close();\", { eval: true }); replacement.on('exit', function(replacementCode) { wt.parentPort.postMessage('replacement:' + replacementCode); wt.parentPort.close(); }); }); child.unref(); child.ref();";
+            var unrefChild = "var wt = require('node:worker_threads'), child = new wt.Worker(\"setTimeout(function() { require('node:worker_threads').parentPort.close(); }, 50);\", { eval: true }); child.unref();";
+            return [await run(failedConstructor), await run(nestedChild, true), await run(unrefChild)];
         };"#,
     )
     .unwrap();
-    let node_modules = temp_registry("fallback_nested_worker_lifetime_node_modules");
-    let (bundle, _, _, _) =
-        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseFallbackNestedWorkerLifetime = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        c"exerciseFallbackNestedWorkerLifetime".as_ptr(),
-        c"[]".as_ptr(),
-    );
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[0,[0,[0,\"replacement:0\"]],0]");
+    let node_modules = temp_registry("nested_worker_lifetime_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "[0,[0,[0,\"replacement:0\"]],0]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
-}
-
-// qjs_pending: fails on thaw-js: "ERROR: TypeError: __thaw_worker_spawn is not a function"
-mod qjs_pending_platform_native_child_of_fallback_inherits_parent_environment_and_stdio {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
-fn native_child_of_fallback_inherits_parent_environment_and_stdio() {
-    use std::ffi::{CStr, CString};
-
-    let dir = temp_registry("native_child_of_fallback_inherited_state");
+fn nested_worker_child_inherits_env_copy_and_streams_stdout_to_parent_worker() {
+    // Node 22.23.1: ["fallback-parent-env","child-stdio",0]; the child's stdout reaches the top worker's stdout capture
+    let dir = temp_registry("nested_worker_inherited_state");
     fs::write(
         dir.join("index.js"),
         r#"var Worker = require('node:worker_threads').Worker;
         module.exports = async function() {
-            var originalSpawn = globalThis.__thaw_worker_spawn, nativeSpawnCount = 0;
-            globalThis.__thaw_worker_spawn = function() { nativeSpawnCount++; return originalSpawn.apply(this, arguments); };
-            var countedSpawn = globalThis.__thaw_worker_spawn;
-            globalThis.__thaw_worker_spawn = undefined;
-            try {
-                var source = "var wt = require('node:worker_threads'), child = new wt.Worker(\"process.stdout.write('child-stdio'); require('node:worker_threads').parentPort.postMessage(process.env.THAW_NESTED); require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('message', function(value) { wt.parentPort.postMessage(value); }); child.on('exit', function() { wt.parentPort.close(); });";
-                var worker = new Worker(source, { eval: true, env: { THAW_NESTED: 'fallback-parent-env' }, stdout: true });
-                globalThis.__thaw_worker_spawn = countedSpawn;
-                var output = '';
-                worker.stdout.setEncoding('utf8');
-                worker.stdout.on('data', function(value) { output += value; });
-                var message = new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); });
-                var outputDone = new Promise(function(resolve) { worker.stdout.on('end', resolve); });
-                var exit = new Promise(function(resolve, reject) { worker.on('exit', resolve); worker.on('error', reject); });
-                var values = await Promise.all([message, outputDone, exit]);
-                return [values[0], output, values[2], nativeSpawnCount];
-            } finally {
-                globalThis.__thaw_worker_spawn = originalSpawn;
-            }
+            var source = "var wt = require('node:worker_threads'), child = new wt.Worker(\"process.stdout.write('child-stdio'); require('node:worker_threads').parentPort.postMessage(process.env.THAW_NESTED); require('node:worker_threads').parentPort.close();\", { eval: true }); child.on('message', function(value) { wt.parentPort.postMessage(value); }); child.on('exit', function() { wt.parentPort.close(); });";
+            var worker = new Worker(source, { eval: true, env: { THAW_NESTED: 'fallback-parent-env' }, stdout: true });
+            var output = '';
+            worker.stdout.setEncoding('utf8');
+            worker.stdout.on('data', function(value) { output += value; });
+            var message = new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); });
+            var outputDone = new Promise(function(resolve) { worker.stdout.on('end', resolve); });
+            var exit = new Promise(function(resolve, reject) { worker.on('exit', resolve); worker.on('error', reject); });
+            var values = await Promise.all([message, outputDone, exit]);
+            return [values[0], output, values[2]];
         };"#,
     )
     .unwrap();
-    let node_modules = temp_registry("native_child_of_fallback_inherited_state_node_modules");
-    let (bundle, _, _, _) =
-        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = CString::new(format!(
-        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
-         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
-         globalThis.exerciseNativeChildOfFallback = module.exports;"
-    ))
-    .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(
-        c"exerciseNativeChildOfFallback".as_ptr(),
-        c"[]".as_ptr(),
-    );
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"fallback-parent-env\",\"child-stdio\",0,1]");
+    let node_modules = temp_registry("nested_worker_inherited_state_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), "[\"fallback-parent-env\",\"child-stdio\",0]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
+
+#[test]
+fn nested_worker_thread_ids_are_one_tree_wide_sequence() {
+    // Node 22.23.1 (3 runs identical): the top worker is 1, its children 2 and 3 (one counter for the tree, in creation
+    // order); a child is not the main thread, has its workerData, an empty threadName and a parentPort; a worker's
+    // threadId reads -1 once it has exited.
+    let dir = temp_registry("nested_worker_thread_ids");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+        module.exports = async function() {
+            var kid = "var wt = require('node:worker_threads'); wt.parentPort.postMessage({ me: wt.threadId, main: wt.isMainThread, data: wt.workerData, name: wt.threadName, parent: wt.parentPort !== null }); wt.parentPort.close();";
+            var mid = "var wt = require('node:worker_threads'); var results = [], ids = [], kids = []; var pending = 2; var kidCode = `" + kid + "`; ['k1', 'k2'].forEach(function (name, index) { var child = new wt.Worker(kidCode, { eval: true, workerData: name }); kids.push(child); ids.push(child.threadId); child.on('message', function (m) { results[index] = m; }); child.on('exit', function () { if (--pending === 0) { wt.parentPort.postMessage({ me: wt.threadId, ids: ids, results: results, after: kids.map(function (k) { return k.threadId; }) }); wt.parentPort.close(); } }); });";
+            var top = new Worker(mid, { eval: true, workerData: 'mid' });
+            var topId = top.threadId;
+            var message = await new Promise(function(resolve, reject) { top.on('message', resolve); top.on('error', reject); });
+            await new Promise(function(resolve) { top.on('exit', resolve); });
+            return [topId, message, top.threadId];
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("nested_worker_thread_ids_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        run_js(&bundle),
+        r#"[1,{"me":1,"ids":[2,3],"results":[{"me":2,"main":false,"data":"k1","name":"","parent":true},{"me":3,"main":false,"data":"k2","name":"","parent":true}],"after":[-1,-1]},-1]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
 }

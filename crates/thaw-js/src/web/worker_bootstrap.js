@@ -124,10 +124,15 @@
     enumerable: true, configurable: true,
   });
 
+  // Events of the workers this worker spawned carry a `handle`: worker_threads.js (the main-thread form, installed
+  // before this bootstrap) delivers them to their Worker objects.
+  const childDispatch = globalThis.__thaw_worker_dispatch;
   // Parent messages arrive as {type, value} records from the Rust poll: queue them on the port like messaging.js does.
   globalThis.__thaw_worker_dispatch = function (json) {
     for (const event of JSON.parse(json)) {
-      if (event.type === 'message') {
+      if (event.handle !== undefined) {
+        childDispatch(JSON.stringify([event]));
+      } else if (event.type === 'message') {
         const { value, ports } = __thaw_worker_decode_full(event.value);
         parentPort.__thawQueue.push({ data: value, ports });
         parentPort.__thawSchedule();
@@ -164,13 +169,9 @@
     MessageChannel: globalThis.MessageChannel,
     MessagePort: globalThis.MessagePort,
     BroadcastChannel: globalThis.BroadcastChannel,
-    Worker: class Worker {
-      constructor() {
-        const error = new Error('worker_threads Worker is not supported inside a worker yet');
-        error.code = 'ERR_THAW_UNSUPPORTED';
-        throw error;
-      }
-    },
+    // the main-thread Worker class of worker_threads.js: a worker spawns its own workers (the same natives, this realm's
+    // thread ids and dispatch)
+    Worker: globalThis.__thaw_worker_threads_exports.Worker,
     receiveMessageOnPort(port) {
       // a MessagePort, or a BroadcastChannel (Node reads both through their handle)
       if (!globalThis.__thaw_is_message_port(port) && !(port instanceof globalThis.BroadcastChannel)) {
