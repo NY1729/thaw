@@ -3,20 +3,6 @@
 # reason: other-runtime-only | native-addon-dlopen (allowed) | scanner-precision | missing-node-api (open, forbidden at D1).
 # Rows of a fixture bundle (crates/thaw-cli/tests/fixtures/bundles) are checked per PR by crates/thaw-cli/tests/blocked_bundles.rs;
 # the other rows are checked by the nightly full-set run and carry the pre-#881 measurement until then.
-drizzle-orm__subpaths__better-sqlite3	require:better-sqlite3	scanner-precision	fixture: verified on main 0bbd19f03
-drizzle-orm__subpaths__better-sqlite3__driver	require:better-sqlite3	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__netlify-db	require:pg	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__netlify-db__driver	require:pg	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__netlify-db__migrator	require:pg	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__node-postgres	require:pg	scanner-precision	fixture: verified on main 0bbd19f03
-drizzle-orm__subpaths__node-postgres__driver	require:pg	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__node-postgres__session	require:pg	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__prisma__mysql	require:@prisma/client	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__prisma__mysql__driver	require:@prisma/client	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__prisma__pg	require:@prisma/client	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__prisma__pg__driver	require:@prisma/client	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
-drizzle-orm__subpaths__prisma__sqlite	require:@prisma/client	scanner-precision	fixture: verified on main 0bbd19f03
-drizzle-orm__subpaths__prisma__sqlite__driver	require:@prisma/client	scanner-precision	not a fixture: pre-#881 measurement, nightly verifies
 hono__subpaths__cloudflare-workers	global:__STATIC_CONTENT	other-runtime-only	fixture: verified on main 0bbd19f03
 prisma__client	method:dlopen	native-addon-dlopen	fixture: verified on main 0bbd19f03
 prisma__client__subpaths__index	method:dlopen	native-addon-dlopen	not a fixture: pre-#881 measurement, nightly verifies

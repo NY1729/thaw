@@ -2083,35 +2083,18 @@ fn native_esm_dynamic_global_capability_uses_legacy_bundle() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: fails on thaw-js: Package route ERROR: bad bundle: await isn't allowed in non-async function; script route needs __thaw_register_native_bundle
-mod qjs_pending_bundling_native_esm_dynamic_absolute_name_cannot_escape_its_bundle {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_esm_dynamic_absolute_name_cannot_escape_its_bundle() {
-    // An isolated realm makes the first Rust-minted prefix deterministic.
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let root = temp_registry("native-esm-absolute-escape");
-        let modules = root.join("node_modules");
-        let package = modules.join("native-escape-pkg");
-        fs::create_dir_all(&package).unwrap();
-        fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
-        let (first, _, _, _) = bundle_commonjs_package(&modules, "native-escape-pkg", &package, "index.mjs").unwrap();
-        let first_script = format!("globalThis.module = {{ exports: {{}} }}; {first}");
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first_script).unwrap().as_ptr()), 1);
-        let old_literal = serde_json::to_string("thaw-bundle:1:native-escape-pkg/index.mjs").unwrap();
-        fs::write(package.join("index.mjs"), format!("export const blocked = await import({old_literal}).then(function() {{ return false; }}, function() {{ return true; }});")).unwrap();
-        let (second, _, _, _) = bundle_commonjs_package(&modules, "native-escape-pkg", &package, "index.mjs").unwrap();
-        assert!(second.contains("__thaw_register_native_bundle"));
-        let second_script = format!("globalThis.module = {{ exports: {{}} }}; {second} globalThis.absoluteImportBlocked = function() {{ return module.exports.blocked; }};");
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second_script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"absoluteImportBlocked".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
-        let _ = fs::remove_dir_all(root);
-    }).join().unwrap();
-}
+    // Node 22: the bundle-prefix scheme is refused with ERR_UNSUPPORTED_ESM_URL_SCHEME, also after a top-level await.
+    let root = temp_registry("native-esm-absolute-escape");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-escape-pkg");
+    fs::create_dir_all(&package).unwrap();
+    let literal = serde_json::to_string("thaw-bundle:1:native-escape-pkg/index.mjs").unwrap();
+    fs::write(package.join("index.mjs"), format!("export const blocked = await import({literal}).then(function() {{ return false; }}, function(error) {{ return error.code; }});")).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-escape-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(run_js_probe(&bundle, "exports.blocked"), r#""ERR_UNSUPPORTED_ESM_URL_SCHEME""#);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -2126,6 +2109,23 @@ fn native_esm_dynamic_absolute_name_blocks_import_without_top_level_await() {
     fs::write(package.join("index.mjs"), format!("export const blocked = import({literal}).then(function() {{ return false; }}, function() {{ return true; }});")).unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-escape-pkg", &package, "index.mjs").unwrap();
     assert_eq!(run_js_probe(&bundle, "exports.blocked"), "true");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_tla_siblings_evaluate_in_import_order_on_thaw_js() {
+    // Node 22: a sync sibling runs while an async sibling is still pending; only the importer of the async one waits.
+    let root = temp_registry("native-tla-sibling-order");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-order-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("entry.mjs"), "import './a.mjs';\nimport './b.mjs';\nimport './c.mjs';\nimport './d.mjs';\nglobalThis.log.push('entry');\nexport const order = globalThis.log.join('|');").unwrap();
+    fs::write(package.join("a.mjs"), "globalThis.log = globalThis.log || []; globalThis.log.push('a start'); await new Promise(function (resolve) { setTimeout(resolve, 20); }); globalThis.log.push('a end'); export const a = 1;").unwrap();
+    fs::write(package.join("b.mjs"), "globalThis.log = globalThis.log || []; globalThis.log.push('b sync'); export const b = 2;").unwrap();
+    fs::write(package.join("c.mjs"), "import { a } from './a.mjs'; globalThis.log.push('c'); export const c = a;").unwrap();
+    fs::write(package.join("d.mjs"), "globalThis.log = globalThis.log || []; globalThis.log.push('d sync'); await null; globalThis.log.push('d end'); export const d = 4;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-order-pkg", &package, "entry.mjs").unwrap();
+    assert_eq!(run_js_probe(&bundle, "exports.order"), r#""a start|b sync|d sync|d end|a end|c|entry""#);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2289,17 +2289,10 @@ fn native_esm_failed_link_never_marks_source_linked() {
 }
 }
 
-// qjs_pending: fails on thaw-js: Package route ERROR: Cannot find module './native.mjs'; script route needs __thaw_register_native_bundle
-mod qjs_pending_bundling_commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() {
-    // Unrun: a CommonJS main enters a native ESM dependency synchronously.
-    // The native star getter must read the final module.exports after the
-    // provisional CommonJS object was replaced later in the same cycle.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1: the entry's first require enters native.mjs, whose `export * from './index.cjs'` imports the
+    // entry while it is still loading. That import throws ERR_REQUIRE_CYCLE_MODULE, so the entry's load fails.
     let root = temp_registry("cjs-first-native-cycle");
     let modules = root.join("node_modules");
     let package = modules.join("cjs-first-native-pkg");
@@ -2307,39 +2300,89 @@ fn commonjs_first_require_uses_cached_native_namespace_and_live_cycle_exports() 
     fs::write(package.join("index.cjs"), "exports.value = 1; var first = require('./native.mjs'); var second = require('./native.mjs'); var created = require('node:module').createRequire(__filename)('./native.mjs'); module.exports = { value: 2, same: first === second && second === created, read: function() { return first.value; } };").unwrap();
     fs::write(package.join("native.mjs"), "export * from './index.cjs';").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-first-native-pkg", &package, "index.cjs").unwrap();
-    assert!(bundle.contains("evalNativeSync"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.cjsFirstNativeResult = function() {{ return [module.exports.same, module.exports.read()]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"cjsFirstNativeResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,2]");
+    let outcome = run_js_get(&bundle, "");
+    assert!(outcome.starts_with("ERROR: "), "{outcome}");
+    assert!(outcome.contains("Cannot import CommonJS Module ./index.cjs in a cycle."), "{outcome}");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn commonjs_require_of_an_acyclic_native_module_returns_one_namespace() {
+    // Node 22.23.1: three requires of one ESM module give the same namespace object, and its live value.
+    let root = temp_registry("cjs-native-namespace-identity");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-native-identity-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "var first = require('./native.mjs'); var second = require('./native.mjs'); var created = require('node:module').createRequire(__filename)('./native.mjs'); module.exports = [first.value, first === second, second === created];").unwrap();
+    fs::write(package.join("native.mjs"), "export const value = 5; export default 1;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-native-identity-pkg", &package, "index.cjs").unwrap();
+    assert_eq!(run_js_get(&bundle, ""), "[5,true,true]");
+    let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: needs JS globals read after load (asyncFactoryRan, nativeTlaRan); script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_sync_require_rejects_async_factory_and_native_tla_before_side_effects {
-    use super::*;
-    use ::thaw_quickjs;
+#[test]
+fn commonjs_require_of_an_esm_module_under_evaluation_throws_cycle_error() {
+    // Node 22.23.1: b.mjs imports c.cjs, which requires b.mjs while b.mjs is still evaluating. That require throws
+    // ERR_REQUIRE_CYCLE_MODULE ("Cannot require() ES Module ... in a cycle."); c.cjs catches it and the graph finishes.
+    let root = temp_registry("esm-under-evaluation-cycle");
+    let modules = root.join("node_modules");
+    let package = modules.join("esm-cycle-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "var b = require('./b.mjs'); var c = require('./c.cjs'); module.exports = [b.x, c.code, c.first];").unwrap();
+    fs::write(package.join("b.mjs"), "import './c.cjs';\nexport const x = 1;").unwrap();
+    fs::write(package.join("c.cjs"), "exports.code = 'unset'; try { require('./b.mjs'); exports.code = 'ok'; } catch (e) { exports.code = e.code; exports.first = e.message.split('\\n')[0]; }").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "esm-cycle-pkg", &package, "index.cjs").unwrap();
+    let result = run_js_get(&bundle, "");
+    assert!(result.starts_with("[1,\"ERR_REQUIRE_CYCLE_MODULE\",\"Cannot require() ES Module "), "{result}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_cycle_between_cjs_modules_keeps_partial_exports() {
+    // Node 22.23.1: a CommonJS cycle is not an error; the re-entered module sees the partial exports.
+    let root = temp_registry("cjs-partial-cycle");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-partial-cycle-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "exports.early = 1; var b = require('./b.cjs'); module.exports = { early: 1, sawA: b.sawA, late: 2 };").unwrap();
+    fs::write(package.join("b.cjs"), "var a = require('./index.cjs'); exports.sawA = JSON.stringify(a);").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-partial-cycle-pkg", &package, "index.cjs").unwrap();
+    assert_eq!(run_js_get(&bundle, ""), "{\"early\":1,\"sawA\":\"{\\\"early\\\":1}\",\"late\":2}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn commonjs_require_of_a_failed_esm_module_rethrows_the_cycle_error_each_time() {
+    // Node 22.23.1: the failed native.mjs is cached as failed; each later require throws ERR_REQUIRE_CYCLE_MODULE again.
+    let root = temp_registry("cjs-failed-native-rethrow");
+    let modules = root.join("node_modules");
+    let package = modules.join("cjs-failed-native-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), "exports.value = 1; var seen = []; for (var i = 0; i < 2; i++) { try { require('./native.mjs'); seen.push('ok'); } catch (e) { seen.push(e.code); } } module.exports = seen;").unwrap();
+    fs::write(package.join("native.mjs"), "export * from './index.cjs';").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-failed-native-pkg", &package, "index.cjs").unwrap();
+    assert_eq!(run_js_get(&bundle, ""), "[\"ERR_REQUIRE_CYCLE_MODULE\",\"ERR_REQUIRE_CYCLE_MODULE\"]");
+    let _ = fs::remove_dir_all(root);
+}
 
 #[test]
 fn sync_require_rejects_async_factory_and_native_tla_before_side_effects() {
-    // Unrun: both direct and created synchronous require must fail before
-    // any pre-await statement runs. Async import remains a separate path.
-    use std::ffi::{CStr, CString};
+    // Node 22: a sync require of an ES-module graph with top-level await throws ERR_REQUIRE_ASYNC_MODULE
+    // before any body runs, on every attempt, and through a dependency that awaits.
     let root = temp_registry("cjs-first-async-guard");
     let modules = root.join("node_modules");
     let package = modules.join("cjs-first-async-pkg");
     fs::create_dir_all(&package).unwrap();
-    fs::write(package.join("index.cjs"), "var created = require('node:module').createRequire(__filename); var errors = []; try { require('./late.cjs'); } catch (error) { errors.push(error.code === 'ERR_REQUIRE_ASYNC_MODULE'); } try { created('./late.cjs'); } catch (error) { errors.push(error.code === 'ERR_REQUIRE_ASYNC_MODULE'); } try { require('./native.mjs'); } catch (error) { errors.push(error.code === 'ERR_REQUIRE_ASYNC_MODULE'); } try { created('./native.mjs'); } catch (error) { errors.push(error.code === 'ERR_REQUIRE_ASYNC_MODULE'); } module.exports = errors;").unwrap();
-    fs::write(package.join("late.cjs"), "globalThis.asyncFactoryRan = true; await Promise.resolve(); module.exports = 1;").unwrap();
+    fs::write(package.join("index.cjs"), "var errors = []; try { require('./native.mjs'); } catch (error) { errors.push(error.code); } try { require('./native.mjs'); } catch (error) { errors.push(error.code); } try { require('./dep-user.mjs'); } catch (error) { errors.push(error.code); } module.exports = errors;").unwrap();
     fs::write(package.join("native.mjs"), "globalThis.nativeTlaRan = true; await Promise.resolve(); export const value = 2;").unwrap();
+    fs::write(package.join("dep.mjs"), "globalThis.depRan = true; await Promise.resolve(); export const value = 3;").unwrap();
+    fs::write(package.join("dep-user.mjs"), "import { value } from './dep.mjs'; export const x = value;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "cjs-first-async-pkg", &package, "index.cjs").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.asyncGuardResult = function() {{ return [module.exports, globalThis.asyncFactoryRan === undefined, globalThis.nativeTlaRan === undefined]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"asyncGuardResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[true,true,true,true],true,true]");
+    assert_eq!(
+        run_js_probe(&bundle, "[exports, globalThis.nativeTlaRan === undefined, globalThis.depRan === undefined]"),
+        r#"[["ERR_REQUIRE_ASYNC_MODULE","ERR_REQUIRE_ASYNC_MODULE","ERR_REQUIRE_ASYNC_MODULE"],true,true]"#
+    );
     let _ = fs::remove_dir_all(root);
-}
 }
 
 #[test]

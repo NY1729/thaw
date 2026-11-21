@@ -54,8 +54,12 @@ fn main() {
             }
         };
         let native_addon = addon.contains(&name);
-        // no served peers: the verdict is the whole-bundle one
-        let served = std::collections::HashSet::new();
+        // the served peers a build of a program importing this bundle has (installed exact unmapped requires)
+        let served: std::collections::HashSet<String> =
+            thaw_registry::served_peers_of(&source, &installed)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
         match thaw_registry::scan_bundle_for_build(&source, native_addon, &installed, &served) {
             Ok(r) => {
                 println!(

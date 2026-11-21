@@ -184,6 +184,8 @@ struct Converted {
     imported: Vec<String>,
     // specifiers of `export * from`: each copies every name of its source, so any live export may be copied
     stars: Vec<String>,
+    // the module awaits outside every function (its factory must be async)
+    tla: bool,
 }
 
 /// Names assigned or updated anywhere in the module (`x = ..`, `x += ..`, `x++`).
@@ -218,6 +220,16 @@ fn convert(
     public_specs: &[String],
     indirect: &[(String, String, String)],
 ) -> Result<Converted, String> {
+    convert_with(source, public_specs, indirect, None)
+}
+
+/// `convert`; `awaits: Some(specs)` makes the factory async: it awaits the modules of `specs` before the body.
+fn convert_with(
+    source: &str,
+    public_specs: &[String],
+    indirect: &[(String, String, String)],
+    awaits: Option<&BTreeSet<String>>,
+) -> Result<Converted, String> {
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source)?;
     Ok(convert_module(
         &module,
@@ -225,7 +237,14 @@ fn convert(
         public_specs,
         indirect,
         &BUNDLE_NAMES,
+        awaits,
     ))
+}
+
+/// The request line of an import: an awaited dependency is requested with `requireAsync` (awaited in the body's prologue).
+fn request(require: &str, m: &str, q: &str, awaited: bool) -> String {
+    let call = if awaited { "requireAsync" } else { require };
+    format!("var {m} = {call}({q});\n")
 }
 
 /// `convert` for a parsed module, with the factory identifiers `names`.
@@ -235,6 +254,7 @@ fn convert_module(
     public_specs: &[String],
     indirect: &[(String, String, String)],
     names: &Names,
+    awaits: Option<&BTreeSet<String>>,
 ) -> Converted {
     let (rq, ex) = (names.require, names.exports);
     let snippet = |span| cm.span_to_snippet(span).unwrap_or_default();
@@ -248,6 +268,8 @@ fn convert_module(
     );
     let mut body = String::new();
     let mut prologue = String::new();
+    // after the prologue's requests: the awaits of the async dependencies, in source order
+    let mut late = String::new();
     let mut specs: Vec<String> = Vec::new();
     // names this source re-exports itself (`export { X } from`); the export graph repeats them as indirect entries
     let mut reexported: BTreeSet<String> = BTreeSet::new();
@@ -297,10 +319,14 @@ fn convert_module(
                     }
                     let mut q = String::new();
                     json_quote(&spec, &mut q);
+                    let awaited = awaits.is_some_and(|set| set.contains(&spec));
                     specs.push(spec);
                     let m = tmp(&mut counter);
                     // every request runs before the body, as ES module evaluation does
-                    prologue.push_str(&format!("var {m} = {rq}({q});\n"));
+                    prologue.push_str(&request(rq, &m, &q, awaited));
+                    if awaited {
+                        late.push_str(&format!("{m} = await {m};\n"));
+                    }
                     for sp in &i.specifiers {
                         match sp {
                             a::ImportSpecifier::Default(d) => body.push_str(&format!(
@@ -387,9 +413,13 @@ fn convert_module(
                         let spec = s.value.to_string_lossy().into_owned();
                         let mut q = String::new();
                         json_quote(&spec, &mut q);
+                        let awaited = awaits.is_some_and(|set| set.contains(&spec));
                         specs.push(spec);
                         let m = tmp(&mut counter);
-                        prologue.push_str(&format!("var {m} = {rq}({q});\n"));
+                        prologue.push_str(&request(rq, &m, &q, awaited));
+                        if awaited {
+                            late.push_str(&format!("{m} = await {m};\n"));
+                        }
                         m
                     });
                     for sp in &e.specifiers {
@@ -438,15 +468,22 @@ fn convert_module(
                     let spec = e.src.value.to_string_lossy().into_owned();
                     let mut q = String::new();
                     json_quote(&spec, &mut q);
+                    let awaited = awaits.is_some_and(|set| set.contains(&spec));
                     specs.push(spec.clone());
                     if stars.is_empty() {
                         head.push_str(STAR_HELPER);
                     }
                     stars.push(spec);
                     let m = tmp(&mut counter);
-                    prologue.push_str(&format!(
-                        "var {m} = {rq}({q});\n__thaw_esm_star({ex}, {m});\n"
-                    ));
+                    if awaited {
+                        // the star copies the names once the awaited module is ready
+                        prologue.push_str(&request(rq, &m, &q, true));
+                        late.push_str(&format!("{m} = await {m};\n__thaw_esm_star({ex}, {m});\n"));
+                    } else {
+                        prologue.push_str(&format!(
+                            "var {m} = {rq}({q});\n__thaw_esm_star({ex}, {m});\n"
+                        ));
+                    }
                 }
                 _ => problems.push("esm-declaration"),
             },
@@ -478,12 +515,13 @@ fn convert_module(
         );
     }
     Converted {
-        body: format!("{head}{prologue}{body}"),
+        body: format!("{head}{prologue}{late}{body}"),
         specs,
         problems,
         live,
         imported: pulled,
         stars,
+        tla: has_top_level_await(module),
     }
 }
 
@@ -512,8 +550,21 @@ const STAR_HELPER: &str = r#"function __thaw_esm_star(ex, m) { var own = Object.
 }
 "#;
 
-/// The factory text, the unsound-construct feature names, and whether the bundle is the pure native shape.
-pub(crate) type NativeBundle = (String, BTreeSet<&'static str>, bool);
+/// The factory text, the unsound-construct feature names, whether the bundle is the pure native shape, and the
+/// keys of the converted ES modules (their namespace is their exports object).
+pub(crate) type NativeBundle = (String, BTreeSet<&'static str>, bool, BTreeSet<String>);
+
+/// A converted native module; its body is re-converted as an async one when it awaits (see `native_bundle_to_factories`).
+struct Staged<'a> {
+    key: String,
+    src: &'a str,
+    public: Vec<String>,
+    imports: Vec<(String, String)>,
+    indirect: &'a [(String, String, String)],
+    specs: Vec<String>,
+    tla: bool,
+    body: String,
+}
 
 /// Rewrite a native bundle into the registry's CommonJS factory bundle text. `Ok(None)`: `source`
 /// is not a native bundle. Problems that make the rewrite unsound are returned as feature names.
@@ -554,6 +605,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
     }
     let mut factories = String::new();
     let mut maps = String::new();
+    let mut staged: Vec<Staged> = Vec::new();
     let mut problems: BTreeSet<&'static str> = BTreeSet::new();
     let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let (mut live_exports, mut imported_names) = (BTreeSet::new(), BTreeSet::new());
@@ -598,14 +650,63 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
                 .map(|(_, t)| t.clone())
                 .collect(),
         );
+        staged.push(Staged {
+            key,
+            src,
+            public,
+            imports,
+            indirect,
+            specs: converted.specs,
+            tla: converted.tla,
+            body: converted.body,
+        });
+    }
+    // An async module: one with top-level await, or one that statically imports an async module (a fixpoint).
+    // A cycle through an async module stays blocked (`esm-cycle`), so the fixpoint terminates on acyclic graphs.
+    let mut asyncs: BTreeSet<String> = staged
+        .iter()
+        .filter(|s| s.tla)
+        .map(|s| s.key.clone())
+        .collect();
+    loop {
+        let found: Vec<String> = staged
+            .iter()
+            .filter(|s| {
+                !asyncs.contains(&s.key)
+                    && graph
+                        .get(&s.key)
+                        .is_some_and(|deps| deps.iter().any(|d| asyncs.contains(d)))
+            })
+            .map(|s| s.key.clone())
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        asyncs.extend(found);
+    }
+    let mut esm_keys = BTreeSet::new();
+    for s in staged {
+        let is_async = asyncs.contains(&s.key);
+        let body = if is_async {
+            let awaits: BTreeSet<String> = s
+                .imports
+                .iter()
+                .filter(|(spec, target)| s.specs.contains(spec) && asyncs.contains(target))
+                .map(|(spec, _)| spec.clone())
+                .collect();
+            convert_with(s.src, &s.public, s.indirect, Some(&awaits))?.body
+        } else {
+            s.body
+        };
         let mut qk = String::new();
-        json_quote(&key, &mut qk);
+        json_quote(&s.key, &mut qk);
         // `requireAsync` is the module's import(): a bare `import(spec)` in the body calls it (lib.rs)
         factories.push_str(&format!(
-            "{qk}: function (module, exports, require, requireAsync) {{\n{}\n}},\n",
-            converted.body
+            "{qk}: {}function (module, exports, require, requireAsync) {{\n{body}\n}},\n",
+            if is_async { "async " } else { "" }
         ));
-        let entries: Vec<String> = imports
+        let entries: Vec<String> = s
+            .imports
             .iter()
             .map(|(spec, target)| {
                 let (mut qs, mut qt) = (String::new(), String::new());
@@ -615,6 +716,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
             })
             .collect();
         maps.push_str(&format!("{qk}: {{ {} }},\n", entries.join(", ")));
+        esm_keys.insert(s.key);
     }
     // a mutable export goes stale when a module copies it. Matched by name over every pulled name
     // (imports, re-exports, indirect entries); an `export *` may copy any name, so it blocks too.
@@ -657,7 +759,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
     let bundle = format!(
         "module.exports = (function (require) {{\nvar __thaw_bundle_factories = {{\n{factories}}};\nvar __thaw_bundle_require_maps = {{\n{maps}}};\n{entry}}})(globalThis.require);\n"
     );
-    Ok(Some((bundle, problems, pure)))
+    Ok(Some((bundle, problems, pure, esm_keys)))
 }
 
 #[cfg(test)]
@@ -970,7 +1072,7 @@ pub(crate) fn convert_entry(source: &str) -> Result<EntryModule, String> {
             f.message, f.line, f.col
         )
     })?;
-    let converted = convert_module(&module, &cm, &[], &[], &ENTRY_NAMES);
+    let converted = convert_module(&module, &cm, &[], &[], &ENTRY_NAMES, None);
     if let Some(problem) = converted.problems.first() {
         return Err(format!("unsupported module syntax: {problem}"));
     }
