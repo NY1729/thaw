@@ -1703,7 +1703,8 @@ fn native_mixed_rewrite_uses_private_opaque_edge_and_origin_reads() {
     assert!(rewritten.contains(".completeDynamic("), "{rewritten}");
     assert!(!rewritten.contains("export { local as renamed }"), "{rewritten}");
     assert!(!rewritten.contains("export { value as indirect } from"), "{rewritten}");
-    assert!(!rewritten.contains("export * from"), "{rewritten}");
+    // `export *` keeps its names: the source is not rewritten to a bare import.
+    assert!(rewritten.contains("export * from './legacy.cjs';"), "{rewritten}");
 }
 
 #[test]
@@ -1746,6 +1747,116 @@ fn native_opaque_export_from_namespace_and_default_reach_the_exports_object() {
     assert!(bundle.contains("__thaw_register_native_bundle"));
     assert_eq!(run_js_get(&bundle, "namespace"), "{\"default\":9}");
     assert_eq!(run_js_get(&bundle, "dflt"), "9");
+    let _ = fs::remove_dir_all(root);
+}
+
+// `export * from` of an opaque CJS or mixed native module: the names come from the target's runtime keys
+// (expectations recorded from real Node 22, the same package layout run as an ESM entry).
+fn export_star_probe(test_name: &str, files: &[(&str, &str)], expected: &str) {
+    let root = temp_registry(test_name);
+    let modules = root.join("node_modules");
+    let package = modules.join(test_name);
+    fs::create_dir_all(&package).unwrap();
+    for (file, source) in files {
+        fs::write(package.join(file), source).unwrap();
+    }
+    // A CJS entry that requires the ESM leaf keeps the bundle on the native route (as the H test does).
+    let entry = if files.iter().any(|(file, _)| *file == "index.mjs") { "index.mjs" } else { "index.cjs" };
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, test_name, &package, entry).unwrap();
+    assert_eq!(run_js_probe(&bundle, "exports.probe"), expected);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_export_star_cjs_names_are_live_and_run_once_before_the_importer() {
+    export_star_probe("native-export-star-cjs-live", &[
+        ("index.mjs", "import * as ns from './leaf.mjs';\nexport const probe = [Object.keys(ns).sort(), 'default' in ns, ns.value, ns.extra, typeof ns.run, ns.token !== undefined, globalThis.order, globalThis.aRuns];"),
+        ("leaf.mjs", "globalThis.order = globalThis.order || []; globalThis.order.push('leaf');\nexport * from './index.cjs'; export const token = {};"),
+        ("index.cjs", "globalThis.order = globalThis.order || []; globalThis.order.push('cjs'); globalThis.aRuns = (globalThis.aRuns || 0) + 1;\nexports.value = 1; exports.run = () => 2; exports.extra = 3;"),
+    ], "[[\"extra\",\"run\",\"token\",\"value\"],false,1,3,\"function\",true,[\"cjs\",\"leaf\"],1]");
+}
+
+#[test]
+fn native_export_star_explicit_export_wins_and_default_is_skipped() {
+    export_star_probe("native-export-star-explicit-wins", &[
+        ("index.mjs", "import * as ns from './leaf.mjs';\nexport const probe = [Object.keys(ns).sort(), ns.value, ns.default, ns.a, ns.b];"),
+        ("leaf.mjs", "export * from './star.cjs'; export const value = 'own'; export default 'd';"),
+        ("star.cjs", "exports.a = 1; exports.b = 2; exports.default = 3; exports.value = 'star';"),
+    ], "[[\"a\",\"b\",\"default\",\"value\"],\"own\",\"d\",1,2]");
+}
+
+#[test]
+fn native_export_star_same_name_from_two_stars_is_ambiguous() {
+    export_star_probe("native-export-star-ambiguous", &[
+        ("index.mjs", "import * as ns from './leaf.mjs';\nexport const probe = [Object.keys(ns).sort(), 'dup' in ns, ns.late, ns.mut, ns.only_b, ns.only_c];"),
+        ("leaf.mjs", "export * from './one.cjs'; export * from './two.cjs';"),
+        ("one.cjs", "exports.__esModule = true; exports.dup = 1; exports.only_b = 2;"),
+        ("two.cjs", "exports.dup = 9; exports.only_c = 3; exports.late = 4; exports.mut = 5;"),
+    ], "[[\"__esModule\",\"late\",\"mut\",\"only_b\",\"only_c\"],false,4,5,2,3]");
+}
+
+// ignore: the named re-export `export { a as a2 } from` of an opaque CJS module fails the static link
+// check, so the bundle is the legacy factory bundle, which adds an enumerable `__esModule` to a star's keys.
+#[ignore = "legacy bundle route: star of opaque CJS adds enumerable __esModule (pre-existing)"]
+#[test]
+fn native_export_star_same_binding_twice_and_explicit_alias_stay_one_name() {
+    export_star_probe("native-export-star-same-binding", &[
+        ("index.cjs", "const ns = require('./leaf.mjs');\nexports.probe = [Object.keys(ns).sort(), ns.a2];"),
+        ("leaf.mjs", "export * from './legacy.cjs'; export * from './legacy.cjs'; export { a as a2 } from './legacy.cjs';"),
+        ("legacy.cjs", "exports.a = 1; exports.b = 2;"),
+    ], "[[\"a\",\"a2\",\"b\"],1]");
+}
+
+#[test]
+fn native_export_star_cjs_and_esm_providing_one_name_is_ambiguous() {
+    export_star_probe("native-export-star-cjs-esm-ambiguous", &[
+        ("index.mjs", "import * as ns from './leaf.mjs';\nexport const probe = [Object.keys(ns).sort(), 'a' in ns];"),
+        ("leaf.mjs", "export * from './legacy.cjs'; export * from './esm.mjs';"),
+        ("legacy.cjs", "exports.a = 1; exports.b = 2;"),
+        ("esm.mjs", "export const a = 9;"),
+    ], "[[\"b\"],false]");
+}
+
+// ignore: `import { a }` of an opaque CJS module fails the static link check, so this is the legacy factory
+// bundle, which adds an enumerable `__esModule` to a star's keys (pre-existing; not the native route).
+#[ignore = "legacy bundle route: star of opaque CJS adds enumerable __esModule (pre-existing)"]
+#[test]
+fn native_export_star_of_mixed_native_module_keeps_its_names() {
+    export_star_probe("native-export-star-mixed", &[
+        ("index.cjs", "const ns = require('./leaf.mjs');\nexports.probe = [Object.keys(ns).sort(), ns.a2, ns.mv];"),
+        ("leaf.mjs", "export * from './mixed.mjs';"),
+        ("mixed.mjs", "import { a } from './legacy.cjs'; export const mv = a + 1; export * from './legacy.cjs'; export { a as a2 } from './legacy.cjs';"),
+        ("legacy.cjs", "exports.a = 1; exports.b = 2;"),
+    ], "[[\"a\",\"a2\",\"b\",\"mv\"],1,2]");
+}
+
+#[test]
+fn native_export_star_of_function_and_primitive_cjs_exports() {
+    export_star_probe("native-export-star-function-primitive", &[
+        ("index.mjs", "import * as g1 from './g1.mjs';\nimport * as g2 from './g2.mjs';\nexport const probe = [Object.keys(g1).sort(), Object.keys(g2).sort()];"),
+        ("g1.mjs", "export * from './fn.cjs'; export const z = 1;"),
+        ("g2.mjs", "export * from './num.cjs'; export const z = 1;"),
+        ("fn.cjs", "module.exports = function () {}; module.exports.x = 1; module.exports.y = 2;"),
+        ("num.cjs", "module.exports = 5;"),
+    ], "[[\"x\",\"y\",\"z\"],[\"z\"]]");
+}
+
+#[test]
+fn commonjs_created_require_native_query_clones_private_opaque_edges_star() {
+    // Port of the pending QuickJS test below to a star re-export. The cycle is not
+    // required at load (Node 22 rejects a cyclic require(esm)); `require` runs inside `run`.
+    // Expectations recorded from real Node 22.
+    let root = temp_registry("cjs-first-native-query-opaque-star");
+    let modules = root.join("node_modules");
+    let package = modules.join("query-opaque-star-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), r#"globalThis.queryIndexRuns = (globalThis.queryIndexRuns || 0) + 1;
+exports.value = 1;
+module.exports = { value: 2, run: async () => { const base = require('./leaf.mjs'); const one = await import('./leaf.mjs?one'), two = await import('./leaf.mjs?two'), again = await import('./leaf.mjs?one'); return [base === one, one === two, one === again, base.value, one.value, two.value, base.token === one.token, one.token === two.token, globalThis.leafRuns, globalThis.queryIndexRuns]; } };"#).unwrap();
+    fs::write(package.join("leaf.mjs"), "globalThis.leafRuns = (globalThis.leafRuns || 0) + 1;\nexport * from './index.cjs'; export const token = {};").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "query-opaque-star-pkg", &package, "index.cjs").unwrap();
+    assert!(bundle.contains("evalNativeSync"));
+    assert_eq!(run_js_probe(&bundle, "exports.run()"), "[false,false,true,2,2,2,false,false,3,1]");
     let _ = fs::remove_dir_all(root);
 }
 
