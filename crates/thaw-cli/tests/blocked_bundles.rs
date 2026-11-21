@@ -130,11 +130,16 @@ fn blocked_bundles_fixtures_scan_to_exactly_the_listed_rows() {
         GzDecoder::new(&gz[..])
             .read_to_string(&mut source)
             .unwrap_or_else(|e| panic!("fixture {} is not valid gzip text: {e}", fixture.name));
+        // the served peers a build of a program importing this bundle has (see `served_peers_of`)
+        let served: HashSet<String> = thaw_registry::served_peers_of(&source, &fixture.installed)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let report = thaw_registry::scan_bundle_for_build(
             &source,
             fixture.addon,
             &fixture.installed,
-            &HashSet::new(),
+            &served,
         )
         .unwrap_or_else(|e| panic!("scan of {} failed: {e}", fixture.name));
 
