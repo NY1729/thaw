@@ -86,6 +86,45 @@ fn v8_heap_space_statistics_lists_node_spaces_in_order() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+// v8.cachedDataVersionTag() (Node 22.23.1 returns a nonzero uint32, 2596627580 here; thaw's number differs by design)
+#[test]
+fn v8_cached_data_version_tag_is_a_stable_nonzero_u32() {
+    let dir = temp_registry("builtin_v8_tag");
+    fs::write(
+        dir.join("index.js"),
+        "var v8 = require('node:v8'); module.exports = function () { var tag = v8.cachedDataVersionTag(); return [Number.isInteger(tag), tag > 0, tag <= 0xFFFFFFFF, tag === v8.cachedDataVersionTag()]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_v8_tag_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    assert_eq!(run_js(&bundle), "[true,true,true,true]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+// v8.getHeapCodeStatistics() (Node 22.23.1: these four keys in this order; sizes > 0 except cpu_profiler_metadata_size)
+#[test]
+fn v8_heap_code_statistics_has_node_keys_and_positive_sizes() {
+    let dir = temp_registry("builtin_v8_code");
+    fs::write(
+        dir.join("index.js"),
+        "var v8 = require('node:v8'); module.exports = function () { var code = v8.getHeapCodeStatistics(); return [Object.keys(code).join(','), code.code_and_metadata_size > 0, code.bytecode_and_metadata_size > 0, code.external_script_source_size > 0, code.cpu_profiler_metadata_size === 0, code.code_and_metadata_size >= code.bytecode_and_metadata_size, v8.getHeapStatistics().total_heap_size_executable > 0]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_v8_code_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    assert_eq!(
+        run_js(&bundle),
+        r#"["code_and_metadata_size,bytecode_and_metadata_size,external_script_source_size,cpu_profiler_metadata_size",true,true,true,true,true,true]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 // qjs_pending: fails on thaw-js: "[true,true,true,true,\"thaw\",42,true,true,true,1,true,0,false,0]"
 mod qjs_pending_platform_v8_builtin_serializes_graphs_and_exposes_runtime_statistics {
     use super::*;
@@ -99,7 +138,7 @@ fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
     fs::write(
             dir.join("index.js"),
             "var v8 = require('node:v8');\n\
-             module.exports = function () { var invalid = new Date(NaN), source = { bigint: 42n, bytes: Buffer.from('thaw'), map: new Map([['answer', 42]]), set: new Set(['x']), missing: undefined, valid: new Date(1234), invalid: invalid, invalidAgain: invalid, array: [invalid], dateMap: new Map([[invalid, invalid]]), dateSet: new Set([invalid]) }; source.self = source; var encoded = v8.serialize(source); var wire = JSON.parse(encoded.toString()), copy = v8.deserialize(encoded), legacy = v8.deserialize(Buffer.from(JSON.stringify({ root: { t: 'r', v: 0 }, nodes: [{ k: 'd', v: '1970-01-01T00:00:00.000Z' }] }))); if (copy.valid.getTime() !== 1234 || !Number.isNaN(copy.invalid.getTime()) || copy.invalid === invalid || copy.invalidAgain !== copy.invalid || copy.array[0] !== copy.invalid || copy.dateMap.get(copy.invalid) !== copy.invalid || !copy.dateSet.has(copy.invalid) || legacy.getTime() !== 0 || !Number.isNaN(v8.deserialize(v8.serialize(new Date(NaN))).getTime())) throw new Error('Date roundtrip'); var dateNodes = wire.nodes.filter(function(node) { return node.k === 'd'; }); if (!dateNodes.some(function(node) { return node.v.t === 'p' && node.v.v === 1234; }) || !dateNodes.some(function(node) { return node.v.t === 'n' && node.v.v === 'NaN'; })) throw new Error('Date wire timestamp'); var malformedCaught = false; try { v8.deserialize(Buffer.from('{')); } catch (error) { malformedCaught = error instanceof SyntaxError; } if (!malformedCaught) throw new Error('Malformed JSON must throw SyntaxError'); var heap = v8.getHeapStatistics(); var code = v8.getHeapCodeStatistics(); return [Buffer.isBuffer(encoded), copy !== source, copy.self === copy, copy.bigint === 42n, copy.bytes.toString(), copy.map.get('answer'), copy.set.has('x'), Object.prototype.hasOwnProperty.call(copy, 'missing'), copy.missing === undefined, heap.number_of_native_contexts, heap.heap_size_limit > 0, v8.getHeapSpaceStatistics().length, code.code_and_metadata_size > 0, v8.cachedDataVersionTag()]; };",
+             module.exports = function () { var invalid = new Date(NaN), source = { bigint: 42n, bytes: Buffer.from('thaw'), map: new Map([['answer', 42]]), set: new Set(['x']), missing: undefined, valid: new Date(1234), invalid: invalid, invalidAgain: invalid, array: [invalid], dateMap: new Map([[invalid, invalid]]), dateSet: new Set([invalid]) }; source.self = source; var encoded = v8.serialize(source); var wire = JSON.parse(encoded.toString()), copy = v8.deserialize(encoded), legacy = v8.deserialize(Buffer.from(JSON.stringify({ root: { t: 'r', v: 0 }, nodes: [{ k: 'd', v: '1970-01-01T00:00:00.000Z' }] }))); if (copy.valid.getTime() !== 1234 || !Number.isNaN(copy.invalid.getTime()) || copy.invalid === invalid || copy.invalidAgain !== copy.invalid || copy.array[0] !== copy.invalid || copy.dateMap.get(copy.invalid) !== copy.invalid || !copy.dateSet.has(copy.invalid) || legacy.getTime() !== 0 || !Number.isNaN(v8.deserialize(v8.serialize(new Date(NaN))).getTime())) throw new Error('Date roundtrip'); var dateNodes = wire.nodes.filter(function(node) { return node.k === 'd'; }); if (!dateNodes.some(function(node) { return node.v.t === 'p' && node.v.v === 1234; }) || !dateNodes.some(function(node) { return node.v.t === 'n' && node.v.v === 'NaN'; })) throw new Error('Date wire timestamp'); var malformedCaught = false; try { v8.deserialize(Buffer.from('{')); } catch (error) { malformedCaught = error instanceof SyntaxError; } if (!malformedCaught) throw new Error('Malformed JSON must throw SyntaxError'); var heap = v8.getHeapStatistics(); var code = v8.getHeapCodeStatistics(); return [Buffer.isBuffer(encoded), copy !== source, copy.self === copy, copy.bigint === 42n, copy.bytes.toString(), copy.map.get('answer'), copy.set.has('x'), Object.prototype.hasOwnProperty.call(copy, 'missing'), copy.missing === undefined, heap.number_of_native_contexts, heap.heap_size_limit > 0, v8.getHeapSpaceStatistics().length, code.code_and_metadata_size > 0, Number.isInteger(v8.cachedDataVersionTag()) && v8.cachedDataVersionTag() > 0 && v8.cachedDataVersionTag() <= 0xFFFFFFFF]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_v8_node_modules");
@@ -121,7 +160,7 @@ fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,true,true,true,"thaw",42,true,true,true,1,true,11,true,0]"#
+        r#"[true,true,true,true,"thaw",42,true,true,true,1,true,11,true,true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

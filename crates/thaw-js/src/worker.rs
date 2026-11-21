@@ -582,12 +582,12 @@ fn thread_cpu_micros() -> (u64, u64) {
 pub(crate) fn serve_cpu_if_requested(it: &Interp) {
     if let Some(side) = &it.worker.side {
         if side.cpu.requested.load(Ordering::Relaxed) {
-            serve_cpu(side);
+            serve_cpu(side, it);
         }
     }
 }
 
-fn serve_cpu(side: &Side) {
+fn serve_cpu(side: &Side, it: &Interp) {
     let acks = {
         let mut acks = side.cpu.acks.lock().unwrap_or_else(|e| e.into_inner());
         side.cpu.requested.store(false, Ordering::Relaxed);
@@ -601,7 +601,7 @@ fn serve_cpu(side: &Side) {
     let usage = acks
         .iter()
         .any(|&(_, heap)| heap)
-        .then(crate::sysio::memory_usage_json);
+        .then(|| crate::sysio::memory_usage_json(it));
     for (ack, heap) in acks {
         let evt = match &usage {
             Some(json) if heap => Evt::Heap(ack, json.clone()),
