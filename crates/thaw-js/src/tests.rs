@@ -10867,6 +10867,31 @@ fn hinted_reads_through_large_scopes_keep_the_visible_binding() {
     assert_eq!(on.out, it.out);
 }
 
+/// Hint ids are indices into one realm's table, but a closure annotated by realm `a` can run under realm
+/// `b`, where the same id names another identifier's slot. The hit must not bind `b`'s recorded name.
+#[test]
+fn foreign_hint_slot_never_binds_another_identifiers_name() {
+    for mode in [
+        crate::compile::CompileMode::Off,
+        crate::compile::CompileMode::On,
+    ] {
+        let mut a = Interp::with_compile_mode(mode);
+        // `zzq` is the first identifier of `a`'s parse, so it owns hint slot 1 there.
+        let inner = a
+            .run("(function () { let String = 1; let zzq = 'text'; return function () { return typeof zzq; }; })()")
+            .unwrap();
+        let mut b = Interp::with_compile_mode(mode);
+        // `String` is the first identifier of `b`'s parse: slot 1 records it at hops 1, index 0.
+        assert!(b
+            .run("(function () { let String = 1; return (function () { return String; })(); })()")
+            .is_ok());
+        for _ in 0..3 {
+            let got = b.call(&inner, &Value::Undefined, &[]).unwrap();
+            assert_eq!(b.to_str(&got).to_string(), "string");
+        }
+    }
+}
+
 #[test]
 fn release_all_handles_drops_every_live_handle_and_reports_the_count() {
     let first = crate::host::store_handle(0, Value::Number(1.0));
