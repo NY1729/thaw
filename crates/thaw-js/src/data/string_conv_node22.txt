@@ -1,0 +1,73 @@
+trim.call(null) TypeError:String.prototype.trim called on null or undefined 
+trim.call(undef) TypeError:String.prototype.trim called on null or undefined 
+endsWith.call(null) TypeError:String.prototype.endsWith called on null or undefined 
+toLowerCase.call(null) TypeError:String.prototype.toLowerCase called on null or undefined 
+toString.call({}) TypeError:String.prototype.toString requires that 'this' be a String 
+valueOf.call(1) TypeError:String.prototype.valueOf requires that 'this' be a String 
+new String(a).toString() "a" 
+charAt(sym) TypeError:Cannot convert a Symbol value to a number 
+indexOf(sym) TypeError:Cannot convert a Symbol value to a string 
+padStart(5,sym) TypeError:Cannot convert a Symbol value to a string 
+repeat(sym) TypeError:Cannot convert a Symbol value to a number 
+concat(sym) TypeError:Cannot convert a Symbol value to a string 
+substring(sym) TypeError:Cannot convert a Symbol value to a number 
+localeCompare(sym) TypeError:Cannot convert a Symbol value to a string 
+fromCharCode(sym) TypeError:Cannot convert a Symbol value to a number 
+charAt(thrower) RangeError:v 
+indexOf(a,thrower) RangeError:v 
+padStart(thrower) RangeError:v 
+repeat(thrower) RangeError:v 
+slice(thrower) RangeError:v 
+split(thrower) RangeError:t 
+fromCharCode(thrower) RangeError:v 
+replace(thrower,x) RangeError:t 
+match(thrower) RangeError:t 
+indexOf(tt) SyntaxError:s 
+includes(/a/) TypeError:First argument to String.prototype.includes must not be a regular expression 
+startsWith(/a/) TypeError:First argument to String.prototype.startsWith must not be a regular expression 
+replaceAll(/a/,x) TypeError:String.prototype.replaceAll called with a non-global RegExp argument 
+repeat(-1) RangeError:Invalid count value: -1 
+String(sym) "Symbol(d)" 
+padStart(3,thrower) target<=len "abcd" 
+padStart(3,tt) target<=len "abcd" 
+includes(tt, thrower) SyntaxError:s 
+startsWith(a, thrower) RangeError:v 
+charAt.call(null, thrower) TypeError:String.prototype.charAt called on null or undefined 
+includes.call(null, thrower) TypeError:String.prototype.includes called on null or undefined 
+repeat.call({tS}, thrower) SyntaxError:x 
+charAt(1n) TypeError:Cannot convert a BigInt value to a number 
+repeat(2n) TypeError:Cannot convert a BigInt value to a number 
+includes(a,1) false 
+startsWith(b,1) true 
+endsWith(b,2) true 
+slice order "" a,b
+substring order "" a,b
+substr order "" a,b
+charAt order "a" a
+indexOf order -1 ss,p
+lastIndexOf order -1 ss,p
+includes order false ss,p
+startsWith order false ss,p
+endsWith order false ss,p
+padStart order "ab" m
+padStart target<=len no fill "abcd" m
+padEnd order "ab" m
+repeat order "" m
+concat order "abxx" xs,ys
+localeCompare order -1 xs
+split order [] y,xs
+replace order "ab" xs,ys
+replaceAll order "ab" xs,ys
+fromCharCode order "\u0000\u0000" x,y
+this before arg -1 this,ss
+includes regexp before pos TypeError:First argument to String.prototype.includes must not be a regular expression 
+split limit before sep [] l,ss
+search order -1 ss
+match order null ss
+repeat(NaN) "" 
+repeat(-1.5) RangeError:Invalid count value: -1.5 
+split(empty,-1) ["a","b","c"] 
+search() 0 
+endsWith(/a/) TypeError:First argument to String.prototype.endsWith must not be a regular expression 
+replace callback result throws RangeError:t 
+replace string repl converted without match "abc" r

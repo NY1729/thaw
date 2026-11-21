@@ -912,6 +912,11 @@ fn append_in_place(scope: &Rc<Scope>, name: &str, cur: &mut Value, rhs: &JsStr) 
     })
 }
 
+/// A Symbol value (a Symbol object here, see `reject_symbol_operand`).
+fn is_symbol_object(v: &Value) -> bool {
+    matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. }))
+}
+
 /// Arithmetic and relational operators on two numbers, without `binary()`'s coercion chain.
 fn number_binop(op: a::BinaryOp, x: f64, y: f64) -> Option<Value> {
     use a::BinaryOp as B;
@@ -2163,10 +2168,47 @@ impl Interp {
 
     /// ToString for `+` and template literals: a Symbol throws there (`String(sym)` still gives `Symbol(desc)`).
     pub(crate) fn reject_symbol_operand(&mut self, v: &Value) -> R<()> {
-        if matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. })) {
+        if is_symbol_object(v) {
             return self.throw_error("TypeError", "Cannot convert a Symbol value to a string");
         }
         Ok(())
+    }
+
+    /// ToString (spec), fallible: a Symbol throws a TypeError and an abrupt ToPrimitive propagates.
+    /// `to_str` stays the infallible form for host code and printing.
+    pub(crate) fn tostr(&mut self, v: &Value) -> R<JsStr> {
+        if let Value::Str(s) = v {
+            return Ok(s.clone());
+        }
+        let p = match v {
+            Value::Object(_) if !is_symbol_object(v) => {
+                self.primitive_of(v, extras::Hint::String)?
+            }
+            _ => v.clone(),
+        };
+        self.reject_symbol_operand(&p)?;
+        Ok(self.to_str(&p))
+    }
+
+    /// ToNumber (spec), fallible: a Symbol or a BigInt throws a TypeError, an abrupt ToPrimitive propagates.
+    /// `num` stays the infallible form for host code.
+    pub(crate) fn tonum(&mut self, v: &Value) -> R<f64> {
+        if let Value::Number(n) = v {
+            return Ok(*n);
+        }
+        let p = match v {
+            Value::Object(_) if !is_symbol_object(v) => {
+                self.primitive_of(v, extras::Hint::Number)?
+            }
+            _ => v.clone(),
+        };
+        if is_symbol_object(&p) {
+            return self.throw_error("TypeError", "Cannot convert a Symbol value to a number");
+        }
+        if let Value::BigInt(_) = p {
+            return self.throw_error("TypeError", "Cannot convert a BigInt value to a number");
+        }
+        Ok(self.num(&p))
     }
 
     /// `to_str`, fallible: a nested array recurses through `try_join`, and an exception thrown by a
