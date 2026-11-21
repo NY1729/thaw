@@ -5,7 +5,6 @@
 (function () {
   const SHARE_ENV = Symbol.for('nodejs.worker_threads.SHARE_ENV');
   const environmentData = new Map();
-  let nextThreadId = 1;
   // handle (worker.rs table id) -> Worker, for events; Worker -> state, for everything else
   const byHandle = new Map();
   const states = new WeakMap();
@@ -195,7 +194,8 @@
           code = 'globalThis.__thaw_run_main_file(' + JSON.stringify(file) + ')';
         }
       }
-      const threadId = nextThreadId++;
+      // one counter for the whole tree (worker.rs `thread_ids`): ids follow creation order across nesting levels
+      const threadId = __thaw_thread_next();
       // the worker's port token: ports that move to it are routed by this (worker.rs), unlike the Node threadId
       const token = __thaw_port_address();
       // transferList (Node: any iterable, here by Array.from, so a non-iterable value is ignored): its buffers move to the

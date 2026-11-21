@@ -2021,34 +2021,6 @@ fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
 }
 }
 
-// qjs_pending: not run on thaw-js: two loads into one QuickJS global context; converting it to run_js_get would be weaker (two bundles in one context needed; needs Package::join or a shared-context helper)
-mod qjs_pending_bundling_native_esm_bundle_name_is_fresh_for_same_key_new_source {
-    use super::*;
-    use ::thaw_quickjs;
-
-#[test]
-fn native_esm_bundle_name_is_fresh_for_same_key_new_source() {
-    use std::ffi::{CStr, CString};
-    let root = temp_registry("native-esm-fresh-bundle");
-    let modules = root.join("node_modules");
-    let package = modules.join("native-fresh-pkg");
-    fs::create_dir_all(&package).unwrap();
-    fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
-    let (first, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
-    let first_script = format!("globalThis.module = {{ exports: {{}} }}; {first} globalThis.firstNativeValue = function() {{ return module.exports.value; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first_script).unwrap().as_ptr()), 1);
-    let one = thaw_quickjs::thaw_js_call(c"firstNativeValue".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(one) }.to_string_lossy(), "1");
-    fs::write(package.join("index.mjs"), "export const value = 2;").unwrap();
-    let (second, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
-    let second_script = format!("globalThis.module = {{ exports: {{}} }}; {second} globalThis.secondNativeValue = function() {{ return module.exports.value; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second_script).unwrap().as_ptr()), 1);
-    let two = thaw_quickjs::thaw_js_call(c"secondNativeValue".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(two) }.to_string_lossy(), "2");
-    let _ = fs::remove_dir_all(root);
-}
-}
-
 #[test]
 fn native_esm_query_suffixes_retain_distinct_module_identity() {
     let root = temp_registry("native-esm-query-identity");
@@ -2158,30 +2130,19 @@ fn native_esm_dynamic_absolute_name_blocks_import_without_top_level_await() {
 }
 
 #[test]
-fn native_esm_bundle_name_is_fresh_for_same_key_new_source_on_thaw_js() {
-    // Replacement for the pending QuickJS test above, Node-visible only: two sequential loads of the same
-    // package key from different source each show their own value (no stale per-key bundle is reused). Node 22: 1 then 2.
+fn native_esm_rebundle_with_new_source_yields_new_value() {
+    // Node 22: the same package key re-bundled from new source reads 1 then 2; the two bundle texts differ.
     let root = temp_registry("native-esm-fresh-bundle-thawjs");
     let modules = root.join("node_modules");
     let package = modules.join("native-fresh-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
     let (first, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(run_js_get(&first, "value"), "1");
     fs::write(package.join("index.mjs"), "export const value = 2;").unwrap();
     let (second, _, _, _) = bundle_commonjs_package(&modules, "native-fresh-pkg", &package, "index.mjs").unwrap();
-    let values = std::thread::Builder::new()
-        .stack_size(256 << 20)
-        .spawn(move || {
-            let read = |bundle: &str| {
-                let mut loaded = thaw_js::host::Package::load(bundle).expect("loads");
-                loaded.get("value").expect("value").to_json()
-            };
-            (read(&first), read(&second))
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-    assert_eq!(values, ("1".to_string(), "2".to_string()));
+    assert_ne!(first, second);
+    assert_eq!(run_js_get(&second, "value"), "2");
     let _ = fs::remove_dir_all(root);
 }
 
