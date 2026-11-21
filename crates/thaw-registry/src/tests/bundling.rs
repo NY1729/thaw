@@ -1450,14 +1450,62 @@ fn esm_star_diamond_coalesces_same_namespace_reexport() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[7,true]");
     let _ = fs::remove_dir_all(root);
 }
-// qjs_pending: fails on thaw-js: needs in-context globalThis.__thaw_bundle_create_require (not exposed by Package); script route needs __thaw_register_native_bundle
-mod qjs_pending_bundling_bundled_require_cache_and_commonjs_this_respect_module_format {
-    use super::*;
-    use ::thaw_quickjs;
+/// Node 22.23.1: `delete require.cache[k]` makes the next require run the module again ([1,2]); a module that
+/// throws is evicted, so its next require throws again.
+#[test]
+fn require_cache_delete_reruns_and_throwing_module_is_evicted() {
+    let package = temp_registry("bundle_require_cache_delete");
+    let modules = temp_registry("bundle_require_cache_delete_modules");
+    fs::write(package.join("index.js"), r#"var r = exports, cache = require.cache;
+function S(n, f) { try { r[n] = f(); } catch (e) { r[n] = 'ERR:' + (e.code || e.name) + ':' + e.message; } }
+S('child', function () { var k = require.resolve('./child.cjs'); var a = require('./child.cjs'); var had = cache[k] !== undefined; delete cache[k]; var b = require('./child.cjs'); return [a.n, b.n, had, a === b]; });
+S('boom', function () { return require('./boom.cjs'); });
+S('boomEvicted', function () { return !Object.prototype.hasOwnProperty.call(cache, require.resolve('./boom.cjs')); });
+S('boomAgain', function () { return require('./boom.cjs'); });
+"#).unwrap();
+    fs::write(package.join("child.cjs"), "globalThis.childRuns = (globalThis.childRuns || 0) + 1; this.n = globalThis.childRuns;").unwrap();
+    fs::write(package.join("boom.cjs"), "throw new Error('boom');").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
+    assert_eq!(
+        run_js_probe(&bundle, "Object.keys(exports).filter(function (k) { return k !== '__thaw_probe'; }).map(function (k) { return exports[k]; })"),
+        "[[1,2,true,false],\"ERR:Error:boom\",true,\"ERR:Error:boom\"]"
+    );
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
 
+/// Node 22.23.1: an invalid nearest package.json, and `import.meta` in a `.cjs`, throw when the file is required
+/// (the file body never runs); a sibling file that is valid still loads.
+#[test]
+fn invalid_package_json_and_import_meta_in_cjs_throw_at_require() {
+    let package = temp_registry("bundle_require_time_stubs");
+    let modules = temp_registry("bundle_require_time_stubs_modules");
+    fs::create_dir_all(package.join("esm_sub/bad")).unwrap();
+    fs::write(package.join("esm_sub/bad/package.json"), "{bad").unwrap();
+    fs::write(package.join("index.js"), r#"var r = exports;
+function S(n, f) { try { r[n] = f(); } catch (e) { r[n] = 'ERR:' + (e.code || e.name); } }
+function M(n, f) { try { r[n] = f(); } catch (e) { r[n] = 'ERR:' + e.name + ':' + e.message; } }
+S('bad', function () { return require('./esm_sub/bad/inner.js'); });
+S('badRan', function () { return typeof globalThis.badRan; });
+M('hybrid', function () { return require('./hybrid.cjs').value; });
+S('ok', function () { return require('./ok.cjs').v; });
+"#).unwrap();
+    fs::write(package.join("esm_sub/bad/inner.js"), "globalThis.badRan = true;").unwrap();
+    fs::write(package.join("hybrid.cjs"), "import.meta.url; this.value = 3;").unwrap();
+    fs::write(package.join("ok.cjs"), "this.v = 1;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
+    assert_eq!(
+        run_js_probe(&bundle, "Object.keys(exports).filter(function (k) { return k !== '__thaw_probe'; }).map(function (k) { return exports[k]; })"),
+        "[\"ERR:ERR_INVALID_PACKAGE_CONFIG\",\"undefined\",\"ERR:SyntaxError:Cannot use 'import.meta' outside a module\",1]"
+    );
+    let _ = fs::remove_dir_all(package);
+    let _ = fs::remove_dir_all(modules);
+}
+
+/// Port of the original pending test to Node-valid form: every require runs under its own try/catch (an unguarded
+/// `require` of hybrid.cjs or esm_sub/bad/inner.js throws in Node 22). Expected values are Node 22.23.1's.
 #[test]
 fn bundled_require_cache_and_commonjs_this_respect_module_format() {
-    use std::ffi::{CStr, CString};
     let package = temp_registry("bundle_factory_context");
     let modules = temp_registry("bundle_factory_context_modules");
     fs::create_dir_all(package.join("esm_sub/nested")).unwrap();
@@ -1465,7 +1513,31 @@ fn bundled_require_cache_and_commonjs_this_respect_module_format() {
     fs::write(package.join("esm_sub/package.json"), r#"{"type":"module"}"#).unwrap();
     fs::write(package.join("esm_sub/nested/package.json"), r#"{"type":"commonjs"}"#).unwrap();
     fs::write(package.join("esm_sub/bad/package.json"), "{bad").unwrap();
-    fs::write(package.join("index.js"), "var cache = require.cache, same = cache === globalThis.__thaw_bundle_create_require('pkg/index.js').cache, self = cache['pkg/index.js'].exports === exports; var sloppy = require('./sloppy.js'), strict = require('./strict.cjs'), hybrid = require('./hybrid.cjs'), plain = require('./plain'), custom = require('./custom.xyz'); require('./meta.js'); require('./bare.mjs'); require('./esm_sub/bare.js'); require('./esm_sub/bad/inner.js'); var override = require('./esm_sub/override.cjs'), nested = require('./esm_sub/nested/inner.js'), graph = require('./graph.js'); var first = require('./child.cjs'); delete cache['pkg/child.cjs']; var second = require('./child.cjs'); try { require('./boom.cjs'); } catch (error) {} module.exports = [same, self, sloppy.value, strict.value, hybrid.value, plain.value, custom.value, override.value, nested.value, graph.x, first.n, second.n, !Object.prototype.hasOwnProperty.call(cache, 'pkg/boom.cjs'), globalThis.metaThis === globalThis, globalThis.mjsThis === globalThis, globalThis.typedThis === globalThis, globalThis.badThis === globalThis, globalThis.graphThis === globalThis];").unwrap();
+    fs::write(package.join("index.js"), r#"var r = exports, cache = require.cache, createRequire = require('node:module').createRequire;
+function S(n, f) { try { r[n] = f(); } catch (e) { r[n] = 'ERR:' + (e.code || e.name); } }
+S('same', function () { return createRequire(__filename).cache === require.cache; });
+S('self', function () { return cache[__filename].exports === exports; });
+S('sloppy', function () { return require('./sloppy.js').value; });
+S('strict', function () { return require('./strict.cjs').value; });
+S('hybrid', function () { return require('./hybrid.cjs').value; });
+S('plain', function () { return require('./plain').value; });
+S('custom', function () { return require('./custom.xyz').value; });
+S('meta', function () { require('./meta.js'); return 'ok'; });
+S('bare', function () { require('./bare.mjs'); return 'ok'; });
+S('esmbare', function () { require('./esm_sub/bare.js'); return 'ok'; });
+S('bad', function () { require('./esm_sub/bad/inner.js'); return 'ok'; });
+S('override', function () { return require('./esm_sub/override.cjs').value; });
+S('nested', function () { return require('./esm_sub/nested/inner.js').value; });
+S('graph', function () { return require('./graph.js').x; });
+S('child', function () { var first = require('./child.cjs'); delete cache[require.resolve('./child.cjs')]; var second = require('./child.cjs'); return [first.n, second.n]; });
+S('boom', function () { return require('./boom.cjs'); });
+S('boomEvicted', function () { return !Object.prototype.hasOwnProperty.call(cache, require.resolve('./boom.cjs')); });
+S('metaThis', function () { return globalThis.metaThis === globalThis; });
+S('mjsThis', function () { return globalThis.mjsThis === globalThis; });
+S('typedThis', function () { return globalThis.typedThis === globalThis; });
+S('badThis', function () { return globalThis.badThis === globalThis; });
+S('graphThis', function () { return globalThis.graphThis === globalThis; });
+"#).unwrap();
     fs::write(package.join("sloppy.js"), "var text = 'import.meta'; // import.meta is not syntax\nthis.value = 1;").unwrap();
     fs::write(package.join("strict.cjs"), "'use strict'; this.value = 2;").unwrap();
     fs::write(package.join("hybrid.cjs"), "import.meta.url; this.value = 3;").unwrap();
@@ -1481,13 +1553,12 @@ fn bundled_require_cache_and_commonjs_this_respect_module_format() {
     fs::write(package.join("child.cjs"), "globalThis.childRuns = (globalThis.childRuns || 0) + 1; this.n = globalThis.childRuns;").unwrap();
     fs::write(package.join("boom.cjs"), "throw new Error('boom');").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
-    let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.factoryContext = function() {{ return module.exports; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"factoryContext".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,1,2,3,7,8,4,5,6,1,2,true,true,false,false,true,true]");
+    assert_eq!(
+        run_js_probe(&bundle, "Object.keys(exports).filter(function (k) { return k !== '__thaw_probe'; }).map(function (k) { return exports[k]; })"),
+        "[true,true,1,2,\"ERR:SyntaxError\",7,8,\"ok\",\"ok\",\"ok\",\"ERR:ERR_INVALID_PACKAGE_CONFIG\",4,5,6,[1,2],\"ERR:Error\",true,false,false,false,false,false]"
+    );
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
-}
 }
 
 // Split of the old async-CommonJS test: a `.cjs` file with top-level await is a SyntaxError in Node 22, so the

@@ -50,7 +50,8 @@ fn commonjs_factory_context(path: &Path, package_dir: &Path, has_esm: bool, uses
                     None if manifest.get("type").is_none() => !uses_import_meta,
                     _ => false,
                 },
-                Err(_) => false,
+                // an invalid package.json is a require-time throw stub (`require_time_stub`), a CommonJS file
+                Err(_) => true,
             };
         }
         if directory == package_dir {
@@ -60,6 +61,42 @@ fn commonjs_factory_context(path: &Path, package_dir: &Path, has_esm: bool, uses
     !uses_import_meta
 }
 
+
+/// The source of a file that Node throws on only when it is required: a `.js`/`.cjs` whose nearest package.json is
+/// invalid (`ERR_INVALID_PACKAGE_CONFIG`), and a `.cjs` with ESM syntax or `import.meta` (`SyntaxError`). The stub
+/// throws that error when the file runs; `None` for every other file.
+// ponytail: `.json` and `.mjs` under an invalid package.json are not stubbed (Node throws there too), and an
+// export-only `.cjs` gets the import message (Node: "Unexpected token 'export'").
+fn require_time_stub(path: &Path, package_dir: &Path, has_esm: bool, uses_import_meta: bool) -> Option<String> {
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    if matches!(extension, Some("mjs" | "json" | "node" | "wasm")) {
+        return None;
+    }
+    for directory in path.ancestors().skip(1) {
+        if !directory.starts_with(package_dir) { break; }
+        if directory.join("package.json").exists() {
+            if read_manifest(directory).is_ok() {
+                break;
+            }
+            let relative = directory.strip_prefix(package_dir).unwrap_or(Path::new("")).join("package.json");
+            let message = format!("Invalid package config {}.", relative.display());
+            return Some(format!(
+                "var error = new Error({}); error.code = 'ERR_INVALID_PACKAGE_CONFIG'; throw error;\n",
+                js_string_literal(&message)
+            ));
+        }
+        if directory == package_dir { break; }
+    }
+    if extension == Some("cjs") && (has_esm || uses_import_meta) {
+        let message = if uses_import_meta {
+            "Cannot use 'import.meta' outside a module"
+        } else {
+            "Cannot use import statement outside a module"
+        };
+        return Some(format!("throw new SyntaxError({});\n", js_string_literal(message)));
+    }
+    None
+}
 
 // Only an explicit `.mjs` extension or the nearest valid `type: module`
 // package scope declares an ESM source to the native loader.
@@ -465,6 +502,11 @@ fn bundle_commonjs_package_cached(
                 .modules
                 .insert(source_cache_key, (rewritten.clone(), analysis.clone(), source_name.clone()));
             (rewritten, analysis, source_name)
+        };
+        // Node throws for these only when the file is required, so the file becomes a throw stub (never a bundle error)
+        let (source, analysis) = match require_time_stub(&abs_path, &pkg_dir, analysis.has_esm, analysis.uses_import_meta) {
+            Some(stub) => (stub.clone(), analyze_module_named(&stub, &source_name)),
+            None => (source, analysis),
         };
         uses_global_fetch |= analysis.uses_global_fetch;
         if let Some(error) = &analysis.attribute_error {
