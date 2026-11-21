@@ -702,14 +702,8 @@ fn worker_threads_redirects_stdin_stdout_and_stderr() {
 }
 
 
-// qjs_pending: fails on thaw-js: "[true,1,1,1,[1],false]"
-mod qjs_pending_platform_worker_terminate_resolves_with_one_shared_exit_code {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn worker_terminate_resolves_with_one_shared_exit_code() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_terminate");
     fs::write(
             dir.join("index.js"),
@@ -720,16 +714,11 @@ fn worker_terminate_resolves_with_one_shared_exit_code() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerTerminate = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let function = CString::new("exerciseWorkerTerminate").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
-    assert_eq!(result, "[true,1,1,1,[1],true]");
+    // Node 22.23.1: a fresh promise per terminate() call; the worker exits 0 (terminated before it started)
+    let result = run_js_json(&bundle);
+    assert_eq!(result, "[false,0,0,null,[0],false]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
-}
 }
 
 

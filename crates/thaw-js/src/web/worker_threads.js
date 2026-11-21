@@ -273,7 +273,8 @@
       // Node: once the worker has exited there is no thread to stop, and the promise resolves undefined
       if (state.exited) return Promise.resolve();
       __thaw_worker_terminate(state.handle);
-      return state.exitPromise;
+      // Node: a new promise per call, each resolving with the exit code
+      return state.exitPromise.then(code => code);
     }
 
     // Node: a separate method that awaits terminate() (resolves undefined, not the exit code)
