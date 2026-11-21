@@ -182,7 +182,7 @@ impl Scope {
 
 impl Interp {
     /// The hinted binding of the identifier at `ctxt` from `scope`, if the hint still holds.
-    fn hinted_read(&self, scope: &Rc<Scope>, ctxt: SyntaxContext) -> Option<Value> {
+    fn hinted_read(&self, scope: &Rc<Scope>, ctxt: SyntaxContext, sym: &str) -> Option<Value> {
         let st = &self.hint_stats;
         let id = ctxt.as_u32() as usize;
         let slot = if id == 0 {
@@ -201,7 +201,9 @@ impl Interp {
         }
         let hops = (packed >> HINT_IDX_BITS) - 1;
         let idx = (packed & HINT_IDX_MASK) as usize;
-        let bit = slot.bit;
+        // The slot may have been annotated for another identifier (a closure from another realm's table
+        // keeps its ids), so the bit and the recorded name come from `sym`, not from the slot.
+        let bit = name_bit(sym);
         let mut cur: &Scope = scope;
         for _ in 0..hops {
             // an intermediate scope that may hold `name` decides the lookup, not the hint
@@ -229,6 +231,10 @@ impl Interp {
             st.bump(&st.miss_key);
             return None;
         };
+        if **name != *sym {
+            st.bump(&st.miss_key);
+            return None;
+        }
         let same_ptr = Rc::ptr_eq(key, name);
         if !same_ptr && **key != **name {
             st.bump(&st.miss_key);
@@ -318,7 +324,7 @@ impl Interp {
     pub(crate) fn lookup_ident(&self, scope: &Rc<Scope>, i: &a::Ident) -> Option<Value> {
         let st = &self.hint_stats;
         st.bump(&st.reads);
-        if let Some(v) = self.hinted_read(scope, i.ctxt) {
+        if let Some(v) = self.hinted_read(scope, i.ctxt, &i.sym) {
             return Some(v);
         }
         let (v, loc) = self.lookup_at(scope, &i.sym)?;
