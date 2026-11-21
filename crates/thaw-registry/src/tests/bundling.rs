@@ -1061,6 +1061,101 @@ fn external_root_alias_collision_reports_both_files() {
     let _ = fs::remove_dir_all(root);
 }
 
+// Nested duplicate dependency copies (a package containing its own `node_modules`, both
+// versions of one dependency reachable) bundle as distinct instances. Node 22.23.1 for each
+// fixture (3 runs, identical): simple -> [{"value":"A-bare","version":"1.0.0"},{"value":"B-bare","version":"2.0.0"}];
+// nested version -> {"top":"x1","other":"x2"}.
+#[test]
+fn nested_duplicate_dependency_copies_bundle_as_distinct_instances() {
+    let root = temp_registry("nested-dup-copies");
+    let modules = root.join("node_modules");
+    let pkg = modules.join("pkg");
+    for directory in ["a/node_modules/affinity-shared", "b/node_modules/affinity-shared"] {
+        fs::create_dir_all(pkg.join(directory)).unwrap();
+    }
+    fs::write(pkg.join("index.js"), "module.exports = [require('./a/use.js'), require('./b/use.js')];").unwrap();
+    fs::write(pkg.join("a/use.js"), "module.exports = require('affinity-shared');").unwrap();
+    fs::write(pkg.join("b/use.js"), "module.exports = require('affinity-shared');").unwrap();
+    fs::write(pkg.join("a/node_modules/affinity-shared/index.js"), "exports.value = 'A-bare'; exports.version = '1.0.0';").unwrap();
+    fs::write(pkg.join("b/node_modules/affinity-shared/index.js"), "exports.value = 'B-bare'; exports.version = '2.0.0';").unwrap();
+    fs::write(pkg.join("a/node_modules/affinity-shared/package.json"), r#"{"name":"affinity-shared","version":"1.0.0","main":"index.js"}"#).unwrap();
+    fs::write(pkg.join("b/node_modules/affinity-shared/package.json"), r#"{"name":"affinity-shared","version":"2.0.0","main":"index.js"}"#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &pkg, "index.js").unwrap();
+    assert_eq!(
+        run_js_probe(&bundle, "JSON.stringify(exports)"),
+        serde_json::to_string(r#"[{"value":"A-bare","version":"1.0.0"},{"value":"B-bare","version":"2.0.0"}]"#).unwrap()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn nested_dependency_copy_inside_a_package_keeps_its_own_version() {
+    let root = temp_registry("nested-dup-version");
+    let modules = root.join("node_modules");
+    let pkg = modules.join("pkg-nv");
+    fs::create_dir_all(pkg.join("node_modules/x")).unwrap();
+    fs::create_dir_all(pkg.join("node_modules/other/node_modules/x")).unwrap();
+    fs::write(pkg.join("index.js"), "module.exports = { top: require('x').v, other: require('other').v };").unwrap();
+    fs::write(pkg.join("package.json"), r#"{"name":"pkg-nv","version":"1.0.0","main":"index.js"}"#).unwrap();
+    fs::write(pkg.join("node_modules/x/index.js"), "exports.v = 'x1';").unwrap();
+    fs::write(pkg.join("node_modules/x/package.json"), r#"{"name":"x","version":"1.0.0","main":"index.js"}"#).unwrap();
+    fs::write(pkg.join("node_modules/other/index.js"), "module.exports = { v: require('x').v };").unwrap();
+    fs::write(pkg.join("node_modules/other/package.json"), r#"{"name":"other","version":"1.0.0","main":"index.js"}"#).unwrap();
+    fs::write(pkg.join("node_modules/other/node_modules/x/index.js"), "exports.v = 'x2';").unwrap();
+    fs::write(pkg.join("node_modules/other/node_modules/x/package.json"), r#"{"name":"x","version":"2.0.0","main":"index.js"}"#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg-nv", &pkg, "index.js").unwrap();
+    assert_eq!(run_js_probe(&bundle, "JSON.stringify(exports)"), serde_json::to_string(r#"{"top":"x1","other":"x2"}"#).unwrap());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bundled_worker_tree_with_two_nested_dependency_copies_bundles() {
+    // The `bundled_worker_and_its_nested_worker_keep_package_directory_affinity` fixture shape (thaw-pkg):
+    // a/ and b/ each own a dep.js and their own node_modules/affinity-shared.
+    // The package root sits outside its node_modules dir (an external root, as the worker tests build it).
+    let root = temp_registry("nested-dup-worker-tree");
+    let modules = root.join("node_modules");
+    let pkg = root.join("pkg");
+    for side in ["a", "b"] {
+        fs::create_dir_all(pkg.join(side).join("node_modules/affinity-shared")).unwrap();
+        fs::write(pkg.join(side).join("dep.js"), format!("exports.value = '{}';", side.to_uppercase())).unwrap();
+        fs::write(pkg.join(side).join("node_modules/affinity-shared/index.js"), format!("exports.value = '{}-bare';", side.to_uppercase())).unwrap();
+        fs::write(pkg.join(side).join("node_modules/affinity-shared/package.json"), r#"{"name":"affinity-shared","main":"index.js"}"#).unwrap();
+        fs::write(pkg.join(side).join("worker.js"), "var parentPort = require('node:worker_threads').parentPort; parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value]);").unwrap();
+    }
+    fs::write(pkg.join("index.js"), "var Worker = require('node:worker_threads').Worker; module.exports = [new Worker(new URL('./a/worker.js', import.meta.url)), new Worker(new URL('./b/worker.js', import.meta.url))];").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &pkg, "index.js").unwrap();
+    assert!(bundle.contains("/*thaw-worker-url:pkg/a/worker.js*/"), "{bundle}");
+    assert!(bundle.contains("/*thaw-worker-url:pkg/b/worker.js*/"), "{bundle}");
+    assert!(bundle.contains("pkg/a/node_modules/affinity-shared/index.js"), "{bundle}");
+    assert!(bundle.contains("pkg/b/node_modules/affinity-shared/index.js"), "{bundle}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn external_root_nested_duplicate_copies_run_as_distinct_instances() {
+    // Same two-copy shape as the registry-root test, with the package root outside its node_modules dir.
+    let root = temp_registry("nested-dup-external-root");
+    let modules = root.join("node_modules");
+    let pkg = root.join("pkg");
+    for directory in ["a/node_modules/affinity-shared", "b/node_modules/affinity-shared"] {
+        fs::create_dir_all(pkg.join(directory)).unwrap();
+    }
+    fs::write(pkg.join("index.js"), "module.exports = [require('./a/use.js'), require('./b/use.js')];").unwrap();
+    fs::write(pkg.join("a/use.js"), "module.exports = require('affinity-shared');").unwrap();
+    fs::write(pkg.join("b/use.js"), "module.exports = require('affinity-shared');").unwrap();
+    fs::write(pkg.join("a/node_modules/affinity-shared/index.js"), "exports.value = 'A-bare'; exports.version = '1.0.0';").unwrap();
+    fs::write(pkg.join("b/node_modules/affinity-shared/index.js"), "exports.value = 'B-bare'; exports.version = '2.0.0';").unwrap();
+    fs::write(pkg.join("a/node_modules/affinity-shared/package.json"), r#"{"name":"affinity-shared","version":"1.0.0","main":"index.js"}"#).unwrap();
+    fs::write(pkg.join("b/node_modules/affinity-shared/package.json"), r#"{"name":"affinity-shared","version":"2.0.0","main":"index.js"}"#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &pkg, "index.js").unwrap();
+    assert_eq!(
+        run_js_probe(&bundle, "JSON.stringify(exports)"),
+        serde_json::to_string(r#"[{"value":"A-bare","version":"1.0.0"},{"value":"B-bare","version":"2.0.0"}]"#).unwrap()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn shared_source_cache_projects_versions_after_all_subpath_bundles() {
     let root = temp_registry("subpaths-two-nested-versions");
@@ -2529,3 +2624,4 @@ fn commonjs_created_require_native_query_clones_private_opaque_edges() {
     let _ = fs::remove_dir_all(root);
 }
 }
+

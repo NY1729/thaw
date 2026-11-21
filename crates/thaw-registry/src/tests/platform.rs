@@ -1528,69 +1528,34 @@ fn bundled_worker_nested_spawn_resolves_from_its_own_package_directory() {
     let _ = fs::remove_dir_all(modules);
 }
 
-// qjs_pending: needs __thaw_detach_array_buffer (QuickJS worker plumbing, not defined on thaw-js)
-mod qjs_pending_platform_worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
-fn worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers() {
-    use std::ffi::{CStr, CString};
-
-    let modules = temp_registry("worker-affinity-modules");
-    let package_a = temp_registry("worker-affinity-a");
-    let package_b = temp_registry("worker-affinity-b");
-    let index = "var Worker = require('node:worker_threads').Worker; \
-        module.exports = { \
-          save: function() { var original = Worker, saved; Worker = function(url) { saved = url; }; \
-            try { new Worker(new URL('./worker.js', import.meta.url)); } finally { Worker = original; } \
-            return saved; }, \
-          run: function(url) { return new Promise(function(resolve, reject) { \
-            var worker = new Worker(url); worker.on('message', resolve); worker.on('error', reject); \
-          }); } \
-        };";
-    fs::write(package_a.join("index.js"), index).unwrap();
-    fs::write(package_b.join("index.js"), index).unwrap();
-    fs::write(package_a.join("worker.js"), "var parentPort = require('node:worker_threads').parentPort; require('./spawner.js')(function(value) { parentPort.postMessage(value); parentPort.close(); });").unwrap();
-    fs::write(package_a.join("spawner.js"), "var Worker = require('node:worker_threads').Worker; module.exports = function(done) { var child = new Worker(new URL('./nested.js', import.meta.url)); child.on('message', done); child.on('error', function(error) { throw error; }); };").unwrap();
-    fs::write(package_a.join("nested.js"), "var parentPort = require('node:worker_threads').parentPort; var direct, created; try { require('affinity-missing'); } catch (error) { direct = error.code; } var makeRequire = require('node:module').createRequire(__filename); try { makeRequire('affinity-missing'); } catch (error) { created = error.code; } parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value, direct, created]); parentPort.close();").unwrap();
-    fs::write(package_a.join("dep.js"), "exports.value = 'A';").unwrap();
-    fs::write(package_b.join("worker.js"), "var parentPort = require('node:worker_threads').parentPort; parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value]); parentPort.close();").unwrap();
-    fs::write(package_b.join("dep.js"), "exports.value = 'B';").unwrap();
-    let dependency_a = package_a.join("node_modules/affinity-shared");
-    let dependency_b = package_b.join("node_modules/affinity-shared");
-    fs::create_dir_all(&dependency_a).unwrap();
-    fs::create_dir_all(&dependency_b).unwrap();
-    fs::write(dependency_a.join("package.json"), r#"{"name":"affinity-shared","main":"index.js"}"#).unwrap();
-    fs::write(dependency_b.join("package.json"), r#"{"name":"affinity-shared","main":"index.js"}"#).unwrap();
-    fs::write(dependency_a.join("index.js"), "exports.value = 'A-bare';").unwrap();
-    fs::write(dependency_b.join("index.js"), "exports.value = 'B-bare';").unwrap();
-    let (bundle_a, _, _, _) = bundle_commonjs_package(&modules, "affinity-a", &package_a, "index.js").unwrap();
-    let (bundle_b, _, _, _) = bundle_commonjs_package(&modules, "affinity-b", &package_b, "index.js").unwrap();
-    let script = format!(r#"globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports;
-        globalThis.require = function(name) {{ throw new Error(name); }};
-        {bundle_a}
-        globalThis.affinityA = module.exports;
-        globalThis.affinityUrlA = affinityA.save();
-        globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports;
-        {bundle_b}
-        globalThis.affinityB = module.exports;
-        globalThis.affinityUrlB = affinityB.save();
-        globalThis.workerAffinityProbe = async function() {{
-          var native = [await affinityA.run(affinityUrlA), await affinityB.run(affinityUrlB), await affinityA.run(affinityUrlA)];
-          var spawn = globalThis.__thaw_worker_spawn, fallback;
-          globalThis.__thaw_worker_spawn = undefined;
-          try {{ fallback = [await affinityA.run(affinityUrlA), await affinityB.run(affinityUrlB), await affinityA.run(affinityUrlA)]; }}
-          finally {{ globalThis.__thaw_worker_spawn = spawn; }}
-          return [native, fallback];
-        }};"#);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"workerAffinityProbe".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[[\"A\",\"A-bare\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\"],[\"B\",\"B-bare\"],[\"A\",\"A-bare\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\"]],[[\"A\",\"A-bare\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\"],[\"B\",\"B-bare\"],[\"A\",\"A-bare\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\"]]]");
-    let _ = fs::remove_dir_all(package_a);
-    let _ = fs::remove_dir_all(package_b);
+fn bundled_worker_and_its_nested_worker_keep_package_directory_affinity() {
+    // Node 22.23.1 (real files, pathToFileURL, 3 runs, identical): [["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"],["B","B-bare"],["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"]].
+    // One package with two copies: a/ and b/ each own a dep.js and their own node_modules/affinity-shared; a/worker.js
+    // starts a/nested.js, which resolves from its own directory, not from b/.
+    let dir = worker_fixture(
+        "bundled_worker_and_nested_worker_affinity",
+        &[
+            ("index.js", "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var first = await new Promise(function (resolve, reject) { var w = new Worker(new URL('./a/worker.js', import.meta.url)); w.on('message', resolve); w.on('error', reject); }); var second = await new Promise(function (resolve, reject) { var w = new Worker(new URL('./b/worker.js', import.meta.url)); w.on('message', resolve); w.on('error', reject); }); var third = await new Promise(function (resolve, reject) { var w = new Worker(new URL('./a/worker.js', import.meta.url)); w.on('message', resolve); w.on('error', reject); }); return [first, second, third]; };"),
+            ("a/worker.js", "var wt = require('node:worker_threads'); var child = new wt.Worker(new URL('./nested.js', import.meta.url)); child.on('message', function (value) { wt.parentPort.postMessage(value); wt.parentPort.close(); }); child.on('error', function (error) { throw error; });"),
+            ("a/nested.js", "var parentPort = require('node:worker_threads').parentPort; var direct, created; try { require('affinity-missing'); } catch (error) { direct = error.code; } var makeRequire = require('node:module').createRequire(__filename); try { makeRequire('affinity-missing'); } catch (error) { created = error.code; } parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value, direct, created]); parentPort.close();"),
+            ("a/dep.js", "exports.value = 'A';"),
+            ("a/node_modules/affinity-shared/package.json", r#"{"name":"affinity-shared","main":"index.js"}"#),
+            ("a/node_modules/affinity-shared/index.js", "exports.value = 'A-bare';"),
+            ("b/worker.js", "var parentPort = require('node:worker_threads').parentPort; parentPort.postMessage([require('./dep.js').value, require('affinity-shared').value]); parentPort.close();"),
+            ("b/dep.js", "exports.value = 'B';"),
+            ("b/node_modules/affinity-shared/package.json", r#"{"name":"affinity-shared","main":"index.js"}"#),
+            ("b/node_modules/affinity-shared/index.js", "exports.value = 'B-bare';"),
+        ],
+    );
+    let modules = temp_registry("bundled_worker_and_nested_worker_affinity_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        run_js(&bundle),
+        r#"[["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"],["B","B-bare"],["A","A-bare","MODULE_NOT_FOUND","MODULE_NOT_FOUND"]]"#
+    );
+    let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
-}
 }
 
 #[test]
