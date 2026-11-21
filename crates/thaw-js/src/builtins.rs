@@ -69,6 +69,7 @@ pub(crate) const PRELUDE: &str = r#"
   // the filename of the vm script running in this realm (undefined when none); captured here, since `__thaw_` names
   // are hidden in a vm realm once it is built
   var scriptFile = __thaw_vm_script_file;
+  var markError = __thaw_mark_error;
   function mkError(name, Parent) {
     var C = function (message, options) {
       if (!(this instanceof C)) return new C(message, options);
@@ -80,6 +81,7 @@ pub(crate) const PRELUDE: &str = r#"
       def(this, 'stack', typeof hook === 'function'
         ? formatStack(this, hook, __thaw_call_frames(C, E.stackTraceLimit, undefined))
         : name + (message !== undefined ? ': ' + String(message) : '') + (file === undefined ? '' : '\n    at <anonymous> (' + file + ':1:1)'));
+      markError(this);
     };
     def(C, 'name', name);
     C.prototype = Parent ? Object.create(Parent.prototype) : {};
@@ -361,6 +363,13 @@ pub(crate) fn install_util_brand(it: &mut Interp) {
         Ok(Value::str(fixed.unwrap_or_else(|| plain_brand(&o))))
     });
     it.global.declare("__thaw_brand", brand, true);
+    let mark = it.native(|_, _, args| {
+        if let Value::Object(o) = arg(args, 0) {
+            o.error_instance.set(true);
+        }
+        Ok(Value::Undefined)
+    });
+    it.global.declare("__thaw_mark_error", mark, true);
 }
 
 /// Brand of a plain object: the hidden (non-enumerable) own slots the builtins define. A user object cannot
@@ -380,7 +389,7 @@ fn plain_brand(o: &Obj) -> &'static str {
     if hidden("__buf") {
         return "DataView";
     }
-    if hidden("stack") && is_error_instance(o) {
+    if o.error_instance.get() {
         return "Error";
     }
     "Object"

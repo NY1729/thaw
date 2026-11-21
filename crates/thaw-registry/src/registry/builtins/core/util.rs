@@ -242,7 +242,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function deprecate(fn) { return function() { return fn.apply(this, arguments); }; }\n\
              function debuglog(section) { var enabled = String(process.env.NODE_DEBUG || '').toUpperCase().split(/[ ,]+/).indexOf(String(section).toUpperCase()) >= 0; var logger = enabled ? function() { console.error(String(section).toUpperCase() + ' ' + format.apply(null, arguments)); } : function() {}; logger.enabled = enabled; return logger; }\n\
              function stripVTControlCharacters(value) { return String(value).replace(/[\\u001B\\u009B][[\\]()#;?]*(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*)?\\u0007|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))/g, ''); }\n\
-             function toUSVString(value) { return String(value).replace(/[\\uD800-\\uDFFF]/gu, '\\uFFFD'); }\n\
+             function toUSVString(value) { var s = String(value), out = [], i = 0; while (i < s.length) { var c = s.charCodeAt(i), d = i + 1 < s.length ? s.charCodeAt(i + 1) : 0; if (c >= 0xd800 && c <= 0xdbff && d >= 0xdc00 && d <= 0xdfff) { out.push(s.charAt(i) + s.charAt(i + 1)); i += 2; } else { out.push(c >= 0xd800 && c <= 0xdfff ? String.fromCharCode(0xfffd) : s.charAt(i)); i++; } } return out.join(''); }\n\
              function parseArgs(config) {\n\
              \x20\x20config = config || {};\n\
              \x20\x20var args = Array.from(config.args === undefined ? (process.argv || []).slice(2) : config.args, String), definitions = config.options || {}, values = Object.create(null), positionals = [], tokens = [], short = Object.create(null), allowPositionals = config.allowPositionals === undefined ? config.strict === false : config.allowPositionals;\n\

@@ -100,7 +100,8 @@
           __thawTextApply(__thawTextViewTag, destination, []) !== 'Uint8Array') {
         throw __thawTextErr(__thawTextTypeError, 'ERR_INVALID_ARG_TYPE', 'The "dest" argument must be an instance of Uint8Array.');
       }
-      const text = `${input}`;
+      if (typeof input !== 'string') throw __thawTextErr(__thawTextTypeError, 'ERR_INVALID_ARG_TYPE', 'The "src" argument must be of type string.');
+      const text = input;
       const capacity = __thawTextApply(__thawTextViewByteLength, destination, []);
       let read = 0;
       let written = 0;

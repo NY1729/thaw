@@ -56,6 +56,15 @@ fn plus_concat_propagates_tostring_throw() {
 }
 
 #[test]
+fn plus_and_template_reject_symbol_operands_but_string_keeps_them() {
+    // Node: `${sym}`, `'' + sym` and `sym + ''` throw TypeError; String(sym) is 'Symbol(x)'.
+    assert_eq!(
+        one("var s = Symbol('x'); var r = []; [function () { return `${s}`; }, function () { return '' + s; }, function () { return s + ''; }].forEach(function (f) { try { f(); r.push('no'); } catch (e) { r.push(e.name); } }); console.log(r.join(','), String(s));"),
+        "TypeError,TypeError,TypeError Symbol(x)"
+    );
+}
+
+#[test]
 fn array_join_propagates_element_tostring_throw() {
     assert_eq!(
         one("try { String([{toString(){throw new Error('e')}}]); console.log('no'); } catch (e) { console.log('caught', e.message); }"),

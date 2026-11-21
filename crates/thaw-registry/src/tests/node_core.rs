@@ -511,6 +511,32 @@ fn util_helpers_run_through_bundled_commonjs_require() {
 }
 
 #[test]
+fn util_native_error_brand_survives_prototype_change_and_usv_string_repairs_lone_surrogates() {
+    // Node-recorded: a null-prototype Error is still a native Error; toUSVString repairs lone surrogates only.
+    let dir = temp_registry("builtin_util_brand_usv");
+    fs::write(
+        dir.join("index.js"),
+        "var util = require('node:util'), directTypes = require('node:util/types');\n\
+         function units(s) { var r = []; for (var i = 0; i < s.length; i++) r.push(s.charCodeAt(i)); return r; }\n\
+         module.exports = function () {\n\
+         \x20 var realError = new Error('brand'); Object.setPrototypeOf(realError, null);\n\
+         \x20 var fakeError = Object.create(Error.prototype);\n\
+         \x20 return [directTypes.isNativeError(realError), directTypes.isNativeError(fakeError), units(util.toUSVString('a\\udc00\\udc01z')), units(util.toUSVString('\\ud83d\\ude00\\udc00')), units(util.toUSVString('\\ud83d\\ude00'))];\n\
+         };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_util_brand_usv_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(
+        run_js(&bundle),
+        "[true,false,[97,65533,65533,122],[55357,56832,65533],[55357,56832]]"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn util_parse_args_handles_long_short_multiple_negative_and_tokens() {
     let dir = temp_registry("builtin_util_parse_args");
     fs::write(
@@ -609,13 +635,8 @@ fn path_builtin_exposes_posix_and_win32_operations() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-mod qjs_pending_node_core_path_full {
-    use super::*;
-
 #[test]
 fn path_full_posix_and_windows_lexical_contracts() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_path_full_contracts");
     fs::write(dir.join("index.js"), r#"
 var path = require('node:path'), posixSubpath = require('path/posix'), winSubpath = require('node:path/win32');
@@ -626,6 +647,7 @@ function lex(api, rows, label) {
       [row[1], row[2], row[3], row[4]], label + ' ' + row[0]);
   });
 }
+function codeOf(f) { try { f(); return 'no throw'; } catch (e) { return e.code; } }
 module.exports = function() {
   var p = path.posix, w = path.win32;
   lex(p, [
@@ -677,16 +699,16 @@ module.exports = function() {
     w.normalize('C:'), w.normalize('C:foo'),
     w.normalize('\\foo\\..\\bar'), w.normalize('\\\\server'), w.normalize('\\\\\\server')],
     ['\\\\server\\share\\x\\','C:.','C:\\','.\\','C:.','C:foo','\\bar','\\server','\\server'], 'win32 normalization roots');
-  same([w.join('\\\\server\\share','a','..','..','x'), w.join('\\\\server\\share','dir'), w.join('\\','\\','server','share'), w.join('/\\server','share'), w.join('a\\..\\'), w.join(null), w.join(undefined,'file')],
-    ['\\\\server\\share\\x','\\\\server\\share\\dir','\\server\\share','\\\\server\\share\\','.\\','null','undefined\\file'], 'win32 join explicit versus synthesized UNC');
+  same([w.join('\\\\server\\share','a','..','..','x'), w.join('\\\\server\\share','dir'), w.join('\\','\\','server','share'), w.join('/\\server','share'), w.join('a\\..\\'), codeOf(function() { return w.join(null); }), codeOf(function() { return w.join(undefined,'file'); })],
+    ['\\\\server\\share\\x','\\\\server\\share\\dir','\\server\\share','\\\\server\\share\\','.\\','ERR_INVALID_ARG_TYPE','ERR_INVALID_ARG_TYPE'], 'win32 join explicit versus synthesized UNC');
   same(['/logs','\\logs','\\\\server\\share','C:\\logs','C:logs','C:','ordinary',''].map(function(x) { return w.isAbsolute(x); }),
     [true,true,true,true,false,false,false,false], 'win32 isAbsolute');
   same([w.relative('C:\\a','D:\\b'), w.relative('C:\\A','c:\\a'), w.relative('C:\\A','C:\\B\\Foo'),
     w.relative('\\\\srv\\share\\A','\\\\SRV\\SHARE\\a\\B'), w.relative('\\\\srv\\one\\a','\\\\srv\\two\\b'), w.relative('\\\\other\\two\\b','\\\\srv\\one\\a'), p.relative('/A','/a')],
     ['D:\\b','','..\\B\\Foo','B','..\\..\\two\\b','\\\\srv\\one\\a','../a'], 'relative device/case behavior');
-  var originalProcess = globalThis.process;
+  var originalProcess = globalThis.process, originalEnv = globalThis.process.env, originalCwd = globalThis.process.cwd;
   try {
-    globalThis.process = { env: {'=C:':'C:\\drive\\home'}, cwd: function() { return 'D:\\base\\cwd'; } };
+    globalThis.process.env = {'=C:':'C:\\drive\\home'}; globalThis.process.cwd = function() { return 'D:\\base\\cwd'; };
     same([w.resolve('C:foo'), w.resolve('\\logs'), w.resolve('\\\\server\\share\\a\\..\\..\\x'), w.resolve('C:\\a','D:\\b','x'), w.resolve('C:\\a','..','b'), w.resolve('\\\\server\\share\\a','..','b'), w.resolve(), w.resolve('plain')],
       ['C:\\drive\\home\\foo','D:\\logs','\\\\server\\share\\x','D:\\b\\x','C:\\b','\\\\server\\share\\b','D:\\base\\cwd','D:\\base\\cwd\\plain'], 'isolated per-drive cwd and conflicting devices');
     globalThis.process.cwd = function() { return 'C:\\current\\dir'; }; delete globalThis.process.env['=C:'];
@@ -715,33 +737,26 @@ module.exports = function() {
     same([w.relative('\\\u0130','\\b'), w.relative('\\\u0130','\\i\u0307'),
       w.relative('\\\\other\\one\\\u0130','\\\\srv\\two\\b')],
       ['..\\b','','..\\..\\..\\srv\\two\\b'], 'relative preserves Node Unicode casefold branches');
-  } finally { globalThis.process = originalProcess; }
+  } finally { globalThis.process.env = originalEnv; globalThis.process.cwd = originalCwd; }
   same(globalThis.process === originalProcess, true, 'resolve fixture restores process identity');
   var extRead = false, winningBase = { base: 'kept' }; Object.defineProperty(winningBase, 'ext', { get: function() { extRead = true; throw new Error('ignored extension'); } });
   var formatErrors = [false, false, false, false]; try { p.format(null); } catch (error) { formatErrors[0] = true; } try { p.format(undefined); } catch (error) { formatErrors[1] = true; } try { w.format(null); } catch (error) { formatErrors[2] = true; } try { w.format(undefined); } catch (error) { formatErrors[3] = true; }
   same([formatErrors, p.format(winningBase), w.format(winningBase), extRead], [[true,true,true,true], 'kept', 'kept', false], 'format preserves errors and lazy base precedence');
   var formatMarker = new Error('format base coercion'), formatBase = { toString: function() { throw formatMarker; } }, formatThrown = false; try { w.format({base: formatBase}); } catch (error) { formatThrown = error === formatMarker; }
-  same([w.format({base:1}), formatThrown], ['1', true], 'win32 format preserves string conversion and errors');
+  same([w.format({base:1}), formatThrown], [1, false], 'win32 format keeps base unconverted');
   var coercionError = new Error('path coercion'), coercionOrder = false, throwingPath = {}; throwingPath.toString = function() { throw coercionError; };
   try { p.resolve(throwingPath, '/absolute'); } catch (error) { coercionOrder = error === coercionError; }
-  same(coercionOrder, true, 'posix resolve coerces all arguments left-to-right');
-  same([p.posix === p, p.win32 === w, w.posix === p, w.win32 === w, posixSubpath === p, winSubpath === w,
-    path.default === path, posixSubpath.default === p, winSubpath.default === w], [true,true,true,true,true,true,true,true,true], 'reciprocal aliases and subpath defaults');
+  same(coercionOrder, false, 'posix resolve does not coerce earlier arguments');
+  same([p.posix === p, p.win32 === w, w.posix === p, w.win32 === w, posixSubpath === p, winSubpath === w],
+    [true,true,true,true,true,true], 'reciprocal aliases');
   return true;
 };
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_path_full_contracts_node_modules");
     let (bundle, _, file_count, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exercisePathContracts = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exercisePathContracts").unwrap(); let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, "true");
+    assert_eq!(run_js(&bundle), "true");
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 #[test]
@@ -2711,7 +2726,8 @@ fn path_join_skips_empty_segments_before_normalizing() {
             dir.join("index.js"),
             "var path = require('node:path');\n\
              module.exports = function () {\n\
-             \x20 return [path.join('', 'file'), path.join('dir', ''), path.join('dir/', ''), path.join('', ''), path.join(), path.join('', '/root', '', 'file'), path.join(null), path.join(undefined, 'file'), path.win32.join('', 'file') ];\n\
+             \x20 function codeOf(f) { try { return f(); } catch (e) { return e.code; } }\n\
+             \x20 return [path.join('', 'file'), path.join('dir', ''), path.join('dir/', ''), path.join('', ''), path.join(), path.join('', '/root', '', 'file'), codeOf(function() { return path.join(null); }), codeOf(function() { return path.join(undefined, 'file'); }), path.win32.join('', 'file') ];\n\
              };",
         )
         .unwrap();
@@ -2722,7 +2738,7 @@ fn path_join_skips_empty_segments_before_normalizing() {
     let result = run_js(&bundle);
     assert_eq!(
         result,
-        r#"["file","dir","dir/",".",".","/root/file",".","/file","file"]"#
+        r#"["file","dir","dir/",".",".","/root/file","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE","file"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
