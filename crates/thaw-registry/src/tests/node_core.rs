@@ -3068,14 +3068,15 @@ module.exports = async function () {
     let inspect = CString::new("inspectRootHooks").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(inspect.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[["before","first","second","after"],["first:passed","second:passed"],["first:passed","second:passed"],true,true]"#);
+    // Node 22 (measured 3 runs): root `after` fires once the first root test settles (before `second`), and late
+    // test()/test.after() calls do not throw (old pin: [before,first,second,after] with both late calls throwing)
+    assert_eq!(result, r#"[["before","first","after","second"],["first:passed","second:passed"],["first:passed","second:passed"],false,false]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 }
 
 #[test]
-#[ignore = "node:test root hooks order differs from Node: thaw-js runs root `after` only at host idle (after the entry returns), so effects are [before,first,second]; Node gives [before,first,after,second]"]
 fn node_test_root_hooks_follow_node_effects_order() {
     // Node 22 (measured 3 runs): root `after` fires once `first` settles, before `second` is registered;
     // late test() and test.after() calls do not throw.
@@ -3104,6 +3105,34 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, r#"[["before","first","after","second"],false,false]"#);
+}
+
+#[test]
+fn node_test_root_after_hooks_run_in_order_when_root_queue_idles() {
+    // Node 22 (measured 3 runs): root after hooks run in registration order once the root queue
+    // drains; a root test registered after an await (no timer) keeps the queue busy, so both run last.
+    let dir = temp_registry("builtin_test_root_after_order");
+    fs::write(
+        dir.join("index.js"),
+        r#"var test = require('node:test');
+module.exports = async function () {
+  var effects = [];
+  test.after(function() { effects.push('after1'); });
+  test.after(function() { effects.push('after2'); });
+  await test('first', function() { effects.push('first'); });
+  await test('second', function() { effects.push('second'); });
+  await new Promise(function(resolve) { setTimeout(resolve, 20); });
+  return effects;
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_test_root_after_order_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let result = run_js_json(&bundle);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, r#"["first","second","after1","after2"]"#);
 }
 
 #[test]
