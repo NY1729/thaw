@@ -3257,6 +3257,7 @@ dependencies = [
  "thaw-arena",
  "thaw-hir",
  "thaw-intl",
+ "thaw-node-builtins",
  "thaw-parser",
  "thaw-sqlite",
  "thaw-wasm",
@@ -3298,6 +3299,10 @@ dependencies = [
  "thaw-runtime",
  "thaw-std",
 ]
+
+[[package]]
+name = "thaw-node-builtins"
+version = "0.1.0"
 
 [[package]]
 name = "thaw-parser"
@@ -3382,6 +3387,7 @@ dependencies = [
  "tar",
  "thaw-js",
  "thaw-js-infer",
+ "thaw-node-builtins",
  "thaw-parser",
  "thaw-quickjs",
  "ureq",

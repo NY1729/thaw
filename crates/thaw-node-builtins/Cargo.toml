@@ -1,0 +1,9 @@
+[package]
+name = "thaw-node-builtins"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Node.js builtin module sources (CommonJS text) shared by thaw-registry bundles and thaw-js worker realms"
+
+# A leaf: no dependencies, so thaw-js and thaw-registry can both depend on it without a cycle.
+[dependencies]

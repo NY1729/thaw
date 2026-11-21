@@ -6125,6 +6125,8 @@ mod builtin_integrity_tests;
 #[cfg(test)]
 mod builtin_members_tests;
 #[cfg(test)]
+mod builtin_source_tests;
+#[cfg(test)]
 mod builtin_table_tests;
 #[cfg(test)]
 mod callsite_tests;
