@@ -2981,6 +2981,76 @@ module.exports = async function () {
 }
 
 #[test]
+#[ignore = "node:test root hooks order differs from Node: thaw-js runs root `after` only at host idle (after the entry returns), so effects are [before,first,second]; Node gives [before,first,after,second]"]
+fn node_test_root_hooks_follow_node_effects_order() {
+    // Node 22 (measured 3 runs): root `after` fires once `first` settles, before `second` is registered;
+    // late test() and test.after() calls do not throw.
+    let dir = temp_registry("builtin_test_root_hooks_node_order");
+    fs::write(
+        dir.join("index.js"),
+        r#"var test = require('node:test');
+module.exports = async function () {
+  var effects = [], first = test('first', function() { effects.push('first'); });
+  test.before(function() { effects.push('before'); });
+  test.after(function() { effects.push('after'); });
+  await first;
+  await new Promise(function(resolve) { setTimeout(resolve, 20); });
+  await test('second', function() { effects.push('second'); });
+  var lateTest = false, lateHook = false;
+  try { test('late', function() {}); } catch (error) { lateTest = true; }
+  try { test.after(function() {}); } catch (error) { lateHook = true; }
+  return [effects, lateTest, lateHook];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_test_root_hooks_node_order_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let result = run_js_json(&bundle);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, r#"[["before","first","after","second"],false,false]"#);
+}
+
+#[test]
+fn child_process_startup_failure_follows_node_async_once() {
+    // Node 22 (measured 3 runs): ENOENT arrives asynchronously, once per call, with empty stdout/stderr
+    // (callback and promisified). Not covered: execFile with {uid: 0} throws EPERM synchronously in Node
+    // as non-root, but thaw-js ignores the uid option (no synchronous throw).
+    let dir = temp_registry("builtin_child_process_startup_failure_node_once");
+    fs::write(
+        dir.join("index.js"),
+        r#"var cp = require('node:child_process'), util = require('node:util');
+module.exports = async function () {
+  var callbackCount = 0, callbackError = null;
+  await new Promise(function(resolve) {
+    cp.execFile('nonexistent-binary-xyz', [], function(error, stdout, stderr) {
+      callbackCount++;
+      callbackError = { code: error && error.code, stdout: stdout, stderr: stderr, isError: error instanceof Error };
+      resolve();
+    });
+  });
+  await new Promise(function(resolve) { setTimeout(resolve, 50); });
+  var promiseCount = 0, promiseError = null;
+  try { await util.promisify(cp.execFile)('nonexistent-binary-xyz', []); promiseCount++; }
+  catch (error) { promiseCount++; promiseError = { code: error.code, stdout: error.stdout, stderr: error.stderr, hasStdout: 'stdout' in error }; }
+  return [callbackCount, callbackError, promiseCount, promiseError];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_child_process_startup_failure_node_once_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let result = run_js_json(&bundle);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(
+        result,
+        r#"[1,{"code":"ENOENT","stdout":"","stderr":"","isError":true},1,{"code":"ENOENT","stdout":"","stderr":"","hasStdout":true}]"#
+    );
+}
+
+#[test]
 fn node_test_root_before_failure_publishes_and_runs_after() {
     let dir = temp_registry("builtin_test_root_before_failure");
     fs::write(
