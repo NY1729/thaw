@@ -1455,14 +1455,137 @@ fn http_server_supports_standard_timeout_configuration() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: fails on thaw-js: /streamed-later response does not end with "ok" (assert at line 1484), then the client join panics
-mod qjs_pending_network_http_server_releases_completed_connection_close_responses {
-    use super::*;
-    use ::thaw_quickjs;
+/// A response ended by a deferred `end(data)` (or `end()`) after an earlier `write()` must deliver every byte,
+/// including the final chunk, under keep-alive, HTTP/1.0, chunked and content-length framing. Expected bytes are
+/// real Node 22 output (3 runs, identical), with `sendDate = false` so the Date header does not vary.
+#[test]
+fn http_server_deferred_end_after_write_under_connection_close_delivers_the_final_chunk() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    // (path, request head, stop once the response ends with this, Node's exact response bytes)
+    let cases: [(&str, &str, Option<&str>, &str); 6] = [
+        (
+            "/close-write-then-end-later",
+            "GET /close-write-then-end-later HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            None,
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        ),
+        (
+            "/keepalive-write-then-end-later",
+            "GET /keepalive-write-then-end-later HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            Some("ok"),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\nok",
+        ),
+        (
+            "/http10-write-then-end-later",
+            "GET /http10-write-then-end-later HTTP/1.0\r\nHost: localhost\r\n\r\n",
+            None,
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        ),
+        (
+            "/close-chunked-write-then-end-later",
+            "GET /close-chunked-write-then-end-later HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            None,
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n1\r\no\r\n1\r\nk\r\n0\r\n\r\n",
+        ),
+        (
+            "/close-write-then-end-nodata-later",
+            "GET /close-write-then-end-nodata-later HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            None,
+            "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\no",
+        ),
+        (
+            "/keepalive-end-data-later-no-write",
+            "GET /keepalive-end-data-later-no-write HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            Some("ok"),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\nok",
+        ),
+    ];
+    let client = std::thread::spawn(move || {
+        let mut responses = Vec::new();
+        for (path, request, stop, _) in cases {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("failed to connect for {path}: {error}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                response.extend_from_slice(&chunk[..read]);
+                if stop.is_some_and(|marker| response.ends_with(marker.as_bytes())) {
+                    break;
+                }
+            }
+            responses.push(String::from_utf8_lossy(&response).into_owned());
+        }
+        responses
+    });
+
+    let dir = temp_registry("builtin_http_deferred_end_after_write");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http = require('node:http'); module.exports = async function(port) {
+            var sockets = [], closed = 0, server = http.createServer(function(request, response) {
+                response.sendDate = false;
+                if (request.url === '/close-write-then-end-later' || request.url === '/keepalive-write-then-end-later' || request.url === '/http10-write-then-end-later') { response.setHeader('Content-Length', '2'); response.write('o'); setTimeout(function() { response.end('k'); }, 10); }
+                else if (request.url === '/close-chunked-write-then-end-later') { response.write('o'); setTimeout(function() { response.end('k'); }, 10); }
+                else if (request.url === '/close-write-then-end-nodata-later') { response.setHeader('Content-Length', '1'); response.write('o'); setTimeout(function() { response.end(); }, 10); }
+                else { response.setHeader('Content-Length', '2'); setTimeout(function() { response.end('ok'); }, 10); }
+            });
+            server.on('connection', function(socket) { sockets.push(socket); socket.on('close', function() { closed++; }); });
+            return await new Promise(function(resolve, reject) {
+                server.on('error', reject);
+                server.listen(port, '127.0.0.1', function() {
+                    var watchdog;
+                    var inspect = setInterval(function() {
+                        if (closed === 6) {
+                            clearInterval(inspect);
+                            clearTimeout(watchdog);
+                            server.close(function() { resolve(closed); });
+                        }
+                    }, 10);
+                    watchdog = setTimeout(function() {
+                        clearInterval(inspect);
+                        sockets.forEach(function(socket) { socket.destroy(); });
+                        server.close(function() { resolve(closed); });
+                    }, 5000);
+                });
+            });
+        };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_deferred_end_after_write_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let closed = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
+    let responses = client.join().unwrap();
+    for ((path, _, _, expected), response) in cases.iter().zip(&responses) {
+        assert_eq!(response, expected, "{path}");
+    }
+    assert_eq!(closed, "6");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
 
 #[test]
 fn http_server_releases_completed_connection_close_responses() {
-    use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
@@ -1547,20 +1670,11 @@ fn http_server_releases_completed_connection_close_responses() {
     let empty_node_modules = temp_registry("builtin_http_connection_close_cleanup_node_modules");
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpConnectionCloseCleanup = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let function = CString::new("exerciseHttpConnectionCloseCleanup").unwrap();
-    let arguments = CString::new(format!("[{port}]" )).unwrap();
-    let result = unsafe {
-        CStr::from_ptr(thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr()))
-    }
-    .to_string_lossy();
+    let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Number(port as f64)]);
     client.join().unwrap();
     assert_eq!(result, "[4,0,0]", "connections should close without queueing bytes after a terminal close response");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
-}
 }
 
 #[test]
