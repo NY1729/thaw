@@ -123,6 +123,9 @@ pub(crate) struct Co {
     promise: Obj,
     /// Set for an async generator: its yields and completion are routed to the generator driver.
     pub(crate) gen: Option<Obj>,
+    /// A generator's bound frame, kept by the host: the coroutine body must not drop the last reference to it, since
+    /// a `Scope` dropped on the coroutine thread miscounts that thread's census and leaves a stale registry entry.
+    pub(crate) _frame: Option<Rc<Scope>>,
 }
 
 #[derive(Default)]
@@ -981,6 +984,7 @@ impl Interp {
             interp: self as *mut Interp,
             promise,
             gen,
+            _frame: def.is_gen.then(|| scope.clone()),
         });
         // The coroutine's segment starts at its own frame. An async call's frame was pushed by the
         // caller just before (`call_as`), so the segment starts one slot below; a generator's frame is
