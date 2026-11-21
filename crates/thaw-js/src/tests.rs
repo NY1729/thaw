@@ -50,6 +50,34 @@ fn main_plain_script_is_sloppy_like_node() {
     );
 }
 
+// Node runs a CommonJS module sloppy too: `run_commonjs` parses its text as a script first, like `run_main`.
+#[test]
+fn commonjs_source_is_sloppy_like_node() {
+    let num = |src: &str| {
+        Interp::new()
+            .run_commonjs(src)
+            .expect("commonjs source runs")
+            .as_number()
+    };
+    assert_eq!(
+        num("var o = {a: 1}; with (o) { module.exports = a + 1 }"),
+        Some(2.0)
+    );
+    assert_eq!(
+        num("function eval() {} module.exports = typeof eval === 'function' ? 1 : 0"),
+        Some(1.0)
+    );
+    assert_eq!(
+        num("var arguments = 5; module.exports = arguments"),
+        Some(5.0)
+    );
+    assert_eq!(num("module.exports = 010"), Some(8.0));
+    assert_eq!(
+        num("'use strict'; try { undeclaredVar = 1; module.exports = 0 } catch (e) { module.exports = e.name === 'ReferenceError' ? 1 : 2 }"),
+        Some(1.0)
+    );
+}
+
 // Module syntax keeps the module goal: the entry is handed to the ESM path, not run as a script.
 #[test]
 fn main_module_syntax_keeps_the_module_goal() {
