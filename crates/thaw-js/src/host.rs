@@ -205,7 +205,13 @@ fn require_async_namespace(
     let key = match module_key(loader, from, spec) {
         Some(key) if !key.ends_with(".node") => key,
         _ => {
-            let exports = require_in(loader, it, from, spec)?;
+            let exports = match require_in(loader, it, from, spec) {
+                Ok(exports) => exports,
+                Err(Ctl::Throw(err)) if is_module_not_found(it, &err) => {
+                    return Err(import_not_found(it, from, spec));
+                }
+                Err(other) => return Err(other),
+            };
             return namespace_of(it, loader, exports, Some(Vec::new()));
         }
     };
@@ -231,6 +237,79 @@ fn require_async_namespace(
     let ns = namespace_of(it, loader, exports, names)?;
     loader.namespaces.borrow_mut().insert(key, ns.clone());
     Ok(ns)
+}
+
+fn is_module_not_found(it: &mut Interp, err: &Value) -> bool {
+    matches!(it.get(err, "code"), Ok(code) if it.to_str(&code).to_string() == "MODULE_NOT_FOUND")
+}
+
+/// The rejection `import(spec)` gives from module `from` when no bundled module answers `spec`, with Node 22's
+/// code and message for that class of specifier (probed, CJS and ESM importers alike): `node:x` ->
+/// ERR_UNKNOWN_BUILTIN_MODULE; another scheme -> ERR_UNSUPPORTED_ESM_URL_SCHEME; a bare name -> ERR_MODULE_NOT_FOUND
+/// "Cannot find package"; a path -> ERR_MODULE_NOT_FOUND "Cannot find module". The importer is its virtual path.
+// ponytail: `data:` gets the scheme error (Node loads it), and the scheme message is Node's `file, data, and node`
+// text, not the `file and data` one Node gives for http:. Add a data: loader when a bundle needs one.
+fn import_not_found(it: &mut Interp, from: &str, spec: &str) -> Ctl {
+    let importer = format!("/thaw_modules/{from}");
+    let scheme = spec.split(':').next().filter(|s| {
+        s.len() < spec.len()
+            && s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    });
+    let (code, message) = if let Some(rest) = spec.strip_prefix("node:") {
+        (
+            "ERR_UNKNOWN_BUILTIN_MODULE",
+            format!("No such built-in module: node:{rest}"),
+        )
+    } else if let Some(scheme) = scheme.filter(|s| *s != "file") {
+        ("ERR_UNSUPPORTED_ESM_URL_SCHEME", format!("Only URLs with a scheme in: file, data, and node are supported by the default ESM loader. Received protocol '{scheme}:'"))
+    } else {
+        let is_file = spec.starts_with("file:");
+        let path = if is_file {
+            spec.strip_prefix("file://").unwrap_or(spec)
+        } else {
+            spec
+        };
+        if !is_file && !path.starts_with('/') && !path.starts_with('.') {
+            (
+                "ERR_MODULE_NOT_FOUND",
+                format!("Cannot find package '{spec}' imported from {importer}"),
+            )
+        } else {
+            let dir = &importer[..importer.rfind('/').unwrap_or(0)];
+            let resolved = resolve_path(dir, path);
+            (
+                "ERR_MODULE_NOT_FOUND",
+                format!("Cannot find module '{resolved}' imported from {importer}"),
+            )
+        }
+    };
+    let err = js_error(it, &message);
+    if let Ctl::Throw(value) = &err {
+        let _ = it.set(value, "code", Value::str(code));
+    }
+    err
+}
+
+/// `spec` against directory `dir` as a path, `.` and `..` folded; no symlinks and no existence check.
+fn resolve_path(dir: &str, spec: &str) -> String {
+    let joined = if spec.starts_with('/') {
+        spec.to_string()
+    } else {
+        format!("{dir}/{spec}")
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in joined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    format!("/{}", parts.join("/"))
 }
 
 fn namespace_of(
@@ -9320,7 +9399,8 @@ var __thaw_bundle_export_graphs = JSON.parse("{\"p/n.js\":{\"local\":{},\"indire
         let reason = settled(&mut pkg, "load", &[Value::str("./missing.js")])
             .err()
             .expect("rejects, not a synchronous throw");
-        assert_eq!(text(&mut pkg, "codeOf", &[reason]), "MODULE_NOT_FOUND");
+        // Node 22 `import('./missing.js')` from CJS: ERR_MODULE_NOT_FOUND (was MODULE_NOT_FOUND, the require code)
+        assert_eq!(text(&mut pkg, "codeOf", &[reason]), "ERR_MODULE_NOT_FOUND");
     }
 
     #[test]

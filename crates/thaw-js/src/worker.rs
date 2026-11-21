@@ -665,8 +665,8 @@ fn run_script(it: &mut Interp, source: &str, opts: &str, main: Option<MainBundle
         .declare("__thaw_worker_opts", Value::str(opts), true);
     match it.run_builtin(BOOTSTRAP) {
         Ok(_) => {}
-        // terminate() arrived before the bootstrap finished: the worker exits with the interrupt's code
-        Err(Ctl::Exit(code)) => return check_heap(it).unwrap_or(code),
+        // terminate() arrived before the bootstrap finished: Node exits 0 (no script ever started)
+        Err(Ctl::Exit(_)) => return check_heap(it).unwrap_or(0),
         Err(_) => panic!("worker bootstrap must evaluate"),
     }
     let global = Value::Object(it.global_object.clone());
