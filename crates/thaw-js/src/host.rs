@@ -506,7 +506,7 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
 /// export-graph JSON; `make(key)` is undefined for a key without a graph, which keeps the factory's old `undefined`.
 // ponytail: named-import link checks (`validateRequests`) are not enforced, cyclic star targets that are still
 // partial when their edge is recorded lose the names they gain later, and dynamic `import()` is not wired.
-const STAR_ORIGIN_RUNTIME: &str = r#"function (graphs) {
+const STAR_ORIGIN_RUNTIME: &str = r#"function (graphs, cjsNamespace) {
   var own = Object.prototype.hasOwnProperty, canonical = new WeakMap();
   // The binding a namespace property names: a star-provided name resolves to the module that owns it.
   function bindingOf(ns, name) {
@@ -546,6 +546,17 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function (graphs) {
       });
       canonical.set(exportsObject, table);
     }
+    // Node's namespace of an opaque CJS module: `default` is module.exports, plus its own enumerable names
+    // (ponytail: runtime own keys, a superset of cjs-module-lexer's static names). One object per spec while
+    // its value holds. A plain prototype, not null: a null-prototype object crosses to Json with a marker key.
+    var namespaces = Object.create(null);
+    function namespaceOf(spec) {
+      var value = edged(spec);
+      if (own.call(namespaces, spec) && Object.is(namespaces[spec].value, value)) return namespaces[spec].ns;
+      var ns = cjsNamespace(value);
+      namespaces[spec] = { value: value, ns: ns };
+      return ns;
+    }
     var origin = {
       track: function (exports) { exportsObject = exports; link(); },
       edge: function (spec, value) { edges[spec] = value; link(); },
@@ -556,11 +567,27 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function (graphs) {
       defaultImport: function (spec, value) { return value && value.__esModule ? value.default : value; },
       readDefault: function (spec) { return origin.defaultImport(spec, edged(spec)); },
       readImport: function (spec, name) { return edged(spec)[name]; },
-      namespaceImport: function (spec) { return edged(spec); }
+      namespaceImport: function (spec) { return namespaceOf(spec); }
     };
     return origin;
   }
   return make;
+}"#;
+
+/// The value name a builtin's bare namespace is served under (`import * as p from 'node:path'` used as a value):
+/// Node's namespace object of the module, see [`CJS_NAMESPACE_RUNTIME`]. Not `default`, which stays module.exports.
+pub const NAMESPACE_VALUE: &str = "__namespace";
+
+/// Node's namespace of an opaque CJS module `value`: `default` is module.exports, plus its own enumerable names
+/// (ponytail: runtime own keys, a superset of cjs-module-lexer's static names). A plain prototype, not null: a
+/// null-prototype object crosses to Json with a marker key. Shared by the star-origin runtime and [`NAMESPACE_VALUE`].
+const CJS_NAMESPACE_RUNTIME: &str = r#"function cjsNamespace(value) {
+  var names = value !== null && (typeof value === 'object' || typeof value === 'function') ? Object.keys(value).filter(function (name) { return name !== 'default'; }) : [];
+  names.push('default');
+  var ns = {};
+  names.sort().forEach(function (name) { Object.defineProperty(ns, name, { value: name === 'default' ? value : value[name], enumerable: true, writable: true }); });
+  Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' });
+  return Object.preventExtensions(ns);
 }"#;
 
 /// The `make` of [`STAR_ORIGIN_RUNTIME`] for `bundle_js`'s export graphs, or `None` for a bundle without them.
@@ -568,7 +595,9 @@ fn star_origins(it: &mut Interp, bundle_js: &str) -> R<Option<Value>> {
     let Some(graphs) = crate::esm::export_graphs_literal(bundle_js) else {
         return Ok(None);
     };
-    let make = it.run(&format!("({STAR_ORIGIN_RUNTIME})(JSON.parse({graphs}))"))?;
+    let make = it.run(&format!(
+        "({STAR_ORIGIN_RUNTIME})(JSON.parse({graphs}), ({CJS_NAMESPACE_RUNTIME}))"
+    ))?;
     Ok(Some(make))
 }
 
@@ -911,6 +940,14 @@ impl Package {
     fn exports_member(&mut self, path: &str) -> Result<Value, HostError> {
         let (root, path) = self.select_root(path);
         let it = &mut self.interp;
+        if path == NAMESPACE_VALUE {
+            let namespace = it
+                .run(&format!("({CJS_NAMESPACE_RUNTIME})"))
+                .map_err(|c| classify(it, c))?;
+            return it
+                .call(&namespace, &Value::Undefined, &[root])
+                .map_err(|c| classify(it, c));
+        }
         let mut value = root.clone();
         let parts = path
             .split('.')

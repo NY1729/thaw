@@ -1144,10 +1144,8 @@ fn rewrite_native_opaque_edges_named(
                                 };
                                 (read, named.exported.as_ref().map(clause).unwrap_or_else(|| clause(&named.orig)))
                             }
-                            // Node's namespace of a CJS module: `default` is module.exports,
-                            // plus its own enumerable names (the origin hands back the raw value).
-                            ExportSpecifier::Namespace(namespace) => (format!(
-                                "((m) => {{ var ns = {{}}; if (m !== null && (typeof m === 'object' || typeof m === 'function')) Object.keys(m).forEach(function (k) {{ if (k !== 'default') ns[k] = m[k]; }}); ns.default = m; return ns; }})({origin_name}.namespaceImport({spec}))"),
+                            // The origin's namespaceImport is Node's namespace of the CJS module.
+                            ExportSpecifier::Namespace(namespace) => (format!("{origin_name}.namespaceImport({spec})"),
                                 clause(&namespace.name)),
                             _ => continue,
                         };
@@ -1559,7 +1557,11 @@ fn rewrite_esm_to_commonjs_mode_named(source: &str, await_imports: bool, source_
                             let _ = d;
                         }
                         ImportSpecifier::Namespace(n) => {
-                            prologue.push_str(&format!("var {} = {var_name};\n", n.local.sym));
+                            // A CJS target's namespace is Node's (the origin builds it); an ES target's
+                            // exports already carry `__esModule` and stay the namespace itself.
+                            prologue.push_str(&format!(
+                                "var {} = (typeof {origin_name} !== 'undefined' && !({var_name} && {var_name}.__esModule)) ? {origin_name}.namespaceImport({}) : {var_name};\n",
+                                n.local.sym, js_string_literal(&spec)));
                         }
                         ImportSpecifier::Named(n) => {
                             let _ = n;

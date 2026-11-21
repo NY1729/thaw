@@ -1559,7 +1559,8 @@ fn builtin_sources_parse_for_the_defined_method_names() {
 
 #[test]
 fn node_path_bundle_text_is_pinned() {
-    // the node:path bundle must stay byte-identical when its source moves to thaw-node-builtins
+    // the node:path bundle must stay byte-identical when its source moves to thaw-node-builtins; the only
+    // intended change since is dropping module.exports.default/__esModule (Node's path has neither): 52641 -> 52551 bytes
     let bundle = builtin_bundle_with("node:path", &[]).unwrap();
     let hex: String = Sha256::digest(bundle.as_bytes())
         .iter()
@@ -1567,7 +1568,7 @@ fn node_path_bundle_text_is_pinned() {
         .collect();
     assert_eq!(
         hex,
-        "14fdc6db55b0c2bf7e4b894e883c20e8dc697babc0daad9c5199d91ac5a25431",
+        "02c836a37668275d3415443998c62ac3e06c185637c7877d53dab4696994d631",
         "node:path bundle sha256 ({} bytes)",
         bundle.len()
     );
