@@ -166,6 +166,12 @@ pub(crate) const STACK_OVERFLOW: &str = "Maximum call stack size exceeded";
 /// Deepest bracket nesting the parser is given. swc and regress recurse once per level, and a level costs
 /// several KB of stack in a debug build, so this is what a 64 MiB worker thread can take. Node accepts about 3000.
 const MAX_NEST: usize = 2000;
+/// Nested error builds before `throw_error` falls back to a plain string (stops a throwing error constructor).
+const MAX_ERROR_NEST: usize = 4;
+/// Dense storage ceiling for one array (24 bytes per slot, so about 1.6 GB at the ceiling). A larger
+/// index or length is a RangeError, not an allocation abort. Sparse arrays are not implemented.
+// ponytail: dense-only arrays; a length past this ceiling needs the sparse-array design (a separate project)
+pub(crate) const MAX_DENSE_ARRAY_LEN: usize = 1 << 26;
 
 #[derive(Clone)]
 pub enum Value {
@@ -1386,6 +1392,8 @@ pub struct Interp {
     max_depth: usize,
     /// Lowest stack address JS calls may reach (0 = not configured).
     pub(crate) stack_limit: usize,
+    /// How many thrown errors are being built right now (see `throw_error`).
+    error_nest: usize,
     /// Lines written by `console.log` (kept for tests and embedders).
     pub out: Vec<String>,
     /// Lines written by `console.error` / `console.warn`.
@@ -1556,6 +1564,7 @@ impl Interp {
             circular_target: None,
             max_depth: MAX_DEPTH,
             stack_limit: 0,
+            error_nest: 0,
             out: Vec::new(),
             err: Vec::new(),
             rt: Default::default(),
@@ -2538,6 +2547,11 @@ impl Interp {
     }
 
     pub(crate) fn throw_error<T>(&mut self, class: &str, message: &str) -> R<T> {
+        // building the error runs the prelude's constructor, which can throw again (a user-replaced global it
+        // calls into): past a few nested builds the error is a plain string, not another recursion
+        if self.error_nest >= MAX_ERROR_NEST {
+            return Err(Ctl::Throw(Value::str(&format!("{class}: {message}"))));
+        }
         let ctor = self
             .lookup(&self.global.clone(), class)
             .unwrap_or(Value::Undefined);
@@ -2546,7 +2560,9 @@ impl Interp {
         // `construct` returns (never `?`), so both values are restored on every path; nested calls save and restore too.
         let depth = std::mem::replace(&mut self.depth, 0);
         let stack_limit = std::mem::replace(&mut self.stack_limit, 0);
+        self.error_nest += 1;
         let built = self.construct(&ctor, &[Value::str(message)]);
+        self.error_nest -= 1;
         self.depth = depth;
         self.stack_limit = stack_limit;
         match built {
@@ -2730,6 +2746,8 @@ impl Interp {
         let frozen = o.frozen.get();
         let not_ext = frozen || o.ext.get() != 0;
         let len_ro = o.len_ro.get();
+        // set when a dense array would need more slots than MAX_DENSE_ARRAY_LEN (a RangeError below)
+        let mut too_long = false;
         let refused = {
             let mut kind = o.kind.borrow_mut();
             match &mut *kind {
@@ -2742,6 +2760,9 @@ impl Interp {
                             Some(("length".to_string(), Refusal::ReadOnly))
                         } else if not_ext && !exists {
                             Some((key.to_string(), Refusal::NotExtensible))
+                        } else if i >= MAX_DENSE_ARRAY_LEN {
+                            too_long = true;
+                            None
                         } else {
                             if i >= items.len() {
                                 let cap = items.capacity();
@@ -2756,13 +2777,19 @@ impl Interp {
                             Some(("length".to_string(), Refusal::ReadOnly))
                         } else {
                             let n = match value {
-                                Value::Number(n) if n >= 0.0 => n as usize,
-                                _ => 0,
+                                Value::Number(n) if n >= 0.0 => n,
+                                _ => 0.0,
                             };
-                            let cap = items.capacity();
-                            items.resize(n, Value::Hole);
-                            grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
-                            return Ok(());
+                            if n >= MAX_DENSE_ARRAY_LEN as f64 {
+                                too_long = true;
+                                None
+                            } else {
+                                let n = n as usize;
+                                let cap = items.capacity();
+                                items.resize(n, Value::Hole);
+                                grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
+                                return Ok(());
+                            }
                         }
                     } else {
                         None
@@ -2773,6 +2800,9 @@ impl Interp {
         };
         if let Some((k, why)) = refused {
             return self.refuse_write(strict, o, &k, why);
+        }
+        if too_long {
+            return self.throw_error("RangeError", "Invalid array length");
         }
         let typed = match &*o.kind.borrow() {
             Kind::Typed(t) => Some(t.clone()),

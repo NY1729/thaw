@@ -232,6 +232,7 @@ fn set_via_proxy(
 
 fn define(it: &mut Interp, o: &Obj, key: &str, desc: &Value) -> R<bool> {
     if let Some((target, handler, trap)) = it.proxy_trap(o, "defineProperty")? {
+        it.prop_desc_of(desc)?;
         if trap.is_callable() {
             let k = it.key_value(key);
             return Ok(it
@@ -404,9 +405,6 @@ impl Interp {
             let o = obj(it, "defineProperty", &arg(args, 0))?;
             let key = it.key_of(&arg(args, 1));
             let desc = arg(args, 2);
-            if !matches!(desc, Value::Object(_)) {
-                return it.throw_error("TypeError", "Property description must be an object");
-            }
             Ok(Value::Bool(define(it, &o, &key, &desc)?))
         });
         {

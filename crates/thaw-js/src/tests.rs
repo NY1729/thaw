@@ -12398,3 +12398,137 @@ fn top_level_script_this_is_the_global_object() {
     let result = it.run("this === globalThis").unwrap();
     assert!(matches!(result, Value::Bool(true)));
 }
+
+/// ToPropertyDescriptor (ECMA-262 6.2.6.5): a non-object descriptor, a non-callable get/set, and a mix of
+/// accessor and data fields are TypeErrors on every define path (Object.defineProperty(ies)/create/Reflect).
+#[test]
+fn to_property_descriptor_validates_its_fields() {
+    let src = r#"
+      var out = [];
+      function t(f) { try { f(); out.push('ok'); } catch (e) { out.push(e.constructor.name + ' ' + e.message.split('\n')[0]); } }
+      t(function () { Object.defineProperty({}, 'x', true); });
+      t(function () { Object.defineProperty({}, 'x', 1); });
+      t(function () { Object.defineProperty({}, 'x', undefined); });
+      t(function () { Object.defineProperty({}, 'x', 'a'); });
+      t(function () { Object.defineProperty({}, 'x', 1n); });
+      t(function () { Object.defineProperty({}, 'x', { get: 1 }); });
+      t(function () { Object.defineProperty({}, 'x', { set: 'a' }); });
+      t(function () { Object.defineProperty({}, 'x', { get: null }); });
+      t(function () { Object.defineProperty({}, 'x', { get() {}, value: 1 }); });
+      t(function () { Object.defineProperty({}, 'x', { set() {}, writable: true }); });
+      t(function () { Reflect.defineProperty({}, 'x', 1); });
+      t(function () { Object.defineProperties({}, { x: 1 }); });
+      t(function () { Object.create(null, { x: 1 }); });
+      t(function () { Object.defineProperty({}, 'x', { get: undefined }); });
+      t(function () { Object.defineProperty({}, 'x', { get() {} }); });
+      console.log(out.join('\n'));
+    "#;
+    // Node 22 output, identical across three runs.
+    assert_eq!(
+        run(src).join("\n"),
+        [
+            "TypeError Property description must be an object: true",
+            "TypeError Property description must be an object: 1",
+            "TypeError Property description must be an object: undefined",
+            "TypeError Property description must be an object: a",
+            "TypeError Property description must be an object: 1",
+            "TypeError Getter must be a function: 1",
+            "TypeError Setter must be a function: a",
+            "TypeError Getter must be a function: null",
+            "TypeError Invalid property descriptor. Cannot both specify accessors and a value or writable attribute, #<Object>",
+            "TypeError Invalid property descriptor. Cannot both specify accessors and a value or writable attribute, #<Object>",
+            "TypeError Property description must be an object: 1",
+            "TypeError Property description must be an object: 1",
+            "TypeError Property description must be an object: 1",
+            "ok",
+            "ok",
+        ]
+        .join("\n")
+    );
+}
+
+/// Huge lengths, indices and bit counts are catchable errors, not allocation aborts or hangs. The expected
+/// lines are Node 22's messages. Where Node succeeds with a length past the dense ceiling
+/// (`MAX_DENSE_ARRAY_LEN`, sparse arrays are not implemented) the line is the RangeError thaw gives.
+#[test]
+fn huge_lengths_and_radix_are_range_errors_not_aborts() {
+    let src = r#"
+      var out = [];
+      function t(name, f) { try { out.push(name + ' ok ' + String(f())); } catch (e) { out.push(name + ' ' + e.constructor.name + ' ' + e.message.split('\n')[0]); } }
+      t('asIntN-big-in-range', function () { return BigInt.asIntN(9007199254740991, 1n); });
+      t('asUintN-big-negative', function () { return BigInt.asUintN(9007199254740991, -1n); });
+      t('asIntN-2^53', function () { return BigInt.asIntN(9007199254740992, 0n); });
+      t('asIntN--1', function () { return BigInt.asIntN(-1, 0n); });
+      t('asUintN-small', function () { return BigInt.asUintN(1000000000, 5n); });
+      t('ta-object-len-2^53', function () { return new Int8Array({ length: Math.pow(2, 53) }).length; });
+      t('ta-object-len-u8', function () { return new Uint8Array({ length: 2 ** 40 }).length; });
+      t('radix-1', function () { return (1).toString(1); });
+      t('radix-37', function () { return (1).toString(37); });
+      t('radix-2.9', function () { return (5).toString(2.9); });
+      t('new-Array--1', function () { return new Array(-1).length; });
+      t('new-Array-1.5', function () { return new Array(1.5).length; });
+      t('length-2^32', function () { var a = []; a.length = 4294967296; return a.length; });
+      t('length-ceiling', function () { var a = []; a.length = 4294967295; return a.length; });
+      t('index-ceiling', function () { var a = []; a[4294967294] = 1; return a.length; });
+      t('map-2^32', function () { return Array.prototype.map.call({ length: 4294967296 }, function (x) { return x; }).length; });
+      t('slice-2^32', function () { return Array.prototype.slice.call({ length: 4294967296 }).length; });
+      t('concat-max-safe', function () { var o = { length: Number.MAX_SAFE_INTEGER }; o[Symbol.isConcatSpreadable] = true; return [1].concat(o).length; });
+      t('radix-2', function () { return (5).toString(2); });
+      t('bits-bigint-arg', function () { return BigInt.asIntN(0n, 0n); });
+      t('bits-object-bigint', function () { return BigInt.asIntN(Object(0n), 0n); });
+      t('bits-toPrimitive-bigint', function () { return BigInt.asUintN({ [Symbol.toPrimitive]: function () { return 0n; } }, 0n); });
+      t('bits-valueOf-string', function () { return BigInt.asUintN({ valueOf: function () { return '3'; } }, 7n); });
+      t('bits-symbol', function () { return BigInt.asIntN(Symbol(), 0n); });
+      console.log(out.join('\n'));
+    "#;
+    // Node 22 messages, recorded over three runs. Node prints `ok 4294967295` for `length-ceiling` and
+    // `index-ceiling`; thaw's dense ceiling makes those two RangeErrors instead.
+    assert_eq!(
+        run(src).join("\n"),
+        [
+            "asIntN-big-in-range ok 1",
+            "asUintN-big-negative RangeError Maximum BigInt size exceeded",
+            "asIntN-2^53 RangeError Invalid value: not (convertible to) a safe integer",
+            "asIntN--1 RangeError Invalid value: not (convertible to) a safe integer",
+            "asUintN-small ok 5",
+            "ta-object-len-2^53 RangeError Array buffer allocation failed",
+            "ta-object-len-u8 RangeError Array buffer allocation failed",
+            "radix-1 RangeError toString() radix argument must be between 2 and 36",
+            "radix-37 RangeError toString() radix argument must be between 2 and 36",
+            "radix-2.9 ok 101",
+            "new-Array--1 RangeError Invalid array length",
+            "new-Array-1.5 RangeError Invalid array length",
+            "length-2^32 RangeError Invalid array length",
+            "length-ceiling RangeError Invalid array length",
+            "index-ceiling RangeError Invalid array length",
+            "map-2^32 RangeError Invalid array length",
+            "slice-2^32 RangeError Invalid array length",
+            "concat-max-safe TypeError Invalid array length",
+            "radix-2 ok 101",
+            "bits-bigint-arg TypeError Cannot convert a BigInt value to a number",
+            "bits-object-bigint TypeError Cannot convert a BigInt value to a number",
+            "bits-toPrimitive-bigint TypeError Cannot convert a BigInt value to a number",
+            "bits-valueOf-string ok 7",
+            "bits-symbol TypeError Cannot convert a Symbol value to a number",
+        ]
+        .join("\n")
+    );
+}
+
+/// The prelude's Error construction and `Object.getOwnPropertyDescriptors` keep working when the script has
+/// replaced the global `Object` (they used to recurse until the stack overflowed).
+#[test]
+fn runtime_paths_do_not_read_a_replaced_global_object() {
+    let src = r#"
+      function fakeObject() { throw new Error('overridden'); }
+      fakeObject.getOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
+      fakeObject.keys = Object.keys;
+      var g = this;
+      g.Object = fakeObject;
+      console.log(Object === fakeObject, Object.keys(Object.getOwnPropertyDescriptors('a')).length);
+      try { Object.getOwnPropertyNames('a'); } catch (e) { console.log(e.constructor.name); }
+    "#;
+    // Node 22 runs the same script as a module, where `this` is not the global object. Under a script, as here,
+    // the Object replacement is visible and the descriptor helper still works on the intrinsics.
+    assert_eq!(run(src), vec!["true 2", "TypeError"]);
+}
