@@ -7,8 +7,10 @@ use crate::*;
 /// Self-hosted standard library: written in the subset the evaluator itself runs.
 pub(crate) const PRELUDE: &str = r#"
 (function () {
+  // the intrinsics the runtime paths below call: a script may replace the global `Object`
+  var objectDefineProperty = Object.defineProperty, objectCreate = Object.create;
   function def(o, name, f) {
-    Object.defineProperty(o, name, { value: f, writable: true, enumerable: false, configurable: true });
+    objectDefineProperty(o, name, { value: f, writable: true, enumerable: false, configurable: true });
   }
   // V8 formats `stack` through Error.prepareStackTrace(error, callsites) when it is a function. This engine
   // formats it when the error is made (V8 at first read). The hook is not re-entered from inside itself: an
@@ -29,7 +31,7 @@ pub(crate) const PRELUDE: &str = r#"
     formatting = true;
     try {
       return hook(err, frames.map(function (fr) {
-        var c = Object.create(siteProto);
+        var c = objectCreate(siteProto);
         siteStore().set(c, fr);
         return c;
       }));
@@ -106,7 +108,7 @@ pub(crate) const PRELUDE: &str = r#"
     var value = typeof hook === 'function'
       ? formatStack(target, hook, __thaw_call_frames(captureStackTrace, E.stackTraceLimit, ctorOpt))
       : header + '\n    at <anonymous>';
-    Object.defineProperty(target, 'stack', { value: value, writable: true, enumerable: false, configurable: true });
+    objectDefineProperty(target, 'stack', { value: value, writable: true, enumerable: false, configurable: true });
   }
   def(E, 'captureStackTrace', captureStackTrace);
   // V8 hook (plain node 22 default: a named function); assignable by addon loaders (`bindings` saves and restores it);
@@ -1086,6 +1088,56 @@ impl Interp {
         self.throw_error("TypeError", &format!("Cannot redefine property: {key}"))
     }
 
+    /// `ToPropertyDescriptor` (ECMA-262 6.2.6.5): fields are read in spec order, and a non-object
+    /// descriptor, a `get`/`set` that is neither callable nor undefined, or accessor fields mixed with
+    /// `value`/`writable` throw a TypeError. Every define path calls this once before it applies anything.
+    pub(crate) fn prop_desc_of(&mut self, desc: &Value) -> R<PropDesc> {
+        let Value::Object(d) = desc else {
+            let shown = self.to_str(desc);
+            return self.throw_error(
+                "TypeError",
+                &format!("Property description must be an object: {shown}"),
+            );
+        };
+        let has = |it: &mut Interp, k: &str| -> R<Option<Value>> {
+            if find_in_chain(d, k).is_some() {
+                return Ok(Some(it.get(desc, k)?));
+            }
+            Ok(None)
+        };
+        let enumerable = has(self, "enumerable")?;
+        let configurable = has(self, "configurable")?;
+        let value = has(self, "value")?;
+        let writable = has(self, "writable")?;
+        let get = has(self, "get")?;
+        let set = has(self, "set")?;
+        for (what, f) in [("Getter", &get), ("Setter", &set)] {
+            if let Some(f) = f
+                .as_ref()
+                .filter(|f| !f.is_callable() && !matches!(f, Value::Undefined))
+            {
+                let shown = self.to_str(f);
+                return self
+                    .throw_error("TypeError", &format!("{what} must be a function: {shown}"));
+            }
+        }
+        if (get.is_some() || set.is_some()) && (value.is_some() || writable.is_some()) {
+            let label = v8_label(self, d)?;
+            return self.throw_error(
+                "TypeError",
+                &format!("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute, {label}"),
+            );
+        }
+        Ok(PropDesc {
+            value,
+            writable,
+            enumerable,
+            configurable,
+            get,
+            set,
+        })
+    }
+
     /// `[[DefineOwnProperty]]` with `ValidateAndApplyPropertyDescriptor`: `Ok(false)` refuses the
     /// descriptor and applies nothing. `Reflect.defineProperty` returns this directly.
     pub(crate) fn try_define(&mut self, o: &Obj, key: &str, desc: &Value) -> R<bool> {
@@ -1093,22 +1145,7 @@ impl Interp {
         if let Some(sb) = crate::vm::sandbox_of(o) {
             return self.try_define(&sb, key, desc);
         }
-        let has = |it: &mut Interp, k: &str| -> R<Option<Value>> {
-            if let Value::Object(d) = desc {
-                if find_in_chain(d, k).is_some() {
-                    return Ok(Some(it.get(desc, k)?));
-                }
-            }
-            Ok(None)
-        };
-        let d = PropDesc {
-            value: has(self, "value")?,
-            writable: has(self, "writable")?,
-            enumerable: has(self, "enumerable")?,
-            configurable: has(self, "configurable")?,
-            get: has(self, "get")?,
-            set: has(self, "set")?,
-        };
+        let d = self.prop_desc_of(desc)?;
         // a typed array's element takes only a plain data descriptor (no accessor, no false attribute)
         if let Some(valid) = crate::typed::typed_own_key(o, key) {
             let refused = |x: &Option<Value>| x.as_ref().is_some_and(|v| !v.truthy());
@@ -1577,6 +1614,7 @@ impl Interp {
                 let key = it.key_of(&arg(args, 1));
                 if let Value::Object(po) = arg(args, 0) {
                     if let Some((target, handler, trap)) = it.proxy_trap(&po, "defineProperty")? {
+                        it.prop_desc_of(&arg(args, 2))?;
                         if trap.is_callable() {
                             it.call(&trap, &handler, &[target, arg(args, 1), arg(args, 2)])?;
                         } else {
@@ -2028,7 +2066,17 @@ impl Interp {
         let ap = self.array_proto.clone();
         let array = self.native(|it, _, args| {
             let made = match args {
-                [Value::Number(n)] => it.array(vec![Value::Hole; *n as usize]),
+                [Value::Number(n)] => {
+                    // ToUint32(n) must equal n (a RangeError otherwise), and dense storage has a ceiling
+                    if n.fract() != 0.0
+                        || *n < 0.0
+                        || *n > 4294967295.0
+                        || *n >= MAX_DENSE_ARRAY_LEN as f64
+                    {
+                        return it.throw_error("RangeError", "Invalid array length");
+                    }
+                    it.array(vec![Value::Hole; *n as usize])
+                }
                 _ => it.array(args.to_vec()),
             };
             // the slots were charged to the heap limit when made: stop here if that tripped it
@@ -2333,6 +2381,9 @@ impl Interp {
                 n.trunc().clamp(0.0, 9e15) as usize
             };
             let (from, to) = it.range(args, len);
+            if to.saturating_sub(from) >= MAX_DENSE_ARRAY_LEN {
+                return it.throw_error("RangeError", "Invalid array length");
+            }
             let mut out = Vec::with_capacity(to.saturating_sub(from));
             for i in from..to {
                 out.push(it.get_index(this, i)?);
@@ -2350,7 +2401,15 @@ impl Interp {
                         let key = it.well_known_key("isConcatSpreadable");
                         if it.get(v, &key)?.truthy() {
                             let n = it.get(v, "length")?;
-                            for i in 0..it.num(&n).max(0.0) as usize {
+                            let n = it.num(&n).max(0.0);
+                            // IsConcatSpreadable's length past the integer limit is a TypeError (ECMA-262 23.1.3.1)
+                            if items.len() as f64 + n > 9007199254740991.0 {
+                                return it.throw_error("TypeError", "Invalid array length");
+                            }
+                            if items.len() as f64 + n > MAX_DENSE_ARRAY_LEN as f64 {
+                                return it.throw_error("RangeError", "Invalid array length");
+                            }
+                            for i in 0..n as usize {
                                 items.push(it.get(v, &i.to_string())?);
                             }
                         } else {
@@ -2833,9 +2892,16 @@ impl Interp {
         self.set_native(&self.number_proto.clone(), "toString", |it, this, args| {
             let n = it.num(this);
             let radix = match arg(args, 0) {
-                Value::Undefined => 10,
-                v => it.num(&v) as u32,
+                Value::Undefined => 10.0,
+                v => it.num(&v).trunc(),
             };
+            if !(2.0..=36.0).contains(&radix) {
+                return it.throw_error(
+                    "RangeError",
+                    "toString() radix argument must be between 2 and 36",
+                );
+            }
+            let radix = radix as u32;
             if radix == 10 || !n.is_finite() || n.fract() != 0.0 {
                 return Ok(Value::Str(number_to_string(n).into()));
             }
@@ -3249,6 +3315,9 @@ impl Interp {
             let (f, t) = (arg(args, 0), arg(args, 1));
             callback(it, &f, "map")?;
             let len = length_of(it, this)?;
+            if len >= MAX_DENSE_ARRAY_LEN {
+                return it.throw_error("RangeError", "Invalid array length");
+            }
             let mut out = Vec::with_capacity(len);
             for i in 0..len {
                 match element(it, this, i)? {
@@ -3355,13 +3424,13 @@ impl Interp {
 }
 
 /// The descriptor fields that were present (`Some`), as `Object.defineProperty` reads them.
-struct PropDesc {
-    value: Option<Value>,
-    writable: Option<Value>,
-    enumerable: Option<Value>,
-    configurable: Option<Value>,
-    get: Option<Value>,
-    set: Option<Value>,
+pub(crate) struct PropDesc {
+    pub(crate) value: Option<Value>,
+    pub(crate) writable: Option<Value>,
+    pub(crate) enumerable: Option<Value>,
+    pub(crate) configurable: Option<Value>,
+    pub(crate) get: Option<Value>,
+    pub(crate) set: Option<Value>,
 }
 
 impl Interp {

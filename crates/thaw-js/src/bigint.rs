@@ -4,6 +4,9 @@ use crate::*;
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
+/// V8's BigInt size limit in bits (kMaxLengthBits): a modulus past it is a RangeError, not an allocation.
+const MAX_BIGINT_BITS: u64 = 1 << 30;
+
 pub(crate) fn big(v: BigInt) -> Value {
     Value::BigInt(Rc::new(v))
 }
@@ -243,8 +246,20 @@ impl Interp {
         for signed in [false, true] {
             let name = if signed { "asIntN" } else { "asUintN" };
             self.set_native(c, name, move |it, _, args| {
-                let bits = it.num(&arg(args, 0));
-                let Some(bits) = (bits.is_finite() && bits >= 0.0).then_some(bits as u64) else {
+                // ToIndex: ToNumber first (a BigInt throws there), then an integer in [0, 2^53 - 1]
+                let raw = arg(args, 0);
+                if matches!(&raw, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. })) {
+                    return it.throw_error("TypeError", "Cannot convert a Symbol value to a number");
+                }
+                let bits = it.primitive_of(&raw, extras::Hint::Number)?;
+                if matches!(bits, Value::BigInt(_)) {
+                    return it
+                        .throw_error("TypeError", "Cannot convert a BigInt value to a number");
+                }
+                let bits = it.num(&bits);
+                let Some(bits) = (bits.is_finite() && (0.0..=9007199254740991.0).contains(&bits))
+                    .then_some(bits as u64)
+                else {
                     return it.throw_error(
                         "RangeError",
                         "Invalid value: not (convertible to) a safe integer",
@@ -253,6 +268,19 @@ impl Interp {
                 let x = it.bigint_of(&arg(args, 1))?;
                 if bits == 0 {
                     return Ok(big(BigInt::zero()));
+                }
+                // a value already in range is its own result: no modulus, so huge `bits` costs nothing
+                let in_range = if signed {
+                    x.bits() < bits
+                } else {
+                    !x.is_negative() && x.bits() <= bits
+                };
+                if in_range {
+                    return Ok(big(x));
+                }
+                // the negative unsigned modulus needs 2^bits: past V8's BigInt size limit it is a RangeError
+                if bits > MAX_BIGINT_BITS {
+                    return it.throw_error("RangeError", "Maximum BigInt size exceeded");
                 }
                 let modulus = BigInt::one() << bits as usize;
                 let mut m = x % &modulus;

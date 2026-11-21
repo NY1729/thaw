@@ -2,6 +2,8 @@
 
 pub(crate) const EXTRAS: &str = r#"
 (function () {
+  // the intrinsics the runtime path below calls: a script may replace the global `Object`
+  var objectGetOwnPropertyNames = Object.getOwnPropertyNames, objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
   function def(o, name, f) {
     Object.defineProperty(o, name, { value: f, writable: true, enumerable: false, configurable: true });
   }
@@ -125,8 +127,8 @@ pub(crate) const EXTRAS: &str = r#"
     return a === b;
   });
   def(Object, 'getOwnPropertyDescriptors', function (o) {
-    var out = {}, names = Object.getOwnPropertyNames(o);
-    for (var i = 0; i < names.length; i++) out[names[i]] = Object.getOwnPropertyDescriptor(o, names[i]);
+    var out = {}, names = objectGetOwnPropertyNames(o);
+    for (var i = 0; i < names.length; i++) out[names[i]] = objectGetOwnPropertyDescriptor(o, names[i]);
     return out;
   });
   def(String, 'raw', function (strings) {
