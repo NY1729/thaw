@@ -770,9 +770,10 @@ fn boot_bundle(
         factories.insert(k.clone(), f);
     }
     let origins = star_origins(it, bundle_js)?;
-    let esm_keys = bundle_table(bundle_js, "__thaw_bundle_export_graphs")
+    let mut esm_keys: HashSet<String> = bundle_table(bundle_js, "__thaw_bundle_export_graphs")
         .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
         .unwrap_or_default();
+    esm_keys.extend(parts.esm_keys.iter().cloned());
     let cjs_names = bundle_table(bundle_js, "__thaw_bundle_cjs_export_names")
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default()
