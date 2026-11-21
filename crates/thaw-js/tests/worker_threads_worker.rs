@@ -155,15 +155,29 @@ fn two_workers_get_distinct_thread_ids() {
 }
 
 #[test]
-fn terminate_returns_the_same_promise_and_resolves_with_the_exit_code() {
+fn terminate_returns_a_new_promise_per_call_that_resolves_with_the_exit_code() {
+    // Node 22.23.1: each terminate() call returns its own promise; both resolve with the exit code
     let src = "const wt = __thaw_worker_threads_exports;
       (async () => {
         const worker = new wt.Worker('while (true) {}', { eval: true });
+        await new Promise((resolve) => worker.once('online', resolve));
         const first = worker.terminate();
-        console.log('same ' + (first === worker.terminate()));
-        console.log('terminated ' + await first);
+        const second = worker.terminate();
+        console.log('same ' + (first === second));
+        console.log('terminated ' + await first + ' ' + await second);
       })().catch((e) => console.log('failed ' + e));";
-    assert_eq!(run_main(src), "same true|terminated 1");
+    assert_eq!(run_main(src), "same false|terminated 1 1");
+}
+
+#[test]
+fn terminate_before_the_bootstrap_exits_0() {
+    // Node 22.23.1: terminate() right after construction, before the worker started, exits 0
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const worker = new wt.Worker('while (true) {}', { eval: true });
+        console.log('terminated ' + await worker.terminate());
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "terminated 0");
 }
 
 #[test]
@@ -171,7 +185,7 @@ fn terminate_stops_a_busy_worker_within_the_time_limit() {
     let src = "const wt = __thaw_worker_threads_exports;
       (async () => {
         const worker = new wt.Worker('while (true) {}', { eval: true });
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => worker.once('online', resolve));
         console.log('terminated ' + await worker.terminate());
       })().catch((e) => console.log('failed ' + e));";
     let started = std::time::Instant::now();
@@ -194,7 +208,7 @@ fn awaited_terminate_settles_through_await_settled() {
     std::thread::spawn(move || {
         let mut it = Interp::new();
         let promise = it
-            .run("(async () => { const wt = __thaw_worker_threads_exports; const worker = new wt.Worker('while (true) {}', { eval: true }); await new Promise((resolve) => setTimeout(resolve, 100)); return worker.terminate(); })();")
+            .run("(async () => { const wt = __thaw_worker_threads_exports; const worker = new wt.Worker('while (true) {}', { eval: true }); await new Promise((resolve) => worker.once('online', resolve)); return worker.terminate(); })();")
             .expect("main script runs");
         let text = match it.await_settled(&promise).expect("loop runs") {
             Some(Ok(thaw_js::Value::Number(code))) => code.to_string(),
