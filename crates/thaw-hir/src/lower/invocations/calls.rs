@@ -4671,7 +4671,10 @@ impl<'a> FnLowerer<'a> {
                     .and_then(|p| p.get(i))
                     .or_else(|| signature.as_ref().and_then(|sig| sig.variadic.as_ref()));
                 if let Some(declared) = declared_slot.filter(|_| thaw_js_live_owner_slot) {
-                    if generic_call || Self::type_holds_any(declared) {
+                    if generic_call
+                        || Self::type_holds_any(declared)
+                        || Self::is_class_instance_type(declared)
+                    {
                         if let Some(marked) =
                             self.thaw_js_live_owner_argument(&value, declared, generic_call)?
                         {
