@@ -15,11 +15,14 @@ wasm = ["dep:thaw-wasm"]
 wasi = ["wasm", "thaw-wasm/wasi"]
 # node:sqlite natives (sqlite/); off by default, so programs without it link no SQLite.
 sqlite = ["dep:thaw-sqlite"]
+# node:zlib zstd natives (zlib/zstd.rs): C libzstd 1.5.7, the version Node 22 links, multithreaded (`zstdmt`, nbWorkers); off by default.
+zstd = ["dep:zstd-safe", "zstd-safe/zstdmt"]
 
 [dependencies]
 thaw-intl = { path = "../thaw-intl", optional = true }
 thaw-wasm = { path = "../thaw-wasm", optional = true }
 thaw-sqlite = { path = "../thaw-sqlite", optional = true }
+zstd-safe = { version = "8.3.0", default-features = false, features = ["std"], optional = true }
 thaw-parser = { path = "../thaw-parser" }
 thaw-node-builtins = { path = "../thaw-node-builtins" }
 thaw-arena = { path = "../thaw-arena" }

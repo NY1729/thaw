@@ -1251,7 +1251,14 @@ fn build_with_native_mode_routed(
     let thaw_js_wasm = compiler.uses_thaw_js() && runtime_features.contains("wasm");
     // `node:sqlite` programs get thaw-js's `sqlite` feature (bundled SQLite); other programs link none of it.
     let thaw_js_sqlite = compiler.uses_thaw_js() && runtime_features.contains("sqlite");
-    let thaw_js_features: Vec<&str> = [(thaw_js_intl, "intl"), (thaw_js_wasm, "wasi"), (thaw_js_sqlite, "sqlite")]
+    // `node:zlib` zstd programs get thaw-js's `zstd` feature (C libzstd); other programs link none of it.
+    let thaw_js_zstd = compiler.uses_thaw_js() && runtime_features.contains("zstd");
+    let thaw_js_features: Vec<&str> = [
+        (thaw_js_intl, "intl"),
+        (thaw_js_wasm, "wasi"),
+        (thaw_js_sqlite, "sqlite"),
+        (thaw_js_zstd, "zstd"),
+    ]
         .into_iter()
         .filter_map(|(on, feature)| on.then_some(feature))
         .collect();
@@ -1809,10 +1816,17 @@ fn native_addon_import_audit_rejects_missing_and_internal_symbols() {
 
 #[test]
 fn quickjs_archive_never_gets_the_thaw_js_only_sqlite_feature() {
-    let features: std::collections::BTreeSet<&str> = ["intl", "sqlite", "tls"].into_iter().collect();
+    let features: std::collections::BTreeSet<&str> = ["intl", "sqlite", "tls", "zstd"].into_iter().collect();
     assert_eq!(quickjs_runtime_features(&features), vec!["intl", "tls"]);
     // the N-API QuickJS features follow the same rule (no `quickjs-sqlite` feature exists)
     assert_eq!(napi_runtime_features(&features), vec!["quickjs", "quickjs-intl", "quickjs-tls"]);
+}
+
+#[test]
+fn zstd_marker_selects_the_zstd_feature_only_for_zstd_users() {
+    assert!(thaw_bridge::required_runtime_features("zlib.zstdCompressSync(input)").contains("zstd"));
+    assert!(thaw_bridge::required_runtime_features("require('node:zlib').createZstdDecompress()").contains("zstd"));
+    assert!(!thaw_bridge::required_runtime_features("module.exports = value => value + 1").contains("zstd"));
 }
 
 #[test]
@@ -2087,12 +2101,17 @@ fn source_uses_intl(source: &str) -> bool {
 /// The runtime features `thaw-quickjs` has as cargo features: `node:sqlite` is served by thaw-js only (the QuickJS lane
 /// never had it), so a program that merely mentions it (undici's cache store) must not ask for a `sqlite` feature there.
 fn quickjs_runtime_features<'a>(features: &std::collections::BTreeSet<&'a str>) -> Vec<&'a str> {
-    features.iter().copied().filter(|feature| *feature != "sqlite").collect()
+    features.iter().copied().filter(|feature| !is_thaw_js_only_feature(feature)).collect()
+}
+
+/// Runtime features served by thaw-js alone (its cargo features `sqlite` and `zstd`): the QuickJS lane never had them.
+fn is_thaw_js_only_feature(feature: &str) -> bool {
+    matches!(feature, "sqlite" | "zstd")
 }
 
 fn napi_runtime_features(features: &std::collections::BTreeSet<&str>) -> Vec<String> {
     std::iter::once("quickjs".to_string())
-        .chain(features.iter().filter(|feature| **feature != "sqlite").map(|feature| format!("quickjs-{feature}")))
+        .chain(features.iter().filter(|feature| !is_thaw_js_only_feature(feature)).map(|feature| format!("quickjs-{feature}")))
         .collect()
 }
 

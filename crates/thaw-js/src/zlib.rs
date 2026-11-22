@@ -14,6 +14,9 @@ use crate::host::Native;
 use crate::json::parse_native;
 use crate::*;
 
+#[cfg(feature = "zstd")]
+mod zstd;
+
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes
@@ -39,6 +42,9 @@ struct ZlibOptions {
     level: Option<u32>,
     dictionary: Vec<u8>,
     max_output: Option<usize>,
+    /// zstd `params` as (`ZSTD_c_*`/`ZSTD_d_*` key, value) pairs.
+    #[cfg(feature = "zstd")]
+    params: Vec<(u32, i32)>,
 }
 
 impl ZlibOptions {
@@ -58,6 +64,22 @@ impl ZlibOptions {
                 _ => Vec::new(),
             },
             max_output: num("maxOutputLength").map(|n| n as usize),
+            #[cfg(feature = "zstd")]
+            params: match get("params") {
+                Some(Native::Array(pairs)) => pairs
+                    .iter()
+                    .filter_map(|pair| match pair {
+                        Native::Array(kv) => match kv.as_slice() {
+                            [Native::Number(key), Native::Number(value)] => {
+                                Some((*key as u32, *value as i32))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -250,6 +272,11 @@ pub(crate) fn install(it: &mut Interp) {
     g.declare("__thaw_zlib_async_take", f, true);
     let f = it.native(|_, _, _| Ok(Value::Bool(active())));
     g.declare("__thaw_zlib_active", f, true);
+    #[cfg(feature = "zstd")]
+    {
+        let f = it.native(|_, _, _| Ok(Value::Bool(true)));
+        g.declare("__thaw_zlib_zstd_available", f, true);
+    }
 }
 
 fn zlib_error(code: &str, message: &str) -> io::Error {
@@ -260,6 +287,8 @@ fn compress_bytes_with(format: &str, value: &[u8], options: &ZlibOptions) -> io:
     use flate2::write::{DeflateEncoder, ZlibEncoder};
     let compression = options.compression();
     match format {
+        #[cfg(feature = "zstd")]
+        "zstd" | "zstdStream" => zstd::compress(value, &options.params, format == "zstdStream"),
         "brotli" => {
             let mut encoder = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
             encoder.write_all(value)?;
@@ -323,6 +352,10 @@ fn decompress_bytes_with(format: &str, value: &[u8], options: &ZlibOptions) -> i
         .map(|limit| limit as u64 + 1)
         .unwrap_or(u64::MAX);
     match format {
+        #[cfg(feature = "zstd")]
+        "zstd" | "zstdStream" => {
+            output = zstd::decompress(value, &options.params, options.max_output)?;
+        }
         "brotli" => {
             brotli::Decompressor::new(value, 4096)
                 .take(limit)

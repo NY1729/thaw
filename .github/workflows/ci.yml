@@ -676,6 +676,8 @@ jobs:
         run: |
           cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
           cargo test -p thaw-registry -- --test-threads=1
+          # node:zlib zstd natives (cargo feature `zstd`, C libzstd): the feature-gated tests run only with it on
+          cargo test -p thaw-registry --features zstd -- zlib_zstd --test-threads=1
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
       - name: Test Hono, Prisma, and PostgreSQL

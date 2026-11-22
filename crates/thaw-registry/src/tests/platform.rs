@@ -2257,3 +2257,163 @@ fn nested_worker_port_closes_for_its_peer_when_its_owner_stops() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
+
+// node:zlib zstd (PR-1: constants, sync and callback one-shots). Expected bytes and error shapes were recorded from
+// Node 22.23.1 (libzstd 1.5.7), the same library thaw-js links through zstd-safe.
+
+#[cfg(feature = "zstd")]
+const ZSTD_HELLO_SYNC: &str = "28b52ffd201c8500005068656c6c6f207a7374640100f14a11";
+#[cfg(feature = "zstd")]
+const ZSTD_HELLO_CALLBACK: &str = "28b52ffd00588500005068656c6c6f207a7374640100f14a11";
+
+/// Runs `body` (a JS expression, or a `return` body for async functions) as an npm-style CommonJS package and returns
+/// its JSON result.
+fn zstd_run(name: &str, body: &str) -> String {
+    let dir = temp_registry(name);
+    fs::write(
+        dir.join("index.js"),
+        format!("var zlib = require('node:zlib'), s = Buffer.from('hello hello hello hello zstd'); module.exports = async function () {{ {body} }};"),
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry(&format!("{name}_node_modules"));
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let result = run_js(&bundle);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    result
+}
+
+#[test]
+fn zlib_zstd_constants_match_node() {
+    let result = zstd_run(
+        "zstd_constants",
+        "var c = zlib.constants; return [c.ZSTD_e_end, c.ZSTD_e_continue, c.ZSTD_c_compressionLevel, c.ZSTD_d_windowLogMax, c.ZSTD_error_prefix_unknown, c.ZSTD_error_noForwardProgress_inputEmpty, c.ZSTD_CLEVEL_DEFAULT, Object.keys(c).filter(function (k) { return k.indexOf('ZSTD') === 0; }).length];",
+    );
+    assert_eq!(result, "[2,0,100,100,10,82,3,63]");
+}
+
+#[cfg(not(feature = "zstd"))]
+#[test]
+fn zlib_zstd_functions_are_absent_without_the_native() {
+    let result = zstd_run(
+        "zstd_absent",
+        "return [typeof zlib.zstdCompressSync, typeof zlib.zstdDecompressSync, typeof zlib.zstdCompress, typeof zlib.zstdDecompress];",
+    );
+    assert_eq!(result, r#"["undefined","undefined","undefined","undefined"]"#);
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_sync_compress_matches_node_bytes_at_each_level() {
+    let result = zstd_run(
+        "zstd_sync_levels",
+        "var hex = function (level) { return zlib.zstdCompressSync(s, { params: { [zlib.constants.ZSTD_c_compressionLevel]: level } }).toString('hex'); }; return [hex(1), hex(3), hex(19), zlib.zstdCompressSync(s).toString('hex')];",
+    );
+    assert_eq!(
+        result,
+        format!(r#"["{h}","{h}","{h}","{h}"]"#, h = ZSTD_HELLO_SYNC)
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_decodes_node_frames() {
+    let result = zstd_run(
+        "zstd_decode_node",
+        &format!(
+            "return [zlib.zstdDecompressSync(Buffer.from('{ZSTD_HELLO_SYNC}', 'hex')).toString(), zlib.zstdDecompressSync(Buffer.from('{ZSTD_HELLO_CALLBACK}', 'hex')).toString()];"
+        ),
+    );
+    assert_eq!(
+        result,
+        r#"["hello hello hello hello zstd","hello hello hello hello zstd"]"#
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_empty_input_round_trips_and_decodes_to_nothing() {
+    let result = zstd_run(
+        "zstd_empty",
+        "return [zlib.zstdCompressSync(Buffer.alloc(0)).toString('hex'), zlib.zstdDecompressSync(Buffer.from('28b52ffd2000010000', 'hex')).length, zlib.zstdDecompressSync(Buffer.alloc(0)).length];",
+    );
+    assert_eq!(result, r#"["28b52ffd2000010000",0,0]"#);
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_one_mib_round_trips_with_node_sizes() {
+    let result = zstd_run(
+        "zstd_one_mib",
+        "var big = Buffer.from('the quick brown fox '.repeat(52429).slice(0, 1048576)); return [1, 3, 19].map(function (level) { var c = zlib.zstdCompressSync(big, { params: { 100: level } }); return [c.length, zlib.zstdDecompressSync(c).equals(big)]; });",
+    );
+    assert_eq!(result, "[[125,true],[124,true],[117,true]]");
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_corrupt_and_wrong_magic_errors_have_node_shape() {
+    let result = zstd_run(
+        "zstd_errors",
+        "var checksummed = Buffer.from('28b52ffd241c8500005068656c6c6f207a7374640100f14a11de38b055', 'hex'); checksummed[9] ^= 0x55; var corrupt = (function () { try { zlib.zstdDecompressSync(checksummed); return null; } catch (e) { return [e.name, e.code, e.errno, e.message]; } })(); var magic = (function () { try { zlib.zstdDecompressSync(Buffer.from('not zstd data')); return null; } catch (e) { return [e.name, e.code, e.errno, e.message]; } })(); return [corrupt, magic];"
+    );
+    assert_eq!(
+        result,
+        r#"[["Error","ZSTD_error_corruption_detected",20,"Data corruption detected"],["Error","ZSTD_error_prefix_unknown",10,"Unknown frame descriptor"]]"#
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_level_is_clamped_like_node() {
+    let result = zstd_run(
+        "zstd_clamp",
+        "return [999, -5, 22].map(function (level) { return zlib.zstdCompressSync(s, { params: { 100: level } }).toString('hex'); });",
+    );
+    assert_eq!(
+        result,
+        format!(r#"["{h}","{h}","{h}"]"#, h = ZSTD_HELLO_SYNC)
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_truncated_concatenated_and_trailing_input_follow_node() {
+    let result = zstd_run(
+        "zstd_stream_shapes",
+        "var frame = zlib.zstdCompressSync(s); return [zlib.zstdDecompressSync(frame.subarray(0, 10)).length, zlib.zstdDecompressSync(Buffer.concat([frame, frame])).toString(), zlib.zstdDecompressSync(Buffer.concat([frame, Buffer.from([1, 2, 3])])).toString()];",
+    );
+    assert_eq!(
+        result,
+        r#"[0,"hello hello hello hello zstdhello hello hello hello zstd","hello hello hello hello zstd"]"#
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_callback_api_uses_the_streaming_header_and_reports_errors() {
+    let result = zstd_run(
+        "zstd_callback",
+        "var compress = function (value, options) { return new Promise(function (resolve, reject) { zlib.zstdCompress(value, options, function (error, output) { if (error) reject(error); else resolve(output.toString('hex')); }); }); }; var plain = await compress(s); var level19 = await compress(s, { params: { 100: 19 } }); var empty = await compress(Buffer.alloc(0)); var failure = await new Promise(function (resolve) { zlib.zstdDecompress(Buffer.from('not zstd data'), function (error) { resolve([error.code, error.errno, error.message]); }); }); return [plain, level19, empty, failure];",
+    );
+    assert_eq!(
+        result,
+        format!(
+            r#"["{ZSTD_HELLO_CALLBACK}","28b52ffd00688500005068656c6c6f207a7374640100f14a11","28b52ffd0058010000",["ZSTD_error_prefix_unknown",10,"Unknown frame descriptor"]]"#
+        )
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_option_errors_have_node_classes_and_messages() {
+    let result = zstd_run(
+        "zstd_option_errors",
+        "var shape = function (fn) { try { fn(); return null; } catch (e) { return [e.name, e.code, e.message]; } }; return [shape(function () { zlib.zstdCompressSync(s, { params: { 999: 1 } }); }), shape(function () { zlib.zstdCompressSync(s, { params: { 100: 'x' } }); }), shape(function () { zlib.zstdCompressSync(s, { params: { 101: 5 } }); }), shape(function () { zlib.zstdDecompressSync(zlib.zstdCompressSync(s), { params: { 101: 20 } }); }), shape(function () { zlib.zstdDecompressSync(zlib.zstdCompressSync(s), { maxOutputLength: 10 }); })];",
+    );
+    assert_eq!(
+        result,
+        r#"[["RangeError","ERR_ZSTD_INVALID_PARAM","999 is not a valid zstd parameter"],["TypeError","ERR_INVALID_ARG_TYPE","The \"options.params[key]\" property must be of type number. Received type string ('x')"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],["RangeError","ERR_ZSTD_INVALID_PARAM","101 is not a valid zstd parameter"],["RangeError","ERR_BUFFER_TOO_LARGE","Cannot create a Buffer larger than 10 bytes"]]"#
+    );
+}

@@ -18,6 +18,10 @@ thaw-js = { path = "../thaw-js", features = ["intl", "wasm"] }
 swc_ecma_visit = "29.0.0"
 ureq = "3.4.0"
 
+# tests of the node:zlib zstd natives (`cargo test -p thaw-registry --features zstd`): forwards to thaw-js.
+[features]
+zstd = ["thaw-js/zstd"]
+
 [dev-dependencies]
 brotli = "8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
