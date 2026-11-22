@@ -4344,3 +4344,46 @@ fn lane_proof_dynamic_primitive_string_thaw_js() {
         "true\n5\nHELLO\nel\n"
     );
 }
+
+#[test]
+fn discarded_json_index_write_releases_its_nested_graph_lease() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.__thaw_index_child = Symbol('index-child'); globalThis.__thaw_index_refs_total = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0);");
+            const child: JsValue = getDynamicValue("__thaw_index_child");
+            const refsTotal: JsValue = getDynamicValue("__thaw_index_refs_total");
+            const values: Json[] = [JSON.parse("null")];
+            const before = Number(callDynamicValue(refsTotal, __thaw_json_argument_array()));
+            values[-1] = { nested: child };
+            const after = Number(callDynamicValue(refsTotal, __thaw_json_argument_array()));
+            console.log(values.length, after === before);
+        }
+    "#;
+    assert_eq!(compile_and_run_lane(source, "discarded_json_index_write_lease", Lane::ThawJs), "1 true\n");
+    assert_eq!(compile_and_run_lane(source, "discarded_json_index_write_lease_qjs", Lane::QuickJs), "1 true\n");
+}
+
+#[test]
+fn thaw_js_event_key_is_released_when_a_later_argument_throws() {
+    let source = r#"
+        declare function __thaw_typed_js_616363657074(key: JsValue, listener: JsValue): void;
+        function main(): void {
+            loadScript("globalThis.accept = () => {}; globalThis.__thaw_event_key_baseline = 0; globalThis.__thaw_event_key_mark = () => { globalThis.__thaw_event_key_baseline = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.__thaw_event_key_refs = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_event_key_baseline;");
+            const eventKeyRefs: JsValue = getDynamicValue("__thaw_event_key_refs");
+            loadScript("globalThis.__thaw_event_key_mark();");
+            function failListener(): JsValue { throw "later argument"; }
+            let caught = false;
+            try {
+                __thaw_typed_js_616363657074("native-key", failListener());
+            } catch (_) {
+                caught = true;
+            }
+            const afterThrow = callDynamicValue(eventKeyRefs, __thaw_json_argument_array());
+            const accept: JsValue = getDynamicValue("accept");
+            loadScript("globalThis.__thaw_event_key_mark();");
+            __thaw_typed_js_616363657074("native-key", accept);
+            console.log(caught, afterThrow, callDynamicValue(eventKeyRefs, __thaw_json_argument_array()));
+        }
+    "#;
+    assert_eq!(compile_and_run_lane(source, "thaw_js_event_key_later_argument", Lane::ThawJs), "true true true\n");
+}
