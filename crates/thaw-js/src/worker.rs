@@ -66,13 +66,16 @@ enum Evt {
     /// The answer to a profile start or stop: its ack id, the status (`started`, `exists`, `ok`, `unknown`), and the
     /// profile JSON of a stop.
     Profile(u32, &'static str, String),
+    /// One piece of the answer to a `getHeapSnapshot` request: its ack id, the text, and whether it is the last.
+    Chunk(u32, String, bool),
 }
 
 /// A request queued by the parent for the worker thread (`worker.cpuUsage()`, `getHeapStatistics()`,
-/// `startCpuProfile()` and the profile's `stop()`).
+/// `getHeapSnapshot()`, `startCpuProfile()` and the profile's `stop()`).
 enum Req {
     Cpu,
     Heap,
+    Snapshot,
     ProfStart(String),
     ProfStop(String),
 }
@@ -746,6 +749,10 @@ fn serve_cpu(side: &Side, it: &Interp) {
     for (ack, req) in acks {
         let evt = match (req, &usage) {
             (Req::Heap, Some(json)) => Evt::Heap(ack, json.clone()),
+            (Req::Snapshot, _) => {
+                send_snapshot(side, ack);
+                continue;
+            }
             (Req::ProfStart(name), _) => {
                 let status = it.worker.prof.borrow_mut().start(&name, &side.cpu);
                 Evt::Profile(ack, status, String::new())
@@ -757,6 +764,27 @@ fn serve_cpu(side: &Side, it: &Interp) {
             _ => Evt::Cpu(ack, user, system),
         };
         let _ = side.tx.send(evt);
+    }
+}
+
+/// Worker side: the worker's heap snapshot (`heapsnap::snapshot_json`) as `Evt::Chunk`s of about 64 KiB, each cut at a
+/// char boundary; the last one is marked `done`. Built on the owning thread, like every other answer here.
+fn send_snapshot(side: &Side, ack: u32) {
+    const CHUNK: usize = 64 << 10;
+    let text = crate::heapsnap::snapshot_json();
+    let mut rest = text.as_str();
+    loop {
+        let mut end = rest.len().min(CHUNK);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (head, tail) = rest.split_at(end);
+        let chunk = Evt::Chunk(ack, head.to_string(), tail.is_empty());
+        let _ = side.tx.send(chunk);
+        if tail.is_empty() {
+            break;
+        }
+        rest = tail;
     }
 }
 
@@ -1078,6 +1106,10 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
                     r#"{{"handle":{id},"type":"profile","ack":{ack},"status":"{status}","value":{}}}"#,
                     quoted(&value)
                 ),
+                Evt::Chunk(ack, value, done) => format!(
+                    r#"{{"handle":{id},"type":"chunk","ack":{ack},"value":{},"done":{done}}}"#,
+                    quoted(&value)
+                ),
             };
             items.push(Item::Json(json));
         }
@@ -1350,6 +1382,19 @@ pub(crate) fn install(it: &mut Interp) {
         Ok(Value::Bool(sent))
     });
     g.declare("__thaw_worker_prof", f, true);
+    // worker.getHeapSnapshot(): queues `ack`; the worker answers with `chunk` events (see `send_snapshot`)
+    let f = it.native(|it, _, a| {
+        let (h, ack) = (it.num(&arg(a, 0)) as u32, it.num(&arg(a, 1)) as u32);
+        let sent = match it.worker.workers.get(&h) {
+            Some(w) if !w.exited => {
+                w.cpu.request(ack, Req::Snapshot);
+                true
+            }
+            _ => false,
+        };
+        Ok(Value::Bool(sent))
+    });
+    g.declare("__thaw_worker_snapshot", f, true);
     let f = it.native(|it, _, a| {
         let (h, refd) = (it.num(&arg(a, 0)) as u32, arg(a, 1).truthy());
         if let Some(w) = it.worker.workers.get_mut(&h) {

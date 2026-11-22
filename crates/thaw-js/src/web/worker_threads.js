@@ -321,6 +321,38 @@
       return askWorker(states.get(this), __thaw_worker_heap, heapStatisticsOf);
     }
 
+    // Node: resolves a Readable of the worker's .heapsnapshot JSON, its chunks pushed as the worker answers (worker.rs
+    // `send_snapshot`). Rejects ERR_WORKER_NOT_RUNNING like the requests above. A worker that exits before the last
+    // chunk ends the stream: 'error' (when listened to), then 'close', with no 'end'.
+    getHeapSnapshot() {
+      const state = states.get(this);
+      return new Promise((resolve, reject) => {
+        if (!state.online || state.exited) return reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+        const ack = nextCpuAck++;
+        const stream = new Readable();
+        const fail = () => {
+          if (stream.endEmitted || stream.destroyed) return;
+          if (stream.__thawList('error').length > 0) stream.emit('error', threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+          stream.destroy();
+          stream.emit('close');
+        };
+        state.cpuPending.set(ack, {
+          chunk: (text, done) => {
+            if (text.length !== 0) stream.__thawPush(new TextEncoder().encode(text));
+            if (done) stream.__thawEnd();
+            stream.__thawFlush();
+          },
+          resolve: () => {},
+          reject: fail,
+        });
+        if (!__thaw_worker_snapshot(state.handle, ack)) {
+          state.cpuPending.delete(ack);
+          return reject(threadError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+        }
+        resolve(stream);
+      });
+    }
+
     // Node 22: a name is required (ERR_INVALID_ARG_TYPE, thrown). Resolves a handle whose stop() resolves the profile
     // JSON; the profile is sampled by the worker itself (cpu_profile.rs).
     startCpuProfile(name) {
@@ -415,6 +447,12 @@
         if (request !== undefined) {
           state.cpuPending.delete(event.ack);
           request.resolve(event.type === 'cpu' ? { user: event.user, system: event.system } : event.type === 'profile' ? { status: event.status, value: event.value } : event.usage);
+        }
+      } else if (event.type === 'chunk') {
+        const request = state.cpuPending.get(event.ack);
+        if (request !== undefined) {
+          if (event.done) state.cpuPending.delete(event.ack);
+          request.chunk(event.value, event.done);
         }
       } else if (event.type === 'message') {
         let value;
