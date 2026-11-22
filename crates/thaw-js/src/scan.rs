@@ -1236,13 +1236,14 @@ pub(crate) const SQLITE_NATIVE_GLOBALS: [&str; 17] = [
 /// `require` (host.rs `addon_of`; any `*.node` name returns the addon). `__non_webpack_require__` is the node-gyp-build
 /// probe, used only when `__webpack_require__` is a function (never on thaw-js). A dynamic `require` is that loader
 /// only when the same bundle also requires a `.node` by name (`bindings`, `node-gyp-build`). Any `method:<name>` is
-/// accepted too, except `method:dlopen`: the addon's exports are native functions named by the addon, not by the
-/// bundle, so the scan cannot list them. `process.dlopen` itself is never served on thaw-js.
+/// accepted too, `method:dlopen` included: the addon's exports are native functions named by the addon, not by the
+/// bundle, so the scan cannot list them, and `process.dlopen(module, path)` of the package's own engine library
+/// (Prisma) is served by the napi bridge (process_members.rs `dlopen`).
 fn addon_tolerated(feature: &str, node_require: bool) -> bool {
     (feature.starts_with("require:") && feature.ends_with(".node"))
         || (feature == "require:dynamic" && node_require)
         || feature == "global:__non_webpack_require__"
-        || (feature.starts_with("method:") && feature != "method:dlopen")
+        || feature.starts_with("method:")
 }
 
 /// A `__`-prefixed name: a host-internal or loader convention (`__thaw_*` natives, `__non_webpack_require__`), never a
@@ -1515,8 +1516,8 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
         }
         for m in &w.called {
             // `util.styleText` calls `stream.hasColors()` only after `typeof stream.hasColors === 'function'`
-            // `process.dlopen` is exported now (it throws ERR_DLOPEN_FAILED), but no addon loads at runtime, so
-            // a bundle that calls it stays a blocker, as it was when the member was missing. `defined` never excuses
+            // `process.dlopen` loads only the napi addon of a package that ships one (addon mode tolerates the
+            // finding, `addon_tolerated`); any other bundle that calls it stays a blocker. `defined` never excuses
             // it: an os-constants object's `dlopen` key (Prisma) is no addon load the bundle serves.
             // Node-parity (R2): a name Node 22 does not have is the package's own method, never a missing one.
             if (!known_methods.contains(m) || m == "dlopen")

@@ -48,6 +48,11 @@ impl std::fmt::Display for HostError {
     }
 }
 
+/// First characters of the line the registry prepends to a bundle to give environment variables defaults
+/// (thaw-registry `runtime_env_prelude`); a loader runs that line before the package's modules.
+pub const RUNTIME_ENV_PRELUDE_HEAD: &str =
+    "(function(defaults) { var env = globalThis.process.env,";
+
 struct Loader {
     parts: BundleParts,
     factories: HashMap<String, Value>,
@@ -165,6 +170,23 @@ fn addon_of(loader: &Rc<Loader>, it: &mut Interp) -> R<Value> {
     )?;
     *loader.addon.borrow_mut() = Some(addon.clone());
     Ok(addon)
+}
+
+/// Lets `process.dlopen` hand out this package's addon (process_members.rs `dlopen`).
+fn register_dlopen_addon(it: &mut Interp, loader: &Rc<Loader>) -> R<()> {
+    let global = it.global.clone();
+    let table = match it.lookup(&global, crate::process_members::DLOPEN_ADDONS) {
+        Some(t) => t,
+        None => {
+            let t = Value::Object(it.plain());
+            it.global
+                .declare(crate::process_members::DLOPEN_ADDONS, t.clone(), true);
+            t
+        }
+    };
+    let l = loader.clone();
+    let thunk = it.native(move |it, _, _| addon_of(&l, it));
+    it.set(&table, &loader.package, thunk)
 }
 
 fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R<Value> {
@@ -1115,6 +1137,18 @@ fn make_loader(
         promise_of,
         cjs_namespace,
     });
+    if crate::napi_bridge::registered() {
+        register_dlopen_addon(it, &loader)?;
+    }
+    // the registry's runtime-env defaults ride on the bundle as a first line (`RUNTIME_ENV_PRELUDE_HEAD`)
+    if let Some(line) = bundle_js
+        .lines()
+        .next()
+        .filter(|l| l.starts_with(RUNTIME_ENV_PRELUDE_HEAD))
+    {
+        let run = it.eval_function(&format!("function () {{ {line} }}"))?;
+        it.call(&run, &Value::Undefined, &[])?;
+    }
     if loader.parts.entry == "node:module" || loader.factories.contains_key("node:module") {
         install_module_loader(it, &loader, bundle_js)?;
     }

@@ -1284,6 +1284,47 @@ fn addon_require_resolves_dot_node_specs_to_the_one_addon() {
 }
 
 #[test]
+fn process_dlopen_of_a_node_file_returns_the_packages_addon() {
+    let _bridge = shim_bridge(
+        r#"{"names":["a::add"],"qualifiedPackages":["a"],"ownerByExportName":{"a::add":"7"}}"#,
+        r#"{"value":3}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    // Prisma's shape: a fresh `{ exports: {} }` module and the engine library path, through `process.dlopen`
+    let body = "const m = { exports: {} }; const r = process.dlopen(m, '/x/.prisma/client/engine.so.node'); \
+                exports.same = m.exports === require.addon() && r === undefined; exports.v = m.exports.add(1, 2); \
+                try { process.dlopen({ exports: {} }, '/x/libfoo.so'); exports.other = 'none'; } \
+                catch (e) { exports.other = e.code; }";
+    let mut p = Package::load_named("a", &addon_bundle(body, "", "{}"), 0).unwrap();
+    assert_eq!(p.get("same").unwrap(), Native::Bool(true));
+    assert_eq!(p.get("v").unwrap(), Native::Number(3.0));
+    assert_eq!(
+        p.get("other").unwrap(),
+        Native::Str("ERR_DLOPEN_FAILED".to_string())
+    );
+}
+
+#[test]
+fn process_dlopen_of_the_executable_returns_every_addon_and_the_runtime_env_prelude_applies() {
+    let _bridge = shim_bridge(
+        r#"{"names":["a::add"],"qualifiedPackages":["a"],"ownerByExportName":{"a::add":"7"}}"#,
+        r#"{"value":3}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    // Prisma's shape: PRISMA_QUERY_ENGINE_LIBRARY defaults to `$self` (the executable), which it dlopens
+    let body = "const m = { exports: {} }; process.dlopen(m, process.env.ENGINE_LIB); \
+                exports.v = m.exports.add(1, 2); exports.lib = process.env.ENGINE_LIB === process.execPath;";
+    let bundle = format!(
+        "{}\n{}",
+        r#"(function(defaults) { var env = globalThis.process.env, self = globalThis.process.execPath; Object.keys(defaults).forEach(function(key) { if (env[key] === undefined) env[key] = defaults[key].split('$self').join(self); }); })({"ENGINE_LIB":"$self"});"#,
+        addon_bundle(body, "", "{}")
+    );
+    let mut p = Package::load_named("a", &bundle, 0).unwrap();
+    assert_eq!(p.get("v").unwrap(), Native::Number(3.0));
+    assert_eq!(p.get("lib").unwrap(), Native::Bool(true));
+}
+
+#[test]
 fn addon_require_bypasses_node_gyp_build_and_bindings() {
     let _bridge = shim_bridge(
         r#"{"names":["a::add"],"qualifiedPackages":["a"],"ownerByExportName":{"a::add":"7"}}"#,

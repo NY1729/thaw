@@ -10957,8 +10957,8 @@ fn q9_addon_mode_tolerates_method_exports_only() {
 }
 
 #[test]
-fn scan_addon_mode_keeps_process_dlopen_blocked() {
-    // process.dlopen is not served on thaw-js: addon mode must not tolerate a dlopen method either
+fn scan_addon_mode_tolerates_process_dlopen() {
+    // process.dlopen of the package's own engine library is served by the napi bridge: addon mode tolerates it
     let bundle = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "addon/index.js": function(module, exports, require) {
@@ -10969,15 +10969,12 @@ var __thaw_bundle_require_maps = { "addon/index.js": {}, };
 var __thaw_bundle_entry_key = "addon/index.js";
 })(globalThis.require);"#;
     let addon = crate::scan::scan_addon_bundle(bundle).ok().unwrap();
+    assert!(addon.is_clean(), "{:?}", addon.blockers);
+    let plain = crate::scan::scan_bundle(bundle).ok().unwrap();
     assert!(
-        !addon.is_clean(),
-        "dlopen must stay blocked: {:?}",
-        addon.blockers
-    );
-    assert!(
-        addon.blockers.keys().any(|k| k == "method:dlopen"),
+        plain.blockers.contains_key("method:dlopen"),
         "{:?}",
-        addon.blockers
+        plain.blockers
     );
 }
 
@@ -10993,16 +10990,15 @@ fn scan_refuses_process_dlopen_even_when_the_bundle_defines_a_dlopen_key() {
         "exports.a = function (m, p) { return process.dlopen && process.dlopen(m, p); };",
     ] {
         let bundle = one_module_bundle(code, "");
-        for report in [
-            crate::scan::scan_bundle(&bundle).ok().unwrap(),
-            crate::scan::scan_addon_bundle(&bundle).ok().unwrap(),
-        ] {
-            assert!(
-                report.blockers.contains_key("method:dlopen"),
-                "{code}: {:?}",
-                report.blockers
-            );
-        }
+        let report = crate::scan::scan_bundle(&bundle).ok().unwrap();
+        assert!(
+            report.blockers.contains_key("method:dlopen"),
+            "{code}: {:?}",
+            report.blockers
+        );
+        // addon mode serves the call through the napi bridge
+        let addon = crate::scan::scan_addon_bundle(&bundle).ok().unwrap();
+        assert!(!addon.blockers.contains_key("method:dlopen"), "{code}: {:?}", addon.blockers);
     }
 }
 
