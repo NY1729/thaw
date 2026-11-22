@@ -75,6 +75,9 @@ struct FnLowerer<'a> {
     /// Set by the `any` declaration/assignment sites: the next native array converted to
     /// `Json` is a live view that aliases the array instead of a copy.
     alias_native_arrays: bool,
+    /// Set while a thaw-js function argument is coerced: only arrays stay live views there, so a
+    /// Map/Set/Date/RegExp/class argument keeps its previous by-value wire.
+    alias_arrays_only: bool,
     /// Set only while a live owner argument (`thaw_js_live_owner_argument`) projects a class:
     /// its live view exposes the decorator token as `constructor`.
     live_owner_constructor_token: bool,
