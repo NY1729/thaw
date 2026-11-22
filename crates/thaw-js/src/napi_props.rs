@@ -266,11 +266,31 @@ pub(crate) fn own_entries(o: &Obj) -> Vec<(Rc<str>, u32)> {
     let mut out: Vec<(Rc<str>, u32)> = Vec::new();
     match &*o.kind.borrow() {
         Kind::Array(items) => {
-            for (i, item) in items.iter().enumerate() {
-                if !matches!(item, Value::Hole) {
-                    out.push((i.to_string().into(), 2 | writable | configurable));
+            let mut idx: Vec<(u32, u32)> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !matches!(item, Value::Hole))
+                .map(|(i, _)| (i as u32, 2 | writable | configurable))
+                .collect();
+            // side-table elements (accessor or attribute elements, the sparse tail) merge in index order
+            if let Some(s) = o.sparse.get() {
+                let s = s.borrow();
+                if !s.elems.is_empty() {
+                    idx.extend(s.elems.iter().map(|(k, e)| {
+                        let data_writable =
+                            u32::from(matches!(e.slot, Slot::Data(_)) && e.writable);
+                        let bits = data_writable
+                            | (u32::from(e.enumerable) << 1)
+                            | (u32::from(e.configurable) << 2);
+                        (*k, bits)
+                    }));
+                    idx.sort_unstable_by_key(|(k, _)| *k);
                 }
             }
+            out.extend(
+                idx.into_iter()
+                    .map(|(k, bits)| (k.to_string().into(), bits)),
+            );
             out.push(("length".into(), u32::from(o.len_writable())));
         }
         Kind::Typed(t) => {

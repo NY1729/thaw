@@ -1227,21 +1227,30 @@ impl Interp {
                 writable: o.len_writable(),
                 configurable: false,
             }),
-            Kind::Array(items) => array_index(key)
-                .and_then(|i| array_elem(o, items, i))
-                .map(|v| Prop {
-                    key: key.into(),
-                    slot: Slot::Data(v.clone()),
-                    enumerable: true,
-                    writable: !frozen,
-                    configurable: !(frozen || o.ext.get() == 2),
-                }),
+            Kind::Array(items) => array_index(key).and_then(|i| {
+                array_entry(o, items, i)
+                    .map(|e| Prop {
+                        key: key.into(),
+                        slot: e.slot,
+                        enumerable: e.enumerable,
+                        writable: e.writable,
+                        configurable: e.configurable,
+                    })
+                    .or_else(|| {
+                        array_elem(o, items, i).map(|v| Prop {
+                            key: key.into(),
+                            slot: Slot::Data(v),
+                            enumerable: true,
+                            writable: !frozen,
+                            configurable: !(frozen || o.ext.get() == 2),
+                        })
+                    })
+            }),
             _ => None,
         };
+        // a new index of an array is an element whatever the descriptor (an accessor has no `value`)
         let is_array_elem = arr_current.is_some()
-            || (matches!(&*o.kind.borrow(), Kind::Array(_))
-                && array_index(key).is_some()
-                && d.value.is_some());
+            || (matches!(&*o.kind.borrow(), Kind::Array(_)) && array_index(key).is_some());
         // a read-only `length` also refuses new elements past it
         let len_blocks = o.len_ro.get()
             && matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(key).is_some_and(|i| i as f64 >= array_length(o, items.len())));
@@ -1275,9 +1284,13 @@ impl Interp {
             None if o.ext.get() != 0 || frozen || len_blocks => return Ok(false),
             _ => {}
         }
+        if is_array_elem && key != "length" {
+            if let Some(i) = array_index(key) {
+                define_array_elem(o, i, &d, current.as_ref());
+                return Ok(true);
+            }
+        }
         if is_array_elem {
-            // ponytail: an element keeps its data attributes; a descriptor asking for other attributes
-            // (or an accessor) on an element is accepted without applying them
             if let Some(v) = d.value {
                 self.set(&Value::Object(o.clone()), key, v)?;
             }
@@ -1372,6 +1385,11 @@ impl Interp {
             Value::Object(o) if array_has_sparse_tail(o) => {
                 self.throw_error("RangeError", "Invalid array length")
             }
+            // ponytail: a side-table element (accessor or attribute) is not read by this builtin yet
+            Value::Object(o) if array_has_elems(o) => self.throw_error(
+                "TypeError",
+                "array with accessor or non-default elements is not supported here",
+            ),
             _ => Ok(()),
         }
     }
@@ -1783,6 +1801,32 @@ impl Interp {
                     .filter(|k| !raw_set.contains(&**k))
                     .map(|k| Value::Str(k.into()))
                     .collect();
+                // non-enumerable side-table indices are own names too (`own_keys` lists enumerable ones only)
+                if let Value::Object(o) = &t {
+                    let hidden: Vec<u32> = o
+                        .sparse
+                        .get()
+                        .map(|s| {
+                            s.borrow()
+                                .elems
+                                .iter()
+                                .filter(|(_, e)| !e.enumerable)
+                                .map(|(k, _)| *k)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !hidden.is_empty() {
+                        let (mut idx, named): (Vec<Value>, Vec<Value>) = names
+                            .into_iter()
+                            .partition(|v| matches!(v, Value::Str(s) if array_index(s).is_some()));
+                        idx.extend(hidden.into_iter().map(|k| Value::Str(k.to_string().into())));
+                        idx.sort_by_key(|v| match v {
+                            Value::Str(s) => array_index(s).unwrap_or(0),
+                            _ => 0,
+                        });
+                        names = idx.into_iter().chain(named).collect();
+                    }
+                }
                 // an Array's `length` follows its indices and leads the named keys (V8 order)
                 if let Value::Object(o) = &t {
                     if matches!(&*o.kind.borrow(), Kind::Array(_)) {
@@ -1890,6 +1934,27 @@ impl Interp {
                         return Ok(Value::Object(d));
                     }
                 }
+                let entry = match &*o.kind.borrow() {
+                    Kind::Array(items) => array_index(&key).and_then(|i| array_entry(&o, items, i)),
+                    _ => None,
+                };
+                if let Some(e) = entry {
+                    let d = it.plain();
+                    match e.slot {
+                        Slot::Data(v) => {
+                            put(&d, "value", v);
+                            put(&d, "writable", Value::Bool(e.writable));
+                        }
+                        Slot::Accessor { get, set } => {
+                            put(&d, "get", get.unwrap_or(Value::Undefined));
+                            put(&d, "set", set.unwrap_or(Value::Undefined));
+                        }
+                        Slot::LazyProto { .. } => {}
+                    }
+                    put(&d, "enumerable", Value::Bool(e.enumerable));
+                    put(&d, "configurable", Value::Bool(e.configurable));
+                    return Ok(Value::Object(d));
+                }
                 let Some(p) = o
                     .raw_props
                     .borrow()
@@ -1953,7 +2018,6 @@ impl Interp {
                 Ok(Value::Object(d))
             });
             self.set_native(o, "freeze", |it, _, args| {
-                it.sparse_unsupported(&arg(args, 0))?;
                 if let Value::Object(o) = arg(args, 0) {
                     if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.cur_len() > 0) {
                         return it.throw_error(
@@ -1980,8 +2044,7 @@ impl Interp {
                 }
                 Ok(arg(args, 0))
             });
-            self.set_native(o, "seal", |it, _, args| {
-                it.sparse_unsupported(&arg(args, 0))?;
+            self.set_native(o, "seal", |_, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
                     seal_obj(&o);
                 }
@@ -2394,8 +2457,8 @@ impl Interp {
         for (name, last) in [("indexOf", false), ("lastIndexOf", true)] {
             self.set_native(&ap, name, move |it, this, args| {
                 if let Value::Object(o) = this {
-                    if array_has_sparse_tail(o) {
-                        return Ok(Value::Number(sparse_search(it, o, args, last)));
+                    if crate::array_snapshot_unsafe(o) {
+                        return Ok(Value::Number(live_search(it, this, args, last)?));
                     }
                 }
                 let needle = arg(args, 0);
@@ -3090,7 +3153,7 @@ impl Interp {
             true,
         );
         let parse_float = self.native(|it, _, args| {
-            let s = it.to_str(&arg(args, 0));
+            let s = it.try_to_str(&arg(args, 0))?;
             let t = s.trim_start();
             let mut end = 0;
             let mut best = f64::NAN;
@@ -3127,7 +3190,7 @@ impl Interp {
             put_hidden(&n, "parseFloat", parse_float);
         }
         let parse_int = self.native(|it, _, args| {
-            let s = it.to_str(&arg(args, 0));
+            let s = it.try_to_str(&arg(args, 0))?;
             let mut radix = match arg(args, 1) {
                 Value::Undefined => 0,
                 v => it.num(&v) as u32,
@@ -3400,17 +3463,27 @@ impl Interp {
         fn length_of(it: &mut Interp, this: &Value) -> R<usize> {
             if let Value::Object(o) = this {
                 if let Kind::Array(items) = &*o.kind.borrow() {
-                    return Ok(items.len());
+                    return Ok(crate::array_length(o, items.len()) as usize);
                 }
             }
             let l = it.get(this, "length")?;
             Ok(it.num(&l).max(0.0) as usize)
         }
-        // an element still present at index `i` (the callback may have shrunk the array)
+        // an element still present at index `i` (the callback may have shrunk the array). An accessor or
+        // attribute element (side table) is present and read live through `get_index`.
         fn element(it: &mut Interp, this: &Value, i: usize) -> R<Option<Value>> {
             if let Value::Object(o) = this {
-                if let Kind::Array(items) = &*o.kind.borrow() {
-                    return Ok(items.get(i).filter(|v| !matches!(v, Value::Hole)).cloned());
+                let present = match &*o.kind.borrow() {
+                    Kind::Array(items) => {
+                        if let Some(v) = items.get(i).filter(|v| !matches!(v, Value::Hole)) {
+                            return Ok(Some(v.clone()));
+                        }
+                        crate::array_has_index(o, items, i)
+                    }
+                    _ => true,
+                };
+                if !present {
+                    return Ok(None);
                 }
             }
             Ok(Some(it.get_index(this, i)?))
@@ -3597,7 +3670,7 @@ impl Interp {
             Value::Object(o) => {
                 crate::typed::typed_own_key(o, &key).unwrap_or_else(|| find_own(o, &key).is_some()
                     || synth_fn_own(o, &key).is_some()
-                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| array_elem(o, items, i).is_some()) || *key == *"length"))
+                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| array_has_index(o, items, i)) || *key == *"length"))
             }
             Value::Str(s) => array_index(&key).is_some_and(|i| i < str_len(s)),
             _ => false,
@@ -3617,7 +3690,7 @@ impl Interp {
         Ok(match target {
             Value::Object(o) => crate::typed::typed_own_key(o, &key).unwrap_or_else(|| {
                 find_own(o, &key).is_some_and(|(_, e)| e)
-                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| array_elem(o, items, i).is_some()))
+                    || matches!(&*o.kind.borrow(), Kind::Array(items) if array_index(&key).is_some_and(|i| array_has_index(o, items, i)))
             }),
             _ => false,
         })
@@ -3628,6 +3701,14 @@ impl Interp {
 /// non-configurable, data properties non-writable, and the object is marked frozen.
 pub(crate) fn freeze_obj(o: &Obj) {
     o.frozen.set(true);
+    if let Some(s) = o.sparse.get() {
+        for e in s.borrow_mut().elems.values_mut() {
+            e.configurable = false;
+            if matches!(e.slot, Slot::Data(_)) {
+                e.writable = false;
+            }
+        }
+    }
     for p in o.props().borrow_mut().iter_mut() {
         p.configurable = false;
         if matches!(p.slot, Slot::Data(_)) {
@@ -3642,6 +3723,11 @@ pub(crate) fn seal_obj(o: &Obj) {
     o.ext.set(2);
     for p in o.raw_props.borrow_mut().iter_mut() {
         p.configurable = false;
+    }
+    if let Some(s) = o.sparse.get() {
+        for e in s.borrow_mut().elems.values_mut() {
+            e.configurable = false;
+        }
     }
 }
 
@@ -3667,6 +3753,64 @@ pub(crate) fn test_integrity(o: &Obj, frozen: bool) -> bool {
 }
 
 /// `ValidateAndApplyPropertyDescriptor` for a non-configurable `cur`: whether `d` may still apply.
+/// Applies the validated descriptor `d` to array index `i` of `o` (`cur` is the element's current property, if any).
+/// A plain element (writable, enumerable, configurable data) stays in the dense slots; any other element moves to
+/// the side table (`put_elem`), which keeps its own attributes and accessor.
+fn define_array_elem(o: &Obj, i: usize, d: &PropDesc, cur: Option<&Prop>) {
+    let mut e = match cur {
+        Some(p) => Elem {
+            slot: p.slot.clone(),
+            enumerable: p.enumerable,
+            writable: p.writable,
+            configurable: p.configurable,
+        },
+        None => Elem {
+            slot: Slot::Data(Value::Undefined),
+            enumerable: false,
+            writable: false,
+            configurable: false,
+        },
+    };
+    if d.get.is_some() || d.set.is_some() {
+        let (mut g, mut s) = match &e.slot {
+            Slot::Accessor { get, set } => (get.clone(), set.clone()),
+            _ => (None, None),
+        };
+        if let Some(v) = &d.get {
+            g = v.is_callable().then(|| v.clone());
+        }
+        if let Some(v) = &d.set {
+            s = v.is_callable().then(|| v.clone());
+        }
+        e.slot = Slot::Accessor { get: g, set: s };
+        e.writable = false;
+    } else if let Some(v) = &d.value {
+        e.slot = Slot::Data(v.clone());
+    }
+    if let Some(w) = &d.writable {
+        e.writable = w.truthy();
+    }
+    if let Some(en) = &d.enumerable {
+        e.enumerable = en.truthy();
+    }
+    if let Some(c) = &d.configurable {
+        e.configurable = c.truthy();
+    }
+    let plain = e.enumerable && e.writable && e.configurable;
+    if let (true, Slot::Data(v)) = (plain, &e.slot) {
+        if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
+            if i < items.len() {
+                items[i] = v.clone();
+                if let Some(s) = o.sparse.get() {
+                    s.borrow_mut().elems.remove(&(i as u32));
+                }
+                return;
+            }
+        }
+    }
+    put_elem(o, i as u32, e);
+}
+
 fn redefine_allowed(cur: &Prop, d: &PropDesc) -> bool {
     if d.configurable.as_ref().is_some_and(Value::truthy) {
         return false;
@@ -3806,21 +3950,54 @@ fn search_start(it: &mut Interp, v: &Value, len: f64, last: bool) -> f64 {
 
 /// `indexOf` / `lastIndexOf` on an array with a sparse tail: holes never match, so only the present
 /// elements are compared (not every index up to `length`). Returns the index, or -1.
-fn sparse_search(it: &mut Interp, o: &Obj, args: &[Value], last: bool) -> f64 {
-    let (len, present) = array_present(o);
+/// indexOf / lastIndexOf on an exotic array (a sparse tail, or accessor and attribute elements). The candidates are
+/// the array's own present indices (dense values and side-table elements, as before); each is re-checked with
+/// HasProperty and read with Get, so a getter that changes the array is seen, as the spec's loop does.
+fn live_search(it: &mut Interp, this: &Value, args: &[Value], last: bool) -> R<f64> {
+    let l = it.get(this, "length")?;
+    let n = it.num(&l);
+    let len = if n.is_nan() {
+        0.0
+    } else {
+        n.clamp(0.0, 9007199254740991.0)
+    };
     let needle = arg(args, 0);
     let from = search_start(it, &arg(args, 1), len, last);
-    let hit = if last {
-        present
-            .iter()
-            .rev()
-            .find(|(k, v)| *k <= from && strict_equals(v, &needle))
-    } else {
-        present
-            .iter()
-            .find(|(k, v)| *k >= from && strict_equals(v, &needle))
+    let mut idx: Vec<u64> = match this {
+        Value::Object(o) => {
+            let mut v = Vec::new();
+            if let Kind::Array(items) = &*o.kind.borrow() {
+                v.extend(
+                    items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, x)| !matches!(x, Value::Hole))
+                        .map(|(i, _)| i as u64),
+                );
+            }
+            if let Some(s) = o.sparse.get() {
+                v.extend(s.borrow().elems.keys().map(|k| u64::from(*k)));
+            }
+            v.sort_unstable();
+            v.dedup();
+            v
+        }
+        _ => Vec::new(),
     };
-    hit.map_or(-1.0, |(k, _)| *k)
+    if last {
+        idx.reverse();
+    }
+    for i in idx {
+        let fi = i as f64;
+        if fi >= len || (last && fi > from) || (!last && fi < from) {
+            continue;
+        }
+        let key = format!("{i}");
+        if it.has_property(this, &key)? && strict_equals(&it.get(this, &key)?, &needle) {
+            return Ok(fi);
+        }
+    }
+    Ok(-1.0)
 }
 
 /// Frozen, or non-extensible (sealed implies non-extensible): writes and deletes can be refused, so
@@ -3925,7 +4102,7 @@ fn splice_restricted(it: &mut Interp, o: &Obj, s: usize, d: usize, ins: &[Value]
 fn own_array_elem(o: &Obj, key: &str) -> bool {
     match &*o.kind.borrow() {
         Kind::Array(items) => {
-            key == "length" || array_index(key).is_some_and(|i| array_elem(o, items, i).is_some())
+            key == "length" || array_index(key).is_some_and(|i| array_has_index(o, items, i))
         }
         _ => false,
     }

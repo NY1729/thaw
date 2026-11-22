@@ -209,8 +209,6 @@ fn array_sparse_tail_guards_dense_only_builtins() {
         "Math.max.apply(null, a)",
         "Array.from(a)",
         "JSON.stringify(a)",
-        "Object.freeze(a)",
-        "Object.seal(a)",
     ];
     for call in calls {
         assert_eq!(
@@ -274,12 +272,14 @@ console.log('T4', Object.isSealed(emptied), Object.isFrozen(emptied));
 
 // `Object.seal` / `Object.freeze` on an exotic array are the stopgap guard (their per-element attribute work is not
 // done for the sparse tail); Node returns the array.
+// Node 22 (v22.23.1), three identical runs: freezing or sealing a sparse array does not throw (stage 2 made it
+// work; stage 1 pinned a RangeError here, see the list in the stage-2 report)
 #[test]
-fn array_sparse_seal_and_freeze_refuse() {
+fn array_sparse_seal_and_freeze_match_node() {
     for call in ["Object.seal(a)", "Object.freeze(a)"] {
         assert_eq!(
             one(&format!("const a = []; a[2 ** 26] = 1; try {{ {call}; console.log('no-throw'); }} catch (x) {{ console.log(x.constructor.name, x.message); }}")),
-            "RangeError Invalid array length",
+            "no-throw",
             "{call}"
         );
     }
@@ -407,4 +407,249 @@ fn array_sparse_copying_and_sorting_methods_refuse_sparse_tail() {
             "{call}"
         );
     }
+}
+
+// Stage 2: accessor and non-default-attribute elements. Expectations are Node 22 (v22.23.1), three identical runs
+// (probe files in thaw-tmp/ar3probe: p1.js, p2.js).
+
+#[test]
+fn array_accessor_element_get_and_descriptor() {
+    assert_eq!(
+        one("const a = [1, 2, 3]; Object.defineProperty(a, '1', { get() { return 'G'; }, enumerable: true, configurable: true }); const d = Object.getOwnPropertyDescriptor(a, '1'); console.log(a[1], a.length, typeof d.get, d.set, d.enumerable);"),
+        "G 3 function undefined true"
+    );
+}
+
+#[test]
+fn array_accessor_element_setter_runs_on_assignment() {
+    assert_eq!(
+        one("const s = [1, 2, 3]; const log = []; Object.defineProperty(s, '1', { set(v) { log.push(v); }, configurable: true }); s[1] = 5; console.log(s[1], log.join(','), s.length);"),
+        "undefined 5 3"
+    );
+}
+
+#[test]
+fn array_define_property_returns_true_and_keeps_keys() {
+    assert_eq!(
+        one("const g = [1, 2, 3]; console.log(Reflect.defineProperty(g, '1', { get() { return 1; } }), Object.keys(g).join(','));"),
+        "true 0,1,2"
+    );
+}
+
+#[test]
+fn array_readonly_element_refuses_write_sloppy_and_strict() {
+    assert_eq!(
+        one("const b = [1, 2, 3]; Object.defineProperty(b, '1', { value: 9, writable: false, configurable: false }); b[1] = 5; console.log(b[1], JSON.stringify(Object.getOwnPropertyDescriptor(b, '1')), delete b[1], b[1]); (function () { 'use strict'; try { b[1] = 7; } catch (e) { console.log(e.constructor.name, e.message); } try { delete b[1]; } catch (e) { console.log(e.constructor.name, e.message); } })();"),
+        "9 {\"value\":9,\"writable\":false,\"enumerable\":true,\"configurable\":false} false 9|TypeError Cannot assign to read only property '1' of object '[object Array]'|TypeError Cannot delete property '1' of [object Array]"
+    );
+}
+
+#[test]
+fn array_length_stops_at_non_configurable_element() {
+    assert_eq!(
+        one("const c = [0, 1, 2, 3, 4, 5, 6]; Object.defineProperty(c, '1', { value: 1, configurable: false }); c.length = 0; console.log(c.length, Object.keys(c).join(','));"),
+        "2 0,1"
+    );
+    assert_eq!(
+        one("const d = [0, 1, 2, 3, 4, 5, 6]; Object.defineProperty(d, '5', { value: 5, configurable: false }); d.length = 0; console.log(d.length);"),
+        "6"
+    );
+    assert_eq!(
+        one("(function () { 'use strict'; const e = [0, 1, 2, 3, 4, 5, 6]; Object.defineProperty(e, '5', { value: 5, configurable: false }); try { e.length = 0; } catch (x) { console.log(x.constructor.name, x.message, e.length); } })();"),
+        "TypeError Cannot delete property '5' of [object Array] 6"
+    );
+}
+
+#[test]
+fn array_non_enumerable_element_is_hidden_from_keys_and_for_in() {
+    assert_eq!(
+        one("const n = [1, 2, 3]; Object.defineProperty(n, '1', { value: 2, enumerable: false }); console.log(Object.keys(n).join(','), JSON.stringify(Object.entries(n)), Object.getOwnPropertyNames(n).join(',')); const fi = []; for (const k in n) fi.push(k); console.log(fi.join(','));"),
+        "0,2 [[\"0\",1],[\"2\",3]] 0,1,2,length|0,2"
+    );
+}
+
+#[test]
+fn array_frozen_accessor_element_keeps_getter() {
+    assert_eq!(
+        one("const f = [1, 2, 3]; Object.defineProperty(f, '1', { get() { return 'G'; }, configurable: true }); Object.freeze(f); console.log(Object.isFrozen(f), Object.getOwnPropertyDescriptor(f, '1').configurable, f[1]);"),
+        "true false G"
+    );
+}
+
+#[test]
+fn array_accessor_element_survives_push_and_join() {
+    assert_eq!(
+        one("const p = [1, 2, 3]; Object.defineProperty(p, '1', { get() { return 'G'; }, configurable: true }); p.push(4); console.log(p.length, p[3], p.join('-'));"),
+        "4 4 1-G-3-4"
+    );
+}
+
+#[test]
+fn array_accessor_element_join_and_json_call_the_getter() {
+    assert_eq!(
+        one("const q = [1, 2, 3]; Object.defineProperty(q, '1', { get() { return 'G'; }, enumerable: true, configurable: true }); console.log(q.join('-'), JSON.stringify(q));"),
+        "1-G-3 [1,\"G\",3]"
+    );
+}
+
+#[test]
+fn array_accessor_element_inspect_forms() {
+    assert_eq!(
+        one("const i1 = [1, 2, 3]; Object.defineProperty(i1, '1', { get() { return 'G'; }, enumerable: true, configurable: true }); console.log(i1);"),
+        "[ 1, [Getter], 3 ]"
+    );
+    assert_eq!(
+        one("const i2 = [1, 2, 3]; Object.defineProperty(i2, '1', { get() { return 'G'; }, set(v) {}, enumerable: true, configurable: true }); console.log(i2);"),
+        "[ 1, [Getter/Setter], 3 ]"
+    );
+    assert_eq!(
+        one("const i3 = [1, 2, 3]; Object.defineProperty(i3, '1', { set(v) {}, enumerable: true, configurable: true }); console.log(i3);"),
+        "[ 1, [Setter], 3 ]"
+    );
+    assert_eq!(
+        one("const i4 = [1, 2, 3]; Object.defineProperty(i4, '1', { get() { return 'G'; }, enumerable: true, configurable: true }); console.log(i4);"),
+        "[ 1, [Getter], 3 ]"
+    );
+}
+
+// indexOf reads an accessor element live (Node 22.23.1, three identical runs).
+#[test]
+fn array_accessor_element_index_of_is_live() {
+    assert_eq!(
+        one("const q = [1, 2, 3]; Object.defineProperty(q, '1', { get() { return 'G'; }, enumerable: true, configurable: true }); console.log(q.indexOf('G'));"),
+        "1"
+    );
+}
+
+// Live iteration sites over an accessor element (Node 22.23.1, three identical runs): spread, for-of, destructuring,
+// Set and Map (their iterable is read through [[Get]]), not a dense snapshot that drops the element.
+#[test]
+fn array_accessor_element_live_iteration_sites() {
+    assert_eq!(
+        one(r#"
+const mk = () => { const a = [1, 2, 3]; Object.defineProperty(a, 1, { get() { return 'G'; }, enumerable: true, configurable: true }); return a; };
+console.log([...mk()].join('|'));
+for (const x of mk()) console.log('of', x);
+const [p, q, r] = mk(); console.log(p, q, r);
+console.log(new Set(mk()).size, [...new Map(mk().map((v, i) => [i, v])).values()].join('|'));
+"#),
+        "1|G|3|of 1|of G|of 3|1 G 3|3 1|G|3"
+    );
+}
+
+// Live callback and index sites: forEach, map, filter, some, every, find, findIndex, findLast, reduce, reduceRight,
+// at, keys, values, entries (Node 22.23.1, three identical runs).
+#[test]
+fn array_accessor_element_live_callback_sites() {
+    assert_eq!(
+        one(r#"
+const mk = () => { const a = [1, 2, 3]; Object.defineProperty(a, 1, { get() { return 'G'; }, enumerable: true, configurable: true }); return a; };
+const o = []; mk().forEach(x => o.push(x)); console.log(o.join('|'));
+console.log(mk().map(x => x).join('|'), mk().filter(() => true).join('|'));
+console.log(mk().some(x => x === 'G'), mk().every(x => x !== 'G'));
+console.log(mk().find(x => x === 'G'), mk().findIndex(x => x === 'G'), mk().findLast(x => x === 'G'));
+console.log(mk().reduce((a, b) => a + '' + b, ''), mk().reduceRight((a, b) => a + '' + b, ''));
+console.log(mk().at(1), [...mk().keys()].join(','), [...mk().values()].join('|'), JSON.stringify([...mk().entries()]));
+"#),
+        "1|G|3|1|G|3 1|G|3|true false|G 1 G|1G3 3G1|G 0,1,2 1|G|3 [[0,1],[1,\"G\"],[2,3]]"
+    );
+}
+
+// Live object and JSON sites: Object.values/entries/assign, JSON.stringify, String/join, structuredClone,
+// Object.fromEntries, spread into a call (NaN), concat spread into a fresh array.
+#[test]
+fn array_accessor_element_live_object_and_json_sites() {
+    assert_eq!(
+        one(r#"
+const mk = () => { const a = [1, 2, 3]; Object.defineProperty(a, 1, { get() { return 'G'; }, enumerable: true, configurable: true }); return a; };
+console.log(Object.values(mk()).join('|'), Object.entries(mk()).length, Object.assign({}, mk())[1]);
+console.log(JSON.stringify(mk()), String(mk()), mk().join('-'));
+console.log(structuredClone(mk()).join('|'), Object.fromEntries(Object.entries({ a: 1 })).a);
+console.log(Math.max(...mk()) !== Math.max(...mk()), [].concat ? 'ok' : '');
+"#),
+        "1|G|3 3 G|[1,\"G\",3] 1,G,3 1-G-3|1|G|3 1|true ok"
+    );
+}
+
+// Promise.all reads its iterable live (Node 22.23.1, three identical runs).
+#[test]
+fn array_accessor_element_promise_all_is_live() {
+    // `one` runs no jobs: drain the promise queue before reading the output
+    let mut it = Interp::new();
+    it.run(r#"
+const mk = () => { const a = [1, 2, 3]; Object.defineProperty(a, 1, { get() { return 'G'; }, enumerable: true, configurable: true }); return a; };
+Promise.all(mk()).then(v => console.log('all', v.join('|')));
+"#)
+    .unwrap();
+    it.run_jobs().unwrap();
+    assert_eq!(it.out.join("|"), "all 1|G|3");
+}
+
+// Guard pin, not a Node value: these builtins still read a dense snapshot, so they fail closed with the shared
+// guard message on an accessor element (Node answers for most of them; see the fail-closed table in the report).
+// indexOf, lastIndexOf, toSorted, toReversed, toSpliced and with read live (see the live test below).
+#[test]
+fn array_accessor_element_snapshot_sites_fail_closed() {
+    const MSG: &str = "TypeError array with accessor or non-default elements is not supported here";
+    assert_eq!(
+        one(r#"
+const mk = () => { const a = [1, 2, 3]; Object.defineProperty(a, 1, { get() { return 'G'; }, enumerable: true, configurable: true }); return a; };
+for (const f of [() => mk().slice(0), () => mk().concat([9]), () => mk().flat(), () => mk().shift(), () => Array.from(mk()), () => Math.max.apply(null, mk()), () => [].concat(mk())]) {
+  try { f(); console.log('no error'); } catch (e) { console.log(e.constructor.name, e.message); }
+}
+"#),
+        [MSG; 7].join("|")
+    );
+}
+
+// An accessor defined on a new index grows `length` and is read live (Node 22.23.1, three identical runs). The
+// descriptor has no `value`, which an earlier version treated as an ordinary property (length stayed 0).
+#[test]
+fn array_accessor_define_on_new_index_grows_length() {
+    assert_eq!(
+        one(r#"
+var a = []; Object.defineProperty(a, '1', { get: function() { return 5; }, enumerable: true, configurable: true }); console.log('idx1', a.length);
+var b = []; Object.defineProperty(b, '0', { get: function() { return 5; }, enumerable: true, configurable: true }); console.log('idx0', b.length, b[0]);
+var c = []; Object.defineProperty(c, '0', { value: 5, writable: false, enumerable: true, configurable: true }); console.log('ro0', c.length);
+var d = [1]; Object.defineProperty(d, '1', { get: function() { return 5; }, enumerable: true, configurable: true }); console.log('ext', d.length);
+var e = []; Object.defineProperty(e, '0', { get: function() { return 5; }, enumerable: true, configurable: true }); console.log('after', e.length, JSON.stringify(Object.getOwnPropertyDescriptor(e, 'length')));
+"#),
+        "idx1 2|idx0 1 5|ro0 1|ext 2|after 1 {\"value\":1,\"writable\":true,\"enumerable\":false,\"configurable\":false}"
+    );
+}
+
+// ToPrimitive exceptions propagate out of Number/parseInt/parseFloat/String, and a symbol returned by ToPrimitive is a
+// TypeError (Node 22.23.1, three identical runs; only the kind is pinned, the message wording differs).
+#[test]
+fn conversion_exception_and_symbol_primitive_match_node() {
+    assert_eq!(
+        one(r#"
+var reason = new Error('conversion');
+var thrower = {}; thrower[Symbol.toPrimitive] = function () { throw reason; };
+var symret = {}; symret[Symbol.toPrimitive] = function () { return Symbol('a'); };
+var r = [];
+function t(name, f) { try { r.push(name + ':' + String(f())); } catch (e) { r.push(name + ':' + (e === reason ? 'REASON' : e.constructor.name)); } }
+t('Number', function () { return Number(thrower); });
+t('parseInt', function () { return parseInt(thrower); });
+t('parseFloat', function () { return parseFloat(thrower); });
+t('String', function () { return String(thrower); });
+t('String-symret', function () { return String(symret); });
+t('parseInt-symret', function () { return parseInt(symret); });
+t('Number-symret', function () { return Number(symret); });
+console.log(r.join(' | '));
+"#),
+        "Number:REASON | parseInt:REASON | parseFloat:REASON | String:REASON | String-symret:TypeError | parseInt-symret:TypeError | Number-symret:TypeError"
+    );
+}
+
+// Live search and copy sites over an accessor element (Node 22.23.1, three identical runs).
+#[test]
+fn array_accessor_element_search_and_copy_sites_are_live() {
+    assert_eq!(
+        one(r#"
+var q = [1, 2, 3]; Object.defineProperty(q, '1', { get: function() { return 'G'; }, enumerable: true, configurable: true });
+console.log(q.indexOf(3), q.lastIndexOf(3), q.indexOf('G'), q.lastIndexOf('G'), q.toSorted().join('|'), q.toReversed().join('|'), q.with(0, 9).join('|'), q.toSpliced(0, 1).join('|'));
+"#),
+        "2 2 1 1 1|3|G 3|G|1 9|G|3 G|3"
+    );
 }

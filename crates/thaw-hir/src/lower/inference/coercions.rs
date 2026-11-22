@@ -2344,14 +2344,23 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             // A dynamic value (a `Record<string, string | boolean>` entry, a parsed field) flowing
-            // into a union of primitives: pick the member by its runtime type.
+            // into a union of primitives -- or of arrays of primitives (`number[] | string[]`, a live
+            // array that was also held as `any`): pick the member by its runtime type, an array by
+            // the type of its first element (an empty array takes the last member).
+            let primitive = |element: &HirType| matches!(element, HirType::Str | HirType::F64 | HirType::Bool);
+            let array_of_primitive =
+                |element: &HirType| matches!(element, HirType::Array(inner) if primitive(inner));
             if actual == HirType::Json
-                && elements.iter().all(|element| matches!(element, HirType::Str | HirType::F64 | HirType::Bool))
+                && (elements.iter().all(primitive) || elements.iter().all(array_of_primitive))
             {
+                let arrays = elements.iter().all(array_of_primitive);
                 let parameter = format!("__thaw_json_to_union_{}", self.next_binding);
                 self.next_binding += 1;
                 let previous = self.scope.insert(parameter.clone(), HirType::Json);
                 let typeof_name = |element: &HirType| match element {
+                    HirType::Array(inner) if matches!(inner.as_ref(), HirType::Str) => "string",
+                    HirType::Array(inner) if matches!(inner.as_ref(), HirType::F64) => "number",
+                    HirType::Array(_) => "boolean",
                     HirType::Str => "string",
                     HirType::F64 => "number",
                     _ => "boolean",
@@ -2360,6 +2369,7 @@ impl<'a> FnLowerer<'a> {
                 for (index, element) in elements.iter().enumerate() {
                     let json = HirExpr::Var(parameter.clone());
                     let decoded = match element {
+                        HirType::Array(_) => self.coerce_to_declared(element, json)?,
                         HirType::Str => HirExpr::JsonAsString(Box::new(json)),
                         HirType::F64 => HirExpr::JsonAsNumber(Box::new(json)),
                         _ => HirExpr::JsonAsBool(Box::new(json)),
@@ -2373,7 +2383,14 @@ impl<'a> FnLowerer<'a> {
                                 BinOp::EqEqEq,
                                 Box::new(HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_json_typeof".into())),
-                                    vec![HirExpr::Var(parameter.clone())],
+                                    vec![if arrays {
+                                        HirExpr::JsonIndex(
+                                            Box::new(HirExpr::Var(parameter.clone())),
+                                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                        )
+                                    } else {
+                                        HirExpr::Var(parameter.clone())
+                                    }],
                                 )),
                                 Box::new(HirExpr::Lit(HirLit::Str(typeof_name(element).into()))),
                             ),
