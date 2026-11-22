@@ -11317,6 +11317,19 @@ fn json_parse_keeps_lone_surrogates() {
     );
 }
 
+/// `JSON.parse` reviver context (`{ source }` of an unmodified primitive, `{}` otherwise), as node 22 prints it.
+#[test]
+fn json_parse_reviver_receives_the_source_text_of_primitives() {
+    assert_eq!(
+        one("const log = []; JSON.parse('{\"a\":9007199254740993,\"b\":[1.0,\"x\"],\"d\":null}', function (k, v, c) { log.push(k + ':' + JSON.stringify(c)); return k === 'a' ? v + 1 : v; }); console.log(log.join('|'))"),
+        r#"a:{"source":"9007199254740993"}|0:{"source":"1.0"}|1:{"source":"\"x\""}|b:{}|d:{"source":"null"}|:{}"#
+    );
+    assert_eq!(
+        one("console.log(JSON.parse('[1,2]', function (k, v, c) { if (k === '0') this[1] = 5; return k === '1' ? JSON.stringify(c) : v; })[1], JSON.parse(' \"q\" ', (k, v, c) => c.source))"),
+        r#"{} "q""#
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {

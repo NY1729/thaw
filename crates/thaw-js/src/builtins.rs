@@ -3906,7 +3906,7 @@ fn redefine_allowed(cur: &Prop, d: &PropDesc) -> bool {
 }
 
 /// `SameValue` (`Object.is`): `===` except NaN equals NaN and `+0` differs from `-0`.
-fn same_value(a: &Value, b: &Value) -> bool {
+pub(crate) fn same_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => {
             (x.is_nan() && y.is_nan()) || (x == y && x.is_sign_negative() == y.is_sign_negative())
