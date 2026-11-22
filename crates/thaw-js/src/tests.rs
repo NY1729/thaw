@@ -11428,6 +11428,22 @@ fn define_properties_on_a_proxy_forwards_to_the_target_and_trap() {
     );
 }
 
+/// `Object.freeze` / `seal` of a Proxy reach its target through `preventExtensions` (node 22).
+#[test]
+fn freeze_and_seal_of_a_proxy_reach_the_target() {
+    assert_eq!(
+        one(
+            r#"const f = Proxy.revocable({ a: 1 }, {}).proxy; const s = Proxy.revocable({ a: 1 }, {}).proxy;
+          const log = []; const t = new Proxy({ a: 1 }, { preventExtensions(t) { log.push('pe'); return Reflect.preventExtensions(t); } });
+          Object.freeze(t);
+          let refused = 'none'; try { Object.freeze(new Proxy({}, { preventExtensions() { return false; } })); } catch (e) { refused = e.constructor.name; }
+          console.log(Object.freeze(f) === f, Object.isFrozen(f), Object.isSealed(f), Object.isExtensible(f),
+            Object.seal(s) === s, Object.isSealed(s), Object.isFrozen(s), Object.isExtensible(s), log.join(), Object.isFrozen(t), refused);"#
+        ),
+        "true true true false true true false false pe true TypeError"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {

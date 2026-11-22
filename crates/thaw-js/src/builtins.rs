@@ -2026,6 +2026,21 @@ impl Interp {
             });
             self.set_native(o, "freeze", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
+                    // a Proxy: its `preventExtensions` trap, then the target takes the integrity level
+                    // ponytail: the `defineProperty` / `getOwnPropertyDescriptor` traps of the per-key steps are not run
+                    if let Some(prevented) = it.proxy_prevent_extensions(&o)? {
+                        if !prevented {
+                            return it.throw_error(
+                                "TypeError",
+                                "'preventExtensions' on proxy: trap returned falsish",
+                            );
+                        }
+                        let target = it.proxy_unwrap(&arg(args, 0), "freeze")?;
+                        if let Value::Object(t) = target {
+                            freeze_obj(&t);
+                        }
+                        return Ok(arg(args, 0));
+                    }
                     if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.cur_len() > 0) {
                         return it.throw_error(
                             "TypeError",
@@ -2051,8 +2066,22 @@ impl Interp {
                 }
                 Ok(arg(args, 0))
             });
-            self.set_native(o, "seal", |_, _, args| {
+            self.set_native(o, "seal", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
+                    // a Proxy: as `freeze`, the target takes the integrity level
+                    if let Some(prevented) = it.proxy_prevent_extensions(&o)? {
+                        if !prevented {
+                            return it.throw_error(
+                                "TypeError",
+                                "'preventExtensions' on proxy: trap returned falsish",
+                            );
+                        }
+                        let target = it.proxy_unwrap(&arg(args, 0), "seal")?;
+                        if let Value::Object(t) = target {
+                            seal_obj(&t);
+                        }
+                        return Ok(arg(args, 0));
+                    }
                     seal_obj(&o);
                 }
                 Ok(arg(args, 0))
