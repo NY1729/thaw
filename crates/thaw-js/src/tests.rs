@@ -11388,6 +11388,16 @@ fn float16_array_math_f16round_and_data_view_round_like_ieee_half() {
     );
 }
 
+/// `Date.prototype.toJSON` is `null` for a non-finite time value, so `JSON.stringify` of an Invalid Date is
+/// `null` (checked with node 22).
+#[test]
+fn invalid_date_to_json_is_null() {
+    assert_eq!(
+        one("console.log(new Date(NaN).toJSON(), JSON.stringify(new Date(NaN)), JSON.stringify([new Date(NaN)], (k, v) => v), JSON.stringify({ a: new Date(NaN) }), new Date(0).toJSON(), Date.prototype.toJSON.call({ valueOf() { return Infinity; } }), Date.prototype.toJSON.call({ valueOf() { return 'x'; }, toISOString() { return 'iso'; } }))"),
+        "null null [null] {\"a\":null} 1970-01-01T00:00:00.000Z null iso"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {

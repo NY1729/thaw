@@ -3403,6 +3403,13 @@ impl Interp {
         });
         self.install_date_extras(&dp);
         self.set_native(&dp, "toJSON", |it, this, _| {
+            it.require_object_coercible(this)?;
+            // a non-finite time value has no ISO text: `null`, not toISOString's RangeError
+            if let Value::Number(n) = it.primitive_of(this, crate::extras::Hint::Number)? {
+                if !n.is_finite() {
+                    return Ok(Value::Null);
+                }
+            }
             let f = it.get(this, "toISOString")?;
             it.call(&f, this, &[])
         });
