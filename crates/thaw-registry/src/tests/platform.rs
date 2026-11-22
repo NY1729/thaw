@@ -252,47 +252,45 @@ fn v8_heap_code_statistics_has_node_keys_and_positive_sizes() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-// qjs_pending: fails on thaw-js: "[true,true,true,true,\"thaw\",42,true,true,true,1,true,0,false,0]"
-mod qjs_pending_platform_v8_builtin_serializes_graphs_and_exposes_runtime_statistics {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_v8");
     fs::write(
-            dir.join("index.js"),
-            "var v8 = require('node:v8');\n\
-             module.exports = function () { var invalid = new Date(NaN), source = { bigint: 42n, bytes: Buffer.from('thaw'), map: new Map([['answer', 42]]), set: new Set(['x']), missing: undefined, valid: new Date(1234), invalid: invalid, invalidAgain: invalid, array: [invalid], dateMap: new Map([[invalid, invalid]]), dateSet: new Set([invalid]) }; source.self = source; var encoded = v8.serialize(source); var wire = JSON.parse(encoded.toString()), copy = v8.deserialize(encoded), legacy = v8.deserialize(Buffer.from(JSON.stringify({ root: { t: 'r', v: 0 }, nodes: [{ k: 'd', v: '1970-01-01T00:00:00.000Z' }] }))); if (copy.valid.getTime() !== 1234 || !Number.isNaN(copy.invalid.getTime()) || copy.invalid === invalid || copy.invalidAgain !== copy.invalid || copy.array[0] !== copy.invalid || copy.dateMap.get(copy.invalid) !== copy.invalid || !copy.dateSet.has(copy.invalid) || legacy.getTime() !== 0 || !Number.isNaN(v8.deserialize(v8.serialize(new Date(NaN))).getTime())) throw new Error('Date roundtrip'); var dateNodes = wire.nodes.filter(function(node) { return node.k === 'd'; }); if (!dateNodes.some(function(node) { return node.v.t === 'p' && node.v.v === 1234; }) || !dateNodes.some(function(node) { return node.v.t === 'n' && node.v.v === 'NaN'; })) throw new Error('Date wire timestamp'); var malformedCaught = false; try { v8.deserialize(Buffer.from('{')); } catch (error) { malformedCaught = error instanceof SyntaxError; } if (!malformedCaught) throw new Error('Malformed JSON must throw SyntaxError'); var heap = v8.getHeapStatistics(); var code = v8.getHeapCodeStatistics(); return [Buffer.isBuffer(encoded), copy !== source, copy.self === copy, copy.bigint === 42n, copy.bytes.toString(), copy.map.get('answer'), copy.set.has('x'), Object.prototype.hasOwnProperty.call(copy, 'missing'), copy.missing === undefined, heap.number_of_native_contexts, heap.heap_size_limit > 0, v8.getHeapSpaceStatistics().length, code.code_and_metadata_size > 0, Number.isInteger(v8.cachedDataVersionTag()) && v8.cachedDataVersionTag() > 0 && v8.cachedDataVersionTag() <= 0xFFFFFFFF]; };",
-        )
-        .unwrap();
+        dir.join("index.js"),
+        "var v8 = require('node:v8');\n\
+         module.exports = function () { var invalid = new Date(NaN), source = { bigint: 42n, bytes: Buffer.from('thaw'), map: new Map([['answer', 42]]), set: new Set(['x']), missing: undefined, valid: new Date(1234), invalid: invalid, invalidAgain: invalid, array: [invalid], dateMap: new Map([[invalid, invalid]]), dateSet: new Set([invalid]) }; source.self = source; var encoded = v8.serialize(source); var copy = v8.deserialize(encoded); if (copy.valid.getTime() !== 1234 || !Number.isNaN(copy.invalid.getTime()) || copy.invalid === invalid || copy.invalidAgain !== copy.invalid || copy.array[0] !== copy.invalid || copy.dateMap.get(copy.invalid) !== copy.invalid || !copy.dateSet.has(copy.invalid) || !Number.isNaN(v8.deserialize(v8.serialize(new Date(NaN))).getTime())) throw new Error('Date roundtrip'); var heap = v8.getHeapStatistics(); var code = v8.getHeapCodeStatistics(); return [Buffer.isBuffer(encoded), copy !== source, copy.self === copy, copy.bigint === 42n, copy.bytes.toString(), copy.map.get('answer'), copy.set.has('x'), Object.prototype.hasOwnProperty.call(copy, 'missing'), copy.missing === undefined, heap.number_of_native_contexts, heap.heap_size_limit > 0, v8.getHeapSpaceStatistics().length, code.code_and_metadata_size > 0, Number.isInteger(v8.cachedDataVersionTag()) && v8.cachedDataVersionTag() > 0 && v8.cachedDataVersionTag() <= 0xFFFFFFFF]; };",
+    )
+    .unwrap();
     let empty_node_modules = temp_registry("builtin_v8_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     // index.js plus the node:stream and node:fs modules the v8 module now requires (snapshot writer)
     assert_eq!(file_count, 5);
-    let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-             {bundle}\n\
-             globalThis.exerciseV8 = module.exports;\n"
-        );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseV8").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
-        result,
+        run_js(&bundle),
         r#"[true,true,true,true,"thaw",42,true,true,true,1,true,11,true,true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+// thaw-only: v8.serialize emits thaw's JSON wire format (Node emits the binary ValueSerializer format) and a malformed
+// buffer throws SyntaxError (Node throws a plain Error). See designs/worker-diagnostics-v8.md D1.
+#[test]
+fn v8_thaw_json_wire_format_and_legacy_decode_is_thaw_only() {
+    let dir = temp_registry("builtin_v8_thaw_wire");
+    fs::write(
+        dir.join("index.js"),
+        "var v8 = require('node:v8');\n\
+         module.exports = function () { var invalid = new Date(NaN), source = { valid: new Date(1234), invalid: invalid, array: [invalid] }; var encoded = v8.serialize(source); var wire = JSON.parse(encoded.toString()); var legacy = v8.deserialize(Buffer.from(JSON.stringify({ root: { t: 'r', v: 0 }, nodes: [{ k: 'd', v: '1970-01-01T00:00:00.000Z' }] }))); var dateNodes = wire.nodes.filter(function(node) { return node.k === 'd'; }); var malformedCaught = false; try { v8.deserialize(Buffer.from('{')); } catch (error) { malformedCaught = error instanceof SyntaxError; } return [dateNodes.some(function(node) { return node.v.t === 'p' && node.v.v === 1234; }), dateNodes.some(function(node) { return node.v.t === 'n' && node.v.v === 'NaN'; }), legacy.getTime() === 0, malformedCaught]; };",
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_v8_thaw_wire_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), r#"[true,true,true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
 #[test]
@@ -935,37 +933,25 @@ fn worker_process_exit_and_chdir_are_worker_local() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
-// qjs_pending: fails on thaw-js: "ERROR: TypeError: worker.cpuUsage is not a function"
-mod qjs_pending_platform_worker_diagnostics_follow_running_state {
-    use super::*;
-    use ::thaw_quickjs;
-
+// Node-valid form: startCpuProfile needs a name, and profile.stop() resolves a JSON string.
 #[test]
 fn worker_diagnostics_follow_running_state() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_diagnostics");
     fs::write(
-            dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var worker = new Worker(\"require('node:worker_threads').parentPort.on('message', function() {});\", { eval: true }); await new Promise(function(resolve, reject) { worker.on('online', resolve); worker.on('error', reject); }); var cpu = await worker.cpuUsage(); var heap = await worker.getHeapStatistics(); var snapshot = await worker.getHeapSnapshot(); snapshot.setEncoding('utf8'); var text = ''; await new Promise(function(resolve, reject) { snapshot.on('data', function(chunk) { text += chunk; }); snapshot.on('end', resolve); snapshot.on('error', reject); }); var profile = await worker.startCpuProfile(); var stopped = await profile.stop(); await worker.terminate(); var stoppedError; try { await worker.cpuUsage(); } catch (error) { stoppedError = error.code; } return [cpu, heap.number_of_native_contexts, JSON.parse(text).snapshot.node_count, stopped.nodes.length, stopped.samples.length, stoppedError]; };",
-        )
-        .unwrap();
+        dir.join("index.js"),
+        "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var worker = new Worker(\"require('node:worker_threads').parentPort.on('message', function() {});\", { eval: true }); await new Promise(function(resolve, reject) { worker.on('online', resolve); worker.on('error', reject); }); var cpu = await worker.cpuUsage(); var heap = await worker.getHeapStatistics(); var snapshot = await worker.getHeapSnapshot(); snapshot.setEncoding('utf8'); var text = ''; await new Promise(function(resolve, reject) { snapshot.on('data', function(chunk) { text += chunk; }); snapshot.on('end', resolve); snapshot.on('error', reject); }); var graph = JSON.parse(text), count = graph.snapshot.node_count; var profile = await worker.startCpuProfile('p'); var stopped = JSON.parse(await profile.stop()); var ids = stopped.nodes.map(function(node) { return node.id; }); await worker.terminate(); var stoppedError; try { await worker.cpuUsage(); } catch (error) { stoppedError = error.code; } return [Number.isInteger(cpu.user) && cpu.user >= 0 && Number.isInteger(cpu.system) && cpu.system >= 0, heap.number_of_native_contexts, count > 0 && graph.nodes.length === 7 * count && graph.edges.length === 3 * graph.snapshot.edge_count && Object.keys(graph).join(',') === 'snapshot,nodes,edges,trace_function_infos,trace_tree,samples,locations,strings', stopped.nodes.length >= 1, stopped.samples.length >= 1, stopped.timeDeltas.length === stopped.samples.length, stopped.nodes[0].callFrame.functionName === '(root)', stopped.samples.every(function(id) { return ids.indexOf(id) !== -1; }), stopped.endTime >= stopped.startTime, stoppedError]; };",
+    )
+    .unwrap();
     let node_modules = temp_registry("builtin_worker_diagnostics_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
-    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerDiagnostics = module.exports;")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let function = CString::new("exerciseWorkerDiagnostics").unwrap();
-    let arguments = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
     assert_eq!(
-        result,
-        r#"[{"user":0,"system":0},1,0,0,0,"ERR_WORKER_NOT_RUNNING"]"#
+        run_js(&bundle),
+        r#"[true,1,true,true,true,true,true,true,true,"ERR_WORKER_NOT_RUNNING"]"#
     );
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
-}
 }
 
 #[test]
