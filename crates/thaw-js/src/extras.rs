@@ -984,7 +984,27 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     return w;
   });
   // the native lowering of `Iterator.from` calls this platform global (thaw-hir static_builtins.rs)
-  globalThis.__thaw_iterator_from = function (source) { return Iterator.from(source); };
+  globalThis.__thaw_iterator_from = function (source) {
+    // a projected native generator keeps its `next(value)` / `return(value)` / `throw(reason)` protocol
+    if (source && source.__thawNativeIterator) {
+      return Object.assign(Object.create(Iterator.prototype), source, {
+        next: function () { return arguments.length ? source.__thawNext(arguments[0]) : source.next(); },
+        return: function () { return arguments.length ? source.__thawReturn(arguments[0]) : source.return(); },
+        throw: function (value) { return source.__thawThrow(String(value)); }
+      });
+    }
+    var method = source[Symbol.iterator];
+    var iterator = method == null ? undefined : method.call(source);
+    if (iterator == null) iterator = source;
+    if (typeof iterator.return !== 'function') {
+      var sourceIterator = iterator;
+      iterator = Object.assign(Object.create(Iterator.prototype), {
+        next: sourceIterator.next.bind(sourceIterator),
+        return: function (value) { return { value: value, done: true }; }
+      });
+    }
+    return Iterator.from(iterator);
+  };
 
   // ----- Atomics. A SharedArrayBuffer goes to the natives (`__thaw_atomic`, `__thaw_atomics_wait/notify`, atomics.rs):
   // real atomic ops on the shared block, with waiters parked across threads. Any other buffer is one agent, so the

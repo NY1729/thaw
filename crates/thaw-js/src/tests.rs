@@ -11222,6 +11222,20 @@ fn iterator_from_and_helpers_match_node() {
     );
 }
 
+/// The compiler's `Iterator.from(nativeGenerator)` hands `__thaw_iterator_from` a projected native iterator:
+/// the wrapper keeps `next(value)` / `return(value)` / `throw(reason)` flowing to the native side.
+#[test]
+fn iterator_from_a_projected_native_generator_forwards_resume_values() {
+    assert_eq!(
+        one("const log = []; const source = { __thawNativeIterator: true, next() { log.push('n'); return { value: 1, done: false }; }, \
+             __thawNext(v) { log.push('n' + v); return { value: v, done: false }; }, return() { return { value: 0, done: true }; }, \
+             __thawReturn(v) { log.push('r' + v); return { value: v, done: true }; }, __thawThrow(v) { log.push('t' + v); return { value: 5, done: false }; } }; \
+             const it = __thaw_iterator_from(source); \
+             console.log(it.next().value, it.next(4).value, it.return(9).value, it.throw('boom').value, log.join(','), it instanceof Iterator)"),
+        "1 4 9 5 n,n4,r9,tboom true"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {
