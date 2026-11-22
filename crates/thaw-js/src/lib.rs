@@ -18,6 +18,10 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
+#[cfg(test)]
+use thaw_runtime as _;
+#[cfg(test)]
+use thaw_std as _;
 
 use classes::ClassInfo;
 use strict::Refusal;

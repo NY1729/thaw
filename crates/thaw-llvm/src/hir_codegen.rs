@@ -1332,6 +1332,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_tjs_terminal_work_pending",
                 ),
                 (
+                    "thaw_js_dynamic_object_query",
+                    "thaw_tjs_dynamic_object_query",
+                ),
+                (
                     "thaw_js_emit_uncaught_result",
                     "thaw_tjs_emit_uncaught_result",
                 ),

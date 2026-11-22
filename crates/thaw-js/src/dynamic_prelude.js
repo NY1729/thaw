@@ -649,6 +649,22 @@
   // Host enumeration (`__thaw_json_host_enumerate`): own keys / values / entries, Map and Set contents,
   // a native collection view's live snapshot, and the prototype.
   const symbolKeyWire = (key) => /^\u0003R?\d+(:|$)/.test(key);
+  // Set-like protocol snapshot (`thaw_tjs_dynamic_object_query`): validates size/has/keys like GetSetRecord and
+  // returns the keys as a JSON object of `key: true`.
+  globalThis.__thaw_set_like_snapshot = (value) => {
+    const size = Number(value.size); const has = value.has; const keys = value.keys;
+    if (Number.isNaN(size) || size < 0 || typeof has !== 'function' || typeof keys !== 'function') throw new TypeError('Set-like object requires non-negative size, has(), and keys()');
+    const iterator = keys.call(value);
+    if ((typeof iterator !== 'object' && typeof iterator !== 'function') || iterator === null || typeof iterator.next !== 'function') throw new TypeError('Set-like keys() must return an iterator');
+    const out = Object.create(null);
+    for (;;) {
+      const step = iterator.next();
+      if ((typeof step !== 'object' && typeof step !== 'function') || step === null) throw new TypeError('Set-like iterator result must be an object');
+      if (step.done) break;
+      out[String(step.value)] = true;
+    }
+    return JSON.stringify(out);
+  };
   globalThis.__thaw_json_host_enumerate = (value, operation) => {
     const view = value !== null && typeof value === 'object' ? thawGraphApply(thawOriginSerialGet, thawNativeCollections, [value]) : undefined;
     if (view && operation >= 4 && operation <= 6) {
