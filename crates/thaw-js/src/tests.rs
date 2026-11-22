@@ -12790,3 +12790,27 @@ fn array_holes_cross_the_typed_abi_as_wire_nodes() {
         "\"true,false,2\""
     );
 }
+
+#[test]
+fn date_constructor_converts_a_single_value_like_the_spec() {
+    // a Date reads its time value without calling `getTime`; any other object goes through ToPrimitive
+    let src = r#"
+        const D = Date;
+        const live = new D(1704067200500);
+        D.prototype.getTime = () => { throw new Error('getTime changed'); };
+        const t = (f) => { try { return String(f()); } catch (e) { return e.constructor.name; } };
+        console.log([
+          t(() => Number(D.prototype.valueOf.call(new D(live)))),
+          t(() => Number(D.prototype.valueOf.call(new D({ [Symbol.toPrimitive](hint) { return hint === 'default' ? '2024-01-01T00:00:00.000Z' : 0; } })))),
+          t(() => new D({ valueOf() { return 5; } }).valueOf()),
+          t(() => new D({ [Symbol.toPrimitive]() { throw new RangeError('hook'); } })),
+          t(() => new D(1n)),
+          t(() => new D(Symbol('d'))),
+          t(() => new D(true).valueOf()),
+        ].join('|'));
+    "#;
+    assert_eq!(
+        one(src),
+        "1704067200500|1704067200000|5|RangeError|TypeError|TypeError|1"
+    );
+}

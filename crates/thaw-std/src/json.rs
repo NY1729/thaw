@@ -4264,6 +4264,27 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
             }
             Value::Object(fields) => {
                 let fields_ref = shared_object_ref(fields);
+                // A branded Buffer wrapper (`{type:'Buffer', data:[..]}`) stays a Buffer for the receiver: its
+                // bytes cross as a `b` node, as a native byte array does.
+                if is_branded_wrapper(&node)
+                    && thaw_json_is_buffer_shape(&node as *const Value) == 1
+                {
+                    if let Some(Value::Array(data)) = fields_ref.get(b"data".as_slice()) {
+                        let data = shared_array_ref(data);
+                        if data.iter().all(|byte| matches!(byte, Value::Number(_))) {
+                            out.extend_from_slice(b"{\"b\":[");
+                            for (slot, byte) in data.iter().enumerate() {
+                                if slot != 0 {
+                                    out.push(b',');
+                                }
+                                write_json_value(byte, &mut out, None, 0);
+                            }
+                            out.extend_from_slice(b"]}");
+                            index += 1;
+                            continue;
+                        }
+                    }
+                }
                 if is_branded_wrapper(&node) && fields_ref.len() == 1 {
                     if let Some(Value::Array(_)) =
                         fields_ref.get(b"__thaw_map_entries__".as_slice())
@@ -14934,6 +14955,18 @@ mod tests {
         let extra = CString::new(r#"{"root":{"r":0},"nodes":[{"a":[],"p":[["extra",{"v":1},7]]}],"leases":[],"napiLeases":[]}"#).unwrap();
         thaw_json_graph_decode(extra.as_ptr());
         assert_eq!(thaw_json_take_graph_error(), 1);
+    }
+
+    #[test]
+    fn graph_encode_sends_a_branded_buffer_wrapper_as_a_bytes_node() {
+        let buffer = parse(r#"{"type":"Buffer","data":[104,105]}"#);
+        thaw_json_brand_wrapper(buffer);
+        let wire = read_c_string(thaw_json_graph_encode(buffer));
+        assert!(wire.contains(r#"{"b":[104,105]}"#), "{wire}");
+        // an unbranded object of the same shape is user data and stays an object
+        let plain = parse(r#"{"type":"Buffer","data":[104,105]}"#);
+        let wire = read_c_string(thaw_json_graph_encode(plain));
+        assert!(wire.contains(r#""o""#), "{wire}");
     }
 
     #[test]

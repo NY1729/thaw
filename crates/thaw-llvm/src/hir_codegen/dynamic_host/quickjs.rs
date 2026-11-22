@@ -645,16 +645,44 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
+        let [arg] = args else {
+            return Err("`releaseDynamicValue` expects exactly one argument".into());
+        };
+        let handle = self.compile_expr(arg)?.into_int_value();
         let released = self
-            .compile_single_arg_call("thaw_js_release_handle", args, "releaseDynamicValue")?
+            .builder
+            .build_call(
+                self.module.get_function("thaw_js_release_handle").unwrap(),
+                &[handle.into()],
+                "release_dynamic_handle",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_js_release_handle returned no value")?
             .into_int_value();
-        self.builder
+        let released = self
+            .builder
             .build_int_compare(
                 IntPredicate::NE,
                 released,
                 self.context.i8_type().const_zero(),
                 "released_dynamic_value",
             )
+            .map_err(|error| error.to_string())?;
+        // Handle 0 is `undefined` on thaw-js: it holds no reference, so releasing it is a success (QuickJS
+        // keeps a real handle for `undefined` and reports the same).
+        let undefined = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                handle,
+                handle.get_type().const_zero(),
+                "dynamic_value_is_undefined",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_or(released, undefined, "released_or_undefined")
             .map(Into::into)
             .map_err(|error| error.to_string())
     }

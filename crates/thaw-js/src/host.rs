@@ -2201,6 +2201,7 @@ pub extern "C" fn thaw_tjs_call_graph_result(
                 f = it.get(&this, part).map_err(|c| classify(it, c))?;
             }
             let result = it.call(&f, &this, &args).map_err(|c| classify(it, c))?;
+            let result = adopt_thenable(it, result)?;
             let result = awaited(it, result)?;
             let mut out = WireOut {
                 owner,
@@ -4514,6 +4515,14 @@ pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResul
         let root = out.token(&mut p.interp, &v)?;
         Ok(out.finish(root))
     }))
+}
+
+/// An `any` result that a copy would damage: a Buffer, or a plain object with a function-valued member
+/// (`{ toString() {} }`), which must stay a live handle so its methods keep running.
+fn is_live_any_result(v: &Value) -> bool {
+    is_buffer_value(v)
+        || matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Plain)
+            && o.props().borrow().iter().any(|p| matches!(&p.slot, Slot::Data(m) if m.is_callable())))
 }
 
 /// A function or class instance: it cannot cross as plain data, so compiled code keeps it by handle.
@@ -7689,6 +7698,11 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             s if s.starts_with('\u{4}') => (false, false, true, &s[1..]),
             s => (false, false, false, s),
         };
+        // `\u{5}`: a `Json` (`any`) result, where a Buffer or an object with function members stays a live handle
+        let (want_live_any, symbol) = match symbol.strip_prefix('\u{5}') {
+            Some(rest) => (true, rest),
+            None => (false, symbol),
+        };
         if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
             eprintln!("thaw-js call: {symbol} {args}");
         }
@@ -7713,7 +7727,9 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             if want_handle {
                 return Ok(store_handle(handle, r).to_string());
             }
-            if is_live_value(&p.interp, &r) && !(want_date && p.interp.date_target(&r)) {
+            if (is_live_value(&p.interp, &r) || (want_live_any && is_live_any_result(&r)))
+                && !(want_date && p.interp.date_target(&r))
+            {
                 return Ok(handle_marker_json(store_handle(handle, r)));
             }
             // A plain result that compiled code already holds by handle returns that handle (same identity).
@@ -8721,6 +8737,26 @@ mod class_symbol_thenable_tests {
             parse_class_symbol("$setter$box$value"),
             Some(("setter", "", "box", Some("value")))
         );
+    }
+
+    /// A function called by name (`callDynamic`) whose result is a thenable is assimilated like a Promise
+    /// (the first `resolve` wins), not handed back as an object.
+    #[test]
+    fn named_call_adopts_a_thenable_result() {
+        let script = CString::new(
+            "globalThis.foreignThenable = () => ({ then(resolve, reject) { resolve(84); reject('late'); resolve(99); } });",
+        )
+        .unwrap();
+        assert_eq!(thaw_tjs_load_script(script.as_ptr()), 1);
+        let name = CString::new("foreignThenable").unwrap();
+        let wire = CString::new(r#"{"root":{"r":0},"nodes":[{"a":[]}]}"#).unwrap();
+        let result = thaw_tjs_call_graph_result(name.as_ptr(), wire.as_ptr());
+        assert!(result.error.is_null());
+        let text = unsafe { CStr::from_ptr(result.value) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(text.contains("84"), "{text}");
     }
 
     #[test]
