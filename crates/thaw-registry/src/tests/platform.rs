@@ -988,6 +988,49 @@ fn worker_threads_routes_messages_by_thread_id() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
+// worker.getHeapSnapshot() on thaw-js: a Readable of Node's .heapsnapshot JSON for the worker's own graph, streamed
+// from its interrupt check. Rejects ERR_WORKER_NOT_RUNNING before 'online' and after exit; a terminate mid-stream
+// settles (no hang).
+#[test]
+fn worker_get_heap_snapshot_streams_the_graph_and_follows_running_state() {
+    let dir = temp_registry("builtin_worker_get_heap_snapshot");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker;
+function idle() { return new Worker("require('node:worker_threads').parentPort.on('message', function() {});", { eval: true }); }
+function online(worker) { return new Promise(function(resolve, reject) { worker.on('online', resolve); worker.on('error', reject); }); }
+function readAll(stream) { stream.setEncoding('utf8'); var text = ''; return new Promise(function(resolve, reject) { stream.on('data', function(chunk) { text += chunk; }); stream.on('end', function() { resolve(text); }); stream.on('error', reject); }); }
+module.exports = async function () {
+  var worker = new Worker("var keep = []; for (var i = 0; i < 4000; i++) keep.push({ i: i, label: 'n' + i }); require('node:worker_threads').parentPort.on('message', function() {});", { eval: true });
+  var early; try { await worker.getHeapSnapshot(); early = 'resolved'; } catch (error) { early = error.code; }
+  await online(worker);
+  var text = await readAll(await worker.getHeapSnapshot());
+  var graph = JSON.parse(text);
+  var count = graph.snapshot.node_count, edges = graph.snapshot.edge_count;
+  await worker.terminate();
+  var stopped; try { await worker.getHeapSnapshot(); stopped = 'resolved'; } catch (error) { stopped = error.code; }
+  var middle = idle();
+  await online(middle);
+  var cut = await middle.getHeapSnapshot();
+  var firstChunk = new Promise(function(resolve) { cut.once('data', function() { resolve('chunk'); }); });
+  var first = await firstChunk;
+  await middle.terminate();
+  return [early, Object.keys(graph).join(','), count > 0 && graph.nodes.length === 7 * count && graph.edges.length === 3 * edges, text.length > 65536, stopped, first];
+};"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_get_heap_snapshot_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    assert_eq!(
+        run_js(&bundle),
+        r#"["ERR_WORKER_NOT_RUNNING","snapshot,nodes,edges,trace_function_infos,trace_tree,samples,locations,strings",true,true,"ERR_WORKER_NOT_RUNNING","chunk"]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
 #[test]
 fn worker_threads_route_direct_messages_between_native_workers() {
     let dir = temp_registry("builtin_worker_direct_between_workers");

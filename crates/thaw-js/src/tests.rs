@@ -3832,7 +3832,7 @@ fn scan_accepts_method_calls_guarded_by_a_truthiness_test_of_the_same_name() {
     let src = "module.exports = (function(require) {
 var __thaw_bundle_factories = {
 \"p/index.js\": function(module, exports, require) {
-  exports.a = function (options, date) { return options?.getHeapSnapshot ? options.getHeapSnapshot(date) : date; };
+  exports.a = function (options, date) { return options?.queryObjects ? options.queryObjects(date) : date; };
   exports.b = function (locale, parts) { if (locale.localize.preprocessor) { parts = locale.localize.preprocessor(parts); } return parts; };
 },
 };
@@ -3843,8 +3843,8 @@ var __thaw_bundle_entry_key = \"p/index.js\";
     assert!(report.is_clean(), "{:?}", report.blockers);
     // v8 is loaded so the unguarded call is a v8 owner's method (R7); without the load it is not a finding
     let unguarded = src.replace(
-        "options?.getHeapSnapshot ? options.getHeapSnapshot(date) : date",
-        "(require('node:v8'), options.getHeapSnapshot(date))",
+        "options?.queryObjects ? options.queryObjects(date) : date",
+        "(require('node:v8'), options.queryObjects(date))",
     );
     assert!(!crate::scan::scan_bundle(&unguarded).unwrap().is_clean());
 }
@@ -3877,20 +3877,20 @@ fn scan_accepts_negated_and_null_compared_method_probes() {
     }
     // the same Node name called without any probe is still refused (`customMerge` is not a Node name: see
     // scan_flags_method_calls_only_for_node_names_thaw_lacks)
-    // (v8 is loaded: getHeapSnapshot is v8's, so the call can be on a v8 object; see the owner rule)
+    // (v8 is loaded: queryObjects is v8's, so the call can be on a v8 object; see the owner rule)
     let unguarded = one_module_bundle(
-        "exports.a = function (o) { require('node:v8'); return o.getHeapSnapshot(1); };",
+        "exports.a = function (o) { require('node:v8'); return o.queryObjects(1); };",
         "",
     );
     let report = crate::scan::scan_bundle(&unguarded).ok().unwrap();
-    assert!(report.blockers.contains_key("method:getHeapSnapshot"));
+    assert!(report.blockers.contains_key("method:queryObjects"));
     // a probe excuses calls of the probed name only
     let other = one_module_bundle(
-        "exports.a = function (o) { require('node:v8'); if (!o.customMerge) return 0; return o.getHeapSnapshot(1); };",
+        "exports.a = function (o) { require('node:v8'); if (!o.customMerge) return 0; return o.queryObjects(1); };",
         "",
     );
     let report = crate::scan::scan_bundle(&other).ok().unwrap();
-    assert!(report.blockers.contains_key("method:getHeapSnapshot"));
+    assert!(report.blockers.contains_key("method:queryObjects"));
     assert!(!report.blockers.contains_key("method:customMerge"));
 }
 
@@ -3905,7 +3905,7 @@ fn scan_refuses_unguarded_host_method_calls_the_probe_rules_do_not_excuse() {
             "exports.a = function (m) { process.dlopen(m, 'x'); };",
             "method:dlopen",
         ),
-        // the owner modules are loaded (publish: diagnostics_channel, execute: _http_common, getHeapSnapshot: v8)
+        // the owner modules are loaded (publish: diagnostics_channel, execute: _http_common, queryObjects: v8)
         (
             "exports.a = function (c) { require('node:diagnostics_channel'); return c.publish('x'); };",
             "method:publish",
@@ -3915,8 +3915,8 @@ fn scan_refuses_unguarded_host_method_calls_the_probe_rules_do_not_excuse() {
             "method:execute",
         ),
         (
-            "exports.a = class C extends EventEmitter { f() { require('node:v8'); return this.getHeapSnapshot(); } };",
-            "method:getHeapSnapshot",
+            "exports.a = class C extends EventEmitter { f() { require('node:v8'); return this.queryObjects(); } };",
+            "method:queryObjects",
         ),
         (
             "exports.a = class C { f() { require('node:_http_common'); return function () { return this.execute(); }; } };",
@@ -3950,8 +3950,8 @@ fn scan_flags_method_calls_only_for_node_names_thaw_lacks() {
     // Node names thaw lacks (or the dlopen special case) stay refused
     for (code, blocker) in [
         (
-            "exports.a = function (c) { require('node:v8'); return c.getHeapSnapshot(); };",
-            "method:getHeapSnapshot",
+            "exports.a = function (c) { require('node:v8'); return c.queryObjects(); };",
+            "method:queryObjects",
         ),
         (
             "exports.a = function (c) { return c.refCounted(); };",
@@ -4265,9 +4265,9 @@ fn scan_knows_exactly_the_callsite_methods_the_engine_implements() {
     let calls: String = listed.iter().map(|m| format!("c.{m}();")).collect();
     let clean = one_module_bundle(&format!("exports.f = function (c) {{ {calls} }};"), "");
     assert!(crate::scan::scan_bundle(&clean).unwrap().is_clean());
-    // (v8 is loaded: getHeapSnapshot's owner, see the owner rule)
+    // (v8 is loaded: queryObjects's owner, see the owner rule)
     let unknown = one_module_bundle(
-        "exports.f = function (c) { require('node:v8'); return c.getHeapSnapshot(); };",
+        "exports.f = function (c) { require('node:v8'); return c.queryObjects(); };",
         "",
     );
     assert!(!crate::scan::scan_bundle(&unknown).unwrap().is_clean());
@@ -12326,8 +12326,8 @@ exports.traceMixed = traceMixed;"#;
     websocket.unsubscribe(room);
 };"#;
     let dlopen = "process.dlopen(module, 'x.node');";
-    // (v8 is loaded dynamically: `process` has no getHeapSnapshot on Node, so the call is no process method, see the owner rule)
-    let heap = "exports.h = process.getBuiltinModule('node:v8').getHeapSnapshot();";
+    // (v8 is loaded dynamically: `process` has no queryObjects on Node, so the call is no process method, see the owner rule)
+    let heap = "exports.h = process.getBuiltinModule('node:v8').queryObjects();";
     let known: HashSet<String> = ["publish", "runStores", "traceSync", "unsubscribe"]
         .iter()
         .map(|s| s.to_string())
@@ -12368,7 +12368,7 @@ exports.traceMixed = traceMixed;"#;
     );
     assert!(blockers(socket, &known).is_empty());
     // a Node method that no builtin defines, and a process.dlopen call, stay blocked with the set
-    assert_eq!(blockers(heap, &known), ["method:getHeapSnapshot"]);
+    assert_eq!(blockers(heap, &known), ["method:queryObjects"]);
     assert_eq!(blockers(dlopen, &known), ["method:dlopen"]);
 }
 
