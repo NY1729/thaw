@@ -3138,7 +3138,6 @@ dependencies = [
  "thaw-hir",
  "thaw-js",
  "thaw-parser",
- "thaw-quickjs",
 ]
 
 [[package]]

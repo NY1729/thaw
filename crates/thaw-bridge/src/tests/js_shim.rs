@@ -10,8 +10,14 @@ mod thaw_js_shim {
     }
 
     extern "C" {
+        fn thaw_tjs_napi_enable_proxy_layer();
         fn thaw_tjs_eval_json(source: *const c_char) -> ThawResult;
         fn thaw_tjs_call_reference(context: *mut std::ffi::c_void, args: *const c_char) -> *const c_char;
+    }
+
+    /// Opts the thread's default realm into the native addon proxy layer (defines the graph helpers).
+    pub fn enable_napi_proxy_layer() {
+        unsafe { thaw_tjs_napi_enable_proxy_layer() }
     }
 
     pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {

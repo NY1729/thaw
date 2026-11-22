@@ -12,5 +12,4 @@ thaw-hir = { path = "../thaw-hir" }
 thaw-parser = { path = "../thaw-parser" }
 
 [dev-dependencies]
-thaw-quickjs = { path = "../thaw-quickjs" }
 thaw-js = { path = "../thaw-js" }
