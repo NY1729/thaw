@@ -2133,6 +2133,7 @@ impl Interp {
                 it.call(&target, &bound_this, &all)
             });
             if let Value::Object(b) = &bound_fn {
+                it.rt.note_bound(b, target0.clone());
                 put_with(b, "length", Value::Number(length), false, false, true);
                 put_with(
                     b,
@@ -3267,13 +3268,24 @@ impl Interp {
                     [Value::Str(s)] => crate::date::parse_date(s),
                     [Value::Null] => 0.0,
                     [Value::Number(n)] => crate::date::clip(*n),
-                    [Value::Object(_)] => match it.get(&args[0], "getTime")? {
-                        f if f.is_callable() => {
-                            let v = it.call(&f, &args[0], &[])?;
-                            it.num(&v)
+                    // one value of another kind: a Date's own time value, else ToPrimitive (default hint), where
+                    // a string parses and anything else is a number (no user `getTime` is consulted)
+                    [v] => {
+                        if it.date_target(v) {
+                            it.date_time(v)?
+                        } else {
+                            let p = match v {
+                                Value::Object(_) if !crate::is_symbol_object(v) => {
+                                    it.primitive_of(v, crate::extras::Hint::Default)?
+                                }
+                                _ => v.clone(),
+                            };
+                            match &p {
+                                Value::Str(s) => crate::date::parse_date(s),
+                                _ => crate::date::clip(it.tonum(&p)?),
+                            }
                         }
-                        _ => f64::NAN,
-                    },
+                    }
                     parts => {
                         let n: Vec<f64> = parts.iter().map(|v| it.num(v)).collect();
                         crate::date::local_from_parts(&n)

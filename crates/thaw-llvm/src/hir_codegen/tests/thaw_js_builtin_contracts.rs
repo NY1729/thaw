@@ -162,3 +162,14 @@ fn date_call_and_bare_date_value_read_the_realm_date() {
     compiler.compile_program(&program).unwrap();
     assert!(compiler.uses_thaw_js());
 }
+
+#[test]
+fn thaw_js_callback_parameters_accept_promise_union_members() {
+    use HirType::*;
+    let union = Union(vec![Str, Promise(Box::new(F64))]);
+    assert!(thaw_js_callback_type(&Function(vec![union.clone()], Box::new(F64))));
+    assert!(thaw_js_param_type(&Function(vec![union], Box::new(F64))));
+    // a promise of non-plain data still cannot cross
+    let opaque = Union(vec![Str, Promise(Box::new(Function(vec![], Box::new(Void))))]);
+    assert!(!thaw_js_callback_type(&Function(vec![opaque], Box::new(F64))));
+}

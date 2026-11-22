@@ -12922,3 +12922,102 @@ fn typed_call_without_a_package_prefix_calls_a_default_realm_global() {
         .unwrap_err()
         .contains("missingFn"));
 }
+
+#[test]
+fn instanceof_follows_instanceof_operator_and_ordinary_has_instance() {
+    let src = r#"
+        function t(f) { try { return String(f()); } catch (e) { return e.constructor.name + ': ' + e.message; } }
+        function F() {}
+        const B = F.bind(null);
+        const P = new Proxy(F, {});
+        const out = [
+            t(() => 1 instanceof null), t(() => 1 instanceof 3), t(() => 1 instanceof {}),
+            t(() => ({}) instanceof (() => {})), t(() => 1 instanceof (() => {})),
+            t(() => 1 instanceof { [Symbol.hasInstance]: 1 }).slice(0, 9),
+            t(() => 1 instanceof { [Symbol.hasInstance]: null }),
+            t(() => 1 instanceof { [Symbol.hasInstance]() { return 'x'; } }),
+            t(() => new F() instanceof B), t(() => new F() instanceof P),
+            t(() => ({}) instanceof new Proxy({}, {})),
+            t(() => ({}) instanceof Proxy),
+        ];
+        console.log(out.join('|'));
+    "#;
+    assert_eq!(
+        one(src),
+        "TypeError: Right-hand side of 'instanceof' is not an object|TypeError: Right-hand side of 'instanceof' is not an object|TypeError: Right-hand side of 'instanceof' is not callable|TypeError: Function has non-object prototype 'undefined' in instanceof check|false|TypeError|TypeError: Right-hand side of 'instanceof' is not callable|true|true|true|TypeError: Right-hand side of 'instanceof' is not callable|TypeError: Function has non-object prototype 'undefined' in instanceof check"
+    );
+}
+
+/// A framed native error whose message holds a NUL crosses the callback result string intact
+/// (the arena string keeps its length; a C-string read would stop at the NUL).
+#[test]
+fn callback_error_text_keeps_an_embedded_nul() {
+    let frame =
+        thaw_arena::error_wire::encode_tagged(b"TypeError", b"before\0after", None).unwrap();
+    let mut text = vec![2u8];
+    text.extend_from_slice(&frame);
+    let pointer = thaw_arena::owned_string(&text);
+    let message = crate::host::with_package(crate::host::default_realm(), |p| {
+        let Err(Ctl::Throw(error)) = crate::host::take_callback_result(&mut p.interp, pointer)
+        else {
+            panic!("expected a throw");
+        };
+        let message = p.interp.get(&error, "message").unwrap();
+        Ok(p.interp.to_str(&message).to_string())
+    })
+    .unwrap_or_else(|_| panic!("the default realm is unavailable"));
+    assert_eq!(message, "before\0after");
+}
+
+const HOLES: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"hl/index.js": function(module, exports, require) {
+  exports.probe = function (values) { return [Object.hasOwn(values, 0), values[0] === undefined, values.length].join(','); };
+},
+};
+var __thaw_bundle_require_maps = { "hl/index.js": {}, };
+var __thaw_bundle_entry_key = "hl/index.js";
+})(globalThis.require);"#;
+
+/// A native array hole crosses the typed ABI as `{"__thaw_tjs_hole__":1}` and stays a hole.
+#[test]
+fn array_holes_cross_the_typed_abi_as_wire_nodes() {
+    use std::ffi::CString;
+    let bundle = CString::new(HOLES).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"hl".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call("hl::probe", r#"[[{"__thaw_tjs_hole__":1},5]]"#).unwrap(),
+        "\"false,true,2\""
+    );
+    assert_eq!(
+        typed_call("hl::probe", r#"[[null,5]]"#).unwrap(),
+        "\"true,false,2\""
+    );
+}
+
+#[test]
+fn date_constructor_converts_a_single_value_like_the_spec() {
+    // a Date reads its time value without calling `getTime`; any other object goes through ToPrimitive
+    let src = r#"
+        const D = Date;
+        const live = new D(1704067200500);
+        D.prototype.getTime = () => { throw new Error('getTime changed'); };
+        const t = (f) => { try { return String(f()); } catch (e) { return e.constructor.name; } };
+        console.log([
+          t(() => Number(D.prototype.valueOf.call(new D(live)))),
+          t(() => Number(D.prototype.valueOf.call(new D({ [Symbol.toPrimitive](hint) { return hint === 'default' ? '2024-01-01T00:00:00.000Z' : 0; } })))),
+          t(() => new D({ valueOf() { return 5; } }).valueOf()),
+          t(() => new D({ [Symbol.toPrimitive]() { throw new RangeError('hook'); } })),
+          t(() => new D(1n)),
+          t(() => new D(Symbol('d'))),
+          t(() => new D(true).valueOf()),
+        ].join('|'));
+    "#;
+    assert_eq!(
+        one(src),
+        "1704067200500|1704067200000|5|RangeError|TypeError|TypeError|1"
+    );
+}

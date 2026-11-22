@@ -5943,9 +5943,15 @@ impl<'a> FnLowerer<'a> {
             }
         }
         if let Some(token) = &decorator_token {
-            let getter = self.projected_read_callback(
+            let mut getter = self.projected_read_callback(
                 HirExpr::Var(token.clone()), HirType::JsValue, &source_type, this_name,
             )?;
+            // the token is a global, which a lambda body reaches only through its captures
+            if let HirExpr::Call(_, registered) = &mut getter {
+                if let Some(HirExpr::Lambda(captures, ..)) = registered.first_mut() {
+                    captures.push(HirParam { name: token.clone(), ty: HirType::JsValue });
+                }
+            }
             body.push(push(&callbacks_name, getter));
             body.push(push(&callbacks_name, HirExpr::Call(
                 Box::new(HirExpr::Var("getDynamicValue".into())),
