@@ -12949,6 +12949,29 @@ fn typed_call_without_a_package_prefix_calls_a_default_realm_global() {
         .contains("missingFn"));
 }
 
+/// `Object.keys/values/entries/assign/hasOwn/getOwnProperty*`, `hasOwnProperty`/`propertyIsEnumerable`/`valueOf`/`isPrototypeOf`
+/// `.call(nullish)`, `delete nullish.x` and `'x' in nullish` throw the spec's TypeError (expected text recorded from node 22).
+#[test]
+fn nullish_receivers_throw_for_object_introspection() {
+    let expected = "keys(null): threw TypeError Cannot convert undefined or null to object|values(null): threw TypeError Cannot convert undefined or null to object|entries(null): threw TypeError Cannot convert undefined or null to object|hasOwn(null): threw TypeError Cannot convert undefined or null to object|gopn(null): threw TypeError Cannot convert undefined or null to object|gops(null): threw TypeError Cannot convert undefined or null to object|gopd(null): threw TypeError Cannot convert undefined or null to object|gopds(null): threw TypeError Cannot convert undefined or null to object|assignSrc(null): {}|assignTarget(null): threw TypeError Cannot convert undefined or null to object|ppe(null): threw TypeError Cannot convert undefined or null to object|hop(null): threw TypeError Cannot convert undefined or null to object|valueOf(null): threw TypeError Cannot convert undefined or null to object|isProtoOf(null): threw TypeError Cannot convert undefined or null to object|isProtoOfPrimitive(null): false|inOp(null): threw TypeError Cannot use 'in' operator to search for 'x' in null|del(null): threw TypeError Cannot convert undefined or null to object|spread(null): {}|keys(undefined): threw TypeError Cannot convert undefined or null to object|values(undefined): threw TypeError Cannot convert undefined or null to object|entries(undefined): threw TypeError Cannot convert undefined or null to object|hasOwn(undefined): threw TypeError Cannot convert undefined or null to object|gopn(undefined): threw TypeError Cannot convert undefined or null to object|gops(undefined): threw TypeError Cannot convert undefined or null to object|gopd(undefined): threw TypeError Cannot convert undefined or null to object|gopds(undefined): threw TypeError Cannot convert undefined or null to object|assignSrc(undefined): {}|assignTarget(undefined): threw TypeError Cannot convert undefined or null to object|ppe(undefined): threw TypeError Cannot convert undefined or null to object|hop(undefined): threw TypeError Cannot convert undefined or null to object|valueOf(undefined): threw TypeError Cannot convert undefined or null to object|isProtoOf(undefined): threw TypeError Cannot convert undefined or null to object|isProtoOfPrimitive(undefined): false|inOp(undefined): threw TypeError Cannot use 'in' operator to search for 'x' in undefined|del(undefined): threw TypeError Cannot convert undefined or null to object|spread(undefined): {}";
+    assert_eq!(
+        one_sloppy(
+            r####"const out=[];
+const cases = {
+ keys:v=>Object.keys(v), values:v=>Object.values(v), entries:v=>Object.entries(v), hasOwn:v=>Object.hasOwn(v,'x'),
+ gopn:v=>Object.getOwnPropertyNames(v), gops:v=>Object.getOwnPropertySymbols(v), gopd:v=>Object.getOwnPropertyDescriptor(v,'x'),
+ gopds:v=>Object.getOwnPropertyDescriptors(v), assignSrc:v=>Object.assign({}, v), assignTarget:v=>Object.assign(v),
+ ppe:v=>Object.prototype.propertyIsEnumerable.call(v,'x'), hop:v=>Object.prototype.hasOwnProperty.call(v,'x'),
+ valueOf:v=>Object.prototype.valueOf.call(v), isProtoOf:v=>Object.prototype.isPrototypeOf.call(v,{}),
+ isProtoOfPrimitive:v=>Object.prototype.isPrototypeOf.call(v,1), inOp:v=>'x' in v, del:v=>delete v.x, spread:v=>({...v}),
+};
+for (const v of [null, undefined]) for (const [n,f] of Object.entries(cases)) { let r; try { r=JSON.stringify(f(v)) } catch(e){ r='threw '+e.constructor.name+' '+e.message } out.push(n+'('+v+'): '+r); }
+console.log(out.join('|'));"####
+        ),
+        expected
+    );
+}
+
 #[test]
 fn instanceof_follows_instanceof_operator_and_ordinary_has_instance() {
     let src = r#"
@@ -13045,5 +13068,28 @@ fn date_constructor_converts_a_single_value_like_the_spec() {
     assert_eq!(
         one(src),
         "1704067200500|1704067200000|5|RangeError|TypeError|TypeError|1"
+    );
+}
+
+/// An object literal's `__proto__: v` (identifier or string key) sets the prototype for an object or null and is
+/// otherwise ignored; computed and shorthand `__proto__` stay own keys. highlight.js's `MODES` relies on it.
+#[test]
+fn object_literal_proto_key_sets_the_prototype() {
+    let expected = r#""a"|["a"]|true|false|"b,inh"|["b"]|1|true|["__proto__"]|["__proto__"]|["c"]|true|["d"]|true|["__proto__"]|true"#;
+    assert_eq!(
+        one_sloppy(
+            r####"const o = { __proto__: null, a: 1 };
+const p = { __proto__: { inh: 1 }, b: 2 };
+const q = { ['__proto__']: 5 }; const k = '__proto__'; const r = { [k]: 6 };
+const s = { __proto__: 7, c: 1 };
+const t = { "__proto__": null, d: 1 };
+const u = { __proto__ };  var __proto__ = 3;
+const keys = x => { const a=[]; for (const key in x) a.push(key); return a.join(); };
+console.log([keys(o), Object.keys(o), Object.getPrototypeOf(o) === null, '__proto__' in o,
+ keys(p), Object.keys(p), p.inh, Object.getPrototypeOf(q) === Object.prototype, Object.keys(q), Object.keys(r),
+ Object.keys(s), Object.getPrototypeOf(s) === Object.prototype, Object.keys(t), Object.getPrototypeOf(t) === null, Object.keys(u), Object.getPrototypeOf(u)===Object.prototype].map(x=>JSON.stringify(x)).join('|'));
+"####
+        ),
+        expected
     );
 }

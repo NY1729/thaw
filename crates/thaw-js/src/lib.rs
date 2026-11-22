@@ -2792,6 +2792,16 @@ impl Interp {
 
     /// Own enumerable string keys (array indices first).
     /// `own_keys` that propagates what a Proxy `ownKeys` / `getOwnPropertyDescriptor` trap throws.
+    /// The spec's `ToObject` precondition: `undefined`/`null` throw, anything else passes.
+    pub(crate) fn require_object_coercible(&mut self, v: &Value) -> R<()> {
+        match v {
+            Value::Undefined | Value::Null => {
+                self.throw_error("TypeError", "Cannot convert undefined or null to object")
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn own_keys_checked(&mut self, v: &Value) -> R<Vec<Rc<str>>> {
         if let Value::Object(o) = v {
             if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
@@ -5195,6 +5205,11 @@ impl Interp {
                             a::Prop::KeyValue(kv) => {
                                 let k = self.prop_name(&kv.key, scope)?;
                                 let v = self.eval(&kv.value, scope)?;
+                                // `__proto__: v` (identifier or string key, not computed) sets the prototype
+                                // when `v` is an object or null, and is otherwise ignored; it never creates a key
+                                if literal_proto_entry(&obj, &kv.key, &k, &v) {
+                                    continue;
+                                }
                                 if is_anonymous_fn_def(&kv.value) {
                                     name_anonymous_fn(&v, &self.fn_name_of_key(&k));
                                 }
@@ -5555,6 +5570,7 @@ impl Interp {
                 a::Expr::Member(m) => {
                     let obj = self.eval(&m.obj, scope)?;
                     let key = self.member_key(&m.prop, scope)?;
+                    self.require_object_coercible(&obj)?;
                     if let Value::Object(o) = obj {
                         let deleted = crate::reflect::delete_own(self, &o, &key)?;
                         // a proxy's refused delete has its own message (a ceiling): not reported here
@@ -5992,6 +6008,15 @@ impl Interp {
             B::InstanceOf => Value::Bool(self.instance_of(l, r)?),
             B::In => {
                 let key = self.key_of(l);
+                if !matches!(r, Value::Object(_)) {
+                    let (key_text, subject) = (self.tostr(l)?, self.tostr(r)?);
+                    return self.throw_error(
+                        "TypeError",
+                        &format!(
+                            "Cannot use 'in' operator to search for '{key_text}' in {subject}"
+                        ),
+                    );
+                }
                 Value::Bool(self.has_property(r, &key)?)
             }
             _ => return unsupported("binary operator"),
@@ -7045,4 +7070,20 @@ impl Drop for Interp {
         host::native_async_hooks_release(self as *mut Interp);
         self.teardown();
     }
+}
+
+/// `{ __proto__: v }` (identifier or string key, not computed): an object or null becomes the literal's prototype,
+/// anything else is ignored, and no key is created. Returns whether `key` was that entry. Out of line so the
+/// (recursion-deep) `eval` frame does not grow.
+#[inline(never)]
+fn literal_proto_entry(obj: &Obj, key: &a::PropName, name: &str, v: &Value) -> bool {
+    if name != "__proto__" || matches!(key, a::PropName::Computed(_)) {
+        return false;
+    }
+    match v {
+        Value::Object(proto) => *obj.proto.borrow_mut() = Some(proto.clone()),
+        Value::Null => *obj.proto.borrow_mut() = None,
+        _ => {}
+    }
+    true
 }

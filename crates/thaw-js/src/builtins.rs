@@ -1639,11 +1639,13 @@ impl Interp {
             put_hidden(o, "prototype", Value::Object(op.clone()));
             put_hidden(&op, "constructor", object.clone());
             self.set_native(o, "keys", |it, _, args| {
+                it.require_object_coercible(&arg(args, 0))?;
                 let keys = it.own_keys_checked(&arg(args, 0))?;
                 Ok(it.array(keys.into_iter().map(|k| Value::Str(k.into())).collect()))
             });
             self.set_native(o, "values", |it, _, args| {
                 let t = arg(args, 0);
+                it.require_object_coercible(&t)?;
                 let mut out = Vec::new();
                 for k in it.own_keys_checked(&t)? {
                     out.push(it.get(&t, &k)?);
@@ -1652,6 +1654,7 @@ impl Interp {
             });
             self.set_native(o, "entries", |it, _, args| {
                 let t = arg(args, 0);
+                it.require_object_coercible(&t)?;
                 let mut out = Vec::new();
                 for k in it.own_keys_checked(&t)? {
                     let v = it.get(&t, &k)?;
@@ -1661,6 +1664,7 @@ impl Interp {
             });
             self.set_native(o, "assign", |it, _, args| {
                 let target = arg(args, 0);
+                it.require_object_coercible(&target)?;
                 for src in args.iter().skip(1) {
                     let keys = it
                         .own_keys(src)
@@ -1758,6 +1762,7 @@ impl Interp {
             });
             self.set_native(o, "getOwnPropertyNames", |it, _, args| {
                 let t = arg(args, 0);
+                it.require_object_coercible(&t)?;
                 if let Value::Object(po) = &t {
                     if let Some(keys) = it.proxy_own_keys(po, false)? {
                         let names = keys
@@ -1863,6 +1868,7 @@ impl Interp {
                 Ok(it.array(names))
             });
             self.set_native(o, "getOwnPropertySymbols", |it, _, args| {
+                it.require_object_coercible(&arg(args, 0))?;
                 let Value::Object(o) = arg(args, 0) else {
                     return Ok(it.array(vec![]));
                 };
@@ -1884,6 +1890,7 @@ impl Interp {
             });
             self.set_native(o, "getOwnPropertyDescriptor", |it, _, args| {
                 let key = it.key_of(&arg(args, 1));
+                it.require_object_coercible(&arg(args, 0))?;
                 let Value::Object(o) = arg(args, 0) else {
                     return Ok(Value::Undefined);
                 };
@@ -2069,10 +2076,15 @@ impl Interp {
         }
         g.declare("Object", object, true);
         self.set_native(&op, "hasOwnProperty", |it, this, args| {
+            it.require_object_coercible(this)?;
             Ok(Value::Bool(it.has_own_property(this, &arg(args, 0))?))
         });
-        self.set_native(&op, "isPrototypeOf", |_, this, args| {
-            let (Value::Object(p), Value::Object(o)) = (this, arg(args, 0)) else {
+        self.set_native(&op, "isPrototypeOf", |it, this, args| {
+            let Value::Object(o) = arg(args, 0) else {
+                return Ok(Value::Bool(false));
+            };
+            it.require_object_coercible(this)?;
+            let Value::Object(p) = this else {
                 return Ok(Value::Bool(false));
             };
             let mut cur = o.proto.borrow().clone();
@@ -2085,9 +2097,13 @@ impl Interp {
             Ok(Value::Bool(false))
         });
         self.set_native(&op, "propertyIsEnumerable", |it, this, args| {
+            it.require_object_coercible(this)?;
             Ok(Value::Bool(it.own_enumerable(this, &arg(args, 0))?))
         });
-        self.set_native(&op, "valueOf", |_, this, _| Ok(this.clone()));
+        self.set_native(&op, "valueOf", |it, this, _| {
+            it.require_object_coercible(this)?;
+            Ok(this.clone())
+        });
         self.set_native(&op, "toString", |it, this, _| {
             object_prototype_to_string(it, this)
         });
