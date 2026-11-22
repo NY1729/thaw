@@ -11658,7 +11658,7 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
 /// Standard globals that thaw-hir lowers by name (`platform_globals`) must
 /// exist in the thaw-js realm, or be listed here. Shrink-only: an entry is
 /// removed in the PR that implements it, and a stale entry fails this test.
-const ABSENT_IN_THAW_JS: &[&str] = &["DisposableStack", "AsyncDisposableStack"];
+const ABSENT_IN_THAW_JS: &[&str] = &[];
 
 #[test]
 fn platform_globals_exist_in_thaw_js_realm_or_are_ledgered() {
