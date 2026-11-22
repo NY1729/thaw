@@ -250,9 +250,10 @@ fn live_import_bindings(module: &a::Module) -> (BTreeMap<String, String>, BTreeS
                 for sp in &i.specifiers {
                     match sp {
                         a::ImportSpecifier::Default(d) => {
+                            // parenthesized: a bare call would turn `new D()` into `new __thaw_esm_default(m)()`
                             live.insert(
                                 d.local.sym.to_string(),
-                                format!("__thaw_esm_default({m})"),
+                                format!("(__thaw_esm_default({m}))"),
                             );
                         }
                         a::ImportSpecifier::Named(n) => {
@@ -263,7 +264,7 @@ fn live_import_bindings(module: &a::Module) -> (BTreeMap<String, String>, BTreeS
                                 .map(export_name)
                                 .unwrap_or_else(|| local.clone());
                             let read = if imported == "default" {
-                                format!("__thaw_esm_default({m})")
+                                format!("(__thaw_esm_default({m}))")
                             } else {
                                 let mut qi = String::new();
                                 json_quote(&imported, &mut qi);
@@ -1049,6 +1050,23 @@ var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal
     // Import reads are scope-safe live member reads: shadowing, shorthand, typeof, call this-value,
     // `export { x }` of an import, default import, and assignment to an import throwing a TypeError.
     // Node 22 expectation of the same sources: "2,p,shadow,2,2,number,undefined,4,2,7,TypeError,TypeError,2" (real `node` 22.23.1)
+    #[test]
+    fn native_default_import_is_constructible_and_a_member_base() {
+        // `new D()` must construct D itself, and `D.prototype` / `new D.Inner()` must see the default export: the live
+        // read of a default import is a call expression, so it has to be parenthesized wherever it is a `new` callee
+        let modules = serde_json::json!([
+            { "key": "m/q.mjs",
+              "source": "export default class Queue { constructor() { this.n = 1; } static Inner = class { constructor() { this.k = 2; } }; }\n",
+              "imports": {} },
+            { "key": "m/u.mjs",
+              "source": "import Queue from \"./q.mjs\";\nexport function make() { var q = new Queue(); var i = new Queue.Inner(); return [q.n, i.k, typeof Queue.prototype, q instanceof Queue].join(','); }\n",
+              "imports": { "./q.mjs": "m/q.mjs" } }
+        ]);
+        let index = r#"var u = require("./u.mjs");
+exports.run = function () { return u.make(); };"#;
+        assert_eq!(run(modules, index), Native::Str("1,2,object,true".into()));
+    }
+
     #[test]
     fn native_import_reads_are_live_scope_safe() {
         let modules = serde_json::json!([
