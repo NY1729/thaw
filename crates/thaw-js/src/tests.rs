@@ -12761,3 +12761,32 @@ fn callback_error_text_keeps_an_embedded_nul() {
     .unwrap_or_else(|_| panic!("the default realm is unavailable"));
     assert_eq!(message, "before\0after");
 }
+
+const HOLES: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"hl/index.js": function(module, exports, require) {
+  exports.probe = function (values) { return [Object.hasOwn(values, 0), values[0] === undefined, values.length].join(','); };
+},
+};
+var __thaw_bundle_require_maps = { "hl/index.js": {}, };
+var __thaw_bundle_entry_key = "hl/index.js";
+})(globalThis.require);"#;
+
+/// A native array hole crosses the typed ABI as `{"__thaw_tjs_hole__":1}` and stays a hole.
+#[test]
+fn array_holes_cross_the_typed_abi_as_wire_nodes() {
+    use std::ffi::CString;
+    let bundle = CString::new(HOLES).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"hl".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call("hl::probe", r#"[[{"__thaw_tjs_hole__":1},5]]"#).unwrap(),
+        "\"false,true,2\""
+    );
+    assert_eq!(
+        typed_call("hl::probe", r#"[[null,5]]"#).unwrap(),
+        "\"true,false,2\""
+    );
+}

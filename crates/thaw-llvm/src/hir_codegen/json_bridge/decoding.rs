@@ -1552,7 +1552,22 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(done);
         // `array` is a freshly built raw buffer; wrap it in a handle before
         // treating it as this call's array-typed return value (see
-        // `compile_array_wrap`'s doc comment).
+        // `compile_array_wrap`'s doc comment). A thaw-js array keeps its holes absent.
+        if self.thaw_js_routed {
+            let mask = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_array_hole_mask").unwrap(),
+                    &[json.into()],
+                    "json_array_hole_mask",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_array_hole_mask returned no value")?
+                .into_pointer_value();
+            return self.compile_array_wrap_with_presence(array, mask);
+        }
         self.compile_array_wrap(array)
     }
 

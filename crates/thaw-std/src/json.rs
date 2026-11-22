@@ -3043,9 +3043,22 @@ fn ordered_json(value: &Value) -> Value {
                 .map(|(key, value)| (key.clone(), ordered_json(value)))
                 .collect(),
         ),
-        Value::Array(items) => {
-            Value::shared_array(shared_array_ref(items).iter().map(ordered_json).collect())
-        }
+        Value::Array(items) => Value::shared_array(
+            shared_array_ref(items)
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    // a thaw-js argument keeps a sparse array's holes as `{"__thaw_tjs_hole__": 1}`
+                    if DATE_WIRE.with(Cell::get) && !array_has_index(items, index) {
+                        return Value::shared_object(indexmap::IndexMap::from([(
+                            b"__thaw_tjs_hole__".to_vec(),
+                            number_value(1.0),
+                        )]));
+                    }
+                    ordered_json(item)
+                })
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -10265,6 +10278,53 @@ pub extern "C" fn thaw_json_array_push_bool(array: *mut Value, value: u8) {
     }
 }
 
+/// The presence mask (`[i64 length][one byte per index: 1 present, 0 hole]`, arena-owned) of the array in
+/// `value`, or null when it has no holes. A native array decoded from a Json array uses it to keep holes.
+///
+/// # Safety
+/// `value` must be null or point to a valid JSON `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_array_hole_mask(value: *const Value) -> *mut u8 {
+    let (length, holes): (usize, Vec<usize>) = match unsafe { value.as_ref() } {
+        Some(Value::Array(items)) => {
+            let length = shared_array_ref(items).len();
+            (
+                (length),
+                (0..length)
+                    .filter(|i| !array_has_index(items, *i))
+                    .collect(),
+            )
+        }
+        Some(Value::Host(lease)) => {
+            let Some(text) = host_query(lease, 33) else {
+                return std::ptr::null_mut();
+            };
+            let holes: Vec<usize> = text
+                .trim_matches(|c| c == '[' || c == ']')
+                .split(',')
+                .filter_map(|n| n.trim().parse().ok())
+                .collect();
+            (thaw_json_array_length(value as *mut Value) as usize, holes)
+        }
+        _ => return std::ptr::null_mut(),
+    };
+    if holes.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let mask = thaw_arena::thaw_arena_alloc(length + 8, 1);
+    if mask.is_null() {
+        return mask;
+    }
+    unsafe {
+        mask.cast::<i64>().write_unaligned(length as i64);
+        std::ptr::write_bytes(mask.add(8), 1, length);
+        for hole in holes.into_iter().filter(|hole| *hole < length) {
+            mask.add(8 + hole).write(0);
+        }
+    }
+    mask
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_hole(array: *mut Value) {
     if let Some(Value::Array(items)) = unsafe { array.as_ref() } {
@@ -15833,6 +15893,34 @@ mod tests {
         assert!(includes(marker_value(3)));
         assert!(includes(lease_value(4)));
         assert!(!includes(lease_value(9)));
+    }
+
+    #[test]
+    fn array_hole_mask_marks_only_the_holes() {
+        let array = thaw_json_array_new();
+        thaw_json_array_push_hole(array);
+        thaw_json_array_push_number(array, 5.0);
+        let mask = unsafe { thaw_json_array_hole_mask(array) };
+        assert!(!mask.is_null());
+        let bytes = unsafe { std::slice::from_raw_parts(mask.add(8), 2) };
+        assert_eq!(bytes, [0, 1]);
+        let dense = thaw_json_array_new();
+        thaw_json_array_push_number(dense, 1.0);
+        assert!(unsafe { thaw_json_array_hole_mask(dense) }.is_null());
+    }
+
+    #[test]
+    fn thaw_js_argument_wire_keeps_array_holes() {
+        let inner = thaw_json_array_new();
+        thaw_json_array_push_hole(inner);
+        thaw_json_array_push_number(inner, 5.0);
+        let args = thaw_json_array_new();
+        thaw_json_array_push_json(args, inner);
+        unsafe { thaw_json_destroy(inner) };
+        assert_eq!(
+            read_c_string(thaw_json_stringify_tjs(args)),
+            r#"[[{"__thaw_tjs_hole__":1},5]]"#
+        );
     }
 
     #[test]
