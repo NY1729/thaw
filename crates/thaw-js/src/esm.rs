@@ -211,10 +211,26 @@ fn convert_with(
         crate::esm_live::rewrite_import_references(source, &module, &cm, &live, &named, true)
     };
     let Some(rewritten) = rewritten else {
-        return Ok(convert_module(&module, &cm, public_specs, indirect, &BUNDLE_NAMES, awaits, &live));
+        return Ok(convert_module(
+            &module,
+            &cm,
+            public_specs,
+            indirect,
+            &BUNDLE_NAMES,
+            awaits,
+            &live,
+        ));
     };
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(&rewritten)?;
-    Ok(convert_module(&module, &cm, public_specs, indirect, &BUNDLE_NAMES, awaits, &live))
+    Ok(convert_module(
+        &module,
+        &cm,
+        public_specs,
+        indirect,
+        &BUNDLE_NAMES,
+        awaits,
+        &live,
+    ))
 }
 
 /// `local -> read expression` of every default and named import of `module` (the names `convert_module` no longer
@@ -224,7 +240,9 @@ fn live_import_bindings(module: &a::Module) -> (BTreeMap<String, String>, BTreeS
     let (mut live, mut named) = (BTreeMap::new(), BTreeSet::new());
     let mut counter = 0usize;
     for item in &module.body {
-        let a::ModuleItem::ModuleDecl(decl) = item else { continue };
+        let a::ModuleItem::ModuleDecl(decl) = item else {
+            continue;
+        };
         match decl {
             a::ModuleDecl::Import(i) if !i.src.value.to_string_lossy().starts_with(ORIGIN_SPEC) => {
                 counter += 1;
@@ -232,11 +250,18 @@ fn live_import_bindings(module: &a::Module) -> (BTreeMap<String, String>, BTreeS
                 for sp in &i.specifiers {
                     match sp {
                         a::ImportSpecifier::Default(d) => {
-                            live.insert(d.local.sym.to_string(), format!("__thaw_esm_default({m})"));
+                            live.insert(
+                                d.local.sym.to_string(),
+                                format!("__thaw_esm_default({m})"),
+                            );
                         }
                         a::ImportSpecifier::Named(n) => {
                             let local = n.local.sym.to_string();
-                            let imported = n.imported.as_ref().map(export_name).unwrap_or_else(|| local.clone());
+                            let imported = n
+                                .imported
+                                .as_ref()
+                                .map(export_name)
+                                .unwrap_or_else(|| local.clone());
                             let read = if imported == "default" {
                                 format!("__thaw_esm_default({m})")
                             } else {
@@ -345,12 +370,17 @@ fn convert_module(
                     for sp in &i.specifiers {
                         match sp {
                             // a name in `live` is read through `m` at each use, not copied
-                            a::ImportSpecifier::Default(d) if !live.contains_key(d.local.sym.as_str()) => body.push_str(&format!(
-                                "var {} = __thaw_esm_default({m});\n",
-                                d.local.sym
-                            )),
+                            a::ImportSpecifier::Default(d)
+                                if !live.contains_key(d.local.sym.as_str()) =>
+                            {
+                                body.push_str(&format!(
+                                    "var {} = __thaw_esm_default({m});\n",
+                                    d.local.sym
+                                ))
+                            }
                             a::ImportSpecifier::Default(_) => {}
-                            a::ImportSpecifier::Named(n) if live.contains_key(n.local.sym.as_str()) => {}
+                            a::ImportSpecifier::Named(n)
+                                if live.contains_key(n.local.sym.as_str()) => {}
                             a::ImportSpecifier::Namespace(n) => body
                                 .push_str(&format!("var {} = __thaw_esm_ns({m});\n", n.local.sym)),
                             a::ImportSpecifier::Named(n) => {

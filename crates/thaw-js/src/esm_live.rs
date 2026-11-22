@@ -4,7 +4,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub fn pattern_names(pattern: &thaw_parser::ast::Pat, names: &mut std::collections::BTreeSet<String>) {
+pub fn pattern_names(
+    pattern: &thaw_parser::ast::Pat,
+    names: &mut std::collections::BTreeSet<String>,
+) {
     match pattern {
         thaw_parser::ast::Pat::Ident(binding) => {
             names.insert(binding.id.sym.to_string());
@@ -131,7 +134,8 @@ pub fn rewrite_import_references(
                 return false;
             };
             let span = identifier.span();
-            self.replacements.push((span.lo.0, span.hi.0, format!("(0, {replacement})")));
+            self.replacements
+                .push((span.lo.0, span.hi.0, format!("(0, {replacement})")));
             true
         }
         fn push_function_scope(&mut self, function: &Function) {
@@ -161,7 +165,8 @@ pub fn rewrite_import_references(
                     if !self.is_shadowed(name) {
                         if let Some(replacement) = self.bindings.get(name) {
                             let span = target.id.span();
-                            self.replacements.push((span.lo.0, span.hi.0, replacement.clone()));
+                            self.replacements
+                                .push((span.lo.0, span.hi.0, replacement.clone()));
                             assign.right.visit_with(self);
                             return;
                         }
@@ -235,7 +240,10 @@ pub fn rewrite_import_references(
         fn visit_for_stmt(&mut self, statement: &ForStmt) {
             let names = match statement.init.as_ref() {
                 Some(VarDeclOrExpr::VarDecl(declaration))
-                    if declaration.kind != VarDeclKind::Var => variable_names(declaration),
+                    if declaration.kind != VarDeclKind::Var =>
+                {
+                    variable_names(declaration)
+                }
                 _ => BTreeSet::new(),
             };
             self.shadowed.push(names);
@@ -353,8 +361,14 @@ pub fn rewrite_import_references(
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0usize;
     for (lo, hi, replacement) in references.replacements {
-        let lo = cm.lookup_byte_offset(thaw_parser::common::BytePos(lo)).pos.0 as usize;
-        let hi = cm.lookup_byte_offset(thaw_parser::common::BytePos(hi)).pos.0 as usize;
+        let lo = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(lo))
+            .pos
+            .0 as usize;
+        let hi = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(hi))
+            .pos
+            .0 as usize;
         if lo < cursor {
             continue;
         }
