@@ -1810,22 +1810,16 @@ fn native_node_path_default_and_namespace_match_node() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: needs in-context helpers and namespace identity after load; script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_mixed_pure_namespace_keeps_engine_identity {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_mixed_pure_namespace_keeps_engine_identity() {
-    // Unrun: a mixed facade's namespace reexport of a pure native module
-    // must be the same engine namespace used by untouched and dynamic imports.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1 (probes g2b-probes/pure_ns, same sources): [true,18,true,true,9,1] then [true,true,18,1]. A mixed
+    // facade's namespace reexport of a pure native module is the namespace used by untouched and dynamic imports.
     let root = temp_registry("native-mixed-pure-namespace");
     let modules = root.join("node_modules");
     let package = modules.join("native-namespace-identity-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "import legacy from './legacy.cjs'; import * as mixedImported from './mixed.mjs'; import * as imported from './pure.mjs'; export * as mixedNs from './mixed.mjs'; export * from './left.mjs'; export * from './right.mjs'; export { imported, mixedImported }; export const value = legacy; export const loadPure = () => import('./pure.mjs'); export const loadMixed = () => import('./mixed.mjs');").unwrap();
-    fs::write(package.join("pure.mjs"), "globalThis.__thaw_pure_runs++; export let value = 17; export function set(value_) { value = value_; }").unwrap();
+    fs::write(package.join("pure.mjs"), "globalThis.__thaw_pure_runs = (globalThis.__thaw_pure_runs || 0) + 1; export let value = 17; export function set(value_) { value = value_; }").unwrap();
     fs::write(package.join("bridge.mjs"), "export * as ns from './pure.mjs';").unwrap();
     fs::write(package.join("left.mjs"), "export { ns } from './bridge.mjs';").unwrap();
     fs::write(package.join("right.mjs"), "export { ns } from './bridge.mjs';").unwrap();
@@ -1833,44 +1827,38 @@ fn native_mixed_pure_namespace_keeps_engine_identity() {
     fs::write(package.join("legacy.cjs"), "module.exports = 9;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-namespace-identity-pkg", &package, "index.mjs").unwrap();
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.__thaw_pure_runs = 0; globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readNamespaceIdentity = function() {{ var exported = module.exports; exported.ns.set(18); return [exported.ns === exported.imported, exported.ns.value, exported.mixedNs === exported.mixedImported, exported.mixedNs.earlyNs === exported.ns, exported.mixedNs.value, __thaw_pure_runs]; }}; globalThis.readDynamicNamespaceIdentity = function() {{ var exported = module.exports; return Promise.all([exported.loadPure(), exported.loadMixed()]).then(function(values) {{ return [values[0] === exported.ns, values[1] === exported.mixedNs, values[0].value, __thaw_pure_runs]; }}); }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let direct = thaw_quickjs::thaw_js_call(c"readNamespaceIdentity".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(direct) }.to_string_lossy(), "[true,18,true,true,9,1]");
-    let dynamic = thaw_quickjs::thaw_js_call(c"readDynamicNamespaceIdentity".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(dynamic) }.to_string_lossy(), "[true,true,18,1]");
+    assert_eq!(
+        run_js_probe(&bundle, "(exports.ns.set(18), [exports.ns === exports.imported, exports.ns.value, exports.mixedNs === exports.mixedImported, exports.mixedNs.earlyNs === exports.ns, exports.mixedNs.value, globalThis.__thaw_pure_runs])"),
+        "[true,18,true,true,9,1]"
+    );
+    assert_eq!(
+        run_js_probe(&bundle, "(exports.ns.set(18), Promise.all([exports.loadPure(), exports.loadMixed()]).then(function (values) { return [values[0] === exports.ns, values[1] === exports.mixedNs, values[0].value, globalThis.__thaw_pure_runs]; }))"),
+        "[true,true,18,1]"
+    );
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: needs JS globals read after load (__thaw_early_ns, __thaw_pure_runs); script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_mixed_namespace_anchor_reseeds_after_stripped_edge {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_namespace_anchor_reseeds_after_stripped_edge() {
-    // Unrun three-module cycle: A's export through mixed D is stripped, but
-    // D's export of pure B is native. Reader R runs before D's later B edge,
-    // so its import of A.ns must read D's retained alias before B evaluates.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1 (probes g2b-probes/anchor, same sources): [true,true,17,1]. Three-module cycle: reader R runs
+    // before mixed D evaluates its later `export * as ns from pure`, yet R's import of index's `ns` is the final
+    // namespace, which is populated once pure has run.
     let root = temp_registry("native-namespace-anchor-reseed");
     let modules = root.join("node_modules");
     let package = modules.join("native-anchor-reseed-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "import './legacy.cjs'; import './mixed.mjs'; export { ns } from './mixed.mjs';").unwrap();
     fs::write(package.join("mixed.mjs"), "import './reader.mjs'; export * as ns from './pure.mjs';").unwrap();
-    fs::write(package.join("reader.mjs"), "import { ns } from './index.mjs'; globalThis.__thaw_early_before_pure = globalThis.__thaw_pure_runs === 0; globalThis.__thaw_early_ns = ns; export const early = ns;").unwrap();
-    fs::write(package.join("pure.mjs"), "globalThis.__thaw_pure_runs++; export const value = 17;").unwrap();
+    fs::write(package.join("reader.mjs"), "import { ns } from './index.mjs'; globalThis.__thaw_early_before_pure = !globalThis.__thaw_pure_runs; globalThis.__thaw_early_ns = ns; export const early = ns;").unwrap();
+    fs::write(package.join("pure.mjs"), "globalThis.__thaw_pure_runs = (globalThis.__thaw_pure_runs || 0) + 1; export const value = 17;").unwrap();
     fs::write(package.join("legacy.cjs"), "module.exports = 9;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-anchor-reseed-pkg", &package, "index.mjs").unwrap();
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.__thaw_pure_runs = 0; globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readAnchorReseed = function() {{ return [__thaw_early_before_pure, __thaw_early_ns === module.exports.ns, __thaw_early_ns.value, __thaw_pure_runs]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"readAnchorReseed".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,17,1]");
+    assert_eq!(
+        run_js_probe(&bundle, "[globalThis.__thaw_early_before_pure, globalThis.__thaw_early_ns === exports.ns, globalThis.__thaw_early_ns.value, globalThis.__thaw_pure_runs]"),
+        "[true,true,17,1]"
+    );
     let _ = fs::remove_dir_all(root);
-}
 }
 
 #[test]
@@ -2202,13 +2190,32 @@ fn native_mixed_async_opaque_back_edge_keeps_legacy_bridge() {
 }
 
 #[test]
+fn native_esm_barrel_default_namespace_and_star_shapes_keep_class_identity() {
+    // Node 22.23.1 (g2b-probes/barrel, same sources): [1,1,true,2,3,2,true,true,"Queue,default,f,ns,qns,u"]. The p-limit
+    // shape: a barrel re-exports a default class (`export { default } from`, `export { default as Queue } from`), a star
+    // and namespaces; the consumer constructs through the default and the named import.
+    let root = temp_registry("native-esm-barrel-shapes");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-barrel-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "export { default as Queue } from './queue.mjs'; export { default } from './queue.mjs'; export * from './util.mjs'; export * as ns from './util.mjs'; export * as qns from './queue.mjs';").unwrap();
+    fs::write(package.join("queue.mjs"), "export default class Queue { constructor() { this.k = 1; } }").unwrap();
+    fs::write(package.join("util.mjs"), "export const u = 2; export function f() { return 3; }").unwrap();
+    fs::write(package.join("use.mjs"), "import Dflt, { Queue, u, f, ns, qns } from './index.mjs'; import * as all from './index.mjs'; export const result = [new Dflt().k, new Queue().k, Dflt === Queue, u, f(), ns.u, ns === all.ns, qns.default === Queue, Object.keys(all).sort().join()];").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-barrel-pkg", &package, "use.mjs").unwrap();
+    assert!(bundle.contains("__thaw_register_native_bundle"));
+    assert_eq!(run_js_get(&bundle, "result"), "[1,1,true,2,3,2,true,true,\"Queue,default,f,ns,qns,u\"]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
-    // Unrun regression: rewriting an unused named import to an opaque shell
-    // must retain native link-time missing/ambiguous export validation.
-    use std::ffi::{CStr, CString};
-    for (kind, middle, extras) in [
-        ("missing", "import legacy from './legacy.cjs'; export const present = legacy;", false),
-        ("ambiguous", "import legacy from './legacy.cjs'; export * from './left.mjs'; export * from './right.mjs'; export const present = legacy;", true),
+    // Node 22.23.1 (probes g2b-probes/lazy, lazy2; the same graphs entered statically): rewriting an unused named
+    // import to an opaque shell must retain link-time missing/ambiguous export validation, and nothing runs first.
+    // A CommonJS dependency that throws when it runs shows that no factory ran: the load fails with the SyntaxError.
+    for (kind, middle, extras, message) in [
+        ("missing", "import legacy from './legacy.cjs'; export const present = legacy;", false, "SyntaxError: The requested module './middle.mjs' does not provide an export named 'absent'"),
+        ("ambiguous", "import legacy from './legacy.cjs'; export * from './left.mjs'; export * from './right.mjs'; export const present = legacy;", true, "SyntaxError: The requested module './middle.mjs' contains conflicting star exports for name 'duplicate'"),
     ] {
         let root = temp_registry(&format!("native-mixed-link-{kind}"));
         let modules = root.join("node_modules");
@@ -2217,17 +2224,14 @@ fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
         let requested = if extras { "duplicate" } else { "absent" };
         fs::write(package.join("index.mjs"), format!("import {{ {requested} }} from './middle.mjs'; export const value = 1;")).unwrap();
         fs::write(package.join("middle.mjs"), middle).unwrap();
-        fs::write(package.join("legacy.cjs"), "globalThis.__thaw_link_runs++; module.exports = 9;").unwrap();
+        fs::write(package.join("legacy.cjs"), "throw new Error('FACTORY RAN'); module.exports = 9;").unwrap();
         if extras {
-            fs::write(package.join("left.mjs"), "globalThis.__thaw_link_runs++; export const duplicate = 1;").unwrap();
-            fs::write(package.join("right.mjs"), "globalThis.__thaw_link_runs++; export const duplicate = 2;").unwrap();
+            fs::write(package.join("left.mjs"), "throw new Error('FACTORY RAN'); export const duplicate = 1;").unwrap();
+            fs::write(package.join("right.mjs"), "throw new Error('FACTORY RAN'); export const duplicate = 2;").unwrap();
         }
         let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-mixed-link-pkg", &package, "index.mjs").unwrap();
         assert!(bundle.contains("validateStatic"), "{kind}: {bundle}");
-        let script = format!("globalThis.__thaw_link_runs = 0; globalThis.readMixedLinkRuns = function() {{ return __thaw_link_runs; }}; globalThis.module = {{ exports: {{}} }}; {bundle}");
-        assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 0);
-        let result = thaw_js_shim::thaw_js_call(c"readMixedLinkRuns".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "0");
+        assert_eq!(run_js_get(&bundle, ""), format!("ERROR: {message}"), "{kind}");
         let _ = fs::remove_dir_all(root);
     }
 }
@@ -2250,19 +2254,12 @@ fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: needs in-context lazy-load helpers across calls; script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_mixed_lazy_link_errors_wait_for_the_dynamic_entry {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
-    // Unrun controls for both native import() and the registration-bound CJS
-    // import(): unrelated lazy modules cannot fail the initial entry, and
-    // their missing/ambiguous names reject before their factories execute.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1 (probes g2b-probes/lazy): unrelated lazy modules cannot fail the initial entry, and their
+    // missing/ambiguous names reject the import() with a SyntaxError before any of their dependencies execute.
     for (kind, entry, middle, extra) in [
-        ("native", "import front from './front.cjs'; export const load = () => import('./lazy.mjs'); export const loadValid = () => import('./valid.mjs'); export const ready = front; Promise.reject = () => { throw new Error('mutated reject'); }; Promise.prototype.then = () => { throw new Error('mutated then'); };", "import late from './late.cjs'; export const present = late;", false),
+        ("native", "import front from './front.cjs'; export const load = () => import('./lazy.mjs'); export const loadValid = () => import('./valid.mjs'); export const ready = front;", "import late from './late.cjs'; export const present = late;", false),
         ("cjs", "import front from './front.cjs'; export const load = front;", "import late from './late.cjs'; export * from './left.mjs'; export * from './right.mjs'; export const present = late;", true),
     ] {
         let root = temp_registry(&format!("native-mixed-lazy-link-{kind}"));
@@ -2277,34 +2274,31 @@ fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
             fs::write(package.join("valid.mjs"), "export const value = 17;").unwrap();
         }
         fs::write(package.join("middle.mjs"), middle).unwrap();
-        fs::write(package.join("late.cjs"), "globalThis.__thaw_late_runs++; module.exports = 3;").unwrap();
+        fs::write(package.join("late.cjs"), "globalThis.__thaw_late_runs = (globalThis.__thaw_late_runs || 0) + 1; module.exports = 3;").unwrap();
         if extra {
-            fs::write(package.join("left.mjs"), "globalThis.__thaw_late_runs++; export const duplicate = 1;").unwrap();
-            fs::write(package.join("right.mjs"), "globalThis.__thaw_late_runs++; export const duplicate = 2;").unwrap();
+            fs::write(package.join("left.mjs"), "globalThis.__thaw_late_runs = (globalThis.__thaw_late_runs || 0) + 1; export const duplicate = 1;").unwrap();
+            fs::write(package.join("right.mjs"), "globalThis.__thaw_late_runs = (globalThis.__thaw_late_runs || 0) + 1; export const duplicate = 2;").unwrap();
         }
         let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-mixed-lazy-link-pkg", &package, "index.mjs").unwrap();
         assert!(bundle.contains("__thaw_register_native_bundle"));
-        let script = format!("globalThis.__thaw_late_runs = 0; globalThis.__thaw_saved_then = Promise.prototype.then; globalThis.__thaw_saved_reject = Promise.reject; globalThis.__thaw_saved_apply = Reflect.apply; globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readLazyState = function() {{ return [module.exports.ready, __thaw_late_runs]; }}; globalThis.loadValidLazy = function() {{ return __thaw_saved_apply(__thaw_saved_then, module.exports.loadValid(), [namespace => [namespace.value, __thaw_late_runs], error => ['unexpected', error.name]]); }}; globalThis.loadLazy = function() {{ return __thaw_saved_apply(__thaw_saved_then, module.exports.load(), [() => ['unexpected'], error => [error.name, __thaw_late_runs]]); }}; globalThis.restoreLazyPromise = function() {{ Promise.prototype.then = __thaw_saved_then; Promise.reject = __thaw_saved_reject; return true; }};");
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let ready = thaw_quickjs::thaw_js_call(c"readLazyState".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(ready) }.to_string_lossy(), if extra { "[null,0]" } else { "[9,0]" });
-        let valid = if extra {
-            None
-        } else {
-            let result = thaw_quickjs::thaw_js_call(c"loadValidLazy".as_ptr(), c"[]".as_ptr());
-            Some(unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned())
-        };
-        let failed = thaw_quickjs::thaw_js_call(c"loadLazy".as_ptr(), c"[]".as_ptr());
-        let failed = unsafe { CStr::from_ptr(failed) }.to_string_lossy().into_owned();
-        let restored = thaw_quickjs::thaw_js_call(c"restoreLazyPromise".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(restored) }.to_string_lossy(), "true");
-        if let Some(valid) = valid {
-            assert_eq!(valid, "[17,0]");
+            assert_eq!(
+            run_js_probe(&bundle, "[exports.ready === undefined ? null : exports.ready, globalThis.__thaw_late_runs || 0]"),
+            if extra { "[null,0]" } else { "[9,0]" },
+            "{kind}"
+        );
+        if !extra {
+            assert_eq!(
+                run_js_probe(&bundle, "exports.loadValid().then(function (ns) { return [ns.value, globalThis.__thaw_late_runs || 0]; })"),
+                "[17,0]"
+            );
         }
-        assert_eq!(failed, "[\"SyntaxError\",0]");
+        assert_eq!(
+            run_js_probe(&bundle, "exports.load().then(function () { return ['unexpected']; }, function (e) { return [e.name, globalThis.__thaw_late_runs || 0]; })"),
+            "[\"SyntaxError\",0]",
+            "{kind}"
+        );
         let _ = fs::remove_dir_all(root);
     }
-}
 }
 
 #[test]

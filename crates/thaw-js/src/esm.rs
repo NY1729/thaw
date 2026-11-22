@@ -92,10 +92,15 @@ fn indirect_exports(source: &str) -> BTreeMap<String, Vec<(String, String, Strin
         let mut names = Vec::new();
         for (name, entry) in indirect {
             if let Native::Array(parts) = entry {
-                if let [Native::Str(spec), Native::Str(remote), ..] = parts.as_slice() {
-                    if remote != "*" {
-                        names.push((name.clone(), spec.clone(), remote.clone()));
+                match parts.as_slice() {
+                    [Native::Str(spec), Native::Str(remote), ..] if remote != "*" => {
+                        names.push((name.clone(), spec.clone(), remote.clone()))
                     }
+                    // a namespace re-export (`export * as name from spec`): remote `*`
+                    [Native::Str(spec), Native::Null | Native::Str(_), ..] => {
+                        names.push((name.clone(), spec.clone(), "*".to_string()))
+                    }
+                    _ => {}
                 }
             }
         }
@@ -242,14 +247,25 @@ struct Converted {
     tla: bool,
 }
 
+/// What the link phase knows about one bundled module (see `native_json_to_factories`): which of its specifiers
+/// name an ES module of the same bundle (`esm`: specifier -> key) and which `export *` names resolve statically to
+/// one binding (`stars`: name, module key, export name there; `None` is a namespace). Such a module's exports exist
+/// before it evaluates (`require.peek(key)`), so a cycle peer reads them early, as it does in Node.
+#[derive(Default)]
+struct Links {
+    esm: BTreeMap<String, String>,
+    stars: Vec<(String, String, Option<String>)>,
+}
+
 /// `indirect`: `(exported name, specifier, imported name)` re-exports that the registry removed from
 /// `source` and kept only in the export graph.
+#[cfg(test)]
 fn convert(
     source: &str,
     public_specs: &[String],
     indirect: &[(String, String, String)],
 ) -> Result<Converted, String> {
-    convert_with(source, public_specs, indirect, None)
+    convert_with(source, public_specs, indirect, None, &Links::default())
 }
 
 /// `convert`; `awaits: Some(specs)` makes the factory async: it awaits the modules of `specs` before the body.
@@ -258,6 +274,7 @@ fn convert_with(
     public_specs: &[String],
     indirect: &[(String, String, String)],
     awaits: Option<&BTreeSet<String>>,
+    links: &Links,
 ) -> Result<Converted, String> {
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source)?;
     let (live, named) = live_import_bindings(&module);
@@ -277,6 +294,7 @@ fn convert_with(
             &BUNDLE_NAMES,
             awaits,
             &live,
+            links,
         ));
     };
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(&rewritten)?;
@@ -288,6 +306,7 @@ fn convert_with(
         &BUNDLE_NAMES,
         awaits,
         &live,
+        links,
     ))
 }
 
@@ -350,6 +369,7 @@ fn request(require: &str, m: &str, q: &str, awaited: bool) -> String {
 }
 
 /// `convert` for a parsed module, with the factory identifiers `names`.
+#[allow(clippy::too_many_arguments)]
 fn convert_module(
     module: &a::Module,
     cm: &thaw_parser::common::SourceMap,
@@ -358,6 +378,7 @@ fn convert_module(
     names: &Names,
     awaits: Option<&BTreeSet<String>>,
     live: &BTreeMap<String, String>,
+    links: &Links,
 ) -> Converted {
     let (rq, ex) = (names.require, names.exports);
     // bundle modules (not entries) are the ones a cycle peer can read
@@ -371,6 +392,43 @@ fn convert_module(
          if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } \
          ns.default = m; return ns; }\n",
     );
+    if bundle && !links.stars.is_empty() {
+        // `export *` names that resolve statically: defined before the body, reading the (maybe not yet evaluated) target
+        head.push_str(&format!("function __thaw_esm_static(n, m, k) {{ {ex}.__thaw_esm_stars[n] = {{ bind: {{ m: m, k: k }}, amb: false, fixed: true }}; Object.defineProperty({ex}, n, {{ enumerable: true, configurable: true, get: function () {{ return k === null ? m : m[k]; }} }}); }}\n"));
+        for (name, key, export) in &links.stars {
+            let (mut qn, mut qk, mut qe) = (String::new(), String::new(), String::new());
+            json_quote(name, &mut qn);
+            json_quote(key, &mut qk);
+            match export {
+                Some(e) => json_quote(e, &mut qe),
+                None => qe.push_str("null"),
+            }
+            head.push_str(&format!(
+                "__thaw_esm_static({qn}, {rq}.peek({qk}), {qe});\n"
+            ));
+        }
+    }
+    // a module of this bundle is read through its (maybe not yet evaluated) exports, so a cycle peer sees its names
+    let peeked = |spec: &str| {
+        links.esm.get(spec).filter(|_| bundle).map(|key| {
+            let mut q = String::new();
+            json_quote(key, &mut q);
+            format!("{rq}.peek({q})")
+        })
+    };
+    // The graph's re-exports of a module of this bundle come first (the registry may have rewritten the source's
+    // `export { x } from` into a local binding that is in TDZ while a cycle peer reads it): they read the target.
+    for (name, spec, remote) in indirect {
+        let Some(target) = peeked(spec) else { continue };
+        let mut qr = String::new();
+        json_quote(remote, &mut qr);
+        let expr = match remote.as_str() {
+            "*" => target,
+            "default" => format!("__thaw_esm_default({target})"),
+            _ => format!("{target}[{qr}]"),
+        };
+        head.push_str(&getter(ex, name, &expr));
+    }
     let mut body = String::new();
     let mut prologue = String::new();
     // after the prologue's requests: the awaits of the async dependencies, in source order
@@ -570,13 +628,15 @@ fn convert_module(
                         let mut q = String::new();
                         json_quote(&spec, &mut q);
                         let awaited = awaits.is_some_and(|set| set.contains(&spec));
+                        let read = peeked(&spec);
                         specs.push(spec);
                         let m = tmp(&mut counter);
                         prologue.push_str(&request(rq, &m, &q, awaited));
                         if awaited {
                             late.push_str(&format!("{m} = await {m};\n"));
                         }
-                        m
+                        // the module's exports as the getters read them: its own (peeked) when it is in this bundle
+                        (m.clone(), read.unwrap_or(m))
                     });
                     for sp in &e.specifiers {
                         match sp {
@@ -588,7 +648,7 @@ fn convert_module(
                                     .map(export_name)
                                     .unwrap_or_else(|| local.clone());
                                 let expr = match &from {
-                                    Some(m) => {
+                                    Some((_, m)) => {
                                         let mut q = String::new();
                                         json_quote(&local, &mut q);
                                         if local == "default" {
@@ -609,7 +669,7 @@ fn convert_module(
                                 head.push_str(&getter(ex, &exported, &expr));
                             }
                             a::ExportSpecifier::Namespace(n) => {
-                                if let Some(m) = &from {
+                                if let Some((_, m)) = &from {
                                     head.push_str(&getter(
                                         ex,
                                         &export_name(&n.name),
@@ -648,12 +708,16 @@ fn convert_module(
     }
     // Indirect getters go in the head so an `export *` in the body skips their names.
     for (name, spec, remote) in indirect {
-        if reexported.contains(name) {
+        if reexported.contains(name) || peeked(spec).is_some() {
             continue;
         }
         let (mut qs, mut qr) = (String::new(), String::new());
         json_quote(spec, &mut qs);
         json_quote(remote, &mut qr);
+        // only a module of this bundle has a namespace here; the source keeps any other `export * as`
+        if remote == "*" {
+            continue;
+        }
         let expr = if remote == "default" {
             format!("__thaw_esm_default({rq}({qs}))")
         } else {
@@ -666,7 +730,9 @@ fn convert_module(
             "function __thaw_esm_origin_obj(t) { var nsCache = Object.create(null); return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, \
              read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, \
              readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (m !== null && (typeof m === 'object' || typeof m === 'function') && Object.prototype.hasOwnProperty.call(m, '__thaw_esm_stars')) return __thaw_esm_ns(m); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, \
-             defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\n\
+             defaultImport: function (s, m) { return __thaw_esm_default(m); }, \
+             validateRequests: function () {}, validateDynamic: function () {}, completeDynamic: function (s, p) { return p; }, \
+             rejectDynamic: function (e) { return Promise.reject(e); } }; }\n\
              function __thaw_esm_cjs_ns(m) { var names = m !== null && (typeof m === 'object' || typeof m === 'function') ? Object.keys(m).filter(function (k) { return k !== 'default'; }) : []; names.push('default'); var ns = {}; names.sort().forEach(function (k) { Object.defineProperty(ns, k, { value: k === 'default' ? m : m[k], enumerable: true, writable: true }); }); Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' }); return Object.preventExtensions(ns); }\n",
         );
     }
@@ -690,7 +756,7 @@ const STAR_HELPER: &str = r#"function __thaw_esm_star(ex, m) { var own = Object.
     if (k === 'default') return;
     var bind = mine && own.call(mine, k) ? mine[k].bind : { m: m, k: k };
     if (own.call(table, k)) {
-      if (!table[k].amb && (table[k].bind.m !== bind.m || table[k].bind.k !== bind.k)) {
+      if (!table[k].fixed && !table[k].amb && (table[k].bind.m !== bind.m || table[k].bind.k !== bind.k)) {
         table[k].amb = true;
         if (k === '__esModule') Object.defineProperty(ex, k, { value: true, configurable: true }); else delete ex[k];
       }
@@ -716,6 +782,7 @@ pub(crate) type NativeBundle = (
 /// A converted native module; its body is re-converted as an async one when it awaits (see `native_bundle_to_factories`).
 struct Staged<'a> {
     key: String,
+    link: Links,
     src: &'a str,
     public: Vec<String>,
     imports: Vec<(String, String)>,
@@ -743,6 +810,54 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         _ => return Err("native bundle payload is not a string".into()),
     };
     native_json_to_factories(&json, source, pure).map(Some)
+}
+
+/// A native module of a payload: key, source, and `(specifier, target key)` imports.
+type RawModule<'a> = (String, &'a str, Vec<(String, String)>);
+
+/// The [`Links`] of every native module (`modules`: key, source, imports) of a bundle whose registry text `source`
+/// holds export graphs; empty without them (a hand-registered payload keeps the copy-at-star-time semantics).
+fn static_links(source: &str, modules: &[RawModule]) -> BTreeMap<String, Links> {
+    let mut out = BTreeMap::new();
+    let Some(graphs) = crate::esm::export_graphs_literal(source)
+        .and_then(|l| crate::json::parse_native(&format!("[{l}]")).ok())
+        .and_then(|v| match v {
+            Native::Array(mut a) => a.pop(),
+            _ => None,
+        })
+        .and_then(|v| match v {
+            Native::Str(json) => serde_json::from_str::<serde_json::Value>(&json).ok(),
+            _ => None,
+        })
+        .and_then(|v| v.as_object().cloned())
+    else {
+        return out;
+    };
+    let staged: BTreeMap<&str, &Vec<(String, String)>> =
+        modules.iter().map(|(k, _, i)| (k.as_str(), i)).collect();
+    // the key `spec` names in staged module `from`, when that is a staged module with an export graph
+    let target = |from: &str, spec: &str| {
+        let (_, _, imports) = modules.iter().find(|(k, _, _)| k == from)?;
+        let key = &imports.iter().find(|(s, _)| s == spec)?.1;
+        (staged.contains_key(key.as_str()) && graphs.contains_key(key)).then(|| key.clone())
+    };
+    for (key, _, imports) in modules {
+        if !graphs.contains_key(key) {
+            continue;
+        }
+        let mut links = Links::default();
+        for (spec, _) in imports {
+            if let Some(k) = target(key, spec) {
+                links.esm.insert(spec.clone(), k);
+            }
+        }
+        links.stars = crate::esm_link::star_bindings(&graphs, key, target)
+            .into_iter()
+            .map(|(name, bound)| (name, bound.key, bound.export))
+            .collect();
+        out.insert(key.clone(), links);
+    }
+    out
 }
 
 /// The factory bundle of the native payload `json` (`__thaw_register_native_bundle`'s argument). `source` is the
@@ -778,6 +893,7 @@ pub(crate) fn native_json_to_factories(
     let mut problems: BTreeSet<&'static str> = BTreeSet::new();
     let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let indirects = indirect_exports(source);
+    let mut raws: Vec<RawModule> = Vec::new();
     for m in modules {
         let Native::Object(fields) = m else { continue };
         let key = text(field(fields, "key"))
@@ -797,9 +913,14 @@ pub(crate) fn native_json_to_factories(
                 }
             }
         }
+        raws.push((key, src, imports));
+    }
+    let mut links = static_links(source, &raws);
+    for (key, src, imports) in raws {
         let public: Vec<String> = imports.iter().map(|(s, _)| s.clone()).collect();
         let indirect = indirects.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-        let converted = convert(src, &public, indirect)?;
+        let link = links.remove(&key).unwrap_or_default();
+        let converted = convert_with(src, &public, indirect, None, &link)?;
         problems.extend(converted.problems);
         graph.insert(
             key.clone(),
@@ -815,6 +936,7 @@ pub(crate) fn native_json_to_factories(
             public,
             imports,
             indirect,
+            link,
             specs: converted.specs,
             tla: converted.tla,
             body: converted.body,
@@ -855,7 +977,7 @@ pub(crate) fn native_json_to_factories(
                 .filter(|(spec, target)| s.specs.contains(spec) && asyncs.contains(target))
                 .map(|(spec, _)| spec.clone())
                 .collect();
-            convert_with(s.src, &s.public, s.indirect, Some(&awaits))?.body
+            convert_with(s.src, &s.public, s.indirect, Some(&awaits), &s.link)?.body
         } else {
             s.body
         };
@@ -940,6 +1062,10 @@ mod origin_vocabulary_tests {
             "namespaceImport",
             "defaultImport",
             "readDefault",
+            "validateRequests",
+            "validateDynamic",
+            "completeDynamic",
+            "rejectDynamic",
         ] {
             assert!(
                 converted.body.contains(&format!("{method}: function")),
@@ -1104,6 +1230,23 @@ mod live_binding_tests {
     // A mixed bundle: the native `modules` (`key`, `source`, `imports`) with main `main`, and the CommonJS
     // entry `m/index.js` whose body is `index`; every module `m/x.mjs` is requirable as `./x.mjs`.
     fn bundle(main: &str, modules: serde_json::Value, index: &str) -> String {
+        bundle_with_graphs(main, modules, index, serde_json::Value::Null)
+    }
+
+    // `bundle` plus the registry's export graphs (`graphs`, an object keyed by module key) for the named-export link check.
+    fn bundle_with_graphs(
+        main: &str,
+        modules: serde_json::Value,
+        index: &str,
+        graphs: serde_json::Value,
+    ) -> String {
+        let table = if graphs.is_null() {
+            String::new()
+        } else {
+            let mut q = String::new();
+            json_quote(&graphs.to_string(), &mut q);
+            format!("var __thaw_bundle_export_graphs = JSON.parse({q});\n")
+        };
         let keys: Vec<String> = modules
             .as_array()
             .unwrap()
@@ -1130,7 +1273,7 @@ var __thaw_bundle_factories = {{
 {stubs}}};
 var __thaw_bundle_require_maps = {{ "m/index.js": {{{map}}}, {empties}}};
 var __thaw_bundle_entry_key = "m/index.js";
-var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal});
+{table}var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal});
 }})(globalThis.require);"#
         )
     }
@@ -1245,6 +1388,135 @@ exports.run = function () {
         assert_eq!(
             p.call("run", &[]).unwrap(),
             Native::Str("ERR_MODULE_NOT_FOUND|Cannot find module '/thaw_modules/m/unmapped.mjs' imported from /thaw_modules/m/bad.mjs|undefined".into())
+        );
+    }
+
+    // Node 22.23.1 (g2b-probes/anchor): in the cycle i -> m -> r -> i, r reads i's `ns` (re-exported from m, which exports
+    // the namespace of p) BEFORE p evaluates: it gets p's final namespace, and p's names appear once p has run.
+    #[test]
+    fn cycle_peer_reads_a_reexported_namespace_before_the_target_evaluates() {
+        let modules = serde_json::json!([
+            { "key": "m/i.mjs", "source": "import \"./m.mjs\"; export { ns } from \"./m.mjs\";\n", "imports": { "./m.mjs": "m/m.mjs" } },
+            { "key": "m/m.mjs", "source": "import \"./r.mjs\"; export * as ns from \"./p.mjs\";\n", "imports": { "./r.mjs": "m/r.mjs", "./p.mjs": "m/p.mjs" } },
+            { "key": "m/r.mjs", "source": "import { ns } from \"./i.mjs\"; globalThis.beforePure = !globalThis.pureRuns; globalThis.earlyNs = ns;\n", "imports": { "./i.mjs": "m/i.mjs" } },
+            { "key": "m/p.mjs", "source": "globalThis.pureRuns = (globalThis.pureRuns || 0) + 1; export const value = 17;\n", "imports": {} }
+        ]);
+        let graphs = serde_json::json!({
+            "m/i.mjs": { "local": {}, "indirect": { "ns": ["./m.mjs", "ns", false] }, "stars": [], "requests": [["./m.mjs", "ns"]], "dependencies": ["./m.mjs"] },
+            "m/m.mjs": { "local": {}, "indirect": { "ns": ["./p.mjs", null, false] }, "stars": [], "requests": [], "dependencies": ["./r.mjs", "./p.mjs"] },
+            "m/r.mjs": { "local": {}, "indirect": {}, "stars": [], "requests": [["./i.mjs", "ns"]], "dependencies": ["./i.mjs"] },
+            "m/p.mjs": { "local": { "value": "value" }, "indirect": {}, "stars": [], "requests": [], "dependencies": [] }
+        });
+        let index = r#"var i = require("./i.mjs"); exports.run = function () { return [globalThis.beforePure, globalThis.earlyNs === i.ns, globalThis.earlyNs.value, globalThis.pureRuns].join('|'); };"#;
+        let mut p =
+            Package::load(&bundle_with_graphs("m/i.mjs", modules, index, graphs)).expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("true|true|17|1".into())
+        );
+    }
+
+    // Node 22.23.1 (g2b-probes/pure_ns): a name two `export *` targets reach through DIFFERENT re-export paths is one
+    // binding when both end at the same declaration (here p's namespace), so it is not ambiguous; the registry may also
+    // have stripped a namespace re-export from the source, leaving it only in the export graph.
+    #[test]
+    fn star_diamond_through_reexports_is_one_binding_and_graph_only_namespaces_are_exported() {
+        let modules = serde_json::json!([
+            { "key": "m/i.mjs", "source": "export * from \"./l.mjs\"; export * from \"./r.mjs\";\n", "imports": { "./l.mjs": "m/l.mjs", "./r.mjs": "m/r.mjs", "./p.mjs": "m/p.mjs" } },
+            { "key": "m/l.mjs", "source": "export { ns } from \"./b.mjs\";\n", "imports": { "./b.mjs": "m/b.mjs" } },
+            { "key": "m/r.mjs", "source": "export { ns } from \"./b.mjs\";\n", "imports": { "./b.mjs": "m/b.mjs" } },
+            { "key": "m/b.mjs", "source": "export * as ns from \"./p.mjs\";\n", "imports": { "./p.mjs": "m/p.mjs" } },
+            { "key": "m/p.mjs", "source": "export let value = 17; export function set(v) { value = v; }\n", "imports": {} }
+        ]);
+        let graphs = serde_json::json!({
+            "m/i.mjs": { "local": {}, "indirect": { "pns": ["./p.mjs", null, false] }, "stars": ["./l.mjs", "./r.mjs"], "requests": [], "dependencies": ["./l.mjs", "./r.mjs"] },
+            "m/l.mjs": { "local": {}, "indirect": { "ns": ["./b.mjs", "ns", false] }, "stars": [], "requests": [["./b.mjs", "ns"]], "dependencies": ["./b.mjs"] },
+            "m/r.mjs": { "local": {}, "indirect": { "ns": ["./b.mjs", "ns", false] }, "stars": [], "requests": [["./b.mjs", "ns"]], "dependencies": ["./b.mjs"] },
+            "m/b.mjs": { "local": {}, "indirect": { "ns": ["./p.mjs", null, false] }, "stars": [], "requests": [], "dependencies": ["./p.mjs"] },
+            "m/p.mjs": { "local": { "value": "value", "set": "set" }, "indirect": {}, "stars": [], "requests": [], "dependencies": [] }
+        });
+        let index = r#"var i = require("./i.mjs"), p = require("./p.mjs"); exports.run = function () { i.ns.set(18); return [i.ns === p, i.pns === p, i.ns.value, Object.keys(i).join()].join('|'); };"#;
+        let mut p =
+            Package::load(&bundle_with_graphs("m/i.mjs", modules, index, graphs)).expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("true|true|18|ns,pns".into())
+        );
+    }
+
+    // Node 22.23.1 (g2b-probes/lazy): a module reachable only through `import()` stays out of the entry's link: the entry
+    // loads though that module has a missing name, and the import() rejects with the SyntaxError before any body runs.
+    // (A mixed module's origin lists its dynamic specifiers too; only the export graph's `dependencies` are static.)
+    #[test]
+    fn lazy_module_with_a_missing_name_rejects_its_dynamic_import_only() {
+        let modules = serde_json::json!([
+            { "key": "m/p.mjs", "source": "import { origin as __thaw_esm_origin_0 } from \"__thaw_private_origin_spec/m/p.mjs\";\nexport const ready = 9; export const load = () => import(\"./lazy.mjs\");\n", "imports": { "./lazy.mjs": "m/lazy.mjs" } },
+            { "key": "m/lazy.mjs", "source": "import { absent } from \"./mid.mjs\"; export const value = 1;\n", "imports": { "./mid.mjs": "m/mid.mjs" } },
+            { "key": "m/mid.mjs", "source": "globalThis.midRuns = (globalThis.midRuns || 0) + 1; export const present = 1;\n", "imports": {} }
+        ]);
+        let graphs = serde_json::json!({
+            "m/p.mjs": { "local": { "ready": "ready", "load": "load" }, "indirect": {}, "stars": [], "requests": [], "dependencies": [] },
+            "m/lazy.mjs": { "local": { "value": "value" }, "indirect": {}, "stars": [], "requests": [["./mid.mjs", "absent"]], "dependencies": ["./mid.mjs"] },
+            "m/mid.mjs": { "local": { "present": "present" }, "indirect": {}, "stars": [], "requests": [], "dependencies": [] }
+        });
+        let index = r#"exports.run = function () { var p = require("./p.mjs"); return p.load().then(function () { return 'no throw'; }, function (e) { return [p.ready, e.name, String(globalThis.midRuns)].join('|'); }); };"#;
+        let mut p =
+            Package::load(&bundle_with_graphs("m/p.mjs", modules, index, graphs)).expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("9|SyntaxError|undefined".into())
+        );
+    }
+
+    // Node 22.23.1 (g2b-probes/fl): `import { nope } from './dep.mjs'` is a SyntaxError at link time, before ANY body of the
+    // graph runs (`okRuns` and `depRuns` stay undefined); the error is cached, and the unrelated modules load normally.
+    #[test]
+    fn missing_named_export_fails_the_link_before_any_body_runs_and_is_cached() {
+        let modules = serde_json::json!([
+            { "key": "m/p.mjs", "source": "import \"./ok.mjs\"; import { nope } from \"./dep.mjs\";\nglobalThis.parentRuns = (globalThis.parentRuns || 0) + 1;\n", "imports": { "./ok.mjs": "m/ok.mjs", "./dep.mjs": "m/dep.mjs" } },
+            { "key": "m/ok.mjs", "source": "globalThis.okRuns = (globalThis.okRuns || 0) + 1; export const o = 1;\n", "imports": {} },
+            { "key": "m/dep.mjs", "source": "globalThis.depRuns = (globalThis.depRuns || 0) + 1; export const x = 1;\n", "imports": {} }
+        ]);
+        let graphs = serde_json::json!({
+            "m/p.mjs": { "local": {}, "indirect": {}, "stars": [], "requests": [["./dep.mjs", "nope"]] },
+            "m/ok.mjs": { "local": { "o": "o" }, "indirect": {}, "stars": [], "requests": [] },
+            "m/dep.mjs": { "local": { "x": "x" }, "indirect": {}, "stars": [], "requests": [] }
+        });
+        let index = r#"var grab = function (spec) { try { require(spec); } catch (e) { return e; } };
+exports.run = function () {
+  var first = grab("./p.mjs"), again = grab("./p.mjs");
+  var ok = require("./ok.mjs"), dep = require("./dep.mjs");
+  return [first.name, first.message, first === again, String(globalThis.parentRuns), globalThis.okRuns, globalThis.depRuns, ok.o, dep.x].join('|');
+};"#;
+        let mut p =
+            Package::load(&bundle_with_graphs("m/p.mjs", modules, index, graphs)).expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("SyntaxError|The requested module './dep.mjs' does not provide an export named 'nope'|true|undefined|1|1|1|1".into())
+        );
+    }
+
+    // Node 22.23.1 (g2b-probes/lazy2): two different bindings of one name through `export *` are ambiguous at link time.
+    #[test]
+    fn ambiguous_star_name_fails_the_link_with_a_syntax_error() {
+        let modules = serde_json::json!([
+            { "key": "m/p.mjs", "source": "import { d } from \"./mid.mjs\";\nglobalThis.parentRuns = 1;\n", "imports": { "./mid.mjs": "m/mid.mjs" } },
+            { "key": "m/mid.mjs", "source": "export * from \"./l.mjs\"; export * from \"./r.mjs\";\n", "imports": { "./l.mjs": "m/l.mjs", "./r.mjs": "m/r.mjs" } },
+            { "key": "m/l.mjs", "source": "globalThis.sideRuns = (globalThis.sideRuns || 0) + 1; export const d = 1;\n", "imports": {} },
+            { "key": "m/r.mjs", "source": "globalThis.sideRuns = (globalThis.sideRuns || 0) + 1; export const d = 2;\n", "imports": {} }
+        ]);
+        let graphs = serde_json::json!({
+            "m/p.mjs": { "local": {}, "indirect": {}, "stars": [], "requests": [["./mid.mjs", "d"]] },
+            "m/mid.mjs": { "local": {}, "indirect": {}, "stars": ["./l.mjs", "./r.mjs"], "requests": [] },
+            "m/l.mjs": { "local": { "d": "d" }, "indirect": {}, "stars": [], "requests": [] },
+            "m/r.mjs": { "local": { "d": "d" }, "indirect": {}, "stars": [], "requests": [] }
+        });
+        let index = r#"exports.run = function () { try { require("./p.mjs"); } catch (e) { return [e.name, e.message, String(globalThis.sideRuns), String(globalThis.parentRuns)].join('|'); } return 'no throw'; };"#;
+        let mut p =
+            Package::load(&bundle_with_graphs("m/p.mjs", modules, index, graphs)).expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("SyntaxError|The requested module './mid.mjs' contains conflicting star exports for name 'd'|undefined|undefined".into())
         );
     }
 
@@ -1421,7 +1693,7 @@ mod convert_pin_tests {
             export * from './s.js';\nexport { q as r } from './t.js';\nexport * as ns from './u.js';\n\
             export const v = __thaw_esm_origin_0.readDefault('node:os');\n";
         let converted = convert(source, &["node:os".to_string()], &[]).expect("convert");
-        assert_eq!(converted.body, "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true, configurable: true });\nObject.defineProperty(exports, '__thaw_esm_stars', { value: Object.create(null) });\nfunction __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\nfunction __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ns.default = m; return ns; }\nvar __thaw_tdz_v = false;\nfunction __thaw_esm_tdz(n) { throw new ReferenceError(\"Cannot access '\" + n + \"' before initialization\"); }\nfunction __thaw_esm_star(ex, m) { var own = Object.prototype.hasOwnProperty;\n  var table = ex.__thaw_esm_stars;\n  var mine = m !== null && (typeof m === 'object' || typeof m === 'function') && own.call(m, '__thaw_esm_stars') ? m.__thaw_esm_stars : null;\n  (m === null || m === undefined ? [] : Object.keys(m)).forEach(function (k) {\n    if (k === 'default') return;\n    var bind = mine && own.call(mine, k) ? mine[k].bind : { m: m, k: k };\n    if (own.call(table, k)) {\n      if (!table[k].amb && (table[k].bind.m !== bind.m || table[k].bind.k !== bind.k)) {\n        table[k].amb = true;\n        if (k === '__esModule') Object.defineProperty(ex, k, { value: true, configurable: true }); else delete ex[k];\n      }\n      return;\n    }\n    if (k !== '__esModule' && own.call(ex, k)) return;\n    table[k] = { bind: bind, amb: false };\n    Object.defineProperty(ex, k, { enumerable: true, configurable: true, get: function () { return bind.m[bind.k]; } });\n  });\n}\nif (!Object.prototype.hasOwnProperty.call(exports, \"r\")) Object.defineProperty(exports, \"r\", { enumerable: true, get: function () { return __thaw_esm_m2[\"q\"]; } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"ns\")) Object.defineProperty(exports, \"ns\", { enumerable: true, get: function () { return __thaw_esm_ns(__thaw_esm_m3); } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"v\")) Object.defineProperty(exports, \"v\", { enumerable: true, get: function () { return (__thaw_tdz_v ? v : __thaw_esm_tdz(\"v\")); } });\nfunction __thaw_esm_origin_obj(t) { var nsCache = Object.create(null); return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (m !== null && (typeof m === 'object' || typeof m === 'function') && Object.prototype.hasOwnProperty.call(m, '__thaw_esm_stars')) return __thaw_esm_ns(m); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\nfunction __thaw_esm_cjs_ns(m) { var names = m !== null && (typeof m === 'object' || typeof m === 'function') ? Object.keys(m).filter(function (k) { return k !== 'default'; }) : []; names.push('default'); var ns = {}; names.sort().forEach(function (k) { Object.defineProperty(ns, k, { value: k === 'default' ? m : m[k], enumerable: true, writable: true }); }); Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' }); return Object.preventExtensions(ns); }\nvar __thaw_esm_m1 = require(\"./s.js\");\n__thaw_esm_star(exports, __thaw_esm_m1);\nvar __thaw_esm_m2 = require(\"./t.js\");\nvar __thaw_esm_m3 = require(\"./u.js\");\nvar __thaw_esm_origin_0 = __thaw_esm_origin_obj({ \"node:os\": function () { return require(\"node:os\"); } });\nconst v = __thaw_esm_origin_0.readDefault('node:os');;\n__thaw_tdz_v = true;\n");
+        assert_eq!(converted.body, "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true, configurable: true });\nObject.defineProperty(exports, '__thaw_esm_stars', { value: Object.create(null) });\nfunction __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\nfunction __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ns.default = m; return ns; }\nvar __thaw_tdz_v = false;\nfunction __thaw_esm_tdz(n) { throw new ReferenceError(\"Cannot access '\" + n + \"' before initialization\"); }\nfunction __thaw_esm_star(ex, m) { var own = Object.prototype.hasOwnProperty;\n  var table = ex.__thaw_esm_stars;\n  var mine = m !== null && (typeof m === 'object' || typeof m === 'function') && own.call(m, '__thaw_esm_stars') ? m.__thaw_esm_stars : null;\n  (m === null || m === undefined ? [] : Object.keys(m)).forEach(function (k) {\n    if (k === 'default') return;\n    var bind = mine && own.call(mine, k) ? mine[k].bind : { m: m, k: k };\n    if (own.call(table, k)) {\n      if (!table[k].fixed && !table[k].amb && (table[k].bind.m !== bind.m || table[k].bind.k !== bind.k)) {\n        table[k].amb = true;\n        if (k === '__esModule') Object.defineProperty(ex, k, { value: true, configurable: true }); else delete ex[k];\n      }\n      return;\n    }\n    if (k !== '__esModule' && own.call(ex, k)) return;\n    table[k] = { bind: bind, amb: false };\n    Object.defineProperty(ex, k, { enumerable: true, configurable: true, get: function () { return bind.m[bind.k]; } });\n  });\n}\nif (!Object.prototype.hasOwnProperty.call(exports, \"r\")) Object.defineProperty(exports, \"r\", { enumerable: true, get: function () { return __thaw_esm_m2[\"q\"]; } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"ns\")) Object.defineProperty(exports, \"ns\", { enumerable: true, get: function () { return __thaw_esm_ns(__thaw_esm_m3); } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"v\")) Object.defineProperty(exports, \"v\", { enumerable: true, get: function () { return (__thaw_tdz_v ? v : __thaw_esm_tdz(\"v\")); } });\nfunction __thaw_esm_origin_obj(t) { var nsCache = Object.create(null); return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (m !== null && (typeof m === 'object' || typeof m === 'function') && Object.prototype.hasOwnProperty.call(m, '__thaw_esm_stars')) return __thaw_esm_ns(m); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, defaultImport: function (s, m) { return __thaw_esm_default(m); }, validateRequests: function () {}, validateDynamic: function () {}, completeDynamic: function (s, p) { return p; }, rejectDynamic: function (e) { return Promise.reject(e); } }; }\nfunction __thaw_esm_cjs_ns(m) { var names = m !== null && (typeof m === 'object' || typeof m === 'function') ? Object.keys(m).filter(function (k) { return k !== 'default'; }) : []; names.push('default'); var ns = {}; names.sort().forEach(function (k) { Object.defineProperty(ns, k, { value: k === 'default' ? m : m[k], enumerable: true, writable: true }); }); Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' }); return Object.preventExtensions(ns); }\nvar __thaw_esm_m1 = require(\"./s.js\");\n__thaw_esm_star(exports, __thaw_esm_m1);\nvar __thaw_esm_m2 = require(\"./t.js\");\nvar __thaw_esm_m3 = require(\"./u.js\");\nvar __thaw_esm_origin_0 = __thaw_esm_origin_obj({ \"node:os\": function () { return require(\"node:os\"); } });\nconst v = __thaw_esm_origin_0.readDefault('node:os');;\n__thaw_tdz_v = true;\n");
     }
 }
 
@@ -1442,7 +1714,16 @@ pub(crate) fn convert_entry(source: &str) -> Result<EntryModule, String> {
             f.message, f.line, f.col
         )
     })?;
-    let converted = convert_module(&module, &cm, &[], &[], &ENTRY_NAMES, None, &BTreeMap::new());
+    let converted = convert_module(
+        &module,
+        &cm,
+        &[],
+        &[],
+        &ENTRY_NAMES,
+        None,
+        &BTreeMap::new(),
+        &Links::default(),
+    );
     if let Some(problem) = converted.problems.first() {
         return Err(format!("unsupported module syntax: {problem}"));
     }
