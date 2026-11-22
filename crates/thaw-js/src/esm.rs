@@ -164,6 +164,64 @@ struct Names {
     exports: &'static str,
 }
 
+/// Prefix of the flag that says an exported lexical binding has been initialised.
+const TDZ_FLAG: &str = "__thaw_tdz_";
+
+/// The names a `let`/`const`/`class` declaration binds (none for `var` and functions).
+fn lexical_decl_names(decl: &a::Decl) -> Vec<String> {
+    let mut names = Vec::new();
+    match decl {
+        a::Decl::Class(c) => names.push(c.ident.sym.to_string()),
+        a::Decl::Var(v) if v.kind != a::VarDeclKind::Var => {
+            for d in &v.decls {
+                binding_names(&d.name, &mut names);
+            }
+        }
+        _ => {}
+    }
+    names
+}
+
+/// Top-level lexical bindings that the module exports (`export let x`, or `export { x }` of a `let x`).
+fn exported_lexicals(module: &a::Module) -> BTreeSet<String> {
+    let mut lexical = BTreeSet::new();
+    let mut local_exports = BTreeSet::new();
+    let mut out = BTreeSet::new();
+    for item in &module.body {
+        match item {
+            a::ModuleItem::Stmt(a::Stmt::Decl(d)) => lexical.extend(lexical_decl_names(d)),
+            a::ModuleItem::ModuleDecl(a::ModuleDecl::ExportDecl(e)) => {
+                out.extend(lexical_decl_names(&e.decl))
+            }
+            a::ModuleItem::ModuleDecl(a::ModuleDecl::ExportDefaultExpr(_)) => {
+                out.insert(DFLT.to_string());
+            }
+            a::ModuleItem::ModuleDecl(a::ModuleDecl::ExportDefaultDecl(e)) => {
+                if let a::DefaultDecl::Class(c) = &e.decl {
+                    out.insert(
+                        c.ident
+                            .as_ref()
+                            .map_or(DFLT.to_string(), |i| i.sym.to_string()),
+                    );
+                }
+            }
+            a::ModuleItem::ModuleDecl(a::ModuleDecl::ExportNamed(e)) if e.src.is_none() => {
+                for sp in &e.specifiers {
+                    if let a::ExportSpecifier::Named(n) = sp {
+                        local_exports.insert(export_name(&n.orig));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.extend(lexical.intersection(&local_exports).cloned());
+    out
+}
+
+/// The synthetic binding behind `export default <expr>`.
+const DFLT: &str = "__thaw_esm_dflt";
+
 const BUNDLE_NAMES: Names = Names {
     require: "require",
     exports: "exports",
@@ -302,6 +360,8 @@ fn convert_module(
     live: &BTreeMap<String, String>,
 ) -> Converted {
     let (rq, ex) = (names.require, names.exports);
+    // bundle modules (not entries) are the ones a cycle peer can read
+    let bundle = ex == BUNDLE_NAMES.exports;
     let snippet = |span| cm.span_to_snippet(span).unwrap_or_default();
     let mut head =
         format!("\"use strict\";\nObject.defineProperty({ex}, '__esModule', {{ value: true, configurable: true }});\nObject.defineProperty({ex}, '__thaw_esm_stars', {{ value: Object.create(null) }});\n");
@@ -326,11 +386,40 @@ fn convert_module(
         *counter += 1;
         format!("__thaw_esm_m{counter}")
     }
+    // Exported `let`/`const`/`class` bindings: a cycle peer reading one before its declaration ran gets Node's
+    // TDZ ReferenceError (the engine has no TDZ of its own), tracked by a flag set right after the declaration.
+    let tdz = if bundle {
+        exported_lexicals(module)
+    } else {
+        BTreeSet::new()
+    };
+    let tdz_flags = |decl: &a::Decl, out: &mut String| {
+        for n in lexical_decl_names(decl).iter().filter(|n| tdz.contains(*n)) {
+            out.push_str(&format!("{TDZ_FLAG}{n} = true;\n"));
+        }
+    };
+    for n in &tdz {
+        head.push_str(&format!("var {TDZ_FLAG}{n} = false;\n"));
+    }
+    if !tdz.is_empty() {
+        head.push_str("function __thaw_esm_tdz(n) { throw new ReferenceError(\"Cannot access '\" + n + \"' before initialization\"); }\n");
+    }
+    // a local binding read through a getter: guarded when it is a flagged lexical
+    let local_read = |n: &str, shown: &str| {
+        if tdz.contains(n) {
+            format!("({TDZ_FLAG}{n} ? {n} : __thaw_esm_tdz(\"{shown}\"))")
+        } else {
+            n.to_string()
+        }
+    };
     for item in &module.body {
         match item {
             a::ModuleItem::Stmt(s) => {
                 body.push_str(&snippet(s.span()));
                 body.push_str(";\n");
+                if let a::Stmt::Decl(d) = s {
+                    tdz_flags(d, &mut body);
+                }
             }
             a::ModuleItem::ModuleDecl(decl) => match decl {
                 a::ModuleDecl::Import(i) => {
@@ -417,10 +506,11 @@ fn convert_module(
                         _ => problems.push("esm-declaration"),
                     }
                     for n in &names {
-                        head.push_str(&getter(ex, n, n));
+                        head.push_str(&getter(ex, n, &local_read(n, n)));
                     }
                     body.push_str(&snippet(e.decl.span()));
                     body.push_str(";\n");
+                    tdz_flags(&e.decl, &mut body);
                 }
                 a::ModuleDecl::ExportDefaultDecl(e) => {
                     let (name, text) = match &e.decl {
@@ -442,13 +532,37 @@ fn convert_module(
                             // a named declaration: keep it as such and export the binding
                             body.push_str(&text);
                             body.push_str(";\n");
-                            head.push_str(&getter(ex, "default", &n));
+                            if tdz.contains(&n) {
+                                body.push_str(&format!("{TDZ_FLAG}{n} = true;\n"));
+                            }
+                            head.push_str(&getter(ex, "default", &local_read(&n, "default")));
+                        }
+                        // an anonymous function is hoisted (a cycle peer calls it before the body runs); a class is a
+                        // `const`, so it stays in TDZ. `{ default: .. }` gives it the name "default".
+                        None if bundle && matches!(e.decl, a::DefaultDecl::Fn(_)) => {
+                            head.push_str(&format!(
+                                "var {DFLT} = ({{ default: ({text}) }}).default;\n"
+                            ));
+                            head.push_str(&getter(ex, "default", DFLT));
+                        }
+                        None if bundle => {
+                            body.push_str(&format!("const {DFLT} = ({{ default: ({text}) }}).default;\n{TDZ_FLAG}{DFLT} = true;\n"));
+                            head.push_str(&getter(ex, "default", &local_read(DFLT, "default")));
                         }
                         None => body.push_str(&format!("{ex}.default = ({text});\n")),
                     }
                 }
                 a::ModuleDecl::ExportDefaultExpr(e) => {
-                    body.push_str(&format!("{ex}.default = ({});\n", snippet(e.expr.span())));
+                    if bundle {
+                        // a `const`, like Node's `*default*` binding: a cycle peer reads it in TDZ until it is evaluated
+                        body.push_str(&format!(
+                            "const {DFLT} = ({{ default: ({}) }}).default;\n{TDZ_FLAG}{DFLT} = true;\n",
+                            snippet(e.expr.span())
+                        ));
+                        head.push_str(&getter(ex, "default", &local_read(DFLT, "default")));
+                    } else {
+                        body.push_str(&format!("{ex}.default = ({});\n", snippet(e.expr.span())));
+                    }
                 }
                 a::ModuleDecl::ExportNamed(e) => {
                     let from = e.src.as_ref().map(|s| {
@@ -484,7 +598,10 @@ fn convert_module(
                                         }
                                     }
                                     // an imported name is read through its dependency (it has no local binding)
-                                    None => live.get(&local).cloned().unwrap_or(local),
+                                    None => live
+                                        .get(&local)
+                                        .cloned()
+                                        .unwrap_or_else(|| local_read(&local, &local)),
                                 };
                                 if from.is_some() {
                                     reexported.insert(exported.clone());
@@ -710,6 +827,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         }
         asyncs.extend(found);
     }
+    let staged_keys: Vec<String> = staged.iter().map(|s| s.key.clone()).collect();
     let mut esm_keys = BTreeSet::new();
     for s in staged {
         let is_async = asyncs.contains(&s.key);
@@ -744,13 +862,18 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         maps.push_str(&format!("{qk}: {{ {} }},\n", entries.join(", ")));
         esm_keys.insert(s.key);
     }
-    // an import cycle would observe half-initialised bindings under the snapshot rewrite
+    // A synchronous cycle links like Node (live reads, TDZ at the read); an async one cannot be evaluated depth-first.
+    // Every member of a cycle through an async module is itself async (the fixpoint above), so only those are walked.
     fn cyclic(
         graph: &BTreeMap<String, Vec<String>>,
+        asyncs: &BTreeSet<String>,
         node: &str,
         stack: &mut Vec<String>,
         done: &mut BTreeSet<String>,
     ) -> bool {
+        if !asyncs.contains(node) {
+            return false;
+        }
         if stack.iter().any(|s| s == node) {
             return true;
         }
@@ -760,11 +883,14 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         stack.push(node.to_string());
         let found = graph
             .get(node)
-            .is_some_and(|next| next.iter().any(|n| cyclic(graph, n, stack, done)));
+            .is_some_and(|next| next.iter().any(|n| cyclic(graph, asyncs, n, stack, done)));
         stack.pop();
         found
     }
-    if cyclic(&graph, &main, &mut Vec::new(), &mut BTreeSet::new()) {
+    if staged_keys
+        .iter()
+        .any(|k| cyclic(&graph, &asyncs, k, &mut Vec::new(), &mut BTreeSet::new()))
+    {
         problems.insert("esm-cycle");
     }
     let mut qm = String::new();
@@ -1087,6 +1213,103 @@ exports.run = function () {
             Native::Str("2,p,shadow,2,2,number,undefined,4,2,7,TypeError,TypeError,2".into())
         );
     }
+
+    // Node 22.23.1 (probes g2-probes/cyc2): depth-first, dependencies first; the cycle peer sees the hoisted function
+    // and TDZ for let/const through a namespace and through a named import, at the read.
+    const CYC_A: &str = "import './b.mjs'; import './c.mjs';\n(globalThis.L ||= []).push('eval a'); export function f(){return 'f'} export let n = 1; export const k = 9;\n";
+    const CYC_B: &str = "import * as A from './a.mjs'; import { n, f } from './a.mjs';\n(globalThis.L ||= []).push('eval b ' + typeof f + ' ' + typeof A.f);\nfor (const name of ['n','k']) { try { globalThis.L.push('b reads A.' + name + ' ' + A[name]); } catch (e) { globalThis.L.push('b reads A.' + name + ' ' + e.name + ' ' + e.message); } }\ntry { globalThis.L.push(String(n)); } catch (e) { globalThis.L.push('b named n ' + e.name + ' ' + e.message); }\nexport const bk = 1; export function bf(){ return n; }\n";
+    const CYC_C: &str =
+        "import { bf, bk } from './b.mjs'; (globalThis.L ||= []).push('eval c ' + bk);\n";
+
+    fn cycle_modules() -> serde_json::Value {
+        serde_json::json!([
+            { "key": "m/a.mjs", "source": CYC_A, "imports": { "./b.mjs": "m/b.mjs", "./c.mjs": "m/c.mjs" } },
+            { "key": "m/b.mjs", "source": CYC_B, "imports": { "./a.mjs": "m/a.mjs" } },
+            { "key": "m/c.mjs", "source": CYC_C, "imports": { "./b.mjs": "m/b.mjs" } }
+        ])
+    }
+
+    #[test]
+    fn esm_cycle_evaluation_order_matches_node() {
+        let index =
+            r#"exports.run = function () { require("./a.mjs"); return globalThis.L.join('|'); };"#;
+        let mut p =
+            Package::load(&bundle("m/a.mjs", cycle_modules(), index)).expect("a sync cycle loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("eval b function function|b reads A.n ReferenceError Cannot access 'n' before initialization|b reads A.k ReferenceError Cannot access 'k' before initialization|b named n ReferenceError Cannot access 'n' before initialization|eval c 1|eval a".into())
+        );
+    }
+
+    // Entry b first: c runs before b's body and reads `bk` in TDZ; the failure reaches the entry, no body of a or b ran.
+    #[test]
+    fn esm_cycle_entry_b_first_throws_tdz_in_c() {
+        let index = r#"exports.run = function () { try { require("./b.mjs"); } catch (e) { return e.name + ': ' + e.message + ' / ' + (globalThis.L || []).join('|'); } return 'no throw'; };"#;
+        let mut p = Package::load(&bundle("m/a.mjs", cycle_modules(), index)).expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("ReferenceError: Cannot access 'bk' before initialization / ".into())
+        );
+    }
+
+    // `export default <expr>` and `export default class {}` are in TDZ for a cycle peer, `export default function () {}`
+    // is hoisted and named "default". (Node 22.23.1, probes g2b-probes/dflt: e:ReferenceError|f:function:default|h:ReferenceError)
+    #[test]
+    fn esm_default_export_is_tdz_in_a_cycle() {
+        let peer = |x: &str| {
+            format!("import v from './{x}.mjs'; try {{ (globalThis.R ||= []).push('{x}:' + typeof v + ':' + v.name); }} catch (x) {{ (globalThis.R ||= []).push('{x}:' + x.name); }}\n")
+        };
+        let mut mods = Vec::new();
+        for (x, d) in [
+            ("e", "5 + 1;"),
+            ("f", "function () { return 1; }"),
+            ("h", "class { }"),
+        ] {
+            mods.push(serde_json::json!({ "key": format!("m/{x}.mjs"), "source": format!("import './g{x}.mjs'; export default {d}\n"), "imports": { format!("./g{x}.mjs"): format!("m/g{x}.mjs") } }));
+            mods.push(serde_json::json!({ "key": format!("m/g{x}.mjs"), "source": peer(x), "imports": { format!("./{x}.mjs"): format!("m/{x}.mjs") } }));
+        }
+        let index = r#"exports.run = function () { require("./e.mjs"); require("./f.mjs"); require("./h.mjs"); return globalThis.R.join('|') + '|' + [require("./e.mjs").default, require("./f.mjs").default(), require("./h.mjs").default.name].join(','); };"#;
+        let mut p = Package::load(&bundle("m/e.mjs", serde_json::Value::Array(mods), index))
+            .expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("e:ReferenceError|f:function:default|h:ReferenceError|6,1,default".into())
+        );
+    }
+
+    // The export shapes the TDZ guard and the default-export rewrite touch, outside a cycle: constructor / default-import /
+    // namespace-import / re-export / star-export (a p-limit style `new Queue()` must keep working).
+    // Node 22.23.1 (g2b-probes/shapes): "1,2,default,default,3,5,5,5,7,6,7,5,TypeError"
+    #[test]
+    fn export_shapes_survive_the_tdz_guard_and_default_rewrite() {
+        let modules = serde_json::json!([
+            { "key": "m/q.mjs", "source": "export default class { constructor() { this.n = 1; } static make() { return new this(); } }\n", "imports": {} },
+            { "key": "m/f.mjs", "source": "export default function () { return 2; }\n", "imports": {} },
+            { "key": "m/o.mjs", "source": "export default { k: 3 };\nexport let c = 4; export const d = 5; export class K { constructor() { this.z = 6; } }\nlet r = 7; export { r as renamed, r as default2 };\nexport let bump = () => { c++; };\n", "imports": {} },
+            { "key": "m/re.mjs", "source": "export { c as c2, K as K2 } from './o.mjs';\nexport * from './o.mjs';\nexport { default as od } from './o.mjs';\nexport * as ons from './o.mjs';\n", "imports": { "./o.mjs": "m/o.mjs" } },
+            { "key": "m/u.mjs", "source": "import Q from './q.mjs';\nimport F from './f.mjs';\nimport * as ns from './re.mjs';\nimport { c2, K2, od } from './re.mjs';\nexport function go() { ns.bump(); return [new Q().n, F(), Q.name, F.name, od.k, ns.c2, c2, ns.d, ns.renamed, new K2().z, ns.ons.default2, ns.ons.c, (() => { try { ns.d = 1; } catch (e) { return e.name; } })()].join(','); }\n",
+              "imports": { "./q.mjs": "m/q.mjs", "./f.mjs": "m/f.mjs", "./re.mjs": "m/re.mjs" } }
+        ]);
+        let index = r#"var u = require("./u.mjs"); exports.run = function () { return u.go(); };"#;
+        let mut p = Package::load(&bundle("m/u.mjs", modules, index)).expect("loads");
+        let Native::Str(got) = p.call("run", &[]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(got, "1,2,default,default,3,5,5,5,7,6,7,5,TypeError");
+    }
+
+    // A cycle through a module with top-level await cannot be evaluated depth-first: still a scan blocker.
+    #[test]
+    fn esm_cycle_through_top_level_await_stays_blocked() {
+        let modules = serde_json::json!([
+            { "key": "m/a.mjs", "source": "import './b.mjs'; export const a = 1;\n", "imports": { "./b.mjs": "m/b.mjs" } },
+            { "key": "m/b.mjs", "source": "import './a.mjs'; await 0; export const b = 1;\n", "imports": { "./a.mjs": "m/a.mjs" } }
+        ]);
+        let error = Package::load(&bundle("m/a.mjs", modules, ""))
+            .err()
+            .expect("blocked");
+        assert!(format!("{error:?}").contains("esm-cycle"), "{error:?}");
+    }
 }
 
 #[cfg(test)]
@@ -1106,11 +1329,16 @@ mod convert_pin_tests {
             "function __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); ",
             "if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ",
             "ns.default = m; return ns; }\n",
-            "if (!Object.prototype.hasOwnProperty.call(exports, \"b\")) Object.defineProperty(exports, \"b\", { enumerable: true, get: function () { return b; } });\n",
+            "var __thaw_tdz___thaw_esm_dflt = false;\nvar __thaw_tdz_b = false;\n",
+            "function __thaw_esm_tdz(n) { throw new ReferenceError(\"Cannot access '\" + n + \"' before initialization\"); }\n",
+            "if (!Object.prototype.hasOwnProperty.call(exports, \"b\")) Object.defineProperty(exports, \"b\", { enumerable: true, get: function () { return (__thaw_tdz_b ? b : __thaw_esm_tdz(\"b\")); } });\n",
+            "if (!Object.prototype.hasOwnProperty.call(exports, \"default\")) Object.defineProperty(exports, \"default\", { enumerable: true, get: function () { return (__thaw_tdz___thaw_esm_dflt ? __thaw_esm_dflt : __thaw_esm_tdz(\"default\")); } });\n",
             "if (!Object.prototype.hasOwnProperty.call(exports, \"c\")) Object.defineProperty(exports, \"c\", { enumerable: true, get: function () { return require(\"./y.js\")[\"c\"]; } });\n",
             "var __thaw_esm_m1 = require(\"./x.js\");\n",
             "const b = __thaw_esm_m1[\"a\"] + 1;;\n",
-            "exports.default = (__thaw_esm_m1[\"a\"]);\n",
+            "__thaw_tdz_b = true;\n",
+            "const __thaw_esm_dflt = ({ default: (__thaw_esm_m1[\"a\"]) }).default;\n",
+            "__thaw_tdz___thaw_esm_dflt = true;\n",
         );
         assert_eq!(converted.body, expected);
         assert_eq!(converted.specs, vec!["./x.js".to_string()]);
@@ -1123,7 +1351,7 @@ mod convert_pin_tests {
             export * from './s.js';\nexport { q as r } from './t.js';\nexport * as ns from './u.js';\n\
             export const v = __thaw_esm_origin_0.readDefault('node:os');\n";
         let converted = convert(source, &["node:os".to_string()], &[]).expect("convert");
-        assert_eq!(converted.body, "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true, configurable: true });\nObject.defineProperty(exports, '__thaw_esm_stars', { value: Object.create(null) });\nfunction __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\nfunction __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ns.default = m; return ns; }\nfunction __thaw_esm_star(ex, m) { var own = Object.prototype.hasOwnProperty;\n  var table = ex.__thaw_esm_stars;\n  var mine = m !== null && (typeof m === 'object' || typeof m === 'function') && own.call(m, '__thaw_esm_stars') ? m.__thaw_esm_stars : null;\n  (m === null || m === undefined ? [] : Object.keys(m)).forEach(function (k) {\n    if (k === 'default') return;\n    var bind = mine && own.call(mine, k) ? mine[k].bind : { m: m, k: k };\n    if (own.call(table, k)) {\n      if (!table[k].amb && (table[k].bind.m !== bind.m || table[k].bind.k !== bind.k)) {\n        table[k].amb = true;\n        if (k === '__esModule') Object.defineProperty(ex, k, { value: true, configurable: true }); else delete ex[k];\n      }\n      return;\n    }\n    if (k !== '__esModule' && own.call(ex, k)) return;\n    table[k] = { bind: bind, amb: false };\n    Object.defineProperty(ex, k, { enumerable: true, configurable: true, get: function () { return bind.m[bind.k]; } });\n  });\n}\nif (!Object.prototype.hasOwnProperty.call(exports, \"r\")) Object.defineProperty(exports, \"r\", { enumerable: true, get: function () { return __thaw_esm_m2[\"q\"]; } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"ns\")) Object.defineProperty(exports, \"ns\", { enumerable: true, get: function () { return __thaw_esm_ns(__thaw_esm_m3); } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"v\")) Object.defineProperty(exports, \"v\", { enumerable: true, get: function () { return v; } });\nfunction __thaw_esm_origin_obj(t) { var nsCache = Object.create(null); return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (m !== null && (typeof m === 'object' || typeof m === 'function') && Object.prototype.hasOwnProperty.call(m, '__thaw_esm_stars')) return __thaw_esm_ns(m); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\nfunction __thaw_esm_cjs_ns(m) { var names = m !== null && (typeof m === 'object' || typeof m === 'function') ? Object.keys(m).filter(function (k) { return k !== 'default'; }) : []; names.push('default'); var ns = {}; names.sort().forEach(function (k) { Object.defineProperty(ns, k, { value: k === 'default' ? m : m[k], enumerable: true, writable: true }); }); Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' }); return Object.preventExtensions(ns); }\nvar __thaw_esm_m1 = require(\"./s.js\");\n__thaw_esm_star(exports, __thaw_esm_m1);\nvar __thaw_esm_m2 = require(\"./t.js\");\nvar __thaw_esm_m3 = require(\"./u.js\");\nvar __thaw_esm_origin_0 = __thaw_esm_origin_obj({ \"node:os\": function () { return require(\"node:os\"); } });\nconst v = __thaw_esm_origin_0.readDefault('node:os');;\n");
+        assert_eq!(converted.body, "\"use strict\";\nObject.defineProperty(exports, '__esModule', { value: true, configurable: true });\nObject.defineProperty(exports, '__thaw_esm_stars', { value: Object.create(null) });\nfunction __thaw_esm_default(m) { return m && m.__esModule ? m.default : m; }\nfunction __thaw_esm_ns(m) { if (m && m.__esModule) return m; var ns = Object.create(null); if (m !== null && (typeof m === 'object' || typeof m === 'function')) { for (var k in m) ns[k] = m[k]; } ns.default = m; return ns; }\nvar __thaw_tdz_v = false;\nfunction __thaw_esm_tdz(n) { throw new ReferenceError(\"Cannot access '\" + n + \"' before initialization\"); }\nfunction __thaw_esm_star(ex, m) { var own = Object.prototype.hasOwnProperty;\n  var table = ex.__thaw_esm_stars;\n  var mine = m !== null && (typeof m === 'object' || typeof m === 'function') && own.call(m, '__thaw_esm_stars') ? m.__thaw_esm_stars : null;\n  (m === null || m === undefined ? [] : Object.keys(m)).forEach(function (k) {\n    if (k === 'default') return;\n    var bind = mine && own.call(mine, k) ? mine[k].bind : { m: m, k: k };\n    if (own.call(table, k)) {\n      if (!table[k].amb && (table[k].bind.m !== bind.m || table[k].bind.k !== bind.k)) {\n        table[k].amb = true;\n        if (k === '__esModule') Object.defineProperty(ex, k, { value: true, configurable: true }); else delete ex[k];\n      }\n      return;\n    }\n    if (k !== '__esModule' && own.call(ex, k)) return;\n    table[k] = { bind: bind, amb: false };\n    Object.defineProperty(ex, k, { enumerable: true, configurable: true, get: function () { return bind.m[bind.k]; } });\n  });\n}\nif (!Object.prototype.hasOwnProperty.call(exports, \"r\")) Object.defineProperty(exports, \"r\", { enumerable: true, get: function () { return __thaw_esm_m2[\"q\"]; } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"ns\")) Object.defineProperty(exports, \"ns\", { enumerable: true, get: function () { return __thaw_esm_ns(__thaw_esm_m3); } });\nif (!Object.prototype.hasOwnProperty.call(exports, \"v\")) Object.defineProperty(exports, \"v\", { enumerable: true, get: function () { return (__thaw_tdz_v ? v : __thaw_esm_tdz(\"v\")); } });\nfunction __thaw_esm_origin_obj(t) { var nsCache = Object.create(null); return { readDefault: function (s) { return __thaw_esm_default(t[s]()); }, read: function (s, n) { return t[s]()[n]; }, readNamespace: function (s) { return __thaw_esm_ns(t[s]()); }, readImport: function (s, n) { return t[s]()[n]; }, namespaceImport: function (s) { var m = t[s](); if (m !== null && (typeof m === 'object' || typeof m === 'function') && Object.prototype.hasOwnProperty.call(m, '__thaw_esm_stars')) return __thaw_esm_ns(m); if (!nsCache[s] || !Object.is(nsCache[s].m, m)) nsCache[s] = { m: m, ns: __thaw_esm_cjs_ns(m) }; return nsCache[s].ns; }, defaultImport: function (s, m) { return __thaw_esm_default(m); } }; }\nfunction __thaw_esm_cjs_ns(m) { var names = m !== null && (typeof m === 'object' || typeof m === 'function') ? Object.keys(m).filter(function (k) { return k !== 'default'; }) : []; names.push('default'); var ns = {}; names.sort().forEach(function (k) { Object.defineProperty(ns, k, { value: k === 'default' ? m : m[k], enumerable: true, writable: true }); }); Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module' }); return Object.preventExtensions(ns); }\nvar __thaw_esm_m1 = require(\"./s.js\");\n__thaw_esm_star(exports, __thaw_esm_m1);\nvar __thaw_esm_m2 = require(\"./t.js\");\nvar __thaw_esm_m3 = require(\"./u.js\");\nvar __thaw_esm_origin_0 = __thaw_esm_origin_obj({ \"node:os\": function () { return require(\"node:os\"); } });\nconst v = __thaw_esm_origin_0.readDefault('node:os');;\n__thaw_tdz_v = true;\n");
     }
 }
 
