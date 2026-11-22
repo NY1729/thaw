@@ -2647,6 +2647,23 @@ impl Interp {
     }
 
     /// Own enumerable string keys (array indices first).
+    /// `own_keys` that propagates what a Proxy `ownKeys` / `getOwnPropertyDescriptor` trap throws.
+    pub(crate) fn own_keys_checked(&mut self, v: &Value) -> R<Vec<Rc<str>>> {
+        if let Value::Object(o) = v {
+            if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+                let keys = self.proxy_own_keys(o, true)?.unwrap_or_default();
+                return Ok(keys
+                    .into_iter()
+                    .filter_map(|k| match k {
+                        Value::Str(s) => Some(s.into_rc()),
+                        _ => None,
+                    })
+                    .collect());
+            }
+        }
+        Ok(self.own_keys(v))
+    }
+
     pub(crate) fn own_keys(&mut self, v: &Value) -> Vec<Rc<str>> {
         match v {
             Value::Object(o) => {

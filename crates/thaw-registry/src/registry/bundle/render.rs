@@ -887,6 +887,8 @@ fn js_string_literal(s: &str) -> String {
 
 #[cfg(test)]
 mod static_link_runtime_regressions {
+    use crate::thaw_js_shim;
+
     #[test]
     fn dynamic_import_wraps_commonjs_and_worker_fallbacks() {
         let module = |key: &str, source: &str, imports: Vec<(String,String)>| super::BundledModule {
@@ -941,8 +943,8 @@ mod static_link_runtime_regressions {
         let bundle = super::render_bundle("main", &modules);
         let script = format!("globalThis.module = {{exports:{{}}}}; globalThis.__thaw_dynamic_then_calls = 0; globalThis.__thaw_dynamic_builtin = {{readFile:function(){{}}}}; globalThis.require = function(spec){{if(spec === 'fs' || spec === 'node:fs') return globalThis.__thaw_dynamic_builtin; throw new Error(spec);}}; {bundle} globalThis.__thaw_dynamic_namespace_check = module.exports;");
         let script = std::ffi::CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"__thaw_dynamic_namespace_check".as_ptr(), c"[]".as_ptr());
+        assert_eq!(thaw_js_shim::thaw_js_load(script.as_ptr()), 1);
+        let result = thaw_js_shim::thaw_js_call(c"__thaw_dynamic_namespace_check".as_ptr(), c"[]".as_ptr());
         let text = unsafe { std::ffi::CStr::from_ptr(result) }.to_string_lossy().into_owned();
         unsafe { drop(std::ffi::CString::from_raw(result.cast_mut())); }
         assert_eq!(text, "[true,true,true,true,true,true,true,true,true,true,true,true,true]");
@@ -979,7 +981,7 @@ mod static_link_runtime_regressions {
                 throw new Error('builtin alias namespace changed');
         }})();"#, runtime = super::STAR_ORIGIN_RUNTIME);
         let script = std::ffi::CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        assert_eq!(thaw_js_shim::thaw_js_load(script.as_ptr()), 1);
     }
 
     #[test]
@@ -1009,7 +1011,7 @@ mod static_link_runtime_regressions {
             delete globalThis.__thaw_static_link_side_effect;
         }})();"#);
         let script = std::ffi::CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        assert_eq!(thaw_js_shim::thaw_js_load(script.as_ptr()), 1);
     }
 
     #[test]
@@ -1058,6 +1060,6 @@ mod static_link_runtime_regressions {
             rejects(() => __thaw_bundle_origin_for('consumer').validateRequests());
         }})();"#, runtime = super::STAR_ORIGIN_RUNTIME);
         let script = std::ffi::CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        assert_eq!(thaw_js_shim::thaw_js_load(script.as_ptr()), 1);
     }
 }
