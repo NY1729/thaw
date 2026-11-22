@@ -12671,3 +12671,32 @@ fn symbol_to_number_throws_type_error_not_nan() {
         .join("|")
     );
 }
+
+#[test]
+fn load_script_sees_the_live_handle_reference_counts() {
+    use crate::host::{thaw_tjs_load_script, thaw_tjs_release_handle};
+    use std::ffi::CString;
+    let run = |src: &str| {
+        let src = CString::new(src).unwrap();
+        thaw_tjs_load_script(src.as_ptr())
+    };
+    assert_eq!(run("if (typeof globalThis.__thaw_value_handle_refs !== 'object') throw new Error('type ' + typeof globalThis.__thaw_value_handle_refs);"), 1);
+    // read at load time, as the compiled lease-accounting scripts do, and again from a later call
+    assert_eq!(
+        run("globalThis.refsAtLoad = __thaw_value_handle_refs.reduce((a, b) => a + b, 0); globalThis.refsNow = () => __thaw_value_handle_refs.reduce((a, b) => a + b, 0);"),
+        1
+    );
+    assert_eq!(run("globalThis.held = {};"), 1);
+    let name = CString::new("held").unwrap();
+    let handle = crate::host::thaw_tjs_get_global(name.as_ptr());
+    assert!(handle > 0);
+    assert_eq!(
+        run("if (refsNow() !== 1) throw new Error('refs ' + refsNow());"),
+        1
+    );
+    thaw_tjs_release_handle(handle);
+    assert_eq!(
+        run("if (refsNow() !== 0) throw new Error('refs ' + refsNow());"),
+        1
+    );
+}
