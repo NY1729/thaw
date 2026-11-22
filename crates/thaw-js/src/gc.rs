@@ -112,8 +112,16 @@ pub(crate) fn obj_edges(o: &ObjData, f: &mut dyn FnMut(Edge)) -> bool {
                 value_edge(&mut buf, v);
             }
             if let Some(s) = sparse.as_ref() {
-                for v in s.elems.values() {
-                    value_edge(&mut buf, v);
+                for e in s.elems.values() {
+                    match &e.slot {
+                        Slot::Data(v) => value_edge(&mut buf, v),
+                        Slot::Accessor { get, set } => {
+                            for v in [get, set].into_iter().flatten() {
+                                value_edge(&mut buf, v);
+                            }
+                        }
+                        Slot::LazyProto { .. } => {}
+                    }
                 }
             }
         }
@@ -377,7 +385,10 @@ fn collect_nodes() -> usize {
                 }
                 if let Some(s) = sparse.as_mut() {
                     taken.push(Taken::Values(
-                        std::mem::take(&mut s.elems).into_values().collect(),
+                        std::mem::take(&mut s.elems)
+                            .into_values()
+                            .flat_map(crate::Elem::into_values)
+                            .collect(),
                     ));
                 }
                 match &mut *kind {

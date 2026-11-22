@@ -344,7 +344,7 @@ use crate::builtins::{json_quote, str_units};
 use crate::host::{live_handle_of, store_handle, thaw_tjs_retain_handle};
 use crate::napi_props::own_entries;
 use crate::napi_symbols::is_symbol;
-use crate::{number_to_string, strict_equals, unhole, Kind, ObjData, Slot};
+use crate::{number_to_string, strict_equals, Kind, ObjData, Slot};
 
 /// A queued node: a value to copy, or a carrier handle (a masked root item).
 enum Source {
@@ -427,7 +427,7 @@ fn own_value(o: &Obj, key: &str) -> Value {
     o.force_key(key);
     if let Kind::Array(items) = &*o.kind.borrow() {
         if let Some(slot) = array_index(key) {
-            return unhole(items.get(slot));
+            return crate::array_elem(o, items, slot).unwrap_or(Value::Undefined);
         }
         if key == "length" {
             return Value::Number(items.len() as f64);
@@ -754,7 +754,7 @@ impl NapiWireOut {
             return Ok(format!("{{\"re\":[{s},{f},{last}]}}"));
         }
         let is_array = matches!(&*o.kind.borrow(), Kind::Array(_));
-        if !(is_array || is_plain) || has_accessor(o) {
+        if !(is_array || is_plain) || has_accessor(o) || crate::array_snapshot_unsafe(o) {
             return Ok(self.hdl(&value));
         }
         let empty = HashMap::new();

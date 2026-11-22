@@ -43,21 +43,21 @@ pub(crate) const EXTRAS: &str = r#"
   def(AP, 'toReversed', function () {
     'use strict';
     if (this == null) throw new TypeError('Array.prototype.toReversed called on null or undefined');
-    var c = Array.prototype.slice.call(this), n = c.length;
+    if (__thaw_array_has_tail(this)) Array.prototype.slice.call(this, 0, 0); var n = this.length; if (n > 4294967295) throw new RangeError('Invalid array length'); var c = []; for (var q = 0; q < n; q++) c.push(this[q]);
     for (var h = 0; h < n; h++) if (!(h in c)) c[h] = undefined;
     return c.reverse();
   });
   def(AP, 'toSorted', function (cmp) {
     'use strict';
     if (this == null) throw new TypeError('Array.prototype.toSorted called on null or undefined');
-    var c = Array.prototype.slice.call(this), n = c.length;
+    if (__thaw_array_has_tail(this)) Array.prototype.slice.call(this, 0, 0); var n = this.length; if (n > 4294967295) throw new RangeError('Invalid array length'); var c = []; for (var q = 0; q < n; q++) c.push(this[q]);
     for (var h = 0; h < n; h++) if (!(h in c)) c[h] = undefined;
     return c.sort(cmp);
   });
   def(AP, 'toSpliced', function () {
     'use strict';
     if (this == null) throw new TypeError('Array.prototype.toSpliced called on null or undefined');
-    var c = Array.prototype.slice.call(this), n = c.length;
+    if (__thaw_array_has_tail(this)) Array.prototype.slice.call(this, 0, 0); var n = this.length; if (n > 4294967295) throw new RangeError('Invalid array length'); var c = []; for (var q = 0; q < n; q++) c.push(this[q]);
     for (var h = 0; h < n; h++) if (!(h in c)) c[h] = undefined;
     c.splice.apply(c, arguments);
     return c;
@@ -67,9 +67,10 @@ pub(crate) const EXTRAS: &str = r#"
     if (this == null) throw new TypeError('Array.prototype.with called on null or undefined');
     if (i < 0) i += this.length;
     if (i < 0 || i >= this.length) throw new RangeError('Invalid index : ' + i);
-    var c = Array.prototype.slice.call(this), n = c.length;
-    for (var h = 0; h < n; h++) if (!(h in c)) c[h] = undefined;
-    c[i] = v;
+    if (__thaw_array_has_tail(this)) Array.prototype.slice.call(this, 0, 0);
+    var n = this.length; if (n > 4294967295) throw new RangeError('Invalid array length');
+    // the replaced index is not read: its slot takes the new value
+    var c = []; for (var q = 0; q < n; q++) c.push(q === i ? v : this[q]);
     return c;
   });
   // ponytail: no subclass `this` constructor; always a plain Array.

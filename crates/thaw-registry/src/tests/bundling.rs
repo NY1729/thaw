@@ -1708,16 +1708,10 @@ fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules(
     let _ = fs::remove_dir_all(modules);
 }
 
-// qjs_pending: fails on thaw-js: Package route ERROR: unsupported: esm-cycle; script route needs __thaw_register_native_bundle
-mod qjs_pending_bundling_native_esm_cycle_links_original_mjs_before_evaluation {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_esm_cycle_links_original_mjs_before_evaluation() {
-    // Unrun regression: B evaluates first, observes A's hoisted function, and
-    // gets TDZ for A's let binding. The old factory rewrite evaluated eagerly.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1 prints [["function","ReferenceError"],7,3] for these sources: B evaluates first, observes A's
+    // hoisted function, and gets TDZ for A's let binding.
     let root = temp_registry("native-esm-cycle-origin");
     let modules = root.join("node_modules");
     let package = modules.join("native-origin-cycle-pkg");
@@ -1727,12 +1721,8 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
     let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-origin-cycle-pkg", &package, "index.mjs").unwrap();
     assert_eq!(count, 2);
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.nativeOriginResult = function() {{ return [module.exports.result, module.exports.ready(), module.exports.value]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"nativeOriginResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[\"function\",\"ReferenceError\"],7,3]");
+    assert_eq!(run_js_probe(&bundle, "[exports.result, exports.ready(), exports.value]"), "[[\"function\",\"ReferenceError\"],7,3]");
     let _ = fs::remove_dir_all(root);
-}
 }
 
 #[test]
