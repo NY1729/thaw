@@ -4287,3 +4287,15 @@ fn a_void_call_in_a_dynamic_slot_yields_dynamic_undefined() {
         );
     }
 }
+
+#[test]
+fn read_dynamic_value_of_a_json_operand_is_the_operand() {
+    let program = lower(
+        r#"
+        declare function make(): Json;
+        function main(): void { console.log(String(readDynamicValue(make()))); }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(!format!("{:?}", main.body).contains("readDynamicValue"), "{:?}", main.body);
+}

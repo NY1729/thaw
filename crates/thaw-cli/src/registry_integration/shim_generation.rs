@@ -550,6 +550,18 @@ fn generate_registry_shims_pass(
             values.clear();
             nested_namespaces.clear();
         }
+        // A synthetic flattened `__thaw_ns_<ns>_<member>` declaration is the function that lives at the
+        // runtime path `<ns>.<member>` (bundles export no top-level name of that spelling): name it by
+        // that path, the same shape a namespace-scoped declaration already has.
+        for (namespace, members) in &nested_namespaces {
+            for (member, target) in members {
+                if target == &format!("__thaw_ns_{namespace}_{member}") {
+                    for function in functions.iter_mut().filter(|function| &function.name == target) {
+                        function.name = format!("{namespace}.{member}");
+                    }
+                }
+            }
+        }
         let live_namespace_origins = nested_namespaces
             .keys()
             .filter(|namespace| !type_only_namespaces.contains(*namespace))
@@ -1185,13 +1197,31 @@ fn generate_registry_shims_pass(
                 .collect::<std::collections::HashSet<_>>();
             // (Only the classes the program names: an unreferenced class's multi-arity constructor
             // dispatcher would pull QuickJS into every routed build.)
-            for class in pkg
-                .classes
-                .iter()
-                .filter(|class| !thaw_js_package || thaw_js_mentions(mention_source, &class.name))
-            {
+            for class in pkg.classes.iter() {
+                // A class reached only through a namespace member alias
+                // (`new ns.Alias(..)`) is named by the alias, not by its own
+                // name, and lives at the alias's path in the package exports.
+                let alias_path = (thaw_js_package
+                    && !class.name.contains('.')
+                    && !thaw_js_mentions(mention_source, &class.name))
+                .then(|| {
+                    pkg.nested_namespaces.iter().find_map(|(namespace, members)| {
+                        members.iter().find_map(|(alias, target)| {
+                            ((target == &class.name || format!("{namespace}.{target}") == class.name)
+                                && thaw_js_mentions(mention_source, alias))
+                            .then(|| format!("{namespace}.{alias}"))
+                        })
+                    })
+                })
+                .flatten();
+                if thaw_js_package
+                    && alias_path.is_none()
+                    && !thaw_js_mentions(mention_source, &class.name)
+                {
+                    continue;
+                }
                 let mut runtime_class = class.clone();
-                runtime_class.name = format!("{}::{}", pkg.name, class.name);
+                runtime_class.name = format!("{}::{}", pkg.name, alias_path.as_ref().unwrap_or(&class.name));
                 if let Some(arities) = constructor_arities_for_package.get(&class.name).cloned() {
                     constructor_arities_for_package
                         .entry(runtime_class.name.clone())
