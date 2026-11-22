@@ -12861,8 +12861,8 @@ Promise.any([4]).then(function () { L('y'); }); Promise.all([5]).then(function (
 }
 
 /// A `globalThis.__x` slot a package defines for itself is no blocker (Node reads it as undefined too), while an
-/// unknown `globalThis.__thaw_*` host member still is. `__thaw_gc` stays a blocker: thaw-js has no real weak
-/// references yet, so a wrapper that relies on GC-driven N-API finalizers must keep falling back.
+/// unknown `globalThis.__thaw_*` host member still is. (`__thaw_gc` is a provided host global since the N-API
+/// finalizer work; `scan_accepts_thaw_gc_and_still_blocks_unknown_host_globals` pins that.)
 #[test]
 fn scan_tolerates_package_own_underscore_globals_but_not_host_internals() {
     let scan =
@@ -12874,12 +12874,6 @@ fn scan_tolerates_package_own_underscore_globals_but_not_host_internals() {
         report
             .blockers
             .contains_key("builtin:globalThis.__thaw_no_such_host_member"),
-        "blockers: {:?}",
-        report.blockers
-    );
-    let report = scan("module.exports.run = () => { __thaw_gc(); };");
-    assert!(
-        report.blockers.contains_key("global:__thaw_gc"),
         "blockers: {:?}",
         report.blockers
     );
