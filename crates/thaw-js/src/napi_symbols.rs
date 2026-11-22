@@ -36,6 +36,9 @@ struct Registry {
     by_native: HashMap<(u64, u64), Entry>,
     /// (owner, thaw-js Symbol id) -> native id.
     by_symbol: HashMap<(u64, u64), u64>,
+    /// Owners that ever bound a Symbol on this thread. Not forgotten with an entry: with a bridge (owners are
+    /// opaque keys, unvalidated) an owner never seen here is unknown (no trusted JS owner), not evidence that its Symbol was collected.
+    owners: std::collections::HashSet<u64>,
 }
 
 thread_local! {
@@ -45,6 +48,7 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn pin_for_test(owner: u64, native: u64, symbol: &Obj) {
     REGISTRY.with(|r| {
+        r.borrow_mut().owners.insert(owner);
         r.borrow_mut().by_native.insert(
             (owner, native),
             Entry {
@@ -128,6 +132,7 @@ pub(crate) fn bind(owner: u64, id: u64, symbol: &Obj) {
     };
     REGISTRY.with(|r| {
         let mut r = r.borrow_mut();
+        r.owners.insert(owner);
         r.by_symbol.insert((owner, symbol_id), id);
         r.by_native.insert((owner, id), entry);
     });
@@ -277,9 +282,13 @@ pub extern "C" fn thaw_tjs_napi_symbol_weak_live(owner: u64, id: u64) -> u8 {
     if !valid_owner(owner) || id == 0 {
         return 2;
     }
-    REGISTRY.with(|r| match r.borrow().by_native.get(&(owner, id)) {
-        Some(entry) => u8::from(entry.pinned.is_some() || entry.weak.strong_count() > 0),
-        None => 0,
+    REGISTRY.with(|r| {
+        let r = r.borrow();
+        match r.by_native.get(&(owner, id)) {
+            Some(entry) => u8::from(entry.pinned.is_some() || entry.weak.strong_count() > 0),
+            None if !bridged() || r.owners.contains(&owner) => 0,
+            None => 2,
+        }
     })
 }
 
