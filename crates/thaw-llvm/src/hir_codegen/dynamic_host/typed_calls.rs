@@ -1973,13 +1973,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| format!("thaw-js argument {} ({ty:?}): {error}", index + 1))?;
         }
         // `\u{2}` asks for the result as a handle id (a `JsValue` result), whatever its kind;
-        // `\u{3}` for a `Date` result as its `{"__thaw_tjs_date__": ms}` wire node.
+        // `\u{3}` for a `Date` result as its `{"__thaw_tjs_date__": ms}` wire node; `\u{5}` for a `Json` result.
         let symbol = if signature.ret == HirType::JsValue {
             format!("\u{2}{}", signature.symbol)
         } else if thaw_js_date_type(awaited) {
             format!("\u{3}{}", signature.symbol)
         } else if pending_site {
             format!("\u{4}{}", signature.symbol)
+        } else if *awaited == HirType::Json {
+            // an `any` result keeps a Buffer live, so its methods (`toString('hex')`) run on the real object
+            format!("\u{5}{}", signature.symbol)
         } else {
             signature.symbol.clone()
         };
@@ -2101,6 +2104,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_global_string_ptr("__thaw_tjs_date__", "thaw_js_date_key")
                     .map_err(|error| error.to_string())?;
+                // only a real Date crosses as the date node: any other object (a plain `{timestamp}`, a
+                // forged identity marker) is not a Date
+                let is_node = self.builder.build_call(
+                    self.module.get_function("thaw_json_has_own").unwrap(),
+                    &[json.into(), key.as_pointer_value().into()],
+                    "thaw_js_date_is_node",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_has_own returned no value")?.into_int_value();
+                let is_node = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE, is_node, is_node.get_type().const_zero(), "thaw_js_date_has_node",
+                ).map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let valid = self.context.append_basic_block(function, "thaw_js_date_valid");
+                let invalid = self.context.append_basic_block(function, "thaw_js_date_invalid");
+                self.builder.build_conditional_branch(is_node, valid, invalid)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(invalid);
+                self.compile_throw_type_error("typed call result is not a Date")?;
+                self.builder.position_at_end(valid);
                 let ms = self.builder.build_call(
                     self.module.get_function("thaw_json_get").unwrap(),
                     &[json.into(), key.as_pointer_value().into()],
