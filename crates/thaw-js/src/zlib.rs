@@ -45,6 +45,12 @@ struct ZlibOptions {
     /// zstd `params` as (`ZSTD_c_*`/`ZSTD_d_*` key, value) pairs.
     #[cfg(feature = "zstd")]
     params: Vec<(u32, i32)>,
+    /// zstd `pledgedSrcSize` (streams and the callback API).
+    #[cfg(feature = "zstd")]
+    pledged_src_size: Option<u64>,
+    /// zstd `finishFlush` (`ZSTD_e_*`); absent is `ZSTD_e_end`.
+    #[cfg(feature = "zstd")]
+    finish_flush: Option<u32>,
 }
 
 impl ZlibOptions {
@@ -80,6 +86,10 @@ impl ZlibOptions {
                     .collect(),
                 _ => Vec::new(),
             },
+            #[cfg(feature = "zstd")]
+            pledged_src_size: num("pledgedSrcSize").map(|n| n as u64),
+            #[cfg(feature = "zstd")]
+            finish_flush: num("finishFlush").map(|n| n as u32),
         }
     }
 
@@ -272,6 +282,13 @@ pub(crate) fn install(it: &mut Interp) {
         };
         let input = buf.window();
         let options = ZlibOptions::parse(&it.to_str(&arg(a, 3)));
+        #[cfg(feature = "zstd")]
+        if format == "zstd" || format == "zstdStream" {
+            // invalid zstd options throw at call time, as Node does; the job would only report them later
+            if let Err(error) = zstd::check(&op, &options) {
+                return it.throw_error("Error", &error.to_string());
+            }
+        }
         Ok(Value::Number(f64::from(start(
             op,
             format,
@@ -310,7 +327,7 @@ fn compress_bytes_with(format: &str, value: &[u8], options: &ZlibOptions) -> io:
     let compression = options.compression();
     match format {
         #[cfg(feature = "zstd")]
-        "zstd" | "zstdStream" => zstd::compress(value, &options.params, format == "zstdStream"),
+        "zstd" | "zstdStream" => zstd::compress(value, options, format == "zstdStream"),
         "brotli" => {
             let mut encoder = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
             encoder.write_all(value)?;
@@ -376,7 +393,7 @@ fn decompress_bytes_with(format: &str, value: &[u8], options: &ZlibOptions) -> i
     match format {
         #[cfg(feature = "zstd")]
         "zstd" | "zstdStream" => {
-            output = zstd::decompress(value, &options.params, options.max_output)?;
+            output = zstd::decompress(value, options)?;
         }
         "brotli" => {
             brotli::Decompressor::new(value, 4096)
@@ -664,11 +681,11 @@ impl WebZlibStream {
             )),
             #[cfg(feature = "zstd")]
             ("compress", "zstd") => {
-                WebZlibWriter::ZstdEncoder(zstd::Compressor::new(&options.params)?)
+                WebZlibWriter::ZstdEncoder(zstd::Compressor::new(options)?)
             }
             #[cfg(feature = "zstd")]
             ("decompress", "zstd") => {
-                WebZlibWriter::ZstdDecoder(zstd::Decompressor::new(&options.params)?)
+                WebZlibWriter::ZstdDecoder(zstd::Decompressor::new(options)?)
             }
             _ => {
                 return Err(io::Error::new(

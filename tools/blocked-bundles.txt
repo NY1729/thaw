@@ -8,4 +8,3 @@ prisma__client	method:dlopen	native-addon-dlopen	fixture: verified on main 0bbd1
 prisma__client__subpaths__index	method:dlopen	native-addon-dlopen	not a fixture: pre-#881 measurement, nightly verifies
 prisma__client__subpaths__runtime__library	method:dlopen	native-addon-dlopen	not a fixture: pre-#881 measurement, nightly verifies
 prisma__client__subpaths__runtime__react-native	global:__PrismaProxy	other-runtime-only	fixture: verified on main 0bbd19f03
-rq1__undici	method:createZstdDecompress	missing-node-api	fixture: verified on main 0bbd19f03
