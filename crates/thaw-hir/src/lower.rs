@@ -182,7 +182,15 @@ fn is_ordinary_quickjs_symbol(backend: DynamicBackend, symbol: &str) -> bool {
 
 fn ordinary_quickjs_typed_symbol(name: &str) -> Option<String> {
     let (backend, symbol) = dynamic_symbol(name)?;
-    is_ordinary_quickjs_symbol(backend, &symbol).then_some(symbol)
+    // A thaw-js plain function is the same kind of function value: reference parameters become
+    // live `Json` views (see `quickjs_function_value_type`) instead of by-value copies.
+    (is_ordinary_quickjs_symbol(backend, &symbol)
+        // ponytail: arity/overload-expanded shims (optional parameters) keep the by-value path.
+        || backend == DynamicBackend::ThawJs
+            && !symbol.starts_with('$')
+            && !name.contains("__arity_")
+            && !name.contains("__overload_"))
+    .then_some(symbol)
 }
 
 /// Signature info needed to type calls to other top-level functions during
