@@ -166,6 +166,10 @@ pub(crate) struct Rt {
     pub(crate) has_instance_key: Option<Rc<str>>,
     /// The intrinsic `Function.prototype[Symbol.hasInstance]`: `instanceof` runs its native path for it.
     pub(crate) default_has_instance: Option<Obj>,
+    /// Bound function (by address) -> its target, for `instanceof` (OrdinaryHasInstance unwraps a bound function).
+    /// Entries whose bound function died are dropped when the map doubles.
+    pub(crate) bound_targets: crate::FxMap<usize, (std::rc::Weak<crate::ObjData>, Value)>,
+    pub(crate) bound_sweep_at: usize,
     pub(crate) pending_nt: Option<Value>,
     pub(crate) bigint_proto: Option<Obj>,
     pub(crate) generator_proto: Option<Obj>,
@@ -194,6 +198,20 @@ pub(crate) struct Rt {
 }
 
 impl Rt {
+    pub(crate) fn note_bound(&mut self, bound: &Obj, target: Value) {
+        if self.bound_targets.len() >= self.bound_sweep_at.max(256) {
+            self.bound_targets.retain(|_, (w, _)| w.strong_count() > 0);
+            self.bound_sweep_at = self.bound_targets.len() * 2;
+        }
+        self.bound_targets
+            .insert(Rc::as_ptr(bound) as usize, (Rc::downgrade(bound), target));
+    }
+
+    pub(crate) fn bound_target(&self, f: &Obj) -> Option<Value> {
+        let (w, t) = self.bound_targets.get(&(Rc::as_ptr(f) as usize))?;
+        w.upgrade().filter(|o| Rc::ptr_eq(o, f)).map(|_| t.clone())
+    }
+
     /// The intrinsic prototypes and host objects this realm's loop holds (teardown roots, lib.rs).
     pub(crate) fn push_object_roots(&mut self, out: &mut Vec<Obj>) {
         out.extend(self.promise_proto.take());

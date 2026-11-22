@@ -2133,6 +2133,7 @@ impl Interp {
                 it.call(&target, &bound_this, &all)
             });
             if let Value::Object(b) = &bound_fn {
+                it.rt.note_bound(b, target0.clone());
                 put_with(b, "length", Value::Number(length), false, false, true);
                 put_with(
                     b,
