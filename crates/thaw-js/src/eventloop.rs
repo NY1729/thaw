@@ -642,6 +642,13 @@ impl Interp {
         (res, rej)
     }
 
+    /// `p.then(on_ful, on_rej)` without the JS-visible `then` lookup (host code awaiting a promise).
+    pub(crate) fn promise_then_native(&mut self, p: &Value, on_ful: Value, on_rej: Value) {
+        if let Value::Object(o) = p {
+            self.promise_then(o, on_ful, on_rej, None);
+        }
+    }
+
     fn promise_then(&mut self, p: &Obj, on_ful: Value, on_rej: Value, result: Option<Obj>) {
         let (ok, val) = {
             let mut k = p.kind.borrow_mut();
