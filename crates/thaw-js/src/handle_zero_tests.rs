@@ -69,6 +69,7 @@ const TABLE: &[(&str, Policy)] = &[
         Policy::Lenient,
     ),
     ("thaw_tjs_delete_property_result", Policy::Lenient),
+    ("thaw_tjs_dynamic_object_query", Policy::Lenient),
     ("thaw_tjs_exception_native_token", Policy::Lenient),
     ("thaw_tjs_get_property_exact_result", Policy::Lenient),
     ("thaw_tjs_get_property_json_key_result", Policy::Lenient),

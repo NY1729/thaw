@@ -135,6 +135,52 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_extract_value(result, 1, "call_dynamic_error")
             .map_err(|e| e.to_string())?
             .into_pointer_value();
+        // A typed thaw-js call that threw a JS object hands that exact object over (identity, own properties,
+        // later mutation), as the QuickJS lane's exact call does; the framed text below stays the fallback.
+        if backend_symbol == "thaw_tjs_call_typed_result" && self.js_engine() == JsEngine::ThawJs {
+            let thrown = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_tjs_take_thrown_handle").unwrap(),
+                    &[],
+                    "tjs_thrown_handle",
+                )
+                .map_err(|e| e.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_tjs_take_thrown_handle returned no value")?
+                .into_int_value();
+            let has_thrown = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    thrown,
+                    self.context.i64_type().const_zero(),
+                    "tjs_has_thrown_handle",
+                )
+                .map_err(|e| e.to_string())?;
+            let function = self.current_function();
+            let original = self.context.append_basic_block(function, "tjs_original_exception");
+            let plain = self.context.append_basic_block(function, "tjs_plain_exception");
+            self.builder
+                .build_conditional_branch(has_thrown, original, plain)
+                .map_err(|e| e.to_string())?;
+            self.builder.position_at_end(original);
+            for (symbol, value, name) in [
+                ("thaw_cstring_destroy", error, "destroy_original_exception_text"),
+                ("thaw_cstring_destroy", args_json_str.into_pointer_value(), "destroy_original_exception_args_string"),
+                ("thaw_json_destroy", args_json_val.into_pointer_value(), "destroy_original_exception_args"),
+            ] {
+                self.builder
+                    .build_call(self.module.get_function(symbol).unwrap(), &[value.into()], name)
+                    .map_err(|e| e.to_string())?;
+            }
+            self.compile_throw_original_quickjs_exception_handle(thrown.into(), true)?;
+            self.builder
+                .build_unconditional_branch(plain)
+                .map_err(|e| e.to_string())?;
+            self.builder.position_at_end(plain);
+        }
         // A thaw-js error string becomes the framed `Error` (name, message, code, properties) it was.
         let error = if backend_symbol.starts_with("thaw_tjs_") {
             self.compile_thaw_js_frame_error(error)?

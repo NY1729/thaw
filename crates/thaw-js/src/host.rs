@@ -1545,6 +1545,9 @@ pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
         _ => None,
     };
     LAST_PACKET.with(|p| *p.borrow_mut() = packet);
+    if let Ctl::Throw(v @ Value::Object(_)) = &c {
+        LAST_THROWN.with(|t| *t.borrow_mut() = Some(v.clone()));
+    }
     match c {
         Ctl::Unsupported(f) => HostError::Unsupported(f),
         Ctl::Throw(v) => {
@@ -3397,6 +3400,49 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             }
         })
     }))
+}
+
+/// The residual JIT's `dynamic_object_query` host ABI (the thaw-js twin of QuickJS `thaw_js_dynamic_object_query`):
+/// operation `0` snapshots a Set-like value's keys into a JSON object (validating the `size`/`has`/`keys`
+/// protocol in this realm) and returns it as a live thaw-std `Json` value, its bits in the `f64`. On failure the
+/// result is 0 and `*error` holds a malloc-owned message.
+///
+/// # Safety
+/// `error` must be null or point to a writable pointer slot.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_dynamic_object_query(
+    operation: u8,
+    handle: u64,
+    error: *mut *const c_char,
+) -> f64 {
+    unsafe extern "C" {
+        fn thaw_json_parse(text: *const c_char) -> *mut u8;
+    }
+    let fail = |message: String| {
+        if let Some(slot) = unsafe { error.as_mut() } {
+            *slot = std::ffi::CString::new(message)
+                .unwrap_or_default()
+                .into_raw();
+        }
+        0.0
+    };
+    if operation != 0 {
+        return fail("unsupported dynamic object query".into());
+    }
+    match set_like_snapshot_text(handle) {
+        Ok(json) => match std::ffi::CString::new(json) {
+            Ok(text) => f64::from_bits(unsafe { thaw_json_parse(text.as_ptr()) } as usize as u64),
+            Err(_) => fail("dynamic object query produced a NUL".into()),
+        },
+        Err(message) => fail(message),
+    }
+}
+
+/// The JSON text of the Set-like snapshot of the value behind `handle`.
+pub(crate) fn set_like_snapshot_text(handle: u64) -> Result<String, String> {
+    on_handle(handle, |p, _, v| {
+        prelude_call(&mut p.interp, "__thaw_set_like_snapshot", &v, 0)
+    })
 }
 
 #[no_mangle]
@@ -6322,6 +6368,18 @@ thread_local! {
     static LAST_FRAME: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     /// The native packet of the last carrier `classify` saw; `error_string` binds it to the error text.
     static LAST_PACKET: RefCell<Option<Rc<thaw_arena::exception::ExceptionPacket>>> = const { RefCell::new(None) };
+    /// The last object `classify` saw thrown, so a failed typed call can hand the exact object to compiled code.
+    static LAST_THROWN: RefCell<Option<Value>> = const { RefCell::new(None) };
+    /// The handle of the object the last failed typed call threw (see `thaw_tjs_take_thrown_handle`); 0 for none.
+    static LAST_THROWN_HANDLE: Cell<i64> = const { Cell::new(0) };
+}
+
+/// The handle (one reference, owned by the caller) of the object the last failed `thaw_tjs_call_typed_result`
+/// threw, or 0 when it failed for another reason. Compiled code rethrows that exact object, so its identity
+/// survives a native frame (a JS-thrown `Error` caught by a package handler is the same object, not a copy).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_take_thrown_handle() -> i64 {
+    LAST_THROWN_HANDLE.with(Cell::take)
 }
 
 /// The live native packet a thrown carrier names in its hidden `\0pkt`, if any.
@@ -7944,6 +8002,8 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
             eprintln!("thaw-js call: {symbol} {args}");
         }
+        LAST_THROWN.with(|t| t.borrow_mut().take());
+        LAST_THROWN_HANDLE.with(|h| h.set(0));
         // `<package>::<export>` names a package export; a bare name is a global of the default realm
         // (a function a `loadScript` defined), read through the empty-named root.
         let (handle, export) = match symbol.split_once("::") {
@@ -7977,7 +8037,15 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             }
             from_result_value(&mut p.interp, &r).map(|n| n.to_result_json())
         })
-        .map_err(|e| e.to_string());
+        .map_err(|e| {
+            if let (HostError::Thrown(_), Some(thrown)) =
+                (&e, LAST_THROWN.with(|t| t.borrow_mut().take()))
+            {
+                LAST_THROWN_HANDLE.with(|h| h.set(store_handle(handle, thrown)));
+            }
+            e.to_string()
+        });
+        LAST_THROWN.with(|t| t.borrow_mut().take());
         pump_watches();
         out
     })())
