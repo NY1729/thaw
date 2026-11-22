@@ -167,7 +167,7 @@ jobs:
           set +e
           bin_dir="$D/bin"; out_dir="$D/out"
           mkdir -p "$bin_dir" "$out_dir"
-          export THAW_JS_ROUTE_ALL=1 THAW_JS_ENGINE=thaw-js THAW_JS_TRACE_WIRE=1 THAW_JS_RUNTIME_DEBUG=1
+          export THAW_JS_TRACE_WIRE=1 THAW_JS_RUNTIME_DEBUG=1
           while IFS=$'\t' read -r slug status name; do
             case_out="$out_dir/$slug"
             mkdir -p "$case_out"
@@ -392,7 +392,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           target/release/thaw registry add ky@2.1.0 --registry "$D/modules" > "$D/out/registry-add.log" 2>&1
           echo "registry add exit $?" >> "$D/out/registry-add.log"
-          export THAW_JS_ROUTE_ALL=1 THAW_JS_ENGINE=thaw-js THAW_JS_TRACE_WIRE=1 THAW_JS_RUNTIME_DEBUG=1
+          export THAW_JS_TRACE_WIRE=1 THAW_JS_RUNTIME_DEBUG=1
           for leg in a-ky b-https c-brotli; do
             leg_out="$D/out/$leg"; mkdir -p "$leg_out"
             use_args=()

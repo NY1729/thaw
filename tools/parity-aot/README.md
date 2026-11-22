@@ -92,7 +92,7 @@ Build command per program and engine (`THAW_JS_ENGINE` is `thaw-js` or `quickjs`
 
     THAW_JS_ENGINE=<engine> thaw build <program>.ts -o <binary>      (cwd: the program's work dir)
 
-Env: `THAW` (default `<repo>/target/release/thaw`), `NODE`, `PARITY_AOT_ENGINES` (default `thaw-js,quickjs`),
+Env: `THAW` (default `<repo>/target/release/thaw`), `NODE`, `PARITY_AOT_ENGINES` (default `thaw-js`),
 `PARITY_AOT_JOBS`, `PARITY_AOT_BUILD_WRAP` (command prefix for each build, e.g. a systemd-run memory cap),
 `PARITY_AOT_FAMILIES` (comma list; generate only those families, skips the coverage ratchet), `PARITY_AOT_RUN_TIMEOUT` (20 s), `PARITY_AOT_BUILD_TIMEOUT` (900 s), `PARITY_AOT_SCRATCH` (default
 `/home/fedora/work/thaw-tmp/parity-aot-scratch`), `PARITY_AOT_OUT`.

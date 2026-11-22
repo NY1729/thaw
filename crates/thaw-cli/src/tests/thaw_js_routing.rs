@@ -1,4 +1,4 @@
-// Experimental thaw-js routing (`THAW_JS_RUNTIME=1`). These call `build_with_thaw_js_routing`
+// Experimental thaw-js routing (thaw-js). These call `build_with_thaw_js_routing`
 // directly so the tests never touch the process environment.
 
 #[test]
@@ -164,7 +164,7 @@ fn thaw_js_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
     (dir.clone(), registry, entry)
 }
 
-fn thaw_js_build(entry: &Path, output: &Path, registry: &Path, routed: bool) -> serde_json::Value {
+fn thaw_js_build(entry: &Path, output: &Path, registry: &Path) -> serde_json::Value {
     build_with_thaw_js_routing(
         entry,
         output,
@@ -178,7 +178,6 @@ fn thaw_js_build(entry: &Path, output: &Path, registry: &Path, routed: bool) -> 
         true,
         false,
         false,
-        routed,
     )
     .unwrap();
     artifact_manifest_from_bytes(&std::fs::read(output).unwrap()).unwrap()
@@ -376,7 +375,7 @@ fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
          function main(): void { console.log(describe(['a', 'b', 'a'], 'x')); console.log(add(2, 3)); console.log(describe([], 'none')); }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     // `apply` (a callback parameter) is declared but never mentioned, so it does not block routing.
@@ -403,7 +402,7 @@ fn thaw_js_routing_carries_dates_both_ways_without_linking_quickjs() {
          function main(): void { const d = new Date(Date.UTC(2024, 2, 5, 10)); console.log(iso(shift(d, 2))); console.log(iso(shift(d, 1))); console.log(iso(d)); }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     std::fs::remove_dir_all(&registry).unwrap();
@@ -415,30 +414,13 @@ fn thaw_js_routing_carries_dates_both_ways_without_linking_quickjs() {
 }
 
 #[test]
-fn thaw_js_routing_off_is_the_unchanged_quickjs_path_with_the_same_result() {
-    let main =
-        "import { add } from 'tjs-kit';\nfunction main(): void { console.log(add(40, 2)); }\n";
-    let (dir, registry, entry) = thaw_js_fixture("parity", main);
-    let routed_output = dir.join("routed");
-    let plain_output = dir.join("plain");
-    let routed = thaw_js_build(&entry, &routed_output, &registry, true);
-    let plain = thaw_js_build(&entry, &plain_output, &registry, false);
-    assert_eq!(routed["quickjs"], false);
-    assert_eq!(plain["quickjs"], true);
-    assert_eq!(plain["thaw_js_routed"], serde_json::json!([]));
-    assert_eq!(thaw_js_run(&routed_output), "42\n");
-    assert_eq!(thaw_js_run(&plain_output), "42\n");
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn thaw_js_routing_decodes_a_nested_array_result_without_linking_quickjs() {
     // A typed `string[][]` result is decoded from plain JSON: no interned-native-owner query (which
     // would need the QuickJS realm) may be compiled into a thaw-js build.
     let main = "import { pairs } from 'tjs-kit';\nfunction main(): void { const p = pairs(['a', 'b', 'c']); console.log(p.length, p[0][1], p[1][0]); }\n";
     let (dir, registry, entry) = thaw_js_fixture("nested-array", main);
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     assert_eq!(thaw_js_run(&output), "2 b c\n");
@@ -446,14 +428,14 @@ fn thaw_js_routing_decodes_a_nested_array_result_without_linking_quickjs() {
 }
 
 #[test]
-fn quickjs_path_prints_a_plain_object_result_like_node() {
-    // The package's `any` result is a live QuickJS object; `console.log` must inspect it like Node
+fn thaw_js_prints_a_plain_object_result_like_node() {
+    // The package's `any` result is a live JS object; `console.log` must inspect it like Node
     // (not `String(value)`, which printed `[object Object]`).
     let main = "import { describe } from 'tjs-kit';\nfunction main(): void { console.log(describe(['a', 'b', 'a'], 'x')); }\n";
     let (dir, registry, entry) = thaw_js_fixture("quickjs-print", main);
     let output = dir.join("plain");
-    let manifest = thaw_js_build(&entry, &output, &registry, false);
-    assert_eq!(manifest["quickjs"], true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(
         thaw_js_run(&output),
         "{ label: 'X', counts: { a: 2, b: 1 } }\n"
@@ -468,7 +450,7 @@ fn thaw_js_routing_serves_a_callback_through_thaw_js_without_quickjs() {
         "import { apply } from 'tjs-kit';\nfunction main(): void { console.log(apply([1, 2, 3], (x: number): number => x * 2).join(',')); }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     assert_eq!(thaw_js_run(&output), "2,4,6\n");
@@ -526,7 +508,6 @@ fn thaw_js_routing_serves_real_leaf_packages_like_node_when_enabled() {
             true,
             true,
             false,
-            true,
         )
         .unwrap();
         let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
@@ -800,110 +781,9 @@ fn thaw_js_blockers_are_recorded_once_and_reported_as_package_and_why() {
 }
 
 #[test]
-fn thaw_js_user_dynamic_blocker_needs_routing_and_no_opt_in() {
-    let dynamic = "function main(): void { const f: any = new Function('return 1'); console.log(f()); }";
-    clear_thaw_js_blockers();
-    record_thaw_js_user_dynamic_blocker(dynamic, false, false);
-    record_thaw_js_user_dynamic_blocker(dynamic, true, true);
-    record_thaw_js_user_dynamic_blocker("function main(): void { console.log(1); }", true, false);
-    assert_eq!(thaw_js_blockers_manifest(), serde_json::json!([]));
-    record_thaw_js_user_dynamic_blocker(dynamic, true, false);
-    record_thaw_js_user_dynamic_blocker(dynamic, true, false);
-    assert_eq!(
-        thaw_js_blockers_manifest(),
-        serde_json::json!([{
-            "package": "<program>",
-            "why": "program source uses dynamic code (new Function/eval): needs THAW_JS_USER_DYNAMIC=1",
-        }])
-    );
-    clear_thaw_js_blockers();
-}
-
-#[test]
-fn thaw_js_user_dynamic_is_on_unless_set_to_zero() {
-    assert!(thaw_js_user_dynamic_from(None));
-    assert!(thaw_js_user_dynamic_from(Some("1")));
-    assert!(thaw_js_user_dynamic_from(Some("")));
-    assert!(!thaw_js_user_dynamic_from(Some("0")));
-}
-
-#[test]
-fn thaw_js_engine_env_selects_engine() {
-    assert!(thaw_js_engine_from(Some("thaw-js"), None, false));
-    assert!(!thaw_js_engine_from(Some("quickjs"), None, true));
-    // THAW_JS_ENGINE wins over a conflicting THAW_JS_RUNTIME
-    assert!(!thaw_js_engine_from(Some("quickjs"), Some("1"), false));
-    assert!(thaw_js_engine_from(Some("thaw-js"), Some("0"), false));
-}
-
-#[test]
-fn thaw_js_runtime_alias_still_works() {
-    assert!(thaw_js_engine_from(None, Some("1"), false));
-    assert!(!thaw_js_engine_from(None, Some("0"), true));
-    assert!(!thaw_js_engine_from(None, Some("2"), false));
-    assert!(thaw_js_engine_from(None, Some(""), true));
-}
-
-#[test]
-#[allow(clippy::assertions_on_constants)]
-fn thaw_js_default_is_thaw_js() {
-    assert!(THAW_JS_DEFAULT);
-}
-
-#[test]
-fn thaw_js_engine_default_applies_when_unset() {
-    assert_eq!(thaw_js_engine_from(None, None, THAW_JS_DEFAULT), THAW_JS_DEFAULT);
-    // unknown THAW_JS_ENGINE values fall through to the RUNTIME alias, then the default
-    assert!(thaw_js_engine_from(Some("bogus"), Some("1"), false));
-    assert_eq!(thaw_js_engine_from(Some("bogus"), None, THAW_JS_DEFAULT), THAW_JS_DEFAULT);
-}
-
-#[test]
-fn thaw_js_routed_fallback_is_recorded_under_the_build_key() {
-    clear_thaw_js_blockers();
-    record_thaw_js_fallback_blocker("thaw-js routing needs QuickJS");
-    assert_eq!(
-        thaw_js_blockers_manifest(),
-        serde_json::json!([{
-            "package": "<build>",
-            "why": "routed build fell back to QuickJS: thaw-js routing needs QuickJS",
-        }])
-    );
-    clear_thaw_js_blockers();
-}
-
-#[test]
-fn fallback_message_names_refused_packages_with_short_reasons() {
-    let refusals = vec![
-        ("rxjs".to_string(), "builtin:Symbol.observable, global:requestAnimationFrame".to_string()),
-        ("deepmerge".to_string(), "bundle uses unsupported features: method:customMerge".to_string()),
-        ("deepmerge".to_string(), "bundle uses unsupported features: method:other".to_string()),
-    ];
-    assert_eq!(
-        thaw_js_fallback_message("thaw-js routing needs QuickJS: site:quickjs:package_bundle", &refusals),
-        "thaw-js routing needs QuickJS: site:quickjs:package_bundle; refused: deepmerge (method:customMerge), rxjs (builtin:Symbol.observable)"
-    );
-    // no refusals: the error alone
-    assert_eq!(thaw_js_fallback_message("e", &[]), "e");
-    // more than 8 packages: the first 8 in sorted order, then `+N more`
-    let many: Vec<(String, String)> = (0..10).map(|i| (format!("p{i:02}"), "method:x".to_string())).collect();
-    let msg = thaw_js_fallback_message("e", &many);
-    assert!(
-        msg.ends_with(
-            "; refused: p00 (method:x), p01 (method:x), p02 (method:x), p03 (method:x), p04 (method:x), \
-             p05 (method:x), p06 (method:x), p07 (method:x), +2 more"
-        ),
-        "{msg}"
-    );
-    // a multi-line reason keeps its first line; a long one is capped at 80 chars
-    let long = ("big".to_string(), format!("{}\nsecond line", "x".repeat(100)));
-    assert_eq!(thaw_js_fallback_message("e", &[long]), format!("e; refused: big ({})", "x".repeat(80)));
-}
-
-#[test]
-fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:async_hooks` createHook program that uses `finally` (not yet Node-identical on thaw-js) keeps that
-    // module on QuickJS; the build falls back and the artifact reports the blocker.
+fn thaw_js_refused_package_fails_the_build_and_records_the_blockers_key() {
+    // A `node:async_hooks` createHook program that uses `finally` (not yet Node-identical on thaw-js) is refused:
+    // the build fails (no QuickJS rebuild) and the blockers of the failed build name the refused package.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "blockers-fallback",
         "import { Counter } from 'tjs-ctr';\n\
@@ -915,29 +795,18 @@ fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
            console.log(c.add(2));\n\
          }\n",
     );
-    let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
-    let blockers = manifest["thaw_js_blockers"].as_array().unwrap_or_else(|| panic!("{manifest}"));
+    let error = build_on_thaw_js(&entry, &dir.join("app"), &registry).unwrap_err();
+    assert!(error.starts_with("unsupported on thaw-js: "), "{error}");
+    let blockers = thaw_js_blockers_manifest();
     assert!(
-        blockers.iter().any(|blocker| blocker["package"] == "node:async_hooks"),
-        "{manifest}"
+        blockers.as_array().unwrap().iter().any(|blocker| blocker["package"] == "node:async_hooks"),
+        "{blockers}"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
-fn thaw_js_fallback_env_parses_the_three_modes() {
-    assert_eq!(thaw_js_fallback_mode_from(None), ThawJsFallbackMode::Silent);
-    assert_eq!(thaw_js_fallback_mode_from(Some("")), ThawJsFallbackMode::Silent);
-    assert_eq!(thaw_js_fallback_mode_from(Some("silent")), ThawJsFallbackMode::Silent);
-    assert_eq!(thaw_js_fallback_mode_from(Some("bogus")), ThawJsFallbackMode::Silent);
-    assert_eq!(thaw_js_fallback_mode_from(Some("warn")), ThawJsFallbackMode::Warn);
-    assert_eq!(thaw_js_fallback_mode_from(Some("error")), ThawJsFallbackMode::Error);
-}
-
-#[test]
-fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_builds() {
+fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal() {
     let (dir, registry, entry) = thaw_js_class_fixture(
         "fallback-modes",
         "import { Counter } from 'tjs-ctr';\n\
@@ -949,22 +818,10 @@ fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_
            console.log(c.add(2));\n\
          }\n",
     );
-    let build =|output: &Path| {
-        build_with_thaw_js_routing(
-            &entry, output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
-        )
-    };
-    // error: the refused package fails the build, named with its reason, and no QuickJS rebuild runs
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
-    let error = build(&dir.join("app-error")).unwrap_err();
+    // the refused package fails the build, named with its reason, and no QuickJS rebuild runs
+    let error = build_on_thaw_js(&entry, &dir.join("app-error"), &registry).unwrap_err();
     assert!(error.starts_with("unsupported on thaw-js: "), "{error}");
     assert!(error.contains("package `node:async_hooks` refused"), "{error}");
-    // warn: the same program builds, falling back to QuickJS for the refused package
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Warn));
-    build(&dir.join("app-warn")).unwrap();
-    set_thaw_js_fallback_mode_override(None);
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("app-warn")).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -981,18 +838,16 @@ fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_quickjs() {
            console.log(b.length);\n\
          }\n",
     );
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &dir.join("app"), &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &dir.join("app"), &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     result.unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("app")).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Builds `main` under `THAW_JS_FALLBACK=error` on thaw-js; returns the build dir and the output path.
+/// Builds `main` on thaw-js; returns the build dir and the output path.
 /// Asserts the native-timer pass succeeded (no retry was recorded) unless `expect_retry`.
 fn native_timer_program_builds(name: &str, main: &str, expect_retry: bool) -> (PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("thaw-cli-native-timer-{name}-{}", std::process::id()));
@@ -1002,11 +857,9 @@ fn native_timer_program_builds(name: &str, main: &str, expect_retry: bool) -> (P
     std::fs::write(&entry, main).unwrap();
     let output = dir.join("app");
     NATIVE_TIMER_RETRIES.with(|retries| retries.borrow_mut().clear());
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1147,11 +1000,9 @@ fn thaw_js_union_callable_result_ejs_shape_builds_under_error_mode() {
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1199,11 +1050,9 @@ fn thaw_js_class_callback_returning_any_builds_under_error_mode() {
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &["tjs-stream".to_string()], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &["tjs-stream".to_string()], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1231,11 +1080,9 @@ fn thaw_js_single_arg_bare_callable_builds_under_error_mode() {
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &["tjs-utf8".to_string()], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &["tjs-utf8".to_string()], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1291,11 +1138,9 @@ fn thaw_js_union_callable_result_real_ejs_overloads_build_under_error_mode() {
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1340,11 +1185,9 @@ fn thaw_js_object_literal_route_handler_on_dynamic_server_builds_under_error_mod
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1370,11 +1213,9 @@ fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
          }\n",
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1405,11 +1246,9 @@ fn thaw_js_export_equals_object_default_import_builds_under_error_mode() {
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1462,11 +1301,9 @@ fn thaw_js_import_meta_url_dirname_is_absolute_under_error_mode() {
     )
     .unwrap();
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1508,11 +1345,9 @@ fn thaw_js_export_equals_callable_default_import_builds_under_error_mode() {
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1551,11 +1386,9 @@ fn thaw_js_class_value_for_static_constant_builds_under_error_mode() {
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }
@@ -1747,7 +1580,7 @@ fn thaw_js_routed_node_http_server_only_links_no_quickjs() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "listening number\n");
@@ -1765,7 +1598,7 @@ fn thaw_js_routed_node_http_get_refused_without_a_server() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
@@ -1786,7 +1619,7 @@ fn thaw_js_routed_node_http_fetch_from_listen_callback_runs_on_thaw_js() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     // A native createServer next to the fetch client runs on thaw-js (the blocker is lifted).
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
@@ -1813,7 +1646,7 @@ fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "rejected\n");
@@ -1839,7 +1672,7 @@ fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "200 ok\n");
@@ -1860,7 +1693,7 @@ fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
@@ -1886,7 +1719,7 @@ fn thaw_js_routed_node_http_get_from_listen_callback_does_not_segv() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "R 201\n");
@@ -1955,7 +1788,7 @@ fn routed_uncaught_and_rejection_reports_reach_thaw_js_process_listeners() {
     for (name, body, expected) in cases {
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-report-{name}"), body);
         let output = entry.with_file_name("app");
-        thaw_js_build(&entry, &output, &registry, true);
+        thaw_js_build(&entry, &output, &registry);
         assert_eq!(thaw_js_run_guarded(&output), expected, "{name}");
     }
 }
@@ -1975,25 +1808,15 @@ fn routed_process_ids_and_kill_match_node() {
     for (name, body, expected) in cases {
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-w4-{}", name.len()), body);
         let output = entry.with_file_name("app");
-        thaw_js_build(&entry, &output, &registry, true);
+        thaw_js_build(&entry, &output, &registry);
         assert_eq!(thaw_js_run_guarded(&output), expected, "{name}");
     }
 }
 
 #[test]
-fn thaw_js_route_all_is_on_unless_exactly_zero() {
-    assert!(thaw_js_route_all_from(None));
-    assert!(thaw_js_route_all_from(Some("1")));
-    assert!(thaw_js_route_all_from(Some("")));
-    assert!(thaw_js_route_all_from(Some("true")));
-    assert!(!thaw_js_route_all_from(Some("0")));
-}
-
-#[test]
-fn thaw_js_route_all_attempts_thaw_js_for_a_plain_any_program_and_names_the_fallback() {
-    // Route-all is the default: this program has no routed package and no dynamic-code marker, yet
-    // thaw-js is still attempted. A build that still needs QuickJS says which lowering demanded it in
-    // the manifest's blockers.
+fn thaw_js_route_all_builds_a_plain_any_program_on_thaw_js() {
+    // Route-all is the only mode: this program has no routed package and no dynamic-code marker, yet it
+    // builds on thaw-js without linking QuickJS (a program that needed QuickJS would fail the build).
     let dir = std::env::temp_dir().join(format!("thaw-cli-route-all-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -2005,20 +1828,9 @@ fn thaw_js_route_all_attempts_thaw_js_for_a_plain_any_program_and_names_the_fall
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = {
-        thaw_js_build(&entry, &output, &registry, true)
-    };
-    eprintln!("route-all manifest: {manifest}");
-    if manifest["quickjs"] == true {
-        let blockers = manifest["thaw_js_blockers"].to_string();
-        assert!(
-            blockers.contains("THAW_JS_MIXED")
-                && (blockers.contains("site:") || blockers.contains("unported:thaw_js_")),
-            "a QuickJS fallback must name its sites or symbols: {manifest}"
-        );
-    } else {
-        assert_eq!(thaw_js_run_guarded(&output).trim(), "1");
-    }
+    let manifest = thaw_js_build(&entry, &output, &registry);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run_guarded(&output).trim(), "1");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -2068,7 +1880,7 @@ fn routed_tick_timer_and_lifecycle_order_matches_node() {
         let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-tick-{slug}"), body);
         let output = entry.with_file_name("app");
-        let manifest = thaw_js_build(&entry, &output, &registry, true);
+        let manifest = thaw_js_build(&entry, &output, &registry);
         assert_eq!(manifest["quickjs"], false, "{name} linked QuickJS: {manifest}");
         let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
         assert_eq!((stdout.as_str(), status), (expected, code), "{name}: {stderr}");
@@ -2094,7 +1906,7 @@ fn routed_fs_and_readline_programs_exit_on_their_own() {
     for (name, body, expected) in cases {
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-exit-{name}"), body);
         let output = entry.with_file_name("app");
-        let manifest = thaw_js_build(&entry, &output, &registry, true);
+        let manifest = thaw_js_build(&entry, &output, &registry);
         eprintln!("{name} manifest: {manifest}");
         let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
@@ -2107,7 +1919,7 @@ fn routed_audit2e_fs_program_exits_on_its_own() {
     let body = r##"import * as fs from "node:fs"; import * as os from "node:os"; async function main(): Promise<void> { const d = fs.mkdtempSync(os.tmpdir() + "/fixe-"); for (const n of ["a", "B", "10", "9", "é"]) fs.writeFileSync(d + "/" + n, "1"); console.log(fs.readdirSync(d)); fs.writeFileSync(d + "/b.bin", Buffer.from([1, 2, 3, 4])); console.log(fs.readFileSync(d + "/b.bin", "hex"), fs.readFileSync(d + "/b.bin", { encoding: "base64" }), fs.statSync(d + "/zzz", { throwIfNoEntry: false })); console.log(fs.constants.R_OK, fs.F_OK, fs.R_OK, fs.W_OK, fs.X_OK); await fs.promises.writeFile(d + "/p.txt", "promised"); console.log(await fs.promises.readFile(d + "/p.txt", "utf8"), (await fs.promises.stat(d + "/p.txt")).size); await new Promise<void>((res) => fs.stat(d + "/p.txt", (err, st) => { console.log(err, st.size); res(); })); await new Promise<void>((res) => fs.readdir(d, (err, names) => { console.log(err, names.length); res(); })); await new Promise<void>((res) => fs.exists(d + "/p.txt", (ex) => { console.log(ex); res(); })); fs.accessSync(d + "/p.txt"); fs.rmSync(d, { recursive: true }); }"##;
     let (_dir, registry, entry) = thaw_js_fixture("route-exit-audit2e", body);
     let output = entry.with_file_name("app");
-    thaw_js_build(&entry, &output, &registry, true);
+    thaw_js_build(&entry, &output, &registry);
     let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
     assert_eq!((stdout.lines().count(), status), (7, Some(0)), "{stderr}");
 }
@@ -2132,7 +1944,7 @@ fn routed_esm_next_tick_orders_match_node() {
         let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-esm-{slug}"), body);
         let output = entry.with_file_name("app");
-        thaw_js_build(&entry, &output, &registry, true);
+        thaw_js_build(&entry, &output, &registry);
         let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
@@ -2164,7 +1976,7 @@ fn routed_iterator_and_raw_json_cases_match_node() {
         let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-c1-{slug}"), body);
         let output = entry.with_file_name("app");
-        thaw_js_build(&entry, &output, &registry, true);
+        thaw_js_build(&entry, &output, &registry);
         let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
@@ -2196,7 +2008,7 @@ fn routed_error_factory_runs_in_a_program_with_no_package() {
     for (name, body, expected) in cases {
         let (_dir, registry, entry) = thaw_js_fixture(&format!("error-factory-{}", name.len()), body);
         let output = entry.with_file_name("app");
-        thaw_js_build(&entry, &output, &registry, true);
+        thaw_js_build(&entry, &output, &registry);
         assert_eq!(thaw_js_run_guarded(&output), expected, "{name}");
     }
 }
@@ -2267,7 +2079,7 @@ fn routed_shared_array_buffer_and_atomics_match_node() {
     for (name, body, expected) in cases {
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-sab-{name}"), body);
         let output = entry.with_file_name("app");
-        thaw_js_build(&entry, &output, &registry, true);
+        thaw_js_build(&entry, &output, &registry);
         let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
         assert_eq!((stdout.as_str(), status), (expected, Some(0)), "{name}: {stderr}");
     }
@@ -2370,7 +2182,7 @@ fn routed_worker_resource_limits_stop_a_runaway_worker() {
         }";
     let (_dir, registry, entry) = thaw_js_fixture("route-worker-limits", body);
     let output = entry.with_file_name("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
     assert_eq!((stdout.as_str(), status), ("error ERR_WORKER_OUT_OF_MEMORY\n", Some(0)), "{stderr}");
@@ -2403,7 +2215,7 @@ fn wasm_in_bundle_only_routes_to_thaw_js_and_runs() {
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["wasm-kit"]));
     std::fs::remove_dir_all(&registry).unwrap();
@@ -2472,7 +2284,7 @@ fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_quickjs() {
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-nested"]));
     std::fs::remove_dir_all(&registry).unwrap();
@@ -2563,14 +2375,11 @@ const TJS_PEER_B: (&str, &str, &str) = (
     "class B {}\nexports.B = B;\nexports.isB = function (x) { return x instanceof B; };\n",
 );
 
-/// Builds `entry` over `registry` under error fallback (thaw-js routed, a QuickJS link is a build error).
+/// Builds `entry` over `registry` on thaw-js (a QuickJS link is a build error).
 fn thaw_js_peer_build(entry: &Path, output: &Path, registry: &Path) -> Result<(), String> {
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
-    let result = build_with_thaw_js_routing(
-        entry, output, &[], &[], &[], registry, &[], false, None, true, false, false, true,
-    );
-    set_thaw_js_fallback_mode_override(None);
-    result
+    build_with_thaw_js_routing(
+        entry, output, &[], &[], &[], registry, &[], false, None, true, false, false,
+    )
 }
 
 #[test]
@@ -2720,7 +2529,7 @@ function main(): void {
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &dir.join("registry"), true);
+    let manifest = thaw_js_build(&entry, &output, &dir.join("registry"));
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     // SQLite is linked because the program imports node:sqlite (its file-header string is in the archive)
     let bytes = std::fs::read(&output).unwrap();
@@ -2752,11 +2561,9 @@ fn thaw_js_tagged_rest_fixture(name: &str, main_body: &str) -> String {
         )],
     );
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let result = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &["tjs-tag".to_string()], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &["tjs-tag".to_string()], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     if let Err(error) = &result {
         eprintln!("build error: {error}");
     }

@@ -4,7 +4,7 @@
 #   OUT_DIR              default $PARITY_AOT_OUT, else $PARITY_AOT_SCRATCH/out (base: $RUNNER_TEMP, $TMPDIR, thaw-tmp)
 #   THAW                 thaw CLI (default <repo>/target/release/thaw); built as: thaw build <file.ts> -o <bin>
 #   NODE                 oracle (default node, 22.18+ strips types; older node gets --experimental-strip-types)
-#   PARITY_AOT_ENGINES   engines to run, default "thaw-js,quickjs" (each is THAW_JS_ENGINE for the build and run)
+#   PARITY_AOT_ENGINES   engines to run, default "thaw-js"
 #   PARITY_AOT_JOBS      programs built in parallel (default min(4, cores/2))
 #   PARITY_AOT_BUILD_WRAP  optional command prefix for each build, e.g. a systemd-run slice with MemoryMax
 #   PARITY_AOT_RUN_TIMEOUT / PARITY_AOT_BUILD_TIMEOUT  seconds (defaults 20 / 900)
@@ -22,7 +22,7 @@ BASE=${PARITY_AOT_SCRATCH:-${RUNNER_TEMP:-/home/fedora/work/thaw-tmp/parity-aot-
 OUT=${1:-${PARITY_AOT_OUT:-$BASE/out}}
 THAW=${THAW:-$REPO/target/release/thaw}
 NODE=${NODE:-node}
-ENGINES=${PARITY_AOT_ENGINES:-thaw-js,quickjs}
+ENGINES=${PARITY_AOT_ENGINES:-thaw-js}
 JOBS=${PARITY_AOT_JOBS:-$(n=$(nproc 2>/dev/null || echo 2); n=$((n / 2)); [ "$n" -lt 1 ] && n=1; [ "$n" -gt 4 ] && n=4; echo "$n")}
 
 mkdir -p "$OUT" || exit 2

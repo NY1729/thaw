@@ -148,7 +148,7 @@ jobs:
             sed -i -E "s/const N = [0-9]+;/const N = $WORKLOAD_N;/" "$PROGRAM.ts"
             grep -n "const N =" "$PROGRAM.ts" || echo "warning: no 'const N =' in $PROGRAM.ts; workload_n ignored" >&2
           fi
-          env -u THAW_JS_RUNTIME THAW_JS_ENGINE=thaw-js \
+          env \
             timeout 3000 "$GITHUB_WORKSPACE/target/release/thaw" build "$PROGRAM.ts" -o "$RUNNER_TEMP/prog" 2>&1 | tee "$RUNNER_TEMP/out/build.log"
           # sanity: engine really is thaw-js, and symbols are present
           "$GITHUB_WORKSPACE/target/release/thaw" inspect "$RUNNER_TEMP/prog" > "$RUNNER_TEMP/out/inspect.txt" 2>&1 || true

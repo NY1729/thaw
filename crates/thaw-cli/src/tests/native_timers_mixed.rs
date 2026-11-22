@@ -13,7 +13,7 @@ fn native_timers_mixed_thaw_js_package_retry_stays_on_thaw_js() {
         "import { apply } from 'tjs-kit';\nfunction main(): void {\n  setTimeout((): void => console.log(\"timer\"), 5);\n  console.log(apply([1, 2, 3], (x: number): number => x * 2).join(','));\n  console.log(\"sync\");\n}\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     assert!(!manifest.to_string().contains("fell back to QuickJS"), "{manifest}");
@@ -21,16 +21,3 @@ fn native_timers_mixed_thaw_js_package_retry_stays_on_thaw_js() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Plain (unrouted) build: the native conflict still rebuilds with engine timers, which here is QuickJS.
-#[test]
-fn native_timers_mixed_quickjs_build_keeps_the_quickjs_retry() {
-    let (dir, registry, entry) = thaw_js_fixture(
-        "native-timers-mixed-quickjs",
-        "import { apply } from 'tjs-kit';\nfunction main(): void {\n  setTimeout((): void => console.log(\"timer\"), 5);\n  console.log(apply([1, 2, 3], (x: number): number => x * 2).join(','));\n  console.log(\"sync\");\n}\n",
-    );
-    let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, false);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
-    assert_eq!(thaw_js_run_guarded(&output), "2,4,6\nsync\ntimer\n");
-    let _ = std::fs::remove_dir_all(dir);
-}

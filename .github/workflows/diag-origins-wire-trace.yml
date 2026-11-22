@@ -14,8 +14,6 @@ jobs:
     # Observed shards take 15-26 minutes.
     timeout-minutes: 75
     env:
-      THAW_JS_ENGINE: thaw-js
-      THAW_JS_USER_DYNAMIC: "1"
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -119,8 +117,7 @@ jobs:
           CLI="$PWD/target/debug/thaw"
           set +e
           for prog in live parsed; do
-            for eng in thaw-js quickjs; do
-              if [ "$eng" = thaw-js ]; then export THAW_JS_ENGINE=thaw-js THAW_JS_USER_DYNAMIC=1; else unset THAW_JS_ENGINE THAW_JS_RUNTIME THAW_JS_USER_DYNAMIC; fi
+            for eng in thaw-js; do
               "$CLI" build "$W/$prog.ts" -o "$W/$prog.$eng" --registry "$W/modules" > "$D/$prog.$eng.build.log" 2>&1
               echo "build $prog $eng exit $?" | tee -a "$D/summary.txt"
               env THAW_JS_TRACE=1 THAW_JS_TRACE_WIRE=1 "$W/$prog.$eng" > "$D/$prog.$eng.stdout" 2> "$D/$prog.$eng.trace"

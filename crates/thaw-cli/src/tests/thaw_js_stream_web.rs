@@ -26,7 +26,7 @@ fn thaw_js_routing_serves_a_writable_with_a_write_callback_without_linking_quick
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     // Same text real Node prints for the equivalent JavaScript.
     assert_eq!(thaw_js_run_guarded(&output), "a\n");
@@ -55,7 +55,7 @@ fn thaw_js_writable_method_output(tag: &str, write_method: &str) -> String {
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     let stdout = thaw_js_run_guarded(&output);
     let bytes = std::fs::read(&output).unwrap();
@@ -104,7 +104,7 @@ fn thaw_js_stream_program_output(tag: &str, imports: &str, body: &str) -> String
     let entry = dir.join("main.ts");
     std::fs::write(&entry, format!("{imports}\nfunction main(): void {{\n{body}\n}}\n")).unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     let stdout = thaw_js_run_guarded(&output);
     let bytes = std::fs::read(&output).unwrap();

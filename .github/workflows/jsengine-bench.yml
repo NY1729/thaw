@@ -195,7 +195,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
-      THAW_JS_RUNTIME: "1"
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
     steps:

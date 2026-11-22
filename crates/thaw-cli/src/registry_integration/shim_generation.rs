@@ -404,7 +404,7 @@ fn generate_registry_shims_pass(
     } else {
         Default::default()
     };
-    // `THAW_JS_FALLBACK=warn|error`: every package thaw-js refuses in this pass (reported by `build` after the last pass).
+    // Every package thaw-js refuses in this pass (reported by `build` after the last pass).
     let mut thaw_js_refusals: Vec<(String, String)> = Vec::new();
     let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
     let observed_constructor_arities =
@@ -2302,7 +2302,7 @@ fn generate_registry_shims_pass(
                         thaw_js_served,
                     ) {
                         thaw_js_eligible.insert(pkg.name.clone());
-                    } else if thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {
+                    } else {
                         thaw_js_refusals.push((pkg.name.clone(), thaw_js_package_refusal(&pkg.name)));
                     }
                 }

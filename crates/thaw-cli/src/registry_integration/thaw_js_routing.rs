@@ -1,41 +1,5 @@
-// thaw-js routing (the default JavaScript engine): which packages the Thaw-native JavaScript runtime
-// can serve for a given program. A package it cannot serve falls back to the QuickJS path while the
-// fallback exists (`THAW_JS_ENGINE=quickjs` opts out of thaw-js entirely).
-
-/// The engine when no env var selects one: thaw-js. `THAW_JS_ENGINE=quickjs` is the temporary opt-out.
-const THAW_JS_DEFAULT: bool = true;
-
-/// Whether thaw-js routing is on. `THAW_JS_ENGINE` (`thaw-js` or `quickjs`) wins over
-/// `THAW_JS_RUNTIME`, which stays a legacy alias: `1` is thaw-js, `0` is QuickJS.
-/// Unset, empty and unknown values fall through to the next rule.
-fn thaw_js_engine_from(engine: Option<&str>, runtime: Option<&str>, default_thaw_js: bool) -> bool {
-    match engine {
-        Some("thaw-js") => true,
-        Some("quickjs") => false,
-        _ => match runtime {
-            Some("1") => true,
-            Some("0") => false,
-            _ => default_thaw_js,
-        },
-    }
-}
-
-/// Warns once on stderr about a `THAW_JS_ENGINE` value that is neither `thaw-js` nor `quickjs`.
-fn warn_unknown_thaw_js_engine(engine: Option<&str>) {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    if let Some(other) = engine.filter(|v| !matches!(*v, "" | "thaw-js" | "quickjs")) {
-        WARNED.call_once(|| {
-            eprintln!("thaw: unknown THAW_JS_ENGINE `{other}`, using the default engine");
-        });
-    }
-}
-
-fn thaw_js_routing_enabled() -> bool {
-    let engine = std::env::var("THAW_JS_ENGINE").ok();
-    let runtime = std::env::var("THAW_JS_RUNTIME").ok();
-    warn_unknown_thaw_js_engine(engine.as_deref());
-    thaw_js_engine_from(engine.as_deref(), runtime.as_deref(), THAW_JS_DEFAULT)
-}
+// thaw-js routing: which packages the Thaw-native JavaScript runtime can serve for a given program.
+// A package it cannot serve fails the build (`unsupported on thaw-js: ...`); there is no QuickJS fallback.
 
 thread_local! {
     /// Why thaw-js refused a package in the current build (`(package, why)`), for `thaw inspect`.
@@ -44,7 +8,7 @@ thread_local! {
 }
 
 thread_local! {
-    /// Packages the LAST shim-generation pass left on QuickJS (`THAW_JS_FALLBACK` warn/error). A pass can refuse a
+    /// Packages the LAST shim-generation pass refused. A pass can refuse a
     /// package that the next pass (with forced fallbacks) accepts, so only the final pass's list counts.
     static THAW_JS_REFUSALS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -92,7 +56,7 @@ fn thaw_js_package_refusal(package: &str) -> String {
     })
 }
 
-/// Every package refusal recorded in this build as `package `X`: why`, joined (appended to a fallback error).
+/// Every package refusal recorded in this build as `package `X`: why`, joined (appended to the refusal error).
 fn thaw_js_recorded_refusals_text() -> String {
     THAW_JS_BLOCKERS.with(|blockers| {
         blockers
@@ -103,72 +67,6 @@ fn thaw_js_recorded_refusals_text() -> String {
             .collect::<Vec<_>>()
             .join("; ")
     })
-}
-
-/// The `FALLBACK:` line of a routed build that stayed on QuickJS: the error, then the refused packages (sorted, one
-/// reason each: its first line, its first term, at most 80 chars; at most 8 packages, then `+N more`).
-fn thaw_js_fallback_message(error: &str, refusals: &[(String, String)]) -> String {
-    const MAX_PACKAGES: usize = 8;
-    const MAX_REASON: usize = 80;
-    let mut by_package: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::new();
-    for (package, why) in refusals {
-        by_package.entry(package.as_str()).or_insert_with(|| {
-            let line = why.lines().next().unwrap_or_default();
-            let term = line.rsplit(": ").next().unwrap_or_default().split(", ").next().unwrap_or_default();
-            term.trim().chars().take(MAX_REASON).collect()
-        });
-    }
-    if by_package.is_empty() {
-        return error.to_string();
-    }
-    let total = by_package.len();
-    let mut items: Vec<String> = by_package
-        .iter()
-        .take(MAX_PACKAGES)
-        .map(|(package, why)| if why.is_empty() { package.to_string() } else { format!("{package} ({why})") })
-        .collect();
-    if total > MAX_PACKAGES {
-        items.push(format!("+{} more", total - MAX_PACKAGES));
-    }
-    format!("{error}; refused: {}", items.join(", "))
-}
-
-/// What happens when thaw-js cannot serve something (`THAW_JS_FALLBACK`): `Silent` keeps the QuickJS
-/// fallback quiet, `Warn` prints it as a `FALLBACK:` line, `Error` fails the build instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ThawJsFallbackMode {
-    Silent,
-    Warn,
-    Error,
-}
-
-/// Pure parser for `THAW_JS_FALLBACK`. Unset, empty and unknown values are `Silent`.
-fn thaw_js_fallback_mode_from(value: Option<&str>) -> ThawJsFallbackMode {
-    match value {
-        Some("warn") => ThawJsFallbackMode::Warn,
-        Some("error") => ThawJsFallbackMode::Error,
-        _ => ThawJsFallbackMode::Silent,
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Test-only per-thread `THAW_JS_FALLBACK` override, so parallel tests never share the process env.
-    static FALLBACK_MODE_OVERRIDE: std::cell::Cell<Option<ThawJsFallbackMode>> = const { std::cell::Cell::new(None) };
-}
-
-/// Sets the calling thread's fallback-mode override (tests only; the build reads it on the same thread).
-#[cfg(test)]
-fn set_thaw_js_fallback_mode_override(mode: Option<ThawJsFallbackMode>) {
-    FALLBACK_MODE_OVERRIDE.with(|cell| cell.set(mode));
-}
-
-fn thaw_js_fallback_mode() -> ThawJsFallbackMode {
-    #[cfg(test)]
-    if let Some(mode) = FALLBACK_MODE_OVERRIDE.with(|cell| cell.get()) {
-        return mode;
-    }
-    thaw_js_fallback_mode_from(std::env::var("THAW_JS_FALLBACK").ok().as_deref())
 }
 
 /// The manifest's `thaw_js_blockers` value: `[{"package", "why"}]`.
@@ -182,48 +80,6 @@ fn thaw_js_blockers_manifest() -> serde_json::Value {
                 .collect(),
         )
     })
-}
-
-/// The program's own dynamic code (`new Function`, `eval`) is served on thaw-js by default;
-/// `THAW_JS_USER_DYNAMIC=0` opts out and keeps it on QuickJS.
-fn thaw_js_user_dynamic_enabled() -> bool {
-    thaw_js_user_dynamic_from(std::env::var("THAW_JS_USER_DYNAMIC").ok().as_deref())
-}
-
-/// Only an explicit `0` turns user dynamic code off; unset or any other value leaves it on.
-fn thaw_js_user_dynamic_from(value: Option<&str>) -> bool {
-    value != Some("0")
-}
-
-/// Route-all is on by default: every program is attempted on thaw-js, not only packages and dynamic-code
-/// programs. A build that still needs QuickJS falls back and records why. `THAW_JS_ROUTE_ALL=0` opts out
-/// (only the exact value `0` does, like `THAW_JS_USER_DYNAMIC`). Ignored when thaw-js itself is off.
-fn thaw_js_route_all_enabled() -> bool {
-    thaw_js_route_all_from(std::env::var("THAW_JS_ROUTE_ALL").ok().as_deref())
-}
-
-/// Only an explicit `0` turns route-all off; unset or any other value routes every program.
-fn thaw_js_route_all_from(value: Option<&str>) -> bool {
-    value != Some("0")
-}
-
-/// A routed program whose own source needs the dynamic host, built without `THAW_JS_USER_DYNAMIC=1`,
-/// links QuickJS; record that so `thaw inspect` says why.
-fn record_thaw_js_user_dynamic_blocker(user_source: &str, routing: bool, user_dynamic: bool) {
-    if routing && !user_dynamic && source_uses_quickjs(user_source) {
-        record_thaw_js_blocker(
-            "<program>",
-            "program source uses dynamic code (new Function/eval): needs THAW_JS_USER_DYNAMIC=1",
-        );
-    }
-}
-
-/// A routed build that failed and was rebuilt on QuickJS (`<build>`: no single package).
-fn record_thaw_js_fallback_blocker(error: &str) {
-    record_thaw_js_blocker(
-        "<build>",
-        &format!("routed build fell back to QuickJS: {error}"),
-    );
 }
 
 /// Whether the program text names `name` (the last segment of a dotted path) as a whole

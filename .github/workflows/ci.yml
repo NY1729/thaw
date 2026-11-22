@@ -298,16 +298,11 @@ jobs:
       matrix:
         include:
           - mode: runtime-only
-            dynamic: "0"
-          - mode: runtime-user-dynamic
-            dynamic: "1"
           # The same run with the closure compiler on, to compare against runtime-only (decides the default flip).
           - mode: runtime-only-compile-on
-            dynamic: "0"
             compile: "on"
           # Coroutine backend leg: same run with THAW_JS_CO=thread (the default leg is the costack backend).
           - mode: runtime-only-thread
-            dynamic: "0"
             co: "thread"
     name: node-compat thaw-js (${{ matrix.mode }})
     runs-on: ubuntu-24.04
@@ -387,9 +382,6 @@ jobs:
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - name: Run node-compat with thaw-js (${{ matrix.mode }})
         env:
-          THAW_JS_ENGINE: thaw-js
-          THAW_JS_FALLBACK: error
-          THAW_JS_USER_DYNAMIC: ${{ matrix.dynamic }}
           THAW_JS_COMPILE: ${{ matrix.compile || 'off' }}
           THAW_JS_CO: ${{ matrix.co || 'stack' }}
           THAW_NODE_COMPAT_JOBS: "4"
@@ -525,11 +517,8 @@ jobs:
           echo "$prefix/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
-      - name: Run others with thaw-js (THAW_JS_ENGINE=thaw-js, THAW_JS_USER_DYNAMIC=1)
+      - name: Run others with thaw-js
         env:
-          THAW_JS_ENGINE: thaw-js
-          THAW_JS_FALLBACK: error
-          THAW_JS_USER_DYNAMIC: "1"
           THAW_NODE_COMPAT_JOBS: "4"
         run: |
           set +e
@@ -553,7 +542,7 @@ jobs:
         run: |
           reports="$RUNNER_TEMP/reports"
           {
-            echo "### thaw-js node-compat others (THAW_JS_ENGINE=thaw-js, THAW_JS_USER_DYNAMIC=1)"
+            echo "### thaw-js node-compat others"
             for f in "$reports"/*.exit-status; do
               [ -e "$f" ] || continue
               label=$(basename "$f" .exit-status)
@@ -691,7 +680,7 @@ jobs:
         run: |
           cargo test -p thaw-cli builds_and_serves_hono_react_prisma_postgres_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_queries_postgres_with_real_pg_when_enabled -- --nocapture
-          THAW_RUN_NPM_INTEGRATION=1 THAW_JS_FALLBACK=error cargo test -p thaw-cli registry_add_runs_drizzle_execute_against_live_postgres_when_enabled -- --nocapture
+          THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli registry_add_runs_drizzle_execute_against_live_postgres_when_enabled -- --nocapture
       - name: Upload acceptance metrics
         if: always()
         uses: actions/upload-artifact@v4
@@ -1357,8 +1346,6 @@ jobs:
     # Observed shards take 15-26 minutes.
     timeout-minutes: 75
     env:
-      # warn, not error, until the R0 blockers are gone: 100+ unit tests still pin `quickjs == true` programs
-      THAW_JS_FALLBACK: warn
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -1494,9 +1481,6 @@ jobs:
     # max). A single lost shard ran 53 minutes with no log before this cap existed.
     timeout-minutes: 75
     env:
-      # Default for every test; the run loop below sets warn for the tests on
-      # .github/npm-fallback-allowlist.txt.
-      THAW_JS_FALLBACK: error
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -1505,28 +1489,6 @@ jobs:
       THAW_SOAK_SECONDS: "30"
     steps:
       - uses: actions/checkout@v4
-      - name: Fallback allowlist may only shrink
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          list=.github/npm-fallback-allowlist.txt
-          # Comments, padding and blank lines dropped, sorted, so the two lists compare line by line.
-          norm() { sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | sort -u; }
-          git fetch --no-tags --depth=1 origin "$BASE_REF"
-          if ! git cat-file -e "FETCH_HEAD:$list" 2>/dev/null; then
-            echo "::notice::$list is not on $BASE_REF yet, so there is nothing to compare against"
-            exit 0
-          fi
-          git show "FETCH_HEAD:$list" | norm > "$RUNNER_TEMP/allowlist-base.txt"
-          if [ -f "$list" ]; then norm < "$list" > "$RUNNER_TEMP/allowlist-head.txt"; else : > "$RUNNER_TEMP/allowlist-head.txt"; fi
-          added=$(comm -13 "$RUNNER_TEMP/allowlist-base.txt" "$RUNNER_TEMP/allowlist-head.txt")
-          if [ -n "$added" ]; then
-            while IFS= read -r line; do echo "::error::$list gained '$line' compared with $BASE_REF"; done <<< "$added"
-            echo "::error::New npm fallbacks are not allowed. Fix the test so thaw-js serves it; do not add it to $list (the list may only shrink)."
-            exit 1
-          fi
-          echo "No line was added to $list compared with $BASE_REF"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -1651,45 +1613,18 @@ jobs:
           # Prebuild once so the two workers do not race on the cargo build.
           cargo test -p thaw-cli --no-run
           run_one() {
-            local t="$1" log rc mode=error
-            # Allowlisted tests may still fall back (warn); any other test must be served by
-            # thaw-js, so a fallback there fails it.
-            if grep -qxF -- "${t#tests::}" .github/npm-fallback-allowlist.txt; then mode=warn; fi
+            local t="$1" log rc
             log="$RUNNER_TEMP/diagnostics/test-$$-${t//::/_}.log"
             set +e
-            THAW_JS_FALLBACK="$mode" timeout --kill-after=30s 20m cargo test -p thaw-cli "$t" -- --exact --test-threads=1 --nocapture > "$log" 2>&1
+            timeout --kill-after=30s 20m cargo test -p thaw-cli "$t" -- --exact --test-threads=1 --nocapture > "$log" 2>&1
             rc=$?
             set -e
-            { echo "::group::$t (rc=$rc, THAW_JS_FALLBACK=$mode)"; cat "$log"; echo "::endgroup::"; } | tee -a "$RUNNER_TEMP/diagnostics/test-output.log"
+            { echo "::group::$t (rc=$rc)"; cat "$log"; echo "::endgroup::"; } | tee -a "$RUNNER_TEMP/diagnostics/test-output.log"
             return "$rc"
           }
           export -f run_one
           # xargs exits 123 if any invocation failed; every test still runs.
           printf '%s\n' "${mine[@]}" | xargs -P2 -I{} bash -c 'run_one "$1"' _ {}
-      - name: Fallback allowlist summary
-        if: always()
-        run: |
-          diagnostics="$RUNNER_TEMP/diagnostics"
-          list=.github/npm-fallback-allowlist.txt
-          if [ ! -f "$diagnostics/shard-tests.txt" ]; then
-            echo "No test list for shard ${{ matrix.shard }}: the test step did not reach the run loop" | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          stale=()
-          while IFS= read -r t; do
-            name="${t#tests::}"
-            grep -qxF -- "$name" "$list" || continue
-            grep -qF -- "test $t ... FALLBACK" "$diagnostics/test-output.log" 2>/dev/null || stale+=("$name")
-          done < "$diagnostics/shard-tests.txt"
-          {
-            echo "### npm fallback allowlist (shard ${{ matrix.shard }})"
-            if (( ${#stale[@]} == 0 )); then
-              echo "Every allowlisted test in this shard still falls back."
-            else
-              echo "These allowlisted tests did not fall back in this run. Delete their lines from \`$list\` (the list may only shrink):"
-              printf -- '- `%s`\n' "${stale[@]}"
-            fi
-          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Collect diagnostics
         if: always()
         run: |
