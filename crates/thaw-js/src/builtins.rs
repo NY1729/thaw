@@ -1762,6 +1762,17 @@ impl Interp {
                             return it
                                 .throw_error("TypeError", &format!("{label} is not extensible"));
                         }
+                        // a cycle through `o` is refused; a proxy on the new chain ends the walk
+                        let mut q = next.clone();
+                        while let Some(x) = q.take() {
+                            if Rc::ptr_eq(&x, &o) {
+                                return it.throw_error("TypeError", "Cyclic __proto__ value");
+                            }
+                            if matches!(&*x.kind.borrow(), Kind::Proxy(_)) {
+                                break;
+                            }
+                            q = x.proto.borrow().clone();
+                        }
                         *o.proto.borrow_mut() = next;
                     }
                 }

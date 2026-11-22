@@ -11472,6 +11472,23 @@ fn proxy_own_keys_list_symbols_and_validate_the_trap_result() {
     );
 }
 
+/// A prototype cycle is a TypeError; `TypedArray.prototype.set` refuses a negative offset (node 22).
+#[test]
+fn prototype_cycles_and_negative_typed_set_offsets_are_refused() {
+    assert_eq!(
+        one(r#"const a = {}, b = {}; Object.setPrototypeOf(a, b);
+          let r = [];
+          try { Object.setPrototypeOf(b, a); r.push('accepted'); } catch (e) { r.push(e.constructor.name + ' ' + e.message); }
+          try { b.__proto__ = a; r.push('accepted'); } catch (e) { r.push(e.constructor.name); }
+          r.push(Reflect.setPrototypeOf(b, a));
+          const u = new Uint8Array(4);
+          try { u.set([1], -1); r.push('bad'); } catch (e) { r.push(e.constructor.name); }
+          try { u.set([1, 2], 3); r.push('bad'); } catch (e) { r.push(e.constructor.name); }
+          console.log(r.join('|'), u.join());"#),
+        "TypeError Cyclic __proto__ value|TypeError|false|RangeError|RangeError 0,0,0,0"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {

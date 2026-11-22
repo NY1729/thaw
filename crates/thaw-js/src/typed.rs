@@ -1131,7 +1131,15 @@ impl Interp {
             }
             let off = match arg(a, 1) {
                 Value::Undefined => 0,
-                v => it.num(&v) as usize,
+                v => {
+                    // ToIntegerOrInfinity: a negative or infinite offset is a RangeError, not a clamp to 0
+                    let n = it.num(&v);
+                    let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                    if n < 0.0 || n.is_infinite() {
+                        return it.throw_error("RangeError", "offset is out of bounds");
+                    }
+                    n as usize
+                }
             };
             // spec: a typed array source is copied after its checks; an array-like's length is checked before any element
             // is read, and a resize made by a getter in between just drops the writes past the new end
