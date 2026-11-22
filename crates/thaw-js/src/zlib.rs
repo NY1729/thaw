@@ -680,13 +680,9 @@ impl WebZlibStream {
                 brotli::DecompressorWriter::new(Vec::new(), 4096),
             )),
             #[cfg(feature = "zstd")]
-            ("compress", "zstd") => {
-                WebZlibWriter::ZstdEncoder(zstd::Compressor::new(options)?)
-            }
+            ("compress", "zstd") => WebZlibWriter::ZstdEncoder(zstd::Compressor::new(options)?),
             #[cfg(feature = "zstd")]
-            ("decompress", "zstd") => {
-                WebZlibWriter::ZstdDecoder(zstd::Decompressor::new(options)?)
-            }
+            ("decompress", "zstd") => WebZlibWriter::ZstdDecoder(zstd::Decompressor::new(options)?),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
