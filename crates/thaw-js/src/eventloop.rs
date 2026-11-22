@@ -1718,7 +1718,13 @@ impl Interp {
             self.run_timers()?;
             // the compiled host's native continuations: a timer just resolved a native Promise they wait on
             if let Some(hook) = self.turn_hook {
-                if hook(self) {
+                let ran = hook(self);
+                // the hook reported a fatal failure (an unhandled native rejection): leave the loop at once,
+                // before another timer can run; the host re-reads the failure and ends the process
+                if self.yielded {
+                    return Ok(());
+                }
+                if ran {
                     continue;
                 }
             }

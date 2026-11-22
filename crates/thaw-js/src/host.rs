@@ -6275,9 +6275,13 @@ fn abort_native_pending_work() {
 fn abort_native_pending_work() {}
 
 /// `drain_native` as a loop turn hook. A listen callback may queue continuations, so servers are polled first.
-pub(crate) fn drain_native_continuations(_: &mut Interp) -> bool {
+pub(crate) fn drain_native_continuations(it: &mut Interp) -> bool {
     let http = poll_native_servers();
     let ran = drain_native();
+    // Node ends the process at the first drain that leaves a rejection unhandled, before a later timer runs
+    if native_unhandled_failure() {
+        it.yielded = true;
+    }
     ran || (http & 2) != 0
 }
 
@@ -7760,17 +7764,21 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
     // `beforeExit` re-arm loop and then `exit`, once. A realm with listeners but no work still gets them.
     if !exited && !WATCHES.with(|w| !w.borrow().is_empty()) && !crate::host::native_servers_live() {
         let count = PACKAGES.with(|ps| ps.borrow().len());
+        let mut exit_ran = false;
         for handle in 0..count {
             let ran = with_package(handle, |p| {
                 if p.interp.exit_emitted() || !p.interp.exit_listeners() {
                     return Ok(0);
                 }
+                exit_ran = true;
                 p.interp.turn_hook = Some(drain_native_continuations);
                 let r = p
                     .interp
                     .run_event_loop()
                     .map_err(|c| classify(&mut p.interp, c));
                 p.interp.turn_hook = None;
+                // Node runs nothing after `exit`: a timer or job an exit listener armed never fires
+                p.interp.drop_pending_work();
                 r
             });
             match ran {
@@ -7781,6 +7789,10 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
                 Ok(code) if code != 0 => status = code,
                 Ok(_) => {}
             }
+        }
+        // ... nor does the compiled runtime's own queue: a timer an exit listener armed natively must not fire
+        if exit_ran {
+            abort_native_pending_work();
         }
     }
     // a natural end with `process.exitCode = n` and no pending work is the program's status too

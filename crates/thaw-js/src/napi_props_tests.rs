@@ -877,3 +877,17 @@ fn host_query_34_writes_the_json_text_of_a_live_value_where_query_8_keeps_the_ha
     assert!(marker.contains("__thaw_tjs_handle__"), "{marker}");
     assert_eq!(query(object, 34).unwrap(), r#"{"a":1,"b":2}"#);
 }
+
+#[test]
+fn nothing_runs_after_exit_even_a_timer_an_exit_listener_armed() {
+    load(
+        "globalThis.__ex = [];\
+         process.on('exit', () => { __ex.push('exit'); setTimeout(() => __ex.push('never'), 0); });",
+    );
+    // a routed program passes the loop several times (native idle, thaw-js, native idle again)
+    thaw_tjs_run_event_loop();
+    thaw_tjs_run_event_loop();
+    thaw_tjs_run_event_loop();
+    load("globalThis.__exn = __ex.join() === 'exit' ? 1 : 0;");
+    assert!(is_number(global("__exn"), 1.0));
+}

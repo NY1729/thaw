@@ -10919,6 +10919,42 @@ fn terminal_loop_exits_when_native_unhandled_failure_latched_while_server_live()
     assert!(SERVER_POLLS.load(std::sync::atomic::Ordering::SeqCst) <= 4);
 }
 
+/// Reports a latched unhandled rejection from the first poll on.
+extern "C" fn fake_unhandled_at_once() -> u8 {
+    1
+}
+
+/// An unhandled native rejection ends the loop at the next drain, before a later timer of the realm runs.
+#[test]
+fn terminal_loop_stops_before_a_timer_when_a_native_rejection_is_latched() {
+    use crate::host::{thaw_tjs_run_event_loop, TEST_UNHANDLED_FAILURE};
+    let _guard = SERVER_POLL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_UNHANDLED_FAILURE.lock().unwrap() = Some(fake_unhandled_at_once);
+    // the realm lives on the thread that loads it
+    guarded(|| {
+        let source = std::ffi::CString::new(
+            "globalThis.__late = 0; setTimeout(() => { globalThis.__late = 1; }, 150);",
+        )
+        .unwrap();
+        assert_eq!(crate::host::thaw_tjs_load_script(source.as_ptr()), 1);
+        LOOP_STATUS.store(
+            thaw_tjs_run_event_loop(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let name = std::ffi::CString::new("__late").unwrap();
+        let handle = crate::host::thaw_tjs_get_global(name.as_ptr());
+        assert!(handle > 0);
+        let result = crate::host::thaw_tjs_host_query_result(handle as u64, 2);
+        assert!(result.error.is_null());
+        let text = unsafe { std::ffi::CStr::from_ptr(result.value) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(text, "0", "the timer ran after the failure latched");
+    });
+    *TEST_UNHANDLED_FAILURE.lock().unwrap() = None;
+    assert_eq!(LOOP_STATUS.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[test]
 fn terminal_loop_exits_when_a_realm_throws_while_server_live() {
     use crate::host::{thaw_tjs_register, thaw_tjs_run_event_loop, TEST_SERVER_POLL};
