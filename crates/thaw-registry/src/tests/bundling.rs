@@ -11,8 +11,8 @@ fn bundled_json_preserves_proto_keys_and_other_json_values() {
     let (bundle, _, count, _) = bundle_commonjs_package(&modules, "json-pkg", &dir, "index.js").unwrap();
     assert_eq!(count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.jsonModuleCheck = function() {{ var values = module.exports, top = values[0], nested = values[1].outer, array = values[3]; return [Object.prototype.hasOwnProperty.call(top, '__proto__'), Object.getPrototypeOf(top) === Object.prototype, Object.keys(top).indexOf('__proto__') >= 0, top['__proto__'].marker, Object.prototype.hasOwnProperty.call(nested, '__proto__'), Object.getPrototypeOf(nested) === Object.prototype, nested.value, nested['__proto__'], values[2], Array.isArray(array), array[0], Object.prototype.hasOwnProperty.call(array[1], '__proto__'), array[1]['__proto__']]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"jsonModuleCheck".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"jsonModuleCheck".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,true,7,true,true,2,\"inner\",42,true,1,true,\"item\"]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
@@ -304,14 +304,14 @@ fn bundle_actually_runs_through_quickjs() {
 
     let source = CString::new(script).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "bundle failed to load"
     );
 
     let func = CString::new("run").unwrap();
     let args = CString::new("[7]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -403,7 +403,7 @@ fn multiple_bundled_packages_dont_stomp_each_others_module_state() {
 
     let source_a = CString::new(wrap(&bundle_a, "getLazy")).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source_a.as_ptr()),
+        thaw_js_shim::thaw_js_load(source_a.as_ptr()),
         1,
         "package A failed to load"
     );
@@ -411,7 +411,7 @@ fn multiple_bundled_packages_dont_stomp_each_others_module_state() {
     // Loaded into the same shared global context *after* A.
     let source_b = CString::new(wrap(&bundle_b, "pkgB")).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source_b.as_ptr()),
+        thaw_js_shim::thaw_js_load(source_b.as_ptr()),
         1,
         "package B failed to load"
     );
@@ -419,7 +419,7 @@ fn multiple_bundled_packages_dont_stomp_each_others_module_state() {
     // Call A's lazily-requiring function *after* B has loaded.
     let func = CString::new("getLazy").unwrap();
     let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -429,7 +429,7 @@ fn multiple_bundled_packages_dont_stomp_each_others_module_state() {
              not package B's, after B has loaded into the shared global context"
     );
 
-    let result = thaw_quickjs::eval_json(
+    let result = thaw_js_shim::eval_json(
         "globalThis.__thaw_bundle_create_require('/tmp/main.js')('pkg-a/index.js')()",
     )
     .unwrap();
@@ -463,15 +463,15 @@ fn bundle_exports_self_contained_worker_runtime_source() {
             "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.workerResolveValueRuns = 0; {bundle}"
         ))
         .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
 
-    let resolved = thaw_quickjs::eval_json(
+    let resolved = thaw_js_shim::eval_json(
             "Function('require', __thaw_worker_bundle_source + \"return [__thaw_bundle_create_require('pkg/index.js').resolve('./value'), globalThis.workerResolveValueRuns || 0];\")(function(name) { throw new Error(name); })",
         )
         .unwrap();
     assert_eq!(resolved.as_deref(), Some("[\"pkg/value.js\",0]"));
 
-    let result = thaw_quickjs::eval_json(
+    let result = thaw_js_shim::eval_json(
             "Function('require', __thaw_worker_bundle_source + \"return __thaw_bundle_create_require('pkg/index.js')('./value').answer;\")(function(name) { throw new Error(name); })",
         )
         .unwrap();
@@ -480,7 +480,7 @@ fn bundle_exports_self_contained_worker_runtime_source() {
     // The serialized origin resolver must carry its factory-key classifier.
     // This lookup runs inside the detached Worker source, where outer bundle
     // helper declarations are not available.
-    let origin = thaw_quickjs::eval_json(
+    let origin = thaw_js_shim::eval_json(
             "Function('require', __thaw_worker_bundle_source + \"return __thaw_bundle_worker_origin('pkg/index.js').resolve('missing') === null;\")(function(name) { throw new Error(name); })",
         )
         .unwrap();
@@ -532,10 +532,10 @@ fn bundled_bindings_require_uses_the_loaded_addon() {
         "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.require.addon = function() {{ return {{ answer: 42 }}; }}; {bundle} globalThis.readAddon = function() {{ return module.exports.answer; }};"
     );
     assert_eq!(
-        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()),
         1
     );
-    let result = thaw_quickjs::thaw_js_call(
+    let result = thaw_js_shim::thaw_js_call(
         CString::new("readAddon").unwrap().as_ptr(),
         CString::new("[]").unwrap().as_ptr(),
     );
@@ -574,8 +574,8 @@ fn delayed_native_require_keeps_each_bundles_addon() {
          {second_bundle} globalThis.secondDelayed = module.exports; \
          globalThis.delayedAddonValues = function() {{ var first = firstDelayed(), firstState = [process.exitCode, process.title, process.argv[0], process.phase, 'marker' in process], second = secondDelayed(), secondState = [process.exitCode, process.title, process.argv[0], process.phase, 'marker' in process]; globalThis.process = globalThis.__thaw_saved_process; delete globalThis.__thaw_saved_process; return [first, firstState, second, secondState]; }};"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"delayedAddonValues".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"delayedAddonValues".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[11,11,11,11,true,true],[11,\"pkg11\",\"11\",11,false],[22,22,22,22,true,true],[22,\"pkg22\",\"22\",22,false]]");
     let _ = fs::remove_dir_all(first);
     let _ = fs::remove_dir_all(second);
@@ -608,10 +608,10 @@ fn bundled_node_gyp_build_uses_the_loaded_addon() {
         "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.require.addon = function() {{ return {{ answer: 42 }}; }}; {bundle} globalThis.readAddon = function() {{ return module.exports.answer; }};"
     );
     assert_eq!(
-        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()),
         1
     );
-    let result = thaw_quickjs::thaw_js_call(
+    let result = thaw_js_shim::thaw_js_call(
         CString::new("readAddon").unwrap().as_ptr(),
         CString::new("[]").unwrap().as_ptr(),
     );
@@ -647,10 +647,10 @@ fn bundled_direct_node_require_uses_the_loaded_addon() {
         "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.require.addon = function() {{ return {{ answer: 42 }}; }}; {bundle} globalThis.readAddon = function() {{ return module.exports.answer; }};"
     );
     assert_eq!(
-        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()),
         1
     );
-    let result = thaw_quickjs::thaw_js_call(
+    let result = thaw_js_shim::thaw_js_call(
         CString::new("readAddon").unwrap().as_ptr(),
         CString::new("[]").unwrap().as_ptr(),
     );
@@ -991,8 +991,8 @@ fn create_require_uses_the_longest_nested_instance_owner() {
     fs::write(nested.join("other.js"), "module.exports = 'nested';").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "app", &app, "index.js").unwrap();
     let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle}")).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::eval_json("__thaw_bundle_create_require('/thaw_modules/left/node_modules/shared/index.js').resolve('./other')").unwrap();
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_js_shim::eval_json("__thaw_bundle_create_require('/thaw_modules/left/node_modules/shared/index.js').resolve('./other')").unwrap();
     assert_eq!(result.as_deref(), Some("\"left/node_modules/shared/other.js\""));
     let _ = fs::remove_dir_all(root);
 }
@@ -1245,8 +1245,8 @@ fn esm_star_diamond_tracks_terminal_binding_and_live_value() {
     fs::write(package.join("leaf.js"), "export let value = 1; export function bump() { value++; }").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ var old = module.exports.value; module.exports.bump(); return [old, module.exports.value, Object.keys(module.exports).filter(function(key) {{ return key === 'value'; }}).length, Object.getOwnPropertyDescriptor(module.exports, 'value').configurable, delete module.exports.value]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,2,1,false,false]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1263,8 +1263,8 @@ fn esm_star_equal_values_from_distinct_bindings_are_ambiguous() {
     fs::write(package.join("b.js"), "export const value = 1;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return [Object.prototype.hasOwnProperty.call(module.exports, 'value'), Object.keys(module.exports).indexOf('value')]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,-1]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1281,8 +1281,8 @@ fn esm_star_cycle_discovers_late_leaf_name() {
     fs::write(package.join("c.js"), "export const x = 7;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} var cycleB = globalThis.__thaw_bundle_create_require('origin-pkg/index.js')('./b.js'); globalThis.starResult = function() {{ return [module.exports.x, Object.prototype.hasOwnProperty.call(module.exports, 'x'), cycleB.x, Object.prototype.hasOwnProperty.call(cycleB, 'x')]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[7,true,7,true]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1299,8 +1299,8 @@ fn esm_star_cycle_exposes_static_name_before_late_module_evaluates() {
     fs::write(package.join("c.js"), "globalThis.events.push('C'); export const x = 7;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.events = []; {bundle} globalThis.starResult = function() {{ return [midCycle[0], midCycle[1], midCycle[2], events.join(','), module.exports.x]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,\"\",\"C\",7]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1317,8 +1317,8 @@ fn esm_star_cycle_keeps_hoisted_function_readable() {
     fs::write(package.join("c.js"), "export function f() { return 7; }").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return [midFunction, module.exports.f()]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"function\",7]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1336,8 +1336,8 @@ fn esm_star_static_name_is_not_blocked_by_unloaded_named_native_reexport() {
     fs::write(package.join("native.node"), "").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.events = []; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.require.addon = function() {{ events.push('N'); return {{ v: 9 }}; }}; {bundle} var cycleB = globalThis.__thaw_bundle_create_require('origin-pkg/index.js')('./b.js'); globalThis.starResult = function() {{ return [midNative[0], midNative[1], midNativeRead, events.join(','), module.exports.x, module.exports.v, cycleB.v]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,\"\",\"ReferenceError\",\"C,N\",7,9,9]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1374,8 +1374,8 @@ fn esm_star_proto_named_binding_is_data_not_graph_prototype() {
     fs::write(package.join("leaf.js"), "export const __proto__ = 3;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return [Object.prototype.hasOwnProperty.call(module.exports, '__proto__'), module.exports['__proto__']]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,3]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1394,8 +1394,8 @@ fn esm_nested_ambiguous_star_does_not_revive_from_later_valid_star() {
     fs::write(package.join("valid.js"), "export const x = 1;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return Object.prototype.hasOwnProperty.call(module.exports, 'x'); }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "false");
     let _ = fs::remove_dir_all(root);
 }
@@ -1413,8 +1413,8 @@ fn esm_star_distinct_cjs_modules_sharing_exports_object_remain_ambiguous() {
     fs::write(package.join("shared.js"), "module.exports = { x: 1 };").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return Object.prototype.hasOwnProperty.call(module.exports, 'x'); }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "false");
     let _ = fs::remove_dir_all(root);
 }
@@ -1432,8 +1432,8 @@ fn esm_star_reexported_cjs_default_uses_existing_interop_value() {
     fs::write(package.join("leaf.cjs"), "module.exports = function() { return 7; };").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return [typeof module.exports.value, module.exports.value()]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"function\",7]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1449,8 +1449,8 @@ fn esm_star_native_addon_uses_the_original_loaded_exports_snapshot() {
     fs::write(package.join("native.node"), "").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.addonCalls = 0; globalThis.require.addon = function() {{ return {{ value: ++addonCalls }}; }}; {bundle} globalThis.starResult = function() {{ return [module.exports.value, addonCalls]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,1]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1466,8 +1466,8 @@ fn esm_star_cjs_inherited_enumerable_key_is_not_a_synthetic_export() {
     fs::write(package.join("leaf.cjs"), "function Source() {} Source.prototype.inherited = 5; module.exports = new Source();").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return [Object.prototype.hasOwnProperty.call(module.exports, 'inherited'), Object.keys(module.exports).indexOf('inherited') >= 0]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,false]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1485,8 +1485,8 @@ fn esm_star_cycle_defers_unloaded_native_edge_without_reordering_body() {
     fs::write(package.join("native.node"), "").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.events = []; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.addonCalls = 0; globalThis.require.addon = function() {{ events.push('N'); return {{ value: ++addonCalls }}; }}; {bundle} var cycleB = globalThis.__thaw_bundle_create_require('origin-pkg/index.js')('./b.js'); globalThis.starResult = function() {{ return [events.join(','), addonCalls, module.exports.value, cycleB.value]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"B,N\",1,1,1]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1503,8 +1503,8 @@ fn esm_star_keeps_explicit_false_esmodule_binding_and_default_import() {
     fs::write(package.join("legacy.js"), "exports.__esModule = true; exports.default = 99; exports.extra = 3;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ var out = module.exports; return [out.__esModule, out.values[0], out.values[1], out.extra, typeof Object.getOwnPropertyDescriptor(out, '__esModule').get]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[false,7,99,3,\"function\"]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1521,8 +1521,8 @@ fn esm_explicit_namespace_reexport_precedes_competing_star() {
     fs::write(package.join("other.js"), "export const ns = 2;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return [module.exports.ns.value, module.exports.ns === globalThis.__thaw_bundle_create_require('origin-pkg/index.js')('./leaf.js')]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1540,8 +1540,8 @@ fn esm_star_diamond_coalesces_same_namespace_reexport() {
     fs::write(package.join("leaf.js"), "export const value = 7;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "origin-pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.starResult = function() {{ return [module.exports.ns.value, module.exports.ns === globalThis.__thaw_bundle_create_require('origin-pkg/index.js')('./a.js').ns]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"starResult".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[7,true]");
     let _ = fs::remove_dir_all(root);
 }
@@ -1701,8 +1701,8 @@ fn bundled_require_resolve_finds_resolve_only_files_and_rejects_missing_modules(
     fs::write(package.join("sub/elsewhere.js"), "globalThis.resolveOnlyRuns = (globalThis.resolveOnlyRuns || 0) + 1;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.resolveOnlyRuns = 0; {bundle} globalThis.resolveOnly = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"resolveOnly".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"resolveOnly".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[\"pkg/only.js\",\"pkg/created.js\",\"pkg/sub/other.js\",\"present-package/index.js\",\"pkg/sub/elsewhere.js\",\"pkg/index.js\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\",\"MODULE_NOT_FOUND\",\"node:inspector/promises\",0]");
     let _ = fs::remove_dir_all(package);
     let _ = fs::remove_dir_all(modules);
@@ -2105,8 +2105,8 @@ fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
         let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-mixed-link-pkg", &package, "index.mjs").unwrap();
         assert!(bundle.contains("validateStatic"), "{kind}: {bundle}");
         let script = format!("globalThis.__thaw_link_runs = 0; globalThis.readMixedLinkRuns = function() {{ return __thaw_link_runs; }}; globalThis.module = {{ exports: {{}} }}; {bundle}");
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 0);
-        let result = thaw_quickjs::thaw_js_call(c"readMixedLinkRuns".as_ptr(), c"[]".as_ptr());
+        assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 0);
+        let result = thaw_js_shim::thaw_js_call(c"readMixedLinkRuns".as_ptr(), c"[]".as_ptr());
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "0");
         let _ = fs::remove_dir_all(root);
     }

@@ -1841,6 +1841,8 @@ fn inline_and_assigned_create_require_collect_query_instances() {
 
 #[cfg(test)]
 mod wrapper_binding_regression {
+    use crate::thaw_js_shim;
+
     use super::*;
 
     #[test]
@@ -1864,12 +1866,14 @@ mod wrapper_binding_regression {
                 throw new Error('mixed wrapper bindings changed');
         }})();"#);
         let script = std::ffi::CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        assert_eq!(thaw_js_shim::thaw_js_load(script.as_ptr()), 1);
     }
 }
 
 #[cfg(test)]
 mod static_link_metadata_regressions {
+    use crate::thaw_js_shim;
+
     #[test]
     fn deferred_link_failure_prevents_module_body() {
         let source = "import { missing } from './dep.js'; globalThis.__thaw_link_body_ran = true;";
@@ -1894,7 +1898,7 @@ mod static_link_metadata_regressions {
                 throw new Error('link failure ran module body or changed import order');
         }})();"#);
         let script = std::ffi::CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        assert_eq!(thaw_js_shim::thaw_js_load(script.as_ptr()), 1);
     }
 
     #[test]
