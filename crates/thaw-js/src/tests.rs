@@ -12922,3 +12922,26 @@ fn typed_call_without_a_package_prefix_calls_a_default_realm_global() {
         .unwrap_err()
         .contains("missingFn"));
 }
+
+/// `Object.keys/values/entries/assign/hasOwn/getOwnProperty*`, `hasOwnProperty`/`propertyIsEnumerable`/`valueOf`/`isPrototypeOf`
+/// `.call(nullish)`, `delete nullish.x` and `'x' in nullish` throw the spec's TypeError (expected text recorded from node 22).
+#[test]
+fn nullish_receivers_throw_for_object_introspection() {
+    let expected = "keys(null): threw TypeError Cannot convert undefined or null to object|values(null): threw TypeError Cannot convert undefined or null to object|entries(null): threw TypeError Cannot convert undefined or null to object|hasOwn(null): threw TypeError Cannot convert undefined or null to object|gopn(null): threw TypeError Cannot convert undefined or null to object|gops(null): threw TypeError Cannot convert undefined or null to object|gopd(null): threw TypeError Cannot convert undefined or null to object|gopds(null): threw TypeError Cannot convert undefined or null to object|assignSrc(null): {}|assignTarget(null): threw TypeError Cannot convert undefined or null to object|ppe(null): threw TypeError Cannot convert undefined or null to object|hop(null): threw TypeError Cannot convert undefined or null to object|valueOf(null): threw TypeError Cannot convert undefined or null to object|isProtoOf(null): threw TypeError Cannot convert undefined or null to object|isProtoOfPrimitive(null): false|inOp(null): threw TypeError Cannot use 'in' operator to search for 'x' in null|del(null): threw TypeError Cannot convert undefined or null to object|spread(null): {}|keys(undefined): threw TypeError Cannot convert undefined or null to object|values(undefined): threw TypeError Cannot convert undefined or null to object|entries(undefined): threw TypeError Cannot convert undefined or null to object|hasOwn(undefined): threw TypeError Cannot convert undefined or null to object|gopn(undefined): threw TypeError Cannot convert undefined or null to object|gops(undefined): threw TypeError Cannot convert undefined or null to object|gopd(undefined): threw TypeError Cannot convert undefined or null to object|gopds(undefined): threw TypeError Cannot convert undefined or null to object|assignSrc(undefined): {}|assignTarget(undefined): threw TypeError Cannot convert undefined or null to object|ppe(undefined): threw TypeError Cannot convert undefined or null to object|hop(undefined): threw TypeError Cannot convert undefined or null to object|valueOf(undefined): threw TypeError Cannot convert undefined or null to object|isProtoOf(undefined): threw TypeError Cannot convert undefined or null to object|isProtoOfPrimitive(undefined): false|inOp(undefined): threw TypeError Cannot use 'in' operator to search for 'x' in undefined|del(undefined): threw TypeError Cannot convert undefined or null to object|spread(undefined): {}";
+    assert_eq!(
+        one_sloppy(
+            r####"const out=[];
+const cases = {
+ keys:v=>Object.keys(v), values:v=>Object.values(v), entries:v=>Object.entries(v), hasOwn:v=>Object.hasOwn(v,'x'),
+ gopn:v=>Object.getOwnPropertyNames(v), gops:v=>Object.getOwnPropertySymbols(v), gopd:v=>Object.getOwnPropertyDescriptor(v,'x'),
+ gopds:v=>Object.getOwnPropertyDescriptors(v), assignSrc:v=>Object.assign({}, v), assignTarget:v=>Object.assign(v),
+ ppe:v=>Object.prototype.propertyIsEnumerable.call(v,'x'), hop:v=>Object.prototype.hasOwnProperty.call(v,'x'),
+ valueOf:v=>Object.prototype.valueOf.call(v), isProtoOf:v=>Object.prototype.isPrototypeOf.call(v,{}),
+ isProtoOfPrimitive:v=>Object.prototype.isPrototypeOf.call(v,1), inOp:v=>'x' in v, del:v=>delete v.x, spread:v=>({...v}),
+};
+for (const v of [null, undefined]) for (const [n,f] of Object.entries(cases)) { let r; try { r=JSON.stringify(f(v)) } catch(e){ r='threw '+e.constructor.name+' '+e.message } out.push(n+'('+v+'): '+r); }
+console.log(out.join('|'));"####
+        ),
+        expected
+    );
+}

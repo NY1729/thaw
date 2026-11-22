@@ -2792,6 +2792,16 @@ impl Interp {
 
     /// Own enumerable string keys (array indices first).
     /// `own_keys` that propagates what a Proxy `ownKeys` / `getOwnPropertyDescriptor` trap throws.
+    /// The spec's `ToObject` precondition: `undefined`/`null` throw, anything else passes.
+    pub(crate) fn require_object_coercible(&mut self, v: &Value) -> R<()> {
+        match v {
+            Value::Undefined | Value::Null => {
+                self.throw_error("TypeError", "Cannot convert undefined or null to object")
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn own_keys_checked(&mut self, v: &Value) -> R<Vec<Rc<str>>> {
         if let Value::Object(o) = v {
             if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
@@ -5555,6 +5565,7 @@ impl Interp {
                 a::Expr::Member(m) => {
                     let obj = self.eval(&m.obj, scope)?;
                     let key = self.member_key(&m.prop, scope)?;
+                    self.require_object_coercible(&obj)?;
                     if let Value::Object(o) = obj {
                         let deleted = crate::reflect::delete_own(self, &o, &key)?;
                         // a proxy's refused delete has its own message (a ceiling): not reported here
@@ -6020,6 +6031,15 @@ impl Interp {
             }
             B::In => {
                 let key = self.key_of(l);
+                if !matches!(r, Value::Object(_)) {
+                    let (key_text, subject) = (self.tostr(l)?, self.tostr(r)?);
+                    return self.throw_error(
+                        "TypeError",
+                        &format!(
+                            "Cannot use 'in' operator to search for '{key_text}' in {subject}"
+                        ),
+                    );
+                }
                 Value::Bool(self.has_property(r, &key)?)
             }
             _ => return unsupported("binary operator"),
