@@ -57,6 +57,19 @@ fn thaw_js_date_type(ty: &HirType) -> bool {
             if marker == "__thaw_class_identity_\u{1e}Date" && timestamp == "timestamp"))
 }
 
+/// A callback parameter type: plain data, where a `Promise<plain>` union member stands for the plain value
+/// thaw-js passes (an already-resolved promise, as in `thaw_js_result_type`).
+fn thaw_js_callback_arg_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Union(members) => members.iter().all(|m| match m {
+            HirType::Promise(inner) => thaw_js_plain_type(inner),
+            other => thaw_js_callback_arg_type(other),
+        }),
+        HirType::Optional(e) | HirType::Nullable(e) | HirType::Nullish(e) => thaw_js_callback_arg_type(e),
+        other => thaw_js_plain_type(other),
+    }
+}
+
 /// A callback parameter thaw-js can call back into: a plain-data function that returns plain data
 /// synchronously (no Promise), optionally absent.
 pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
@@ -66,7 +79,7 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
                 && thaw_js_callback_type(inner)
         }
         _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
-            params.iter().all(|p| thaw_js_plain_type(p) && !thaw_js_contains_bytes(p))
+            params.iter().all(|p| thaw_js_callback_arg_type(p) && !thaw_js_contains_bytes(p))
                 && thaw_js_plain_type(&ret)
                 && !thaw_js_contains_bytes(&ret)
         }),
@@ -78,7 +91,7 @@ pub(crate) fn thaw_js_async_callback_type(ty: &HirType) -> bool {
     match ty {
         HirType::Optional(inner) => thaw_js_async_callback_type(inner),
         _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
-            params.iter().all(|p| thaw_js_plain_type(p) && !thaw_js_contains_bytes(p))
+            params.iter().all(|p| thaw_js_callback_arg_type(p) && !thaw_js_contains_bytes(p))
                 && matches!(&ret, HirType::Promise(inner) if thaw_js_plain_type(inner))
         }),
     }
