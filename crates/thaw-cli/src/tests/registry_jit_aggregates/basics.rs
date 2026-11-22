@@ -604,9 +604,9 @@ fn dictionary_nullish_operations_fall_back_for_dynamic_record_values() {
     )
     .unwrap();
     let output = dir.join("app");
-    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    build_on_thaw_js(&entry, &output, &registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));

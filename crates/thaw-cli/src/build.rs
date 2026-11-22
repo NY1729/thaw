@@ -20,24 +20,11 @@ fn build(
     )
 }
 
-/// `build` with thaw-js routing forced off: for tests that assert QuickJS-specific manifest facts
-/// (`manifest["quickjs"]`, `quickjs_reasons`) and must not depend on `THAW_JS_ENGINE` in the environment.
+/// `build` with install off and no extras, for tests that only need the default build of one program.
 #[cfg(test)]
-fn build_quickjs_pinned(input: &Path, output: &Path, registry_dir: &Path) -> Result<(), String> {
+fn build_on_thaw_js(input: &Path, output: &Path, registry_dir: &Path) -> Result<(), String> {
     build_with_thaw_js_routing(
-        input,
-        output,
-        &[],
-        &[],
-        &[],
-        registry_dir,
-        &[],
-        false,
-        None,
-        true,
-        false,
-        false,
-        false,
+        input, output, &[], &[], &[], registry_dir, &[], false, None, true, false, false,
     )
 }
 
@@ -453,12 +440,11 @@ fn build_with_native_mode_shared(
     build_with_thaw_js_routing_shared(
         input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
         static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt,
-        None, thaw_js_routing_enabled(),
+        None,
     )
 }
 
-/// `build_with_native_mode_routed`, retried without routing when the routed build turns out to need
-/// QuickJS as well.
+/// Tests' `build` over the shared inner builder: the thaw-js lane is the only lane.
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 fn build_with_thaw_js_routing(
@@ -474,11 +460,10 @@ fn build_with_thaw_js_routing(
     embed_native_addons: bool,
     install_missing: bool,
     icu4c: bool,
-    routing: bool,
 ) -> Result<(), String> {
     build_with_thaw_js_routing_shared(
         input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
-        static_link, assets, embed_native_addons, install_missing, icu4c, false, None, routing,
+        static_link, assets, embed_native_addons, install_missing, icu4c, false, None,
     )
 }
 
@@ -534,7 +519,6 @@ fn build_with_thaw_js_routing_shared(
     icu4c: bool,
     shared_rt: bool,
     lib_mode: Option<&LibBuildMode>,
-    routing: bool,
 ) -> Result<(), String> {
     clear_thaw_js_blockers();
     // Timers lower to thaw-runtime's queue first (no JS context for timer-only programs); any
@@ -545,7 +529,6 @@ fn build_with_thaw_js_routing_shared(
         let native = build_with_thaw_js_routing_inner(
             input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
             static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode,
-            routing,
         );
         thaw_hir::set_native_timers(false);
         match native {
@@ -555,7 +538,7 @@ fn build_with_thaw_js_routing_shared(
             Err(error) => {
                 #[cfg(test)]
                 NATIVE_TIMER_RETRIES.with(|retries| retries.borrow_mut().push(error.clone()));
-                if error != NATIVE_TIMERS_NEED_ENGINE && thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {
+                if error != NATIVE_TIMERS_NEED_ENGINE {
                     // In error mode the attempt's error carries the routed "unsupported on thaw-js" wrapper;
                     // this is a timer rebuild note, not a refusal, so drop that prefix.
                     let reason = error.strip_prefix("unsupported on thaw-js: ").unwrap_or(&error);
@@ -567,7 +550,6 @@ fn build_with_thaw_js_routing_shared(
     build_with_thaw_js_routing_inner(
         input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
         static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode,
-        routing,
     )
 }
 
@@ -587,38 +569,17 @@ fn build_with_thaw_js_routing_inner(
     icu4c: bool,
     shared_rt: bool,
     lib_mode: Option<&LibBuildMode>,
-    routing: bool,
 ) -> Result<(), String> {
     let result = build_with_native_mode_routed(
         input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
         static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode,
-        routing,
     );
     match result {
-        // Whatever a routed build could not express (it needed QuickJS as well, or the compiler
-        // rejected a construct) is built the ordinary way: never a build failure or a wrong result
-        // that the unrouted path would not have had.
-        Err(error) if routing && routed_failure_falls_back(&error) => {
-            match thaw_js_fallback_mode() {
-                ThawJsFallbackMode::Error => {
-                    let refused = thaw_js_recorded_refusals_text();
-                    let sep = if refused.is_empty() { "" } else { "; " };
-                    return Err(format!("unsupported on thaw-js: {error}{sep}{refused}"));
-                }
-                ThawJsFallbackMode::Warn => {
-                    eprintln!("FALLBACK: {}", thaw_js_fallback_message(&error, &take_thaw_js_refusals()))
-                }
-                ThawJsFallbackMode::Silent => {
-                    if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1") {
-                        eprintln!("thaw-js routing: routed build failed, retrying on QuickJS: {error}");
-                    }
-                }
-            }
-            record_thaw_js_fallback_blocker(&error);
-            build_with_native_mode_routed(
-                input, output, extra_links, bridge_dts, ffi_metadata, registry_dir, use_packages,
-                static_link, assets, embed_native_addons, install_missing, icu4c, shared_rt, lib_mode, false,
-            )
+        // A refusal or routed failure is a build error: thaw-js is the only engine, there is no retry.
+        Err(error) if routed_failure_falls_back(&error) => {
+            let refused = thaw_js_recorded_refusals_text();
+            let sep = if refused.is_empty() { "" } else { "; " };
+            Err(format!("unsupported on thaw-js: {error}{sep}{refused}"))
         }
         result => result,
     }
@@ -649,7 +610,6 @@ fn build_with_native_mode_routed(
     shared_rt: bool,
     // `thaw lib build`: compile `input` as a shared library instead of an executable.
     lib_mode: Option<&LibBuildMode>,
-    thaw_js_routing: bool,
 ) -> Result<(), String> {
     if shared_rt && static_link {
         return Err("--shared-rt cannot be combined with --static".into());
@@ -759,11 +719,10 @@ fn build_with_native_mode_routed(
     // They are `forced_runtime_only`: no typed declarations, so they cannot clash with the program's own imports.
     let mut forced_runtime_only = std::collections::HashSet::new();
     // the shim loads these even for an imported node:http, whose declarations it keeps (`generate_registry_shims`)
-    let mut fetch_transport_bundles = std::collections::HashSet::new();
-    if thaw_js_routing {
+    let fetch_transport_bundles = {
         let sources = module_graph::graph_sources(input, &user_source)?;
         let sources = sources.iter().map(String::as_str).collect::<Vec<_>>();
-        fetch_transport_bundles = realm_fetch_transport_bundles(&sources);
+        let fetch_transport_bundles = realm_fetch_transport_bundles(&sources);
         if !fetch_transport_bundles.is_empty() {
             for builtin in REALM_FETCH_TRANSPORT_BUNDLES {
                 thaw_registry::resolve_builtin(builtin)?;
@@ -774,18 +733,15 @@ fn build_with_native_mode_routed(
                 &mut forced_runtime_only,
             );
         }
-    }
-    // thaw-js: the installed packages the bundles require by name are compiled in too (they are the served peers)
-    let served_peers = if thaw_js_routing {
-        add_implicit_peers(
-            registry_dir,
-            &mut resolved_packages,
-            &mut runtime_packages,
-            &mut static_packages,
-        )
-    } else {
-        Default::default()
+        fetch_transport_bundles
     };
+    // thaw-js: the installed packages the bundles require by name are compiled in too (they are the served peers)
+    let served_peers = add_implicit_peers(
+        registry_dir,
+        &mut resolved_packages,
+        &mut runtime_packages,
+        &mut static_packages,
+    );
     let mut native_addons = resolved_packages
         .iter()
         .filter(|package| runtime_packages.contains(*package))
@@ -836,7 +792,7 @@ fn build_with_native_mode_routed(
             &forced_jit_fallbacks,
             &forced_runtime_only,
             &fetch_transport_bundles,
-            thaw_js_routing,
+            true,
             &served_peers,
         )?;
         let external_resolutions =
@@ -896,7 +852,7 @@ fn build_with_native_mode_routed(
         // thaw-js serves `node:module` (its createRequire keeps result handles), so no QuickJS forcing there
         let created_require_live_result =
             module_graph::uses_created_require_live_result(input, &user_source)?
-                && !(thaw_js_routing && thaw_js_routed_packages(&shim_source).iter().any(|p| p == "node:module"));
+                && !(thaw_js_routed_packages(&shim_source).iter().any(|p| p == "node:module"));
         let mut quickjs_reasons = quickjs_fallback_reasons(
             input,
             &user_source,
@@ -915,10 +871,7 @@ fn build_with_native_mode_routed(
         }
         if let Ok(path) = std::env::var("THAW_JS_RUNTIME_DUMP_SHIM") {
             let _ = std::fs::write(
-                format!(
-                    "{path}.{}",
-                    if thaw_js_routing { "routed" } else { "plain" }
-                ),
+                format!("{path}.routed"),
                 &shim_source,
             );
         }
@@ -946,11 +899,7 @@ fn build_with_native_mode_routed(
                 || shim_source.contains("loadNativeAddon(")
                 || shim_source.contains("embedExecutable("),
         });
-        if thaw_js_routing {
-            manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
-        }
-        record_thaw_js_user_dynamic_blocker(&user_source, thaw_js_routing, thaw_js_user_dynamic_enabled());
-        // Always present: the QuickJS retry of a routed build (routing off) must still report why.
+        manifest["thaw_js"] = thaw_js_eligibility(registry_dir, &resolved_packages);
         manifest["thaw_js_blockers"] = thaw_js_blockers_manifest();
         if std::env::var("THAW_JS_INFER").as_deref() == Ok("1") {
             manifest["js_infer"] = js_infer_entries(registry_dir, &resolved_packages, &user_source);
@@ -1087,11 +1036,7 @@ fn build_with_native_mode_routed(
             manifest,
         );
     };
-    let thaw_js_route = thaw_js_routing
-        && (!thaw_js_routed_packages(&shim_source).is_empty()
-            || (thaw_js_user_dynamic_enabled() && source_uses_quickjs(&user_source))
-            || thaw_js_route_all_enabled());
-    thaw_hir::set_thaw_js_routed(thaw_js_route);
+    thaw_hir::set_thaw_js_routed(true);
     // `SHARE_ENV` shares the environment table with a worker: `process.env.NAME` must read that table
     thaw_hir::set_shared_env_program(user_source.contains("SHARE_ENV"));
     let mut program = thaw_hir::lower_module(&module)?;
@@ -1132,7 +1077,7 @@ fn build_with_native_mode_routed(
     compiler.set_codegen_opt(codegen_opt_level()?);
     compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
     compiler.set_uses_async_hooks(user_source.contains("async_hooks"));
-    compiler.set_thaw_js_routed(thaw_js_route);
+    compiler.set_thaw_js_routed(true);
     if let Some(lib) = lib_mode {
         compiler.set_library_mode(lib.exports.clone());
     }
@@ -1142,7 +1087,7 @@ fn build_with_native_mode_routed(
     }
     let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
-    if thaw_js_routing && compiler.uses_thaw_js() {
+    if compiler.uses_thaw_js() {
         // `THAW_JS_RUNTIME_DUMP_FN` also dumps a function of a build that stays routed.
         if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
             && (uses_quickjs || std::env::var_os("THAW_JS_RUNTIME_DUMP_FN").is_some())
@@ -1156,20 +1101,17 @@ fn build_with_native_mode_routed(
             return Err(format!("{THAW_JS_MIXED}: {blockers}"));
         }
     }
-    // `THAW_JS_FALLBACK`: a routed build that still links QuickJS (a package thaw-js refused, with no thaw-js code in
-    // the program to trigger the mixed-build retry above). A refused package alone is not a fallback: built-ins such as
-    // node:crypto are refused per function and still end up on thaw-js, so only the link decides.
-    if thaw_js_routing && uses_quickjs && thaw_js_fallback_mode() != ThawJsFallbackMode::Silent {
+    // A build that still links QuickJS (a package thaw-js refused, with no thaw-js code in the program to trigger
+    // the mixed-build error above) is refused. A refused package alone is not enough: built-ins such as node:crypto
+    // are refused per function and still end up on thaw-js, so only the link decides.
+    if uses_quickjs {
         let refusals = take_thaw_js_refusals();
         let why = if refusals.is_empty() {
             "the program links QuickJS".to_string()
         } else {
             refusals.iter().map(|(package, why)| format!("package `{package}` stays on QuickJS: {why}")).collect::<Vec<_>>().join("; ")
         };
-        if thaw_js_fallback_mode() == ThawJsFallbackMode::Error {
-            return Err(format!("unsupported on thaw-js: {why}"));
-        }
-        eprintln!("FALLBACK: {why}");
+        return Err(format!("unsupported on thaw-js: {why}"));
     }
     if let Some(object) = manifest.as_object_mut() {
         // The flag must name the archive this build links. The pre-compile guess above misses

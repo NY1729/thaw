@@ -1830,7 +1830,6 @@ async function main(): Promise<void> {
 }"#,
     )
     .unwrap();
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let built = build_with_thaw_js_routing(
         &source,
         &output,
@@ -1844,9 +1843,7 @@ async function main(): Promise<void> {
         true,
         false,
         false,
-        true,
     );
-    set_thaw_js_fallback_mode_override(None);
     built.unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();

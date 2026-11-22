@@ -695,18 +695,9 @@ function main(): void {
     )
     .unwrap();
     let output = dir.join("app");
-    build_quickjs_pinned(&entry, &output, &registry).unwrap();
+    build_on_thaw_js(&entry, &output, &registry).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert!(manifest["quickjs_reasons"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|reason| {
-            reason["kind"] == "registry-fallback"
-                && reason["package"] == "case-kit"
-                && reason["function"] == "toCase"
-                && reason["line"] == 3
-        }));
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
     let result = Command::new(&output).output().unwrap();
     assert!(
         result.status.success(),

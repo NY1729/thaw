@@ -244,7 +244,7 @@ jobs:
           PARITY_AOT_FAMILIES: ${{ matrix.families }}
           PARITY_AOT_OUT: ${{ runner.temp }}/parity-aot-out-${{ matrix.shard }}
           PARITY_AOT_SCRATCH: ${{ runner.temp }}/parity-aot-scratch-${{ matrix.shard }}
-          PARITY_AOT_ENGINES: thaw-js,quickjs
+          PARITY_AOT_ENGINES: thaw-js
           PARITY_AOT_JOBS: "4"
           PARITY_AOT_RUN_TIMEOUT: "20"
           PARITY_AOT_BUILD_TIMEOUT: "600"

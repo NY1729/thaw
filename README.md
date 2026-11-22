@@ -159,8 +159,9 @@ add-ons can be embedded or placed beside the executable with
 
 Statically understood code is compiled through HIR and LLVM. Package code that
 requires general JavaScript semantics runs on the Thaw-native JavaScript evaluator
-(`thaw-js`), the default engine; see [thaw-js](#thaw-js). The embedded QuickJS layer
-remains only as a temporary fallback (`THAW_JS_ENGINE=quickjs` selects it explicitly).
+(`thaw-js`), the only engine; see [thaw-js](#thaw-js). A package or program thaw-js cannot
+serve fails the build with `unsupported on thaw-js: ...` listing every refusal; there is no QuickJS
+fallback and no environment opt-out.
 `thaw inspect` reports whether QuickJS or N-API is present, which packages were
 routed to thaw-js, and explains known fallback reasons.
 
@@ -263,10 +264,9 @@ Known gaps against Node semantics:
 ## thaw-js
 
 `thaw-js` is a Thaw-native JavaScript evaluator and the default engine for `thaw build`.
-`THAW_JS_ENGINE=quickjs` is a temporary opt-out that selects the embedded QuickJS layer; the legacy
-`THAW_JS_RUNTIME=1` and `=0` still work, and `THAW_JS_ENGINE` wins when both are set. A package is
-served by thaw-js when its bundle passes the thaw-js feature scan and every call the
-program makes is a typed call of plain data; anything else still falls back to QuickJS for now.
+A package is served by thaw-js when its bundle passes the thaw-js feature scan and every call the
+program makes is a typed call of plain data; anything else fails the build with
+`unsupported on thaw-js: ...`.
 The routed Node built-in modules are `node:events`, `node:module`, `node:path` (with
 `path/posix` and `path/win32`), `node:assert` (with `assert/strict`), `node:os`, `node:util`
 (with `util/types`), `node:constants`, `node:url`, `node:fs` (with `fs/promises`),
@@ -278,9 +278,9 @@ The routed Node built-in modules are `node:events`, `node:module`, `node:path` (
 `node:perf_hooks`, `node:zlib`, `node:net`, `node:crypto`, `node:sys` (an alias of `node:util`),
 `node:sea`, and `node:sqlite` (SQLite is linked only into programs that import it). Other `node:*`
 modules, including
-`node:cluster`, keep using QuickJS.
+`node:cluster`, are refused (the build fails).
 
-Some routed modules still fall back to QuickJS when the program uses specific names:
+Some routed modules are still refused (the build fails) when the program uses specific names:
 
 - `node:async_hooks`: the program names `createHook` (object-literal callbacks are not marshalled yet).
 - `node:perf_hooks`: the program names `mark`, `measure`, `PerformanceObserver`, `timerify`,
@@ -290,10 +290,8 @@ Some routed modules still fall back to QuickJS when the program uses specific na
   `SharedArrayBuffer`, `Atomics`, `transferList`, `postMessageToThread`, `SHARE_ENV`, ...), or uses
   `process.stdin` without constructing a `Worker`.
 
-With `THAW_JS_ENGINE=thaw-js`, the program's own `eval`/`new Function` is served on thaw-js by default;
-`THAW_JS_USER_DYNAMIC=0` keeps `eval`/`new Function` on QuickJS. `THAW_JS_RUNTIME_DEBUG=1` prints, for each package that stayed
-on QuickJS, the reason (``thaw-js routing: package `x` stays on QuickJS: ...``), and names the
-compiled functions that still call into QuickJS. `thaw inspect <executable>` prints
+The program's own `eval`/`new Function` is served on thaw-js. `THAW_JS_RUNTIME_DEBUG=1` names the
+compiled functions that still call into QuickJS in a refused build. `thaw inspect <executable>` prints
 `quickjs: true|false`, `quickjs-reason:` lines, a `thaw-js-routed:` list of packages served by
 thaw-js, and `thaw-js: package=... eligible=true|false blockers=...` lines.
 

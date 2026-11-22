@@ -326,7 +326,7 @@ fn lib_build(
     let built = scratch.path.join(&soname);
     build_with_thaw_js_routing_shared(
         &entry, &built, &[], &[], &[], &scratch_registry, &[], false, None, true, install, false, false,
-        Some(&mode), false,
+        Some(&mode),
     )?;
 
     let sha = sha256_hex(&std::fs::read(&built).map_err(|e| e.to_string())?);

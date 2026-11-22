@@ -1,8 +1,0 @@
-# npm-integration tests that still fall back to QuickJS on main. CI runs these with
-# THAW_JS_FALLBACK=warn; every other registry_add test runs with THAW_JS_FALLBACK=error,
-# so a fallback there fails the test.
-#
-# Shrink only. Delete a line when its test stops falling back (the job summary lists
-# such tests). Never add a line: a PR that adds one fails CI, so fix the test instead.
-# One test function name per line, without the tests:: prefix. Sorted.
-registry_add_exposes_real_undici_named_exports_when_enabled

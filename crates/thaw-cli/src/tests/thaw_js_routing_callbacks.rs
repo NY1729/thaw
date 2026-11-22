@@ -57,7 +57,7 @@ fn thaw_js_routing_serves_a_package_that_calls_back_into_typescript() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-cb"]));
     std::fs::remove_dir_all(&registry).unwrap();
@@ -83,7 +83,7 @@ fn thaw_js_routing_catches_a_package_error_without_linking_quickjs() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-cb"]));
     std::fs::remove_dir_all(&registry).unwrap();
@@ -106,7 +106,7 @@ fn thaw_js_routing_keeps_an_any_typed_result_of_a_callback_call_working() {
          }\n",
     );
     let output = dir.join("app");
-    thaw_js_build(&entry, &output, &registry, true);
+    thaw_js_build(&entry, &output, &registry);
     assert_eq!(thaw_js_run(&output), "[ 2, 3 ] object\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -185,7 +185,7 @@ fn thaw_js_routing_keeps_package_class_instances_in_the_thaw_js_heap() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-ctr"]));
     std::fs::remove_dir_all(&registry).unwrap();
@@ -211,7 +211,7 @@ fn thaw_js_routing_serves_a_class_instance_property_write() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-ctr"]));
     assert_eq!(thaw_js_run(&output), "42 42\n");
@@ -231,7 +231,7 @@ fn thaw_js_routing_passes_class_instances_back_into_the_package() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "12 24 b=11\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -289,7 +289,7 @@ fn thaw_js_routing_serves_a_function_returning_a_class_instance() {
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-fac"]));
     assert_eq!(thaw_js_run(&output), "v=10\n5\n");
@@ -346,7 +346,7 @@ fn thaw_js_routing_callback_sees_a_live_config_object_after_an_await() {
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-adp"]));
     std::fs::remove_dir_all(&registry).unwrap();
@@ -406,7 +406,7 @@ fn thaw_js_routing_callback_returning_uint8array_reaches_the_package_as_bytes() 
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    let manifest = thaw_js_build(&entry, &output, &registry);
     assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-bytes"]));
     std::fs::remove_dir_all(&registry).unwrap();

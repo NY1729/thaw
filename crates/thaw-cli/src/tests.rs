@@ -1929,8 +1929,7 @@ fn quickjs_manifest_detection_tracks_dynamic_host_calls() {
     ));
 }
 
-/// `eval(` stays a QuickJS marker: it is the route trigger of a thaw-js build (`THAW_JS_USER_DYNAMIC`
-/// on) and the reason a QuickJS-lane build keeps the archive, since a QuickJS build has no other engine.
+/// `eval(` stays a dynamic-code marker (the thaw-js lane serves the program's own dynamic code).
 #[test]
 fn direct_eval_source_is_a_dynamic_code_marker() {
     assert!(source_uses_quickjs(
@@ -1943,7 +1942,7 @@ fn manifest_quickjs_flag_matches_the_linked_quickjs_archive() {
     let directory =
         std::env::temp_dir().join(format!("thaw-cli-quickjs-flag-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
-    // `globalThis.fetch` is a JsValue dynamic read: it links the QuickJS archive without any bundle.
+    // `globalThis.fetch` is a JsValue dynamic read; the flag must follow whatever archive the build links.
     let cases = [
         (
             "probe",

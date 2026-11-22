@@ -57,11 +57,9 @@ fn thaw_js_routes_an_arity_overload_with_an_object_bearing_union_parameter() {
     )
     .unwrap();
     let output = dir.join("app");
-    set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let built = build_with_thaw_js_routing(
-        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
+        &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
-    set_thaw_js_fallback_mode_override(None);
     built.unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["quickjs"], false, "{manifest}");
