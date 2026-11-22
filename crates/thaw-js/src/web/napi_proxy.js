@@ -395,6 +395,20 @@
   const binaryValues = new Map();
   const promises = new Map();
   const nextReference = cap.reference;
+  // A function stays in the strong maps (its `__thaw_napi_reference_<id>` global pins it until native releases it).
+  // Any other object is weak: its id is flagged on the object natively, and its collection releases the id, which
+  // runs the native finalizers attached to its copy (the QuickJS lane's FinalizationRegistry).
+  const refIdOf = value => (typeof value === 'function' ? referenceIds.get(value) : cap.weakId(value));
+  const refValueOf = id => {
+    const value = referenceValues.get(id);
+    return value !== undefined ? value : cap.weakValue(id);
+  };
+  const refSet = (value, id) => {
+    if (typeof value === 'function') {
+      referenceIds.set(value, id);
+      referenceValues.set(id, value);
+    } else cap.weakWatch(value, id);
+  };
   const isBufferValue = value => bufferCtor !== undefined && bufferCtor.isBuffer(value);
   // ponytail: Array.prototype.slice.call on a typed array is [] in thaw-js, so the bytes are read through a Uint8Array.
   const bytesOf = value => arrayFrom(new uint8Array(value));
@@ -481,13 +495,12 @@
     if (ArrayBuffer.isView(value) && !isBufferValue(value))
       throw new TypeError('native binary values are not implemented yet');
     active = active || new WeakSet();
-    let id = referenceIds.get(value);
+    let id = refIdOf(value);
     if (id !== undefined && active.has(value)) return { __thaw_napi_ref__: id };
     const fresh = id === undefined;
     if (fresh) {
       id = nextReference();
-      referenceIds.set(value, id);
-      referenceValues.set(id, value);
+      refSet(value, id);
     }
     if (typeof value === 'function') {
       if (fresh) defineCallback(id, value);
@@ -584,7 +597,7 @@
         }
         return symbolValues.get(id);
       }
-      if (!plain && value.__thaw_napi_ref__) return referenceValues.get(value.__thaw_napi_ref__);
+      if (!plain && value.__thaw_napi_ref__) return refValueOf(value.__thaw_napi_ref__);
       if (!plain && value.__thaw_napi_handle__) return proxyForHandle(value.__thaw_napi_handle__);
       if (!plain && value.__thaw_napi_binary__) return binaryOf(value, origins, path);
       if (!plain && hasOwn(value, '__thaw_napi_promise__')) return promiseOf(value.__thaw_napi_promise__);
@@ -620,7 +633,7 @@
       if (value === null || typeof value !== 'object' || seen.has(value)) return;
       seen.add(value);
       const proxyHandle = handleOf.get(value);
-      const id = referenceIds.get(value);
+      const id = refIdOf(value);
       if (proxyHandle !== undefined && !ownsHandle(proxyHandle))
         throw new TypeError('native object belongs to another addon');
       if (proxyHandle === undefined && id === undefined) return;

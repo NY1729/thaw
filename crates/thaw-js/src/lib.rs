@@ -68,6 +68,7 @@ mod napi_graph;
 mod napi_ops;
 mod napi_props;
 mod napi_symbols;
+mod napi_weak;
 mod net;
 mod node_crypto;
 mod numfmt;
@@ -356,6 +357,14 @@ pub struct ObjData {
     closure_counted: bool,
     /// Index in the `gc_registry` object list, or `gc_registry::NONE`.
     reg_idx: Cell<usize>,
+    /// An object a native addon holds a finalizable reference to (`napi_weak`): its drop queues the release.
+    watched: Cell<bool>,
+}
+
+impl ObjData {
+    pub(crate) fn set_watched(&self) {
+        self.watched.set(true);
+    }
 }
 
 impl Drop for ObjData {
@@ -363,6 +372,9 @@ impl Drop for ObjData {
         heap_limit::credit(self.charged.get());
         crate::mem_trace::obj_dropped(self.closure_counted);
         gc_registry::unregister_obj(self);
+        if self.watched.get() {
+            napi_weak::died(self as *const ObjData as usize);
+        }
     }
 }
 
@@ -1376,6 +1388,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         charged: Cell::new(0),
         closure_counted,
         reg_idx: Cell::new(gc_registry::NONE),
+        watched: Cell::new(false),
     });
     gc_registry::register_obj(&obj);
     account(&obj);
@@ -1486,6 +1499,8 @@ pub struct Interp {
     names: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<FxHasher>>,
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
+    /// Native bundles registered in this realm (`__thaw_register_native_bundle`); the next id is this + 1.
+    pub(crate) native_bundles: u64,
     /// Read-hint slots, one per annotated identifier (`hints.rs`). Slot 0 is never used.
     ident_hints: Vec<hints::HintSlot>,
     /// Hint counters (`THAW_JS_HINT_STATS=1`).
@@ -1677,6 +1692,7 @@ impl Interp {
             loop_captures: FxMap::default(),
             names: Default::default(),
             run_id: 0,
+            native_bundles: 0,
             ident_hints: vec![hints::HintSlot::default()],
             share_preludes: !host,
             share_globals: false,
@@ -6693,6 +6709,8 @@ mod direct_eval_tests;
 mod dynamic_helper_contract_tests;
 #[cfg(test)]
 mod errors_stack_tests;
+#[cfg(test)]
+mod esm_private_tests;
 #[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]

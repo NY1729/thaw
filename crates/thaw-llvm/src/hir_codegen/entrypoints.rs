@@ -1365,7 +1365,10 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn release_terminal_handles(&self) -> IntValue<'ctx> {
-        if !self.js_handles_used() {
+        // A routed thaw-js addon wrapper holds native pins in thaw-js's own handle table and proxy caches even when
+        // compiled code names no handle; the N-API shutdown barrier stays closed until they are released.
+        let routed_napi = self.uses_napi && self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs;
+        if !self.js_handles_used() && !routed_napi {
             return self.context.bool_type().const_zero();
         }
         let count = self.builder.build_call(

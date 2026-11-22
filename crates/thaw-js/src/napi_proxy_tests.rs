@@ -19,6 +19,8 @@ thread_local! {
     static CALLS: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
     /// The napi references the fake bridge was asked to release on this thread.
     static RELEASED: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// The targets of the `release` handle operations (a collected JS object's reference id) on this thread.
+    static COLLECTED: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 fn read(ptr: *const c_char) -> String {
@@ -49,6 +51,10 @@ unsafe extern "C" fn fake_handle(
     let (operation, target, graph) = (read(operation), read(target), read(graph));
     let reply = match operation.as_str() {
         "retain_graph_handle" => r#"{"value":"73"}"#.to_string(),
+        "release" => {
+            COLLECTED.with(|c| c.borrow_mut().push(target.parse().unwrap()));
+            r#"{"kind":"value","value":true}"#.to_string()
+        }
         "symbol_metadata" => {
             let id = if target == "5" { "5" } else { "99" };
             format!(
@@ -1338,4 +1344,93 @@ fn addon_construct_uses_new_target() {
             "{ops:?}"
         );
     });
+}
+
+/// How many times the fake bridge was told to release reference `id`.
+fn collected(id: u64) -> usize {
+    COLLECTED.with(|c| c.borrow().iter().filter(|&&x| x == id).count())
+}
+
+/// The reference id the wire of `expr`'s value (an object or array expression) carries.
+fn send(it: &mut Interp, global: &str, expr: &str) -> u64 {
+    let wire = run_in(
+        it,
+        &format!("(() => {{ globalThis.{global} = {expr}; return JSON.stringify(api.argument({global})); }})()"),
+    );
+    id_of(&wire, "__thaw_napi_object__")
+}
+
+#[test]
+fn collected_object_sent_to_native_releases_its_reference_once() {
+    crate::gc::force_enabled();
+    let _bridge = fake_bridge();
+    let mut it = plain_realm();
+    let id = send(&mut it, "held", "{ value: 1 }");
+    // Reachable: no collection releases it, and the id still names the same object.
+    run_in(&mut it, "__thaw_gc()");
+    assert_eq!(collected(id), 0);
+    assert_eq!(
+        run_in(
+            &mut it,
+            &format!("api.decode({{ __thaw_napi_ref__: {id} }}) === held")
+        ),
+        "true"
+    );
+    run_in(&mut it, "globalThis.held = undefined");
+    run_in(&mut it, "__thaw_gc()");
+    assert_eq!(collected(id), 1);
+    assert_eq!(
+        run_in(
+            &mut it,
+            &format!("String(api.decode({{ __thaw_napi_ref__: {id} }}))")
+        ),
+        "undefined"
+    );
+    run_in(&mut it, "__thaw_gc(); __thaw_gc()");
+    assert_eq!(collected(id), 1, "a finalizer must not run twice");
+}
+
+#[test]
+fn cyclic_object_sent_to_native_is_released_by_the_cycle_collector() {
+    crate::gc::force_enabled();
+    let _bridge = fake_bridge();
+    let mut it = plain_realm();
+    let id = send(
+        &mut it,
+        "held",
+        "(() => { const o = { a: 1 }; o.self = o; return o; })()",
+    );
+    run_in(&mut it, "__thaw_gc()");
+    assert_eq!(collected(id), 0);
+    run_in(&mut it, "globalThis.held = undefined");
+    assert_eq!(
+        collected(id),
+        0,
+        "a cycle is not freed by reference counting"
+    );
+    run_in(&mut it, "__thaw_gc()");
+    assert_eq!(collected(id), 1);
+    run_in(&mut it, "__thaw_gc()");
+    assert_eq!(collected(id), 1);
+}
+
+#[test]
+fn function_sent_to_native_stays_pinned_by_its_callback_global() {
+    crate::gc::force_enabled();
+    let _bridge = fake_bridge();
+    let mut it = plain_realm();
+    let wire = run_in(
+        &mut it,
+        "JSON.stringify(api.argument(function () { return 1; }))",
+    );
+    let id = id_of(&wire, "__thaw_napi_function__");
+    run_in(&mut it, "__thaw_gc()");
+    assert_eq!(collected(id), 0);
+    assert_eq!(
+        run_in(
+            &mut it,
+            &format!("typeof globalThis.__thaw_napi_reference_{id}")
+        ),
+        "function"
+    );
 }
