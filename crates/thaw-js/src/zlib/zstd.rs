@@ -79,62 +79,82 @@ fn set_compress_params(cctx: &mut CCtx<'_>, params: &[(u32, i32)]) -> io::Result
     Ok(())
 }
 
+/// `ZSTD_e_continue` / `ZSTD_e_flush` / `ZSTD_e_end` as the JS side numbers them (`zlib.constants`).
+pub(super) fn directive(value: u32) -> io::Result<ZSTD_EndDirective> {
+    Ok(match value {
+        0 => ZSTD_EndDirective::ZSTD_e_continue,
+        1 => ZSTD_EndDirective::ZSTD_e_flush,
+        2 => ZSTD_EndDirective::ZSTD_e_end,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid zstd directive",
+            ))
+        }
+    })
+}
+
 /// Compresses `input` in one call (`ZSTD_compress2`, so the frame header carries the content size, as Node's sync
 /// API does). `streamed` takes the streaming path that Node's callback API uses instead: the header then has no
 /// content size.
 pub(super) fn compress(input: &[u8], params: &[(u32, i32)], streamed: bool) -> io::Result<Vec<u8>> {
-    let mut cctx = CCtx::create();
-    set_compress_params(&mut cctx, params)?;
-    if !streamed {
-        let mut output = Vec::with_capacity(zstd_safe::compress_bound(input.len()));
-        cctx.compress2(&mut output, input).map_err(libzstd_error)?;
+    if streamed {
+        // Node's streaming API writes the input with `ZSTD_e_continue` and ends the frame with `ZSTD_e_end`; libzstd
+        // leaves the content size out of the header on that path only.
+        let mut compressor = Compressor::new(params)?;
+        let mut output = compressor.write(input, ZSTD_EndDirective::ZSTD_e_continue)?;
+        output.extend(compressor.write(&[], ZSTD_EndDirective::ZSTD_e_end)?);
         return Ok(output);
     }
-    // Node's streaming API writes the input with `ZSTD_e_continue` and ends the frame with `ZSTD_e_end`; libzstd
-    // leaves the content size out of the header on that path only.
-    let mut output = Vec::new();
-    let mut scratch = vec![0u8; CCtx::out_size()];
-    let mut source = InBuffer::around(input);
-    loop {
-        stream_step(
-            &mut cctx,
-            &mut source,
-            &mut scratch,
-            &mut output,
-            ZSTD_EndDirective::ZSTD_e_continue,
-        )?;
-        if source.pos() == input.len() {
-            break;
-        }
-    }
-    while stream_step(
-        &mut cctx,
-        &mut source,
-        &mut scratch,
-        &mut output,
-        ZSTD_EndDirective::ZSTD_e_end,
-    )? != 0
-    {}
+    let mut cctx = CCtx::create();
+    set_compress_params(&mut cctx, params)?;
+    let mut output = Vec::with_capacity(zstd_safe::compress_bound(input.len()));
+    cctx.compress2(&mut output, input).map_err(libzstd_error)?;
     Ok(output)
 }
 
-/// One `ZSTD_compressStream2` call: appends what it produced to `output` and returns libzstd's remaining-work hint.
-fn stream_step(
-    cctx: &mut CCtx<'_>,
-    source: &mut InBuffer<'_>,
-    scratch: &mut [u8],
-    output: &mut Vec<u8>,
-    directive: ZSTD_EndDirective,
-) -> io::Result<usize> {
-    let (remaining, produced) = {
-        let mut sink = OutBuffer::around(&mut *scratch);
-        let remaining = cctx
-            .compress_stream2(&mut sink, source, directive)
-            .map_err(libzstd_error)?;
-        (remaining, sink.pos())
-    };
-    output.extend_from_slice(&scratch[..produced]);
-    Ok(remaining)
+/// A compressor kept across writes (`node:zlib` ZstdCompress). Every write runs `ZSTD_compressStream2` to completion
+/// for its directive and appends the bytes libzstd produced.
+pub(super) struct Compressor {
+    cctx: CCtx<'static>,
+    scratch: Vec<u8>,
+}
+
+impl Compressor {
+    pub(super) fn new(params: &[(u32, i32)]) -> io::Result<Self> {
+        let mut cctx = CCtx::create();
+        set_compress_params(&mut cctx, params)?;
+        Ok(Self {
+            cctx,
+            scratch: vec![0u8; CCtx::out_size()],
+        })
+    }
+
+    /// Feeds `input` with `directive` until libzstd has taken all of it (`ZSTD_e_continue`) or has nothing left to
+    /// emit for a flush or end.
+    pub(super) fn write(
+        &mut self,
+        input: &[u8],
+        directive: ZSTD_EndDirective,
+    ) -> io::Result<Vec<u8>> {
+        let continues = matches!(directive, ZSTD_EndDirective::ZSTD_e_continue);
+        let mut output = Vec::new();
+        let mut source = InBuffer::around(input);
+        loop {
+            let (remaining, produced) = {
+                let mut sink = OutBuffer::around(&mut self.scratch[..]);
+                let remaining = self
+                    .cctx
+                    .compress_stream2(&mut sink, &mut source, directive)
+                    .map_err(libzstd_error)?;
+                (remaining, sink.pos())
+            };
+            output.extend_from_slice(&self.scratch[..produced]);
+            if source.pos() == input.len() && (continues || remaining == 0) {
+                return Ok(output);
+            }
+        }
+    }
 }
 
 /// Decompresses every frame of `input` (`ZSTD_decompressStream`, which moves on to the next frame by itself).
@@ -145,22 +165,14 @@ pub(super) fn decompress(
     params: &[(u32, i32)],
     max_output: Option<usize>,
 ) -> io::Result<Vec<u8>> {
-    let mut dctx = DCtx::create();
-    for &(key, value) in params {
-        if key != 100 {
-            return Err(invalid_param(key));
-        }
-        dctx.set_parameter(DParameter::WindowLogMax(value as u32))
-            .map_err(|_| setting_failed())?;
-    }
+    let mut decoder = Decompressor::new(params)?;
     let mut output = Vec::new();
-    let mut scratch = vec![0u8; DCtx::out_size()];
     let mut source = InBuffer::around(input);
     let mut frame_done = false;
     loop {
         let (result, produced) = {
-            let mut sink = OutBuffer::around(&mut scratch[..]);
-            let result = dctx.decompress_stream(&mut sink, &mut source);
+            let mut sink = OutBuffer::around(&mut decoder.scratch[..]);
+            let result = decoder.dctx.decompress_stream(&mut sink, &mut source);
             (result, sink.pos())
         };
         if let Err(code) = result {
@@ -170,7 +182,7 @@ pub(super) fn decompress(
             return Err(libzstd_error(code));
         }
         frame_done |= result == Ok(0);
-        output.extend_from_slice(&scratch[..produced]);
+        output.extend_from_slice(&decoder.scratch[..produced]);
         if let Some(max) = max_output {
             if output.len() > max {
                 return Err(zlib_error(
@@ -179,8 +191,48 @@ pub(super) fn decompress(
                 ));
             }
         }
-        if source.pos() == input.len() && produced < scratch.len() {
+        if source.pos() == input.len() && produced < decoder.scratch.len() {
             return Ok(output);
+        }
+    }
+}
+
+/// A decompressor kept across writes (`node:zlib` ZstdDecompress). Output is whatever the input completed so far.
+pub(super) struct Decompressor {
+    dctx: DCtx<'static>,
+    scratch: Vec<u8>,
+}
+
+impl Decompressor {
+    pub(super) fn new(params: &[(u32, i32)]) -> io::Result<Self> {
+        let mut dctx = DCtx::create();
+        for &(key, value) in params {
+            if key != 100 {
+                return Err(invalid_param(key));
+            }
+            dctx.set_parameter(DParameter::WindowLogMax(value as u32))
+                .map_err(|_| setting_failed())?;
+        }
+        Ok(Self {
+            dctx,
+            scratch: vec![0u8; DCtx::out_size()],
+        })
+    }
+
+    pub(super) fn write(&mut self, input: &[u8]) -> io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        let mut source = InBuffer::around(input);
+        loop {
+            let (result, produced) = {
+                let mut sink = OutBuffer::around(&mut self.scratch[..]);
+                let result = self.dctx.decompress_stream(&mut sink, &mut source);
+                (result, sink.pos())
+            };
+            result.map_err(libzstd_error)?;
+            output.extend_from_slice(&self.scratch[..produced]);
+            if source.pos() == input.len() && produced < self.scratch.len() {
+                return Ok(output);
+            }
         }
     }
 }

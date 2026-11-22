@@ -240,6 +240,28 @@ pub(crate) fn install(it: &mut Interp) {
         ))
     });
     g.declare("__thaw_zlib_stream_drop", f, true);
+    #[cfg(feature = "zstd")]
+    {
+        let f = it.native(|it, _, a| {
+            let h = it.num(&arg(a, 0)) as u32;
+            let input = hex_decode(&it.to_str(&arg(a, 1)));
+            let directive = it.num(&arg(a, 2)) as u32;
+            let r = STREAMS.with(|m| {
+                let mut m = m.borrow_mut();
+                if directive == 2 {
+                    m.remove(&h).map(|mut s| s.zstd_write(&input, directive))
+                } else {
+                    m.get_mut(&h).map(|s| s.zstd_write(&input, directive))
+                }
+            });
+            match r {
+                None => it.throw_error("Error", "unknown stream handle"),
+                Some(Ok(b)) => Ok(Value::str(&hex_encode(&b))),
+                Some(Err(e)) => it.throw_error("Error", &e.to_string()),
+            }
+        });
+        g.declare("__thaw_zlib_zstd_stream_write", f, true);
+    }
     let f = it.native(|it, _, a| {
         let (op, format) = (
             it.to_str(&arg(a, 0)).to_string(),
@@ -453,6 +475,10 @@ enum WebZlibWriter {
     DeflateDecoder(Inflate),
     BrotliEncoder(Box<brotli::CompressorWriter<Vec<u8>>>),
     BrotliDecoder(Box<brotli::DecompressorWriter<Vec<u8>>>),
+    #[cfg(feature = "zstd")]
+    ZstdEncoder(zstd::Compressor),
+    #[cfg(feature = "zstd")]
+    ZstdDecoder(zstd::Decompressor),
 }
 
 /// Raw-deflate streaming encoder on top of `flate2::Compress` (flate2's write-side `DeflateEncoder` cannot take a
@@ -636,6 +662,14 @@ impl WebZlibStream {
             ("decompress", "brotli") => WebZlibWriter::BrotliDecoder(Box::new(
                 brotli::DecompressorWriter::new(Vec::new(), 4096),
             )),
+            #[cfg(feature = "zstd")]
+            ("compress", "zstd") => {
+                WebZlibWriter::ZstdEncoder(zstd::Compressor::new(&options.params)?)
+            }
+            #[cfg(feature = "zstd")]
+            ("decompress", "zstd") => {
+                WebZlibWriter::ZstdDecoder(zstd::Decompressor::new(&options.params)?)
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -663,7 +697,28 @@ impl WebZlibStream {
             WebZlibWriter::DeflateDecoder(writer) => write!(writer),
             WebZlibWriter::BrotliEncoder(writer) => write!(writer),
             WebZlibWriter::BrotliDecoder(writer) => write!(writer),
+            #[cfg(feature = "zstd")]
+            WebZlibWriter::ZstdEncoder(writer) => writer.write(
+                input,
+                zstd_safe::zstd_sys::ZSTD_EndDirective::ZSTD_e_continue,
+            )?,
+            #[cfg(feature = "zstd")]
+            WebZlibWriter::ZstdDecoder(writer) => writer.write(input)?,
         })
+    }
+
+    /// One zstd write with an explicit directive (0 continue, 1 flush, 2 end); 2 also retires the stream.
+    #[cfg(feature = "zstd")]
+    fn zstd_write(&mut self, input: &[u8], directive: u32) -> io::Result<Vec<u8>> {
+        let directive = zstd::directive(directive)?;
+        match &mut self.writer {
+            WebZlibWriter::ZstdEncoder(writer) => writer.write(input, directive),
+            WebZlibWriter::ZstdDecoder(writer) => writer.write(input),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a zstd stream",
+            )),
+        }
     }
 
     fn finish(self, input: &[u8]) -> io::Result<Vec<u8>> {
@@ -693,6 +748,12 @@ impl WebZlibStream {
                     io::Error::new(io::ErrorKind::InvalidData, "invalid Brotli stream")
                 })?
             }
+            #[cfg(feature = "zstd")]
+            WebZlibWriter::ZstdEncoder(mut writer) => {
+                writer.write(input, zstd_safe::zstd_sys::ZSTD_EndDirective::ZSTD_e_end)?
+            }
+            #[cfg(feature = "zstd")]
+            WebZlibWriter::ZstdDecoder(mut writer) => writer.write(input)?,
         };
         Ok(output)
     }

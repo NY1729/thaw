@@ -2426,3 +2426,87 @@ fn zlib_zstd_option_errors_have_node_classes_and_messages() {
         r#"[["RangeError","ERR_ZSTD_INVALID_PARAM","999 is not a valid zstd parameter"],["TypeError","ERR_INVALID_ARG_TYPE","The \"options.params[key]\" property must be of type number. Received type string ('x')"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],["RangeError","ERR_ZSTD_INVALID_PARAM","101 is not a valid zstd parameter"],["RangeError","ERR_BUFFER_TOO_LARGE","Cannot create a Buffer larger than 10 bytes"]]"#
     );
 }
+
+// node:zlib zstd (PR-2: streams). Expected values were recorded from Node 22.23.1 (libzstd 1.5.7).
+
+#[cfg(feature = "zstd")]
+const ZSTD_STREAM_FIXTURE: &str = "28b52ffd0058f000006368756e6b306368756e6b316368756e6b326368756e6b336368756e6b342100007461696c";
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_stream_classes_are_transforms_and_need_new() {
+    let result = zstd_run(
+        "zstd_stream_classes",
+        "var stream = require('node:stream'); var c = zlib.createZstdCompress(), d = zlib.createZstdDecompress(); var threw; try { zlib.ZstdCompress(); threw = 'no'; } catch (e) { threw = e.name + ': ' + e.message; } return [c instanceof zlib.ZstdCompress, d instanceof zlib.ZstdDecompress, c instanceof stream.Transform, d instanceof stream.Transform, c.constructor.name, d.constructor.name, threw];",
+    );
+    assert_eq!(
+        result,
+        r#"[true,true,true,true,"ZstdCompress","ZstdDecompress","TypeError: Class constructor ZstdCompress cannot be invoked without 'new'"]"#
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_stream_piped_round_trip_chunked_one_byte_and_large() {
+    let result = zstd_run(
+        "zstd_stream_round_trip",
+        "function collect(s) { return new Promise(function (resolve, reject) { var out = []; s.on('data', function (c) { out.push(c); }); s.on('end', function () { resolve(Buffer.concat(out)); }); s.on('error', reject); }); } var text = Buffer.from('the quick brown fox '.repeat(60000)); var c = zlib.createZstdCompress(), d = zlib.createZstdDecompress(); c.pipe(d); var result = collect(d); for (var i = 0; i < text.length; i += 100000) c.write(text.subarray(i, i + 100000)); c.end(); var big = await result; var small = Buffer.from('hello zstd'); var c2 = zlib.createZstdCompress(), d2 = zlib.createZstdDecompress(); c2.pipe(d2); var r2 = collect(d2); for (var j = 0; j < small.length; j++) c2.write(small.subarray(j, j + 1)); c2.end(); var s = await r2; var frame = zlib.zstdCompressSync(small); var d3 = zlib.createZstdDecompress(); var r3 = collect(d3); for (var k = 0; k < frame.length; k++) d3.write(frame.subarray(k, k + 1)); d3.end(); var s3 = await r3; return [big.length, big.equals(text), s.toString(), s3.toString()];",
+    );
+    assert_eq!(result, r#"[1200000,true,"hello zstd","hello zstd"]"#);
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_stream_flush_emits_a_decodable_prefix() {
+    let result = zstd_run(
+        "zstd_stream_flush",
+        "var c = zlib.createZstdCompress(), parts = []; c.on('data', function (x) { parts.push(x); }); c.write('chunk0'); await new Promise(function (r) { c.flush(r); }); var flushed = Buffer.concat(parts).toString('hex'); var decoded = zlib.zstdDecompressSync(Buffer.concat(parts)).toString(); c.end('tail'); await new Promise(function (r) { c.on('end', r); }); return [flushed, decoded, Buffer.concat(parts).toString('hex')];",
+    );
+    assert_eq!(
+        result,
+        r#"["28b52ffd00583000006368756e6b30","chunk0","28b52ffd00583000006368756e6b302100007461696c"]"#
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_stream_matches_node_frame_bytes() {
+    let result = zstd_run(
+        "zstd_stream_bytes",
+        "var c = zlib.createZstdCompress(), parts = []; c.on('data', function (x) { parts.push(x); }); for (var i = 0; i < 5; i++) c.write('chunk' + i); await new Promise(function (r) { c.flush(r); }); c.end('tail'); await new Promise(function (r) { c.on('end', r); }); return [Buffer.concat(parts).toString('hex')];",
+    );
+    assert_eq!(result, format!(r#"["{ZSTD_STREAM_FIXTURE}"]"#));
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_stream_corrupt_input_emits_error() {
+    let result = zstd_run(
+        "zstd_stream_error",
+        "var d = zlib.createZstdDecompress(); return [await new Promise(function (resolve) { d.on('error', function (e) { resolve([e.name, e.code, e.errno, e.message]); }); d.on('data', function () {}); d.end(Buffer.from('not zstd data')); })];",
+    );
+    assert_eq!(
+        result,
+        r#"[["Error","ZSTD_error_prefix_unknown",10,"Unknown frame descriptor"]]"#
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_stream_async_iteration_decodes() {
+    let result = zstd_run(
+        "zstd_stream_iter",
+        "var d = zlib.createZstdDecompress(); d.end(zlib.zstdCompressSync(Buffer.from('async iterated'))); var text = ''; for await (var chunk of d) text += chunk.toString(); return [text];",
+    );
+    assert_eq!(result, r#"["async iterated"]"#);
+}
+
+#[cfg(not(feature = "zstd"))]
+#[test]
+fn zlib_zstd_stream_classes_are_absent_without_the_native() {
+    let result = zstd_run(
+        "zstd_stream_absent",
+        "return [typeof zlib.createZstdCompress, typeof zlib.createZstdDecompress, typeof zlib.ZstdCompress, typeof zlib.ZstdDecompress];",
+    );
+    assert_eq!(result, r#"["undefined","undefined","undefined","undefined"]"#);
+}
