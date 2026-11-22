@@ -4338,7 +4338,6 @@ fn lane_proof_dynamic_primitive_string_quickjs() {
 }
 
 #[test]
-#[ignore = "needs compile_load_script to route non-class scripts to thaw_tjs_load_script (compiler lane removal plan, PR2)"]
 fn lane_proof_dynamic_primitive_string_thaw_js() {
     assert_eq!(
         compile_and_run_lane(lane_proof_source(), "lane_proof_tjs", Lane::ThawJs),
