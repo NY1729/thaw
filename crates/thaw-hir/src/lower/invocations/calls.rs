@@ -4781,7 +4781,13 @@ impl<'a> FnLowerer<'a> {
                                 && i > 0
                                 && Self::type_holds_any(declared))
                         {
-                            self.coerce_primitive_array_argument_aliasing(value, declared)
+                            let outer = std::mem::replace(
+                                &mut self.alias_arrays_only,
+                                matches!(dynamic_symbol(&callee_name), Some((DynamicBackend::ThawJs, symbol)) if !symbol.starts_with('$')),
+                            );
+                            let coerced = self.coerce_primitive_array_argument_aliasing(value, declared);
+                            self.alias_arrays_only = outer;
+                            coerced
                         } else if signature.as_ref().is_some_and(|sig| sig.is_extern)
                             && dynamic_symbol(&callee_name).is_none()
                         {

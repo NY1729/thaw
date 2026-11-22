@@ -4551,6 +4551,61 @@ fn thaw_js_array_parameter_function_value_takes_a_live_view() {
 }
 
 #[test]
+fn thaw_js_only_array_containing_parameters_take_a_live_view() {
+    fn hex(text: &str) -> String {
+        text.bytes().map(|byte| format!("{byte:02x}")).collect()
+    }
+    fn main_body(param: &str, argument: &str) -> String {
+        let name = format!("__thaw_typed_tjs_{}", hex("k::probe"));
+        let program = lower(&format!(
+            r#"
+            declare function {name}(value: {param}): boolean;
+            function main(): void {{
+                {name}({argument});
+            }}
+            "#
+        ));
+        let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+        format!("{:?}", main.body)
+    }
+    for (param, argument) in [
+        ("Json", "new Map<string, number>()"),
+        ("Json", "new Set<number>()"),
+        ("Json", "new Date(0)"),
+        ("Json", "/x/"),
+        ("Map<string, number>", "new Map<string, number>()"),
+        ("Set<number>", "new Set<number>()"),
+        ("Date", "new Date(0)"),
+        ("RegExp", "/x/"),
+        ("Uint8Array", "new Uint8Array(2)"),
+    ] {
+        let body = main_body(param, argument);
+        assert!(!body.contains("__thaw_array_with_native_view"), "{param}: {body}");
+        assert!(!body.contains("__thaw_collection_with_native_view"), "{param}: {body}");
+        assert!(!body.contains("registerNativeCallbackGraph"), "{param}: {body}");
+        assert!(param == "Json" || !body.contains("params: [Json]"), "{param}: {body}");
+    }
+    // Arrays and aggregates holding an array stay live (through a function value, as the
+    // function-value test above).
+    for (param, init) in [("number[]", "[1, 2]"), ("{ values: number[] }", "{ values: [1] }")] {
+        let name = format!("__thaw_typed_tjs_{}", hex("k::probe"));
+        let program = lower(&format!(
+            r#"
+            declare function {name}(value: {param}): boolean;
+            function main(): void {{
+                const probe: (value: {param}) => boolean = {name};
+                const value: {param} = {init};
+                probe(value);
+            }}
+            "#
+        ));
+        let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+        let body = format!("{:?}", main.body);
+        assert!(body.contains("params: [Json]"), "{param}: {body}");
+    }
+}
+
+#[test]
 fn ambient_js_export_passed_to_promisify_is_fetched_by_registry_key_on_both_backends() {
     fn hex(text: &str) -> String {
         text.bytes().map(|byte| format!("{byte:02x}")).collect()
