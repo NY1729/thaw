@@ -5399,6 +5399,15 @@ fn primitive_reason(packet: &thaw_arena::exception::ExceptionPacket) -> Option<V
     })
 }
 
+/// The text of an arena string. A string with an embedded NUL has a recorded length (`owned_string`), which a
+/// C-string read would cut at the NUL; error messages may hold NULs.
+///
+/// # Safety
+/// `pointer` must be non-null and an arena-owned or NUL-terminated string.
+unsafe fn owned_text_lossy(pointer: *const c_char) -> String {
+    String::from_utf8_lossy(thaw_arena::NativeStr::from_ptr(pointer).to_bytes()).into_owned()
+}
+
 /// Unwrap a callback result string: a thrown error (arena packet or `\u{2}` framing) becomes a JS throw.
 pub(crate) fn take_callback_result(
     it: &mut Interp,
@@ -5408,9 +5417,7 @@ pub(crate) fn take_callback_result(
     let out = if result.is_null() {
         String::new()
     } else {
-        let s = unsafe { CStr::from_ptr(result) }
-            .to_string_lossy()
-            .into_owned();
+        let s = unsafe { owned_text_lossy(result) };
         unsafe { thaw_arena::destroy_string(result) };
         s
     };
@@ -5989,9 +5996,7 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
     let out = if result.is_null() {
         String::new()
     } else {
-        let s = unsafe { CStr::from_ptr(result) }
-            .to_string_lossy()
-            .into_owned();
+        let s = unsafe { owned_text_lossy(result) };
         unsafe { thaw_arena::destroy_string(result) };
         s
     };
@@ -7552,16 +7557,21 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
 }
 
 fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, String>) {
-    let text = |s: String| CString::new(s.replace('\0', "\u{FFFD}")).unwrap();
+    // JSON text has no raw NUL; an error text may, so it travels as an arena string that records its length
     let (json, error) = match result {
-        Ok(json) => (Some(text(json)), None),
-        Err(error) => (None, Some(text(error))),
+        Ok(json) => (
+            Some(CString::new(json.replace('\0', "\u{FFFD}")).unwrap()),
+            ptr::null_mut(),
+        ),
+        Err(error) => (None, thaw_arena::owned_string(error)),
     };
     settle(
         native,
         json.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
-        error.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+        error,
     );
+    // SAFETY: `error` is null or the arena string made above, no longer used by the settler.
+    unsafe { thaw_arena::destroy_string(error) };
 }
 
 /// Drain the jobs of every package with a watched promise, then settle the watches that left Pending.
