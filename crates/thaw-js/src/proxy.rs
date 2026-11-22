@@ -253,7 +253,26 @@ impl Interp {
         let all: Vec<Value> = if trap.is_callable() {
             let r = self.call(&trap, &handler, std::slice::from_ref(&target))?;
             self.sparse_unsupported(&r)?;
-            self.array_items(&r)
+            let items = self.array_items(&r);
+            // CreateListFromArrayLike(.., string | symbol), then no duplicates
+            let mut seen: Vec<Rc<str>> = Vec::new();
+            for item in &items {
+                let is_symbol = matches!(item, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. }));
+                if !matches!(item, Value::Str(_)) && !is_symbol {
+                    let text = self.to_str(item);
+                    return self
+                        .throw_error("TypeError", &format!("{text} is not a valid property name"));
+                }
+                let key = self.key_of(item);
+                if seen.contains(&key) {
+                    return self.throw_error(
+                        "TypeError",
+                        "'ownKeys' on proxy: trap returned duplicate entries",
+                    );
+                }
+                seen.push(key);
+            }
+            items
         } else if enumerable_only {
             self.own_keys(&target)
                 .into_iter()
@@ -266,7 +285,12 @@ impl Interp {
             let names = self.get(&object, "getOwnPropertyNames")?;
             let r = self.call(&names, &object, std::slice::from_ref(&target))?;
             self.sparse_unsupported(&r)?;
-            self.array_items(&r)
+            let mut keys = self.array_items(&r);
+            // the target's symbol keys follow its string keys
+            let symbols = self.get(&object, "getOwnPropertySymbols")?;
+            let r = self.call(&symbols, &object, std::slice::from_ref(&target))?;
+            keys.extend(self.array_items(&r));
+            keys
         };
         if !enumerable_only {
             return Ok(Some(all));

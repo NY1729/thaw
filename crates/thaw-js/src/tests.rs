@@ -11457,6 +11457,21 @@ fn object_forms_throw_when_a_proxy_trap_refuses() {
     );
 }
 
+/// A Proxy's own keys include the target's symbols; an `ownKeys` trap result is validated (node 22).
+#[test]
+fn proxy_own_keys_list_symbols_and_validate_the_trap_result() {
+    assert_eq!(
+        one(r#"const symbolic = Proxy.revocable({ plain: 1 }, {}).proxy;
+          Object.defineProperty(symbolic, Symbol.iterator, { value: 9 });
+          const invalid = Proxy.revocable({ a: 1 }, { ownKeys: () => ["a", "a"] }).proxy;
+          try { Reflect.ownKeys(invalid); } catch (e) { console.log(e.constructor.name, e.message); }
+          const bad = new Proxy({}, { ownKeys: () => [1] });
+          try { Reflect.ownKeys(bad); } catch (e) { console.log(e.constructor.name, e.message); }
+          console.log(Object.getOwnPropertySymbols(symbolic).length, typeof Reflect.ownKeys(symbolic)[1], Reflect.ownKeys(symbolic).length, Object.keys(symbolic).join());"#),
+        "TypeError 'ownKeys' on proxy: trap returned duplicate entries|TypeError 1 is not a valid property name|1 symbol 2 plain"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {
