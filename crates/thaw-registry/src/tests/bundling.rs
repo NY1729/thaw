@@ -2029,6 +2029,30 @@ module.exports = { value: 2, run: async () => { const base = require('./leaf.mjs
 }
 
 #[test]
+fn commonjs_require_of_query_specifier_is_module_not_found() {
+    // Node 22 (probed): require / createRequire / require.resolve of `./x?q` are
+    // MODULE_NOT_FOUND (a query is an `import` feature) and load nothing.
+    let root = temp_registry("cjs-require-query-not-found");
+    let modules = root.join("node_modules");
+    let package = modules.join("require-query-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), r#"const t = (f) => { try { f(); return 'ok'; } catch (e) { return e.code; } };
+module.exports = { run: () => {
+  const out = [t(() => require('./leaf.mjs?one')), t(() => require('node:module').createRequire(__filename)('./leaf.mjs?two')), t(() => require.resolve('./leaf.mjs?one')), t(() => require('./dep.cjs#h'))];
+  const base = require('./leaf.mjs');
+  return out.concat([base.value, globalThis.leafRuns, globalThis.depRuns || 0]);
+} };"#).unwrap();
+    fs::write(package.join("leaf.mjs"), "globalThis.leafRuns = (globalThis.leafRuns || 0) + 1; export const value = 0;").unwrap();
+    fs::write(package.join("dep.cjs"), "globalThis.depRuns = (globalThis.depRuns || 0) + 1; module.exports = {};").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "require-query-pkg", &package, "index.cjs").unwrap();
+    assert_eq!(
+        run_js_probe(&bundle, "exports.run()"),
+        r#"["MODULE_NOT_FOUND","MODULE_NOT_FOUND","MODULE_NOT_FOUND","MODULE_NOT_FOUND",0,1,0]"#
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
     // Unrun regression: the CJS factory starts after its native importer
     // links, then dynamically imports another native module through the same
