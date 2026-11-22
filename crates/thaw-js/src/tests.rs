@@ -13044,3 +13044,26 @@ fn date_constructor_converts_a_single_value_like_the_spec() {
         "1704067200500|1704067200000|5|RangeError|TypeError|TypeError|1"
     );
 }
+
+/// An object literal's `__proto__: v` (identifier or string key) sets the prototype for an object or null and is
+/// otherwise ignored; computed and shorthand `__proto__` stay own keys. highlight.js's `MODES` relies on it.
+#[test]
+fn object_literal_proto_key_sets_the_prototype() {
+    let expected = r#""a"|["a"]|true|false|"b,inh"|["b"]|1|true|["__proto__"]|["__proto__"]|["c"]|true|["d"]|true|["__proto__"]|true"#;
+    assert_eq!(
+        one_sloppy(
+            r####"const o = { __proto__: null, a: 1 };
+const p = { __proto__: { inh: 1 }, b: 2 };
+const q = { ['__proto__']: 5 }; const k = '__proto__'; const r = { [k]: 6 };
+const s = { __proto__: 7, c: 1 };
+const t = { "__proto__": null, d: 1 };
+const u = { __proto__ };  var __proto__ = 3;
+const keys = x => { const a=[]; for (const key in x) a.push(key); return a.join(); };
+console.log([keys(o), Object.keys(o), Object.getPrototypeOf(o) === null, '__proto__' in o,
+ keys(p), Object.keys(p), p.inh, Object.getPrototypeOf(q) === Object.prototype, Object.keys(q), Object.keys(r),
+ Object.keys(s), Object.getPrototypeOf(s) === Object.prototype, Object.keys(t), Object.getPrototypeOf(t) === null, Object.keys(u), Object.getPrototypeOf(u)===Object.prototype].map(x=>JSON.stringify(x)).join('|'));
+"####
+        ),
+        expected
+    );
+}

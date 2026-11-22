@@ -5205,6 +5205,11 @@ impl Interp {
                             a::Prop::KeyValue(kv) => {
                                 let k = self.prop_name(&kv.key, scope)?;
                                 let v = self.eval(&kv.value, scope)?;
+                                // `__proto__: v` (identifier or string key, not computed) sets the prototype
+                                // when `v` is an object or null, and is otherwise ignored; it never creates a key
+                                if literal_proto_entry(&obj, &kv.key, &k, &v) {
+                                    continue;
+                                }
                                 if is_anonymous_fn_def(&kv.value) {
                                     name_anonymous_fn(&v, &self.fn_name_of_key(&k));
                                 }
@@ -7065,4 +7070,20 @@ impl Drop for Interp {
         host::native_async_hooks_release(self as *mut Interp);
         self.teardown();
     }
+}
+
+/// `{ __proto__: v }` (identifier or string key, not computed): an object or null becomes the literal's prototype,
+/// anything else is ignored, and no key is created. Returns whether `key` was that entry. Out of line so the
+/// (recursion-deep) `eval` frame does not grow.
+#[inline(never)]
+fn literal_proto_entry(obj: &Obj, key: &a::PropName, name: &str, v: &Value) -> bool {
+    if name != "__proto__" || matches!(key, a::PropName::Computed(_)) {
+        return false;
+    }
+    match v {
+        Value::Object(proto) => *obj.proto.borrow_mut() = Some(proto.clone()),
+        Value::Null => *obj.proto.borrow_mut() = None,
+        _ => {}
+    }
+    true
 }
