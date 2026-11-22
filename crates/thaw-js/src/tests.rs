@@ -12690,6 +12690,195 @@ fn symbol_to_number_throws_type_error_not_nan() {
     );
 }
 
+/// `thaw_tjs_dynamic_object_query` snapshots a Set-like handle's keys (size/has/keys protocol) and rejects
+/// a value that breaks the protocol, as QuickJS `thaw_js_dynamic_object_query` does.
+#[test]
+fn set_like_snapshot_validates_the_protocol_and_lists_the_keys() {
+    use crate::host::{set_like_snapshot_text, thaw_tjs_register};
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "slk/index.js": function(module, exports, require) {
+  exports.good = function () { return { size: 2, has: function () { return true; }, keys: function () { return ['a', 7][Symbol.iterator](); } }; };
+  exports.bad = function () { return { size: -1, has: function () {}, keys: function () {} }; };
+}, };
+var __thaw_bundle_require_maps = { "slk/index.js": {}, };
+var __thaw_bundle_entry_key = "slk/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("slk").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    let handle = |export: &str| {
+        typed_call(&format!("\u{2}slk::{export}"), "[]")
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    assert_eq!(
+        set_like_snapshot_text(handle("good")),
+        Ok(r#"{"7":true,"a":true}"#.to_string())
+    );
+    let error = set_like_snapshot_text(handle("bad")).unwrap_err();
+    assert!(error.contains("Set-like object requires"), "{error}");
+}
+
+/// A typed call that throws an object leaves that exact object behind a handle for compiled code to rethrow
+/// (`thaw_tjs_take_thrown_handle`); a call that succeeds or fails for another reason leaves none.
+#[test]
+fn a_failed_typed_call_hands_over_the_thrown_object() {
+    use crate::host::{handle_value, thaw_tjs_register, thaw_tjs_take_thrown_handle};
+    use std::ffi::CString;
+    let bundle = r#"module.exports = (function(require){
+var __thaw_bundle_factories = { "thr/index.js": function(module, exports, require) {
+  var kept;
+  exports.boom = function () { kept = new Error('teapot'); kept.status = 418; throw kept; };
+  exports.same = function () { return kept.status; };
+  exports.fine = function () { return 1; };
+}, };
+var __thaw_bundle_require_maps = { "thr/index.js": {}, };
+var __thaw_bundle_entry_key = "thr/index.js";
+})(globalThis.require);"#;
+    let (name, source) = (CString::new("thr").unwrap(), CString::new(bundle).unwrap());
+    assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    assert!(typed_call("thr::boom", "[]").is_err());
+    let id = thaw_tjs_take_thrown_handle();
+    assert_ne!(id, 0);
+    let Some(Value::Object(thrown)) = handle_value(id as u64) else {
+        panic!("the thrown handle does not name an object");
+    };
+    let Ok(Value::Number(status)) = crate::host::with_package(crate::host::default_realm(), |p| {
+        Ok::<_, crate::host::HostError>(
+            p.interp
+                .get(&Value::Object(thrown.clone()), "status")
+                .unwrap_or(Value::Undefined),
+        )
+    }) else {
+        panic!("status unreadable");
+    };
+    assert_eq!(status, 418.0);
+    // taking it clears it; a success leaves none
+    assert_eq!(thaw_tjs_take_thrown_handle(), 0);
+    assert!(typed_call("thr::fine", "[]").is_ok());
+    assert_eq!(thaw_tjs_take_thrown_handle(), 0);
+}
+
+/// finally on a fulfilled promise: the thenFinally/valueThunk promises are children of the then result. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_finally() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.resolve(1).finally(function () { L('f'); }).then(function () { L('cb'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|init #4 PROMISE trig=#3|before #3|f|init #5 PROMISE trig=#3|resolve #5|init #6 PROMISE trig=#5|after #3|before #6|resolve #6|after #6|before #3|init #7 PROMISE trig=#6|after #3|before #7|resolve #3|resolve #7|after #7|before #4|cb|resolve #4|after #4"
+    );
+}
+
+/// finally on a rejected promise followed by catch. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_finally_reject() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.reject(1).finally(function () { L('f'); }).catch(function () { L('c'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|init #4 PROMISE trig=#3|before #3|f|init #5 PROMISE trig=#3|resolve #5|init #6 PROMISE trig=#5|after #3|before #6|resolve #6|after #6|before #3|init #7 PROMISE trig=#6|after #3|before #7|resolve #3|resolve #7|after #7|before #4|c|resolve #4|after #4"
+    );
+}
+
+/// finally whose callback returns a promise. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_finally_return() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.resolve(1).finally(function () { return Promise.resolve(2); }).then(function () { L('cb'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|resolve #1|init #3 PROMISE trig=#1|init #4 PROMISE trig=#3|before #3|init #5 PROMISE trig=#3|resolve #5|init #6 PROMISE trig=#5|after #3|before #6|resolve #6|after #6|before #3|init #7 PROMISE trig=#6|after #3|before #7|resolve #3|resolve #7|after #7|before #4|cb|resolve #4|after #4"
+    );
+}
+
+/// race().finally(). Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_race_finally() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.race([1, 2]).finally(function () { L('f'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|init #3 PROMISE trig=#2|resolve #3|init #4 PROMISE trig=#3|init #5 PROMISE trig=#2|resolve #5|init #6 PROMISE trig=#5|init #7 PROMISE trig=#1|before #4|resolve #1|resolve #4|after #4|before #6|resolve #6|after #6|before #7|f|init #8 PROMISE trig=#7|resolve #8|init #9 PROMISE trig=#8|after #7|before #9|resolve #9|after #9|before #7|init #10 PROMISE trig=#9|after #7|before #10|resolve #7|resolve #10|after #10"
+    );
+}
+
+/// any and all each with one element. Expected: Node 22.23.1 trace (`node` on the same script).
+#[test]
+fn async_hooks_promise_any_all() {
+    let src = r#"var A = __thaw_async_hooks_exports; var L = function (s) { console.log(s); };
+var t = new Map();
+
+var n = function (id) { if (!t.has(id)) t.set(id, t.size + 1); return '#' + t.get(id); };
+A.createHook({
+  init: function (id, type, trig) { L('init ' + n(id) + ' ' + type + ' trig=' + n(trig)); },
+  before: function (id) { L('before ' + n(id)); },
+  after: function (id) { L('after ' + n(id)); },
+  promiseResolve: function (id) { L('resolve ' + n(id)); },
+}).enable();
+Promise.any([4]).then(function () { L('y'); }); Promise.all([5]).then(function () { L('z'); });"#;
+    assert_eq!(
+        run_loop(src),
+        "init #1 PROMISE trig=#2|init #3 PROMISE trig=#2|resolve #3|init #4 PROMISE trig=#3|init #5 PROMISE trig=#1|init #6 PROMISE trig=#2|init #7 PROMISE trig=#2|resolve #7|init #8 PROMISE trig=#7|init #9 PROMISE trig=#6|before #4|resolve #1|resolve #4|after #4|before #8|resolve #6|resolve #8|after #8|before #5|y|resolve #5|after #5|before #9|z|resolve #9|after #9"
+    );
+}
+
+/// A `globalThis.__x` slot a package defines for itself is no blocker (Node reads it as undefined too), while an
+/// unknown `globalThis.__thaw_*` host member still is. (`__thaw_gc` is a provided host global since the N-API
+/// finalizer work; `scan_accepts_thaw_gc_and_still_blocks_unknown_host_globals` pins that.)
+#[test]
+fn scan_tolerates_package_own_underscore_globals_but_not_host_internals() {
+    let scan =
+        |src: &str| crate::scan::scan_bundle(&crate::scan::script_as_bundle(src)).expect("scans");
+    let report = scan("module.exports.run = () => globalThis.__identityOriginal;");
+    assert!(report.is_clean(), "blockers: {:?}", report.blockers);
+    let report = scan("module.exports.run = () => globalThis.__thaw_no_such_host_member;");
+    assert!(
+        report
+            .blockers
+            .contains_key("builtin:globalThis.__thaw_no_such_host_member"),
+        "blockers: {:?}",
+        report.blockers
+    );
+}
+
 #[test]
 fn load_script_sees_the_live_handle_reference_counts() {
     use crate::host::{thaw_tjs_load_script, thaw_tjs_release_handle};

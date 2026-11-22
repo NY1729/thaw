@@ -62,6 +62,8 @@ struct Loader {
     origins: Option<Value>,
     /// Keys of the ESM-converted modules (those with an export graph); every other key is CommonJS.
     esm_keys: HashSet<String>,
+    /// The registry's export graph of each ES module key (`__thaw_bundle_export_graphs`).
+    graphs: serde_json::Map<String, serde_json::Value>,
     /// The CommonJS export names of each key (`__thaw_bundle_cjs_export_names`).
     cjs_names: HashMap<String, Vec<String>>,
     /// Keys whose factory runs with `this` = its exports (`__thaw_bundle_commonjs_contexts`); `None` when the
@@ -77,6 +79,9 @@ struct Loader {
     failed: RefCell<HashMap<String, Value>>,
     /// ES-module keys whose static graph `link_check` found fully resolvable.
     linked: RefCell<HashSet<String>>,
+    /// ES-module keys with a module record (in `cache`) whose factory has not started: a cycle peer reached their
+    /// exports through `require.peek` (an export that resolves to a binding of a module not evaluated yet).
+    declared: RefCell<HashSet<String>>,
     /// The keys whose factory is running right now (a synchronous evaluation in progress). A `require` that
     /// re-enters one across the CommonJS/ES boundary is a cycle Node refuses (`cycle_refused`).
     loading: RefCell<HashSet<String>>,
@@ -537,7 +542,9 @@ fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
 /// resolve before ANY module body runs. A failure is `ERR_MODULE_NOT_FOUND` (as `import()` of an unmapped spec), cached
 /// for the importing module and the modules above it on the walk (the same Error object each time, and it
 /// stays cached when the file appears later); unrelated modules are untouched and load normally.
-// ponytail: named-export existence (`does not provide an export named`) is not checked here, only resolution.
+/// The same walk checks each module's named imports and re-exports against its ES-module targets' export graphs
+/// (`esm_link`); that needs the registry's export graphs, so a hand-registered payload without them is only resolved.
+// ponytail: a named import from a CommonJS target is not checked (Node uses cjs-module-lexer's static names).
 fn link_check(loader: &Rc<Loader>, it: &mut Interp, root: &str) -> R<()> {
     fn walk(loader: &Rc<Loader>, it: &mut Interp, key: &str, seen: &mut HashSet<String>) -> R<()> {
         let specs = loader
@@ -546,7 +553,19 @@ fn link_check(loader: &Rc<Loader>, it: &mut Interp, root: &str) -> R<()> {
             .get(base_of(loader, key))
             .cloned()
             .unwrap_or_default();
+        // a mixed module's origin lists its dynamic imports too: only the export graph's `dependencies` are static
+        let statics: Option<Vec<&str>> = loader
+            .graphs
+            .get(base_of(loader, key))
+            .and_then(|g| g.get("dependencies")?.as_array())
+            .map(|d| d.iter().filter_map(|s| s.as_str()).collect());
         for spec in specs {
+            if statics
+                .as_ref()
+                .is_some_and(|d| !d.contains(&spec.as_str()))
+            {
+                continue;
+            }
             if spec == "bindings" || spec == "node-gyp-build" || spec.ends_with(".node") {
                 continue;
             }
@@ -554,7 +573,8 @@ fn link_check(loader: &Rc<Loader>, it: &mut Interp, root: &str) -> R<()> {
                 Some(next) => {
                     if is_esm(loader, &next)
                         && !loader.linked.borrow().contains(&next)
-                        && !loader.cache.borrow().contains_key(&next)
+                        && (!loader.cache.borrow().contains_key(&next)
+                            || loader.declared.borrow().contains(&next))
                         && seen.insert(next.clone())
                     {
                         if let Err(Ctl::Throw(reason)) = walk(loader, it, &next, seen) {
@@ -579,12 +599,58 @@ fn link_check(loader: &Rc<Loader>, it: &mut Interp, root: &str) -> R<()> {
                 }
             }
         }
+        // the named requests of this module, once every module below it resolved
+        if let Some((spec, name, error)) =
+            crate::esm_link::check_requests(&loader.graphs, base_of(loader, key), |from, spec| {
+                module_key(loader, from, spec, false)
+            })
+        {
+            let message = match error {
+                crate::esm_link::LinkError::Missing => format!(
+                    "The requested module '{spec}' does not provide an export named '{name}'"
+                ),
+                crate::esm_link::LinkError::Ambiguous => format!(
+                    "The requested module '{spec}' contains conflicting star exports for name '{name}'"
+                ),
+            };
+            let err = it.throw_error::<()>("SyntaxError", &message).unwrap_err();
+            if let Ctl::Throw(reason) = &err {
+                loader
+                    .failed
+                    .borrow_mut()
+                    .insert(key.to_string(), reason.clone());
+            }
+            return Err(err);
+        }
         Ok(())
     }
     let mut seen = HashSet::from([root.to_string()]);
     walk(loader, it, root, &mut seen)?;
     loader.linked.borrow_mut().extend(seen);
     Ok(())
+}
+
+/// The exports object of ES module `key`, made without running its factory when no one loaded it yet: a module record
+/// in `loader.cache` marked `declared`, which `load_module` fills later (so every reader holds the final object).
+fn peek_exports(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
+    let known = loader.cache.borrow().get(key).cloned();
+    if let Some(module) = known {
+        return it.get(&module, "exports");
+    }
+    if !is_esm(loader, key) || !loader.factories.contains_key(base_of(loader, key)) {
+        return load_module(loader, it, key);
+    }
+    let module = Value::Object(it.plain());
+    let exports = Value::Object(it.plain());
+    it.set(&module, "exports", exports.clone())?;
+    // what the factory's head defines first, so a namespace read before the head ran is already a namespace
+    let define = it.eval_function(
+        "function (e) { Object.defineProperty(e, '__esModule', { value: true, configurable: true }); }",
+    )?;
+    it.call(&define, &Value::Undefined, std::slice::from_ref(&exports))?;
+    loader.cache.borrow_mut().insert(key.to_string(), module);
+    loader.declared.borrow_mut().insert(key.to_string());
+    Ok(exports)
 }
 
 fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
@@ -598,7 +664,9 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
             return it.get(&cached, "exports");
         }
     }
-    let cached = if commonjs {
+    // a declared record has no factory run yet: it is reused below, not returned
+    let declared = loader.declared.borrow().contains(key);
+    let cached = if commonjs || declared {
         None
     } else {
         loader.cache.borrow().get(key).cloned()
@@ -648,9 +716,24 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         Some(slash) => base_file[..slash].to_string(),
         None => ".".to_string(),
     };
-    let module = Value::Object(it.plain());
-    let exports = Value::Object(it.plain());
-    it.set(&module, "exports", exports.clone())?;
+    let recorded = if declared {
+        loader.declared.borrow_mut().remove(key);
+        loader.cache.borrow().get(key).cloned()
+    } else {
+        None
+    };
+    let (module, exports) = match recorded {
+        Some(module) => {
+            let exports = it.get(&module, "exports")?;
+            (module, exports)
+        }
+        None => {
+            let module = Value::Object(it.plain());
+            let exports = Value::Object(it.plain());
+            it.set(&module, "exports", exports.clone())?;
+            (module, exports)
+        }
+    };
     it.set(&module, "filename", Value::str(&file))?;
     if commonjs {
         // the shared `require.cache`: CommonJS file modules by filename (ESM and builtins are not cached, as in Node)
@@ -673,6 +756,13 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         resolve_in(&l, it, &k, &spec)
     });
     it.set(&require, "resolve", resolve)?;
+    // `require.peek(key)`: the exports of ES module `key` of this bundle without evaluating it (see `Loader::declared`)
+    let l = loader.clone();
+    let peek = it.native(move |it, _, args| {
+        let key = it.to_str(&crate::arg(args, 0)).to_string();
+        peek_exports(&l, it, &key)
+    });
+    it.set(&require, "peek", peek)?;
     it.set(&require, "cache", loader.cache_obj.clone())?;
     let require_async = {
         let (l, k) = (loader.clone(), key.to_string());
@@ -982,9 +1072,10 @@ fn make_loader(
         factories.insert(k.clone(), f);
     }
     let origins = star_origins(it, bundle_js)?;
-    let mut esm_keys: HashSet<String> = bundle_table(bundle_js, "__thaw_bundle_export_graphs")
-        .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
+    let graphs = bundle_table(bundle_js, "__thaw_bundle_export_graphs")
+        .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
+    let mut esm_keys: HashSet<String> = graphs.keys().cloned().collect();
     esm_keys.extend(parts.esm_keys.iter().cloned());
     let cjs_names = bundle_table(bundle_js, "__thaw_bundle_cjs_export_names")
         .and_then(|v| v.as_object().cloned())
@@ -1012,12 +1103,14 @@ fn make_loader(
         package: name.to_string(),
         origins,
         esm_keys,
+        graphs,
         cjs_names,
         commonjs_contexts,
         namespaces: RefCell::new(HashMap::new()),
         ready: RefCell::new(HashMap::new()),
         failed: RefCell::new(HashMap::new()),
         linked: RefCell::new(HashSet::new()),
+        declared: RefCell::new(HashSet::new()),
         loading: RefCell::new(HashSet::new()),
         promise_of,
         cjs_namespace,
@@ -1143,7 +1236,9 @@ fn register_native_bundle(it: &mut Interp, json: &str) -> R<Value> {
             Some(_) => id.strip_prefix(&prefix),
             None => Some(id.as_str()),
         };
-        let module = key.and_then(|k| l.cache.borrow().get(k).cloned().map(|m| (k.to_string(), m)));
+        let module = key
+            .filter(|k| !l.declared.borrow().contains(*k))
+            .and_then(|k| l.cache.borrow().get(k).cloned().map(|m| (k.to_string(), m)));
         let Some((key, module)) = module else {
             return Err(js_error(it, "unlinked or foreign native source"));
         };
@@ -1450,6 +1545,9 @@ pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
         _ => None,
     };
     LAST_PACKET.with(|p| *p.borrow_mut() = packet);
+    if let Ctl::Throw(v @ Value::Object(_)) = &c {
+        LAST_THROWN.with(|t| *t.borrow_mut() = Some(v.clone()));
+    }
     match c {
         Ctl::Unsupported(f) => HostError::Unsupported(f),
         Ctl::Throw(v) => {
@@ -3324,6 +3422,49 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             }
         })
     }))
+}
+
+/// The residual JIT's `dynamic_object_query` host ABI (the thaw-js twin of QuickJS `thaw_js_dynamic_object_query`):
+/// operation `0` snapshots a Set-like value's keys into a JSON object (validating the `size`/`has`/`keys`
+/// protocol in this realm) and returns it as a live thaw-std `Json` value, its bits in the `f64`. On failure the
+/// result is 0 and `*error` holds a malloc-owned message.
+///
+/// # Safety
+/// `error` must be null or point to a writable pointer slot.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_tjs_dynamic_object_query(
+    operation: u8,
+    handle: u64,
+    error: *mut *const c_char,
+) -> f64 {
+    unsafe extern "C" {
+        fn thaw_json_parse(text: *const c_char) -> *mut u8;
+    }
+    let fail = |message: String| {
+        if let Some(slot) = unsafe { error.as_mut() } {
+            *slot = std::ffi::CString::new(message)
+                .unwrap_or_default()
+                .into_raw();
+        }
+        0.0
+    };
+    if operation != 0 {
+        return fail("unsupported dynamic object query".into());
+    }
+    match set_like_snapshot_text(handle) {
+        Ok(json) => match std::ffi::CString::new(json) {
+            Ok(text) => f64::from_bits(unsafe { thaw_json_parse(text.as_ptr()) } as usize as u64),
+            Err(_) => fail("dynamic object query produced a NUL".into()),
+        },
+        Err(message) => fail(message),
+    }
+}
+
+/// The JSON text of the Set-like snapshot of the value behind `handle`.
+pub(crate) fn set_like_snapshot_text(handle: u64) -> Result<String, String> {
+    on_handle(handle, |p, _, v| {
+        prelude_call(&mut p.interp, "__thaw_set_like_snapshot", &v, 0)
+    })
 }
 
 #[no_mangle]
@@ -6262,6 +6403,18 @@ thread_local! {
     static LAST_FRAME: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     /// The native packet of the last carrier `classify` saw; `error_string` binds it to the error text.
     static LAST_PACKET: RefCell<Option<Rc<thaw_arena::exception::ExceptionPacket>>> = const { RefCell::new(None) };
+    /// The last object `classify` saw thrown, so a failed typed call can hand the exact object to compiled code.
+    static LAST_THROWN: RefCell<Option<Value>> = const { RefCell::new(None) };
+    /// The handle of the object the last failed typed call threw (see `thaw_tjs_take_thrown_handle`); 0 for none.
+    static LAST_THROWN_HANDLE: Cell<i64> = const { Cell::new(0) };
+}
+
+/// The handle (one reference, owned by the caller) of the object the last failed `thaw_tjs_call_typed_result`
+/// threw, or 0 when it failed for another reason. Compiled code rethrows that exact object, so its identity
+/// survives a native frame (a JS-thrown `Error` caught by a package handler is the same object, not a copy).
+#[no_mangle]
+pub extern "C" fn thaw_tjs_take_thrown_handle() -> i64 {
+    LAST_THROWN_HANDLE.with(Cell::take)
 }
 
 /// The live native packet a thrown carrier names in its hidden `\0pkt`, if any.
@@ -7902,6 +8055,8 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
             eprintln!("thaw-js call: {symbol} {args}");
         }
+        LAST_THROWN.with(|t| t.borrow_mut().take());
+        LAST_THROWN_HANDLE.with(|h| h.set(0));
         // `<package>::<export>` names a package export; a bare name is a global of the default realm
         // (a function a `loadScript` defined), read through the empty-named root.
         let (handle, export) = match symbol.split_once("::") {
@@ -7937,7 +8092,15 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             }
             from_result_value(&mut p.interp, &r).map(|n| n.to_result_json())
         })
-        .map_err(|e| e.to_string());
+        .map_err(|e| {
+            if let (HostError::Thrown(_), Some(thrown)) =
+                (&e, LAST_THROWN.with(|t| t.borrow_mut().take()))
+            {
+                LAST_THROWN_HANDLE.with(|h| h.set(store_handle(handle, thrown)));
+            }
+            e.to_string()
+        });
+        LAST_THROWN.with(|t| t.borrow_mut().take());
         pump_watches();
         out
     })())

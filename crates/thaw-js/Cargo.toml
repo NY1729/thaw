@@ -65,3 +65,8 @@ serde_json = "1"
 
 [dev-dependencies]
 thaw-hir = { path = "../thaw-hir" }
+# Test-only, same device as thaw-napi: `thaw_tjs_dynamic_object_query` calls thaw-std's `thaw_json_parse` as an
+# `extern "C"` resolved at the final link; the unit-test binary needs thaw-std (and the thaw-runtime helpers it calls)
+# linked in. No normal dependency edge.
+thaw-std = { path = "../thaw-std" }
+thaw-runtime = { path = "../thaw-runtime" }

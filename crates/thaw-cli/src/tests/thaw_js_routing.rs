@@ -900,29 +900,51 @@ fn fallback_message_names_refused_packages_with_short_reasons() {
     assert_eq!(thaw_js_fallback_message("e", &[long]), format!("e; refused: big ({})", "x".repeat(80)));
 }
 
+/// A package thaw-js refuses (its bundle calls `process.dlopen`) and the program that calls it: the stable way to
+/// make a routed build fall back to QuickJS.
+const TJS_DLOPEN_MAIN: &str = "import { load } from 'tjs-dl';\nfunction main(): void {\n  console.log(load('x'));\n}\n";
+const TJS_DLOPEN_PACKAGE: (&str, &str, &str) = (
+    "tjs-dl",
+    "export declare function load(m: string): number;\n",
+    "exports.load = function (m) { return process.dlopen(m, 'x.node'); };\n",
+);
+
 #[test]
 fn thaw_js_fallback_build_keeps_quickjs_and_reports_the_blockers_key() {
-    // A `node:async_hooks` createHook program that uses `finally` (not yet Node-identical on thaw-js) keeps that
-    // module on QuickJS; the build falls back and the artifact reports the blocker.
+    // A package whose bundle calls `process.dlopen` (refused: no addon loads there) keeps the build on QuickJS;
+    // the build falls back and the artifact reports the blocker.
+    let (dir, registry, entry) = thaw_js_package_fixture("blockers-fallback", TJS_DLOPEN_MAIN, &[TJS_DLOPEN_PACKAGE]);
+    let output = dir.join("app");
+    let manifest = thaw_js_build(&entry, &output, &registry, true);
+    assert_eq!(manifest["quickjs"], true, "{manifest}");
+    let blockers = manifest["thaw_js_blockers"].as_array().unwrap_or_else(|| panic!("{manifest}"));
+    assert!(
+        blockers.iter().any(|blocker| blocker["package"] == "tjs-dl"),
+        "{manifest}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A `createHook` program that uses `finally` and the Promise combinators stays on thaw-js: its hook traces are
+/// pinned against Node 22 in thaw-js (`async_hooks_promise_*`), so the module is no longer refused.
+#[test]
+fn thaw_js_create_hook_with_finally_and_promise_combinators_stays_on_thaw_js() {
     let (dir, registry, entry) = thaw_js_class_fixture(
-        "blockers-fallback",
+        "async-hooks-finally",
         "import { Counter } from 'tjs-ctr';\n\
          import { createHook } from 'node:async_hooks';\n\
          function main(): void {\n\
            const c = new Counter(5);\n\
            createHook({ init(): void {} }).enable();\n\
            Promise.resolve(1).finally((): void => {});\n\
+           Promise.all([Promise.resolve(1)]);\n\
            console.log(c.add(2));\n\
          }\n",
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry, true);
-    assert_eq!(manifest["quickjs"], true, "{manifest}");
-    let blockers = manifest["thaw_js_blockers"].as_array().unwrap_or_else(|| panic!("{manifest}"));
-    assert!(
-        blockers.iter().any(|blocker| blocker["package"] == "node:async_hooks"),
-        "{manifest}"
-    );
+    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(thaw_js_run_guarded(&output), "7\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -938,17 +960,7 @@ fn thaw_js_fallback_env_parses_the_three_modes() {
 
 #[test]
 fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_builds() {
-    let (dir, registry, entry) = thaw_js_class_fixture(
-        "fallback-modes",
-        "import { Counter } from 'tjs-ctr';\n\
-         import { createHook } from 'node:async_hooks';\n\
-         function main(): void {\n\
-           const c = new Counter(5);\n\
-           createHook({ init(): void {} }).enable();\n\
-           Promise.resolve(1).finally((): void => {});\n\
-           console.log(c.add(2));\n\
-         }\n",
-    );
+    let (dir, registry, entry) = thaw_js_package_fixture("fallback-modes", TJS_DLOPEN_MAIN, &[TJS_DLOPEN_PACKAGE]);
     let build =|output: &Path| {
         build_with_thaw_js_routing(
             &entry, output, &[], &[], &[], &registry, &[], false, None, true, false, false, true,
@@ -958,7 +970,7 @@ fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal_and_warn_mode_
     set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Error));
     let error = build(&dir.join("app-error")).unwrap_err();
     assert!(error.starts_with("unsupported on thaw-js: "), "{error}");
-    assert!(error.contains("package `node:async_hooks` refused"), "{error}");
+    assert!(error.contains("package `tjs-dl` refused"), "{error}");
     // warn: the same program builds, falling back to QuickJS for the refused package
     set_thaw_js_fallback_mode_override(Some(ThawJsFallbackMode::Warn));
     build(&dir.join("app-warn")).unwrap();

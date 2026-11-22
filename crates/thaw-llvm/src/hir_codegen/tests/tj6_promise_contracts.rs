@@ -114,3 +114,16 @@ fn tj6_routed_union_promise_method_sets_the_union_await_bit() {
         .count();
     assert_eq!(calls, 3, "{ir}");
 }
+
+#[test]
+fn routed_typed_call_rethrows_the_exact_thrown_object_without_quickjs() {
+    let run = tj6_hex("k::boom");
+    let source = format!(
+        "declare function __thaw_typed_tjs_{run}(x: number): number;
+         function main(): void {{ console.log(__thaw_typed_tjs_{run}(2)); }}"
+    );
+    let (uses_thaw_js, uses_quickjs, ir) = tj6_compile_routed(&source, "tj6_thrown_identity");
+    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(ir.contains("call i64 @thaw_tjs_take_thrown_handle()"), "{ir}");
+    assert!(ir.contains("call { ptr, ptr } @thaw_tjs_capture_handle_graph_result("), "{ir}");
+}
