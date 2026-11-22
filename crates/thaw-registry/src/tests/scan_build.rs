@@ -59,3 +59,18 @@ fn scan_build_serves_an_installed_peer_the_bundle_requires() {
     let build = scan_bundle_for_build(&bundle, false, &installed, &served).unwrap();
     assert!(build.is_clean(), "{:?}", build.blockers);
 }
+
+#[test]
+fn scan_build_accepts_the_zlib_builtin_without_the_zstd_feature() {
+    // the zstd stream native only exists with the `zstd` feature; the zlib builtin must reach it through a typeof-guarded
+    // alias so a build without the feature still scans clean (an unguarded call refused every package that requires zlib)
+    let dir = temp_registry("scan_build_zlib_builtin");
+    fs::write(dir.join("index.js"), "module.exports = require('node:zlib');").unwrap();
+    let node_modules = temp_registry("scan_build_zlib_builtin_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let empty = std::collections::HashSet::new();
+    let report = scan_bundle_for_build(&bundle, false, &empty, &empty).unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
