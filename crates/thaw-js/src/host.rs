@@ -10474,3 +10474,165 @@ var __thaw_bundle_commonjs_contexts = JSON.parse("{\"p/index.js\":true,\"p/c.js\
         assert_eq!(read(it, &["cjs", "cjsThis"]), "true");
     }
 }
+
+/// thaw-js twins of the QuickJS-form module-wrapper behaviour tests that were removed from the bridge: how a
+/// registry bundle's exports are reached through [`Package::call_export`] (the production path), with the
+/// results Node 22 gives for the same source.
+#[cfg(test)]
+mod bridge_wrapper_behaviour_twin_tests {
+    use super::*;
+
+    /// A one-module registry bundle whose entry factory body is `body`.
+    fn cjs(body: &str) -> String {
+        format!(
+            r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{
+"p/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {{ {body} }}
+}};
+var __thaw_bundle_require_maps = {{ "p/index.js": {{}} }};
+var __thaw_bundle_entry_key = "p/index.js";
+}})(globalThis.require);"#
+        )
+    }
+
+    fn call(body: &str, name: &str, args: &[Native]) -> Native {
+        Package::load(&cjs(body))
+            .expect("loads")
+            .call_export(name, args)
+            .expect("call")
+    }
+
+    fn s(text: &str) -> Native {
+        Native::Str(text.into())
+    }
+
+    /// morgan's shape: a throwing-or-counting `default` getter must not be read to call a named export.
+    #[test]
+    fn a_getter_named_default_is_not_read_when_calling_a_named_export() {
+        let body = "var reads = 0; Object.defineProperty(module.exports, 'default', { enumerable: true, configurable: true, get: function () { reads++; return 'ignored'; } }); module.exports.combined = function (s) { return '[' + s + ':' + reads + ']'; };";
+        assert_eq!(call(body, "combined", &[s("hi")]), s("[hi:0]"));
+    }
+
+    /// zod's `z.undefined()` shape: an export literally named `undefined` does not stop later exports.
+    #[test]
+    fn an_export_named_undefined_does_not_block_later_exports() {
+        let body = "module.exports.undefined = function () { return 'nope'; }; module.exports.after = function (s) { return '[' + s + ']'; };";
+        assert_eq!(call(body, "after", &[s("hi")]), s("[hi]"));
+        assert_eq!(call(body, "undefined", &[]), s("nope"));
+    }
+
+    #[test]
+    fn a_commonjs_function_export_is_called_under_its_declared_name() {
+        let body = "module.exports = function leftPad(str) { return str + '!'; };";
+        assert_eq!(call(body, "leftPad", &[s("x")]), s("x!"));
+    }
+
+    #[test]
+    fn an_esm_default_export_is_called_under_its_declared_name() {
+        let body = "module.exports.__esModule = true; module.exports.default = function escapeIt(s) { return '[' + s + ']'; };";
+        assert_eq!(call(body, "escapeIt", &[s("hi")]), s("[hi]"));
+    }
+
+    /// utf-8-validate's shape: a `{ default: fn }` object without `__esModule`.
+    #[test]
+    fn a_bare_default_only_object_is_called_under_the_declared_name() {
+        let body = "module.exports = { default: function isValid(s) { return s.length > 0; } };";
+        assert_eq!(call(body, "isValid", &[s("x")]), Native::Bool(true));
+    }
+
+    /// p-queue's shape: `module.exports = PQueue; module.exports.default = PQueue;` - the declared name is the class.
+    #[test]
+    fn a_default_exported_class_is_reached_under_its_declared_name() {
+        let body = "function PQueue(options) { this.size = 7; } module.exports = PQueue; module.exports.default = PQueue;";
+        let mut pkg = Package::load(&cjs(body)).expect("loads");
+        let class = pkg.exports_member("PQueue").expect("member");
+        assert!(class.is_callable());
+        let it = pkg.interp();
+        let probe = it
+            .run(
+                "(function (C) { var q = new C({}); return [q.size, C.default === C].join(','); })",
+            )
+            .expect("probe compiles");
+        let out = it.call(&probe, &Value::Undefined, &[class]).expect("runs");
+        assert_eq!(it.to_str(&out).to_string(), "7,true");
+    }
+
+    /// lodash's shape: a function module's named `isNaN` method must not replace the global `isNaN`.
+    #[test]
+    fn a_function_modules_named_methods_do_not_replace_globals() {
+        let body = "module.exports = function lodash() {}; module.exports.isNaN = function () { return false; };";
+        let mut pkg = Package::load(&cjs(body)).expect("loads");
+        assert_eq!(
+            pkg.call_export("isNaN", &[Native::Number(1.0)]).unwrap(),
+            Native::Bool(false)
+        );
+        let it = pkg.interp();
+        let out = it
+            .run("isNaN('x') === true && isNaN !== undefined")
+            .expect("runs");
+        assert!(matches!(out, Value::Bool(true)));
+    }
+
+    /// @hapi/hoek's guard `Buffer && Buffer.isBuffer(x)`: loads, and takes the not-a-buffer branch.
+    #[test]
+    fn a_guarded_buffer_reference_does_not_throw() {
+        let body = "module.exports = function checkBuffer(x) { return (Buffer && Buffer.isBuffer(x)) || false; };";
+        assert_eq!(
+            call(body, "checkBuffer", &[Native::Number(1.0)]),
+            Native::Bool(false)
+        );
+    }
+
+    /// @hapi/hoek's unconditional `URL.prototype` lookup (Node: `typeof URL.prototype` is "object").
+    #[test]
+    fn an_unguarded_url_prototype_access_does_not_throw() {
+        let body = "module.exports = function getIt() { return typeof URL.prototype; };";
+        assert_eq!(call(body, "getIt", &[]), s("object"));
+    }
+
+    /// node-gyp-build's unguarded `process.*` reads (Node: "object,string,string,string").
+    #[test]
+    fn unguarded_process_global_reads_do_not_throw() {
+        let body = "module.exports = function readIt() { var vars = (process.config && process.config.variables) || {}; var abi = process.versions.modules; var uv = (process.versions.uv || '').split('.')[0]; return typeof process.env + ',' + typeof process.execPath + ',' + typeof __dirname + ',' + typeof __filename; };";
+        assert_eq!(call(body, "readIt", &[]), s("object,string,string,string"));
+    }
+
+    /// The receiver of a nested namespace member is its immediate namespace object, not the package root.
+    #[test]
+    fn a_nested_namespace_member_keeps_its_deep_path_and_receiver() {
+        let body = "module.exports.Outer = { Inner: { make: function () { return this.tag; }, tag: 'inner' } }; module.exports.tag = 'root';";
+        assert_eq!(call(body, "Outer.Inner.make", &[]), s("inner"));
+    }
+
+    /// Two packages exporting the same name stay separate: each is called in its own realm.
+    #[test]
+    fn same_named_exports_of_two_packages_do_not_collide() {
+        let mut qs = Package::load(&cjs(
+            "module.exports = { stringify: function (x) { return 'qs:' + x; } };",
+        ))
+        .unwrap();
+        let mut hoek = Package::load(&cjs(
+            "module.exports = { stringify: function (x) { return 'hoek:' + x; } };",
+        ))
+        .unwrap();
+        assert_eq!(qs.call_export("stringify", &[s("a")]).unwrap(), s("qs:a"));
+        assert_eq!(
+            hoek.call_export("stringify", &[s("a")]).unwrap(),
+            s("hoek:a")
+        );
+        assert_eq!(qs.call_export("stringify", &[s("b")]).unwrap(), s("qs:b"));
+    }
+
+    /// A hand-authored bundle with no factory (a bare global function, the QuickJS lane's old `loadScript` shape)
+    /// is not a thaw-js bundle: the registry always emits the factory form, and the loader refuses anything else.
+    #[test]
+    fn a_source_that_is_not_a_registry_bundle_is_refused() {
+        let error = Package::load("function greet(name) { return 'hi, ' + name; }")
+            .err()
+            .expect("refused");
+        assert!(
+            error.to_string().contains("not a registry bundle"),
+            "{error}"
+        );
+    }
+}

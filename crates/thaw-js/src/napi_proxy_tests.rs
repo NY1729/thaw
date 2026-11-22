@@ -853,10 +853,10 @@ fn plain_function_argument_is_a_marker_whose_callback_global_the_reference_looku
     let id = id_of(&wire, "__thaw_napi_function__");
     assert_eq!(wire, format!(r#"{{"__thaw_napi_function__":{id}}}"#));
     let name = format!("__thaw_napi_reference_{id}");
-    // The callback global is installed by `defineCallback` with a bare `Object.defineProperty`, so it is
-    // both non-writable and non-configurable.
+    // The callback global is installed by `defineCallback` with a bare `Object.defineProperty`: non-writable, and
+    // configurable only so that native's `released` list can delete it (see the release tests below).
     assert_eq!(
-        run_in(&mut it, &format!("Object.getOwnPropertyDescriptor(globalThis, '{name}').writable === false && Object.getOwnPropertyDescriptor(globalThis, '{name}').configurable === false")),
+        run_in(&mut it, &format!("Object.getOwnPropertyDescriptor(globalThis, '{name}').writable === false && Object.getOwnPropertyDescriptor(globalThis, '{name}').configurable === true")),
         "true"
     );
     // The lookup that napi_eval's call_reference makes on the realm global.
@@ -1474,4 +1474,329 @@ fn function_sent_to_native_stays_pinned_by_its_callback_global() {
         ),
         "function"
     );
+}
+
+// ---- thaw-js twins of the QuickJS-form wrapper tests removed from the bridge. ----
+
+#[test]
+fn native_callback_arguments_become_proxies_only_at_the_listed_handle_paths() {
+    // Only the paths `__thaw_napi_argument_handles__` lists are replaced by the handle's proxy; an ordinary
+    // object that merely carries a `__thaw_napi_handle__` property stays plain, and a JSON own `__proto__` key
+    // is replaced as an own data property (the prototype is never touched).
+    let _bridge = table_bridge();
+    reply("array_kind_graph", "", r#"{"value":false}"#);
+    let mut it = plain_realm();
+    let wire = run_in(
+        &mut it,
+        "JSON.stringify(api.argument(function (instance, nested, ordinary, special) { \
+           var own = Object.getOwnPropertyDescriptor(special, '__proto__'); \
+           var proxy = api.decode({ __thaw_napi_handle__: '7' }); \
+           return [instance === proxy, nested[0] === proxy, ordinary.__thaw_napi_handle__, ordinary === proxy, \
+                   own !== undefined && own.value === proxy, Object.getPrototypeOf(special) === Object.prototype].join(','); }))",
+    );
+    let id = id_of(&wire, "__thaw_napi_function__");
+    assert_eq!(
+        run_in(
+            &mut it,
+            &format!(
+                "globalThis.__thaw_napi_reference_{id}(\
+                 {{__thaw_napi_argument_handles__: [[[0], '7'], [[1, 0], '7'], [[3, '__proto__'], '7']]}}, \
+                 {{__thaw_napi_handle__: '7'}}, [{{__thaw_napi_handle__: '7'}}], {{__thaw_napi_handle__: '7'}}, \
+                 JSON.parse('{{\"__proto__\":{{\"__thaw_napi_handle__\":\"7\"}}}}'))"
+            )
+        ),
+        "true,true,7,false,true,true"
+    );
+}
+
+/// Replaces the table fake's replies with `operation -> text` only.
+fn only_reply(operation: &str, text: &str) {
+    TABLE.with(|t| t.borrow_mut().clear());
+    reply(operation, "", text);
+}
+
+#[test]
+fn private_wire_origins_survive_decode_results_and_argument_sync() {
+    // Dates, non-finite numbers and plain data cross the JSON wire as origin lists: a nested `__proto__` key,
+    // an invalid date, NaN/Infinity, a plain-marked object that looks like a wire marker, and every result path
+    // (`get`, `call_captured`, `call`) plus the write-back of an object, an array and a numeric-keyed object.
+    let _bridge = table_bridge();
+    let mut it = plain_realm();
+    run_in(
+        &mut it,
+        "globalThis.direct = api.decode(JSON.parse('{\"timestamp\":0,\"__thaw_napi_error__\":\"data\",\"__thaw_napi_promise__\":\"ordinary\",\"$__thaw_napi_undefined$\":true,\"nested\":{\"__proto__\":null,\"invalid\":null,\"numbers\":[null,null,null]}}'), \
+         [[[], 'plain'], [['nested'], 'plain'], [['nested', '__proto__'], 'date', 0], [['nested', 'invalid'], 'date', null], \
+          [['nested', 'numbers', 0], 'nonfinite', 'NaN'], [['nested', 'numbers', 1], 'nonfinite', 'Infinity'], \
+          [['nested', 'numbers', 2], 'nonfinite', '-Infinity']]);",
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "(() => { const nested = direct.nested; const own = Object.getOwnPropertyDescriptor(nested, '__proto__'); \
+             return [direct.timestamp === 0, direct instanceof Date === false, direct.__thaw_napi_error__ === 'data', \
+             direct.__thaw_napi_promise__ === 'ordinary' && direct['$__thaw_napi_undefined$'] === true, \
+             own.value instanceof Date && own.value.getTime() === 0, Object.getPrototypeOf(nested) === Object.prototype, \
+             nested.invalid instanceof Date && Number.isNaN(nested.invalid.getTime()), Number.isNaN(nested.numbers[0]), \
+             nested.numbers[1] === Infinity, nested.numbers[2] === -Infinity].join(','); })()"
+        ),
+        "true,true,true,true,true,true,true,true,true,true"
+    );
+    only_reply(
+        "get",
+        r#"{"kind":"value","value":null,"origins":[[[],"nonfinite","NaN"]]}"#,
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "Number.isNaN(api.handle('get', '5', '', []).value)"
+        ),
+        "true"
+    );
+    only_reply(
+        "call_captured",
+        r#"{"kind":"value","value":null,"origins":[[[],"date",0]]}"#,
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "api.handle('call_captured', '5', '', []).value instanceof Date"
+        ),
+        "true"
+    );
+    only_reply(
+        "call",
+        r#"{"kind":"value","value":null,"origins":[[[],"nonfinite","-Infinity"]]}"#,
+    );
+    assert_eq!(
+        run_in(
+            &mut it,
+            "api.handle('call', '5', '', []).value === -Infinity"
+        ),
+        "true"
+    );
+    only_reply(
+        "sync_reference",
+        r#"{"kind":"value","value":{"stamp":null},"origins":[[["stamp"],"date",0]]}"#,
+    );
+    assert_eq!(
+        run_in(&mut it, "(() => { const o = { stamp: 1 }; api.argument(o); api.syncArguments([o]); return o.stamp instanceof Date && o.stamp.getTime() === 0; })()"),
+        "true"
+    );
+    only_reply(
+        "sync_reference",
+        r#"{"kind":"value","value":[null],"origins":[[[0],"date",0]]}"#,
+    );
+    assert_eq!(
+        run_in(&mut it, "(() => { const a = [1]; api.argument(a); api.syncArguments([a]); return a[0] instanceof Date && a[0].getTime() === 0; })()"),
+        "true"
+    );
+    only_reply(
+        "sync_reference",
+        r#"{"kind":"value","value":{"0":null},"origins":[[["0"],"nonfinite","NaN"]]}"#,
+    );
+    assert_eq!(
+        run_in(&mut it, "(() => { const o = { '0': 1 }; api.argument(o); api.syncArguments([o]); return Number.isNaN(o['0']); })()"),
+        "true"
+    );
+}
+
+#[test]
+fn a_package_loaded_before_the_bridge_exists_reaches_the_addon_once_it_does() {
+    // A bundle that does not touch `require.addon()` while loading must load with no bridge registered, and a
+    // later call through it (after another package's addon registered the bridge) sees the bridge's exports.
+    let _lock = crate::napi_bridge_tests::LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    clear_for_tests();
+    thaw_tjs_napi_enable_proxy_layer();
+    let body = "exports.read = function () { return require.addon().add(1, 2); };";
+    let mut early = Package::load_named("a", &addon_bundle(body, "", "{}"), 0).unwrap();
+    let early_error = early.call("read", &[]).unwrap_err().to_string();
+    assert!(
+        early_error.contains("native addon bridge is unavailable"),
+        "{early_error}"
+    );
+    drop(_lock);
+    let _bridge = shim_bridge(
+        r#"{"names":["a::add"],"qualifiedPackages":["a"],"ownerByExportName":{"a::add":"7"}}"#,
+        r#"{"value":7}"#,
+    );
+    assert_eq!(early.call("read", &[]).unwrap(), Native::Number(7.0));
+    let mut late = Package::load_named("a", &addon_bundle(body, "", "{}"), 0).unwrap();
+    assert_eq!(late.call("read", &[]).unwrap(), Native::Number(7.0));
+}
+
+#[test]
+fn each_package_addon_view_uses_its_own_qualified_exports() {
+    // Two packages export `same`; each package's addon view calls its own qualified export, a scoped package
+    // keeps its `@scope/` prefix, a qualified package with no exports sees nothing, and a package the bridge
+    // lists no qualified section for sees only the bare names.
+    let _bridge = shim_bridge(
+        r#"{"names":["first-pkg::same","second-pkg::same","@scope/third::same","legacy"],"qualifiedPackages":["first-pkg","second-pkg","@scope/third","zero-pkg"],"ownerByExportName":{"first-pkg::same":"7","second-pkg::same":"7","@scope/third::same":"7","legacy":"7"}}"#,
+        r#"{"value":0}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    let body = "exports.same = function () { return require.addon().same(); }; \
+                exports.keys = function () { return Object.keys(require.addon()).join(','); }; \
+                exports.legacy = function () { return typeof require.addon().legacy; };";
+    let load = |name: &str| Package::load_named(name, &addon_bundle(body, "", "{}"), 0).unwrap();
+    let (mut first, mut second, mut scoped, mut zero, mut legacy) = (
+        load("first-pkg"),
+        load("second-pkg"),
+        load("@scope/third"),
+        load("zero-pkg"),
+        load("legacy-pkg"),
+    );
+    first.call("same", &[]).unwrap();
+    second.call("same", &[]).unwrap();
+    scoped.call("same", &[]).unwrap();
+    let names: Vec<String> =
+        E2E_CALLS.with(|c| c.borrow().iter().map(|(n, _)| n.clone()).collect());
+    assert_eq!(
+        names,
+        ["first-pkg::same", "second-pkg::same", "@scope/third::same"]
+    );
+    assert_eq!(
+        first.call("legacy", &[]).unwrap(),
+        Native::Str("undefined".into())
+    );
+    assert_eq!(zero.call("keys", &[]).unwrap(), Native::Str(String::new()));
+    assert_eq!(
+        legacy.call("keys", &[]).unwrap(),
+        Native::Str("legacy".into())
+    );
+    assert_eq!(
+        legacy.call("legacy", &[]).unwrap(),
+        Native::Str("function".into())
+    );
+}
+
+#[test]
+fn callbacks_the_native_side_reports_released_drop_their_global_and_resend_under_a_fresh_id() {
+    // Native code reports the callbacks it no longer holds with its next response: the strong
+    // `__thaw_napi_reference_<id>` global (and so the callback) must go, and the same function passed again
+    // registers under a fresh id.
+    let _bridge = table_bridge();
+    let mut it = plain_realm();
+    run_in(&mut it, "globalThis.cb = function () { return 1; }");
+    let id_global = |it: &mut Interp, id: u64| {
+        run_in(it, &format!("typeof globalThis.__thaw_napi_reference_{id}"))
+    };
+    let first = id_of(
+        &run_in(&mut it, "JSON.stringify(api.argument(cb))"),
+        "__thaw_napi_function__",
+    );
+    assert_eq!(id_global(&mut it, first), "function");
+    assert_eq!(
+        id_of(
+            &run_in(&mut it, "JSON.stringify(api.argument(cb))"),
+            "__thaw_napi_function__"
+        ),
+        first,
+        "a held callback keeps its id"
+    );
+    reply(
+        "noop",
+        "",
+        &format!(r#"{{"value":null,"released":[{first}]}}"#),
+    );
+    run_in(&mut it, "api.handle('noop', '0', '', [])");
+    assert_eq!(id_global(&mut it, first), "undefined");
+    let second = id_of(
+        &run_in(&mut it, "JSON.stringify(api.argument(cb))"),
+        "__thaw_napi_function__",
+    );
+    assert_ne!(second, first);
+    assert_eq!(id_global(&mut it, second), "function");
+}
+
+#[test]
+fn a_callback_released_in_an_export_call_reply_is_dropped_by_the_trusted_path_too() {
+    let _bridge = shim_bridge(
+        r#"{"names":["a::add"],"qualifiedPackages":["a"],"ownerByExportName":{"a::add":"7"}}"#,
+        r#"{"value":1}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    let body = "globalThis.cb = function () { return 1; }; exports.send = function () { return require.addon().add(globalThis.cb); }; \
+                exports.has = function (id) { return typeof globalThis['__thaw_napi_reference_' + id]; };";
+    let mut p = Package::load_named("a", &addon_bundle(body, "", "{}"), 0).unwrap();
+    p.call("send", &[]).unwrap();
+    let payload = E2E_CALLS.with(|c| c.borrow()[0].1.clone());
+    let id = id_of(&payload, "__thaw_napi_function__");
+    assert_eq!(
+        p.call("has", &[Native::Number(id as f64)]).unwrap(),
+        Native::Str("function".into())
+    );
+    E2E_CALL_REPLY.with(|r| *r.borrow_mut() = format!(r#"{{"value":1,"released":[{id}]}}"#));
+    p.call("send", &[]).unwrap();
+    assert_eq!(
+        p.call("has", &[Native::Number(id as f64)]).unwrap(),
+        Native::Str("undefined".into())
+    );
+}
+
+#[test]
+fn a_release_reported_in_another_realms_reply_still_reaches_the_realm_that_owns_the_callback() {
+    // Ids are process-wide and native drains its pending releases into whichever reply comes next, so a reply
+    // to realm B may carry the release of a callback realm A sent: A drops it at its next reply.
+    let _bridge = table_bridge();
+    let mut owner = plain_realm();
+    let mut other = plain_realm();
+    run_in(&mut owner, "globalThis.cb = function () { return 1; }");
+    let id = id_of(
+        &run_in(&mut owner, "JSON.stringify(api.argument(cb))"),
+        "__thaw_napi_function__",
+    );
+    reply(
+        "noop",
+        "",
+        &format!(r#"{{"value":null,"released":[{id}]}}"#),
+    );
+    run_in(&mut other, "api.handle('noop', '0', '', [])");
+    reply("ping", "", r#"{"value":null}"#);
+    run_in(&mut owner, "api.handle('ping', '0', '', [])");
+    assert_eq!(
+        run_in(
+            &mut owner,
+            &format!("typeof globalThis.__thaw_napi_reference_{id}")
+        ),
+        "undefined"
+    );
+}
+
+#[test]
+fn the_executable_path_names_the_calling_packages_own_addon_even_with_a_name_clash() {
+    // Each package runs in its own realm, so every alias of the executable (`/proc/self/exe`, `process.execPath`,
+    // `/proc/<pid>/exe`) hands a package its own addon: `same` is its own qualified export, and a package-only
+    // export of another package is not part of the view.
+    let _bridge = shim_bridge(
+        r#"{"names":["first-pkg::same","second-pkg::same","second-pkg::only"],"qualifiedPackages":["first-pkg","second-pkg"],"ownerByExportName":{"first-pkg::same":"7","second-pkg::same":"7","second-pkg::only":"7"}}"#,
+        r#"{"value":0}"#,
+    );
+    thaw_tjs_napi_enable_proxy_layer();
+    let body = "exports.viaExe = function (alias) { const m = { exports: {} }; \
+                process.dlopen(m, alias === 'execPath' ? process.execPath : alias); m.exports.same(); \
+                return typeof m.exports.only; };";
+    let load = |name: &str| Package::load_named(name, &addon_bundle(body, "", "{}"), 0).unwrap();
+    let (mut first, mut second) = (load("first-pkg"), load("second-pkg"));
+    let aliases = [
+        "/proc/self/exe".to_string(),
+        "execPath".to_string(),
+        format!("/proc/{}/exe", std::process::id()),
+    ];
+    for alias in &aliases {
+        assert_eq!(
+            first.call("viaExe", &[Native::Str(alias.clone())]).unwrap(),
+            Native::Str("undefined".into())
+        );
+        assert_eq!(
+            second
+                .call("viaExe", &[Native::Str(alias.clone())])
+                .unwrap(),
+            Native::Str("function".into())
+        );
+    }
+    let names: Vec<String> =
+        E2E_CALLS.with(|c| c.borrow().iter().map(|(n, _)| n.clone()).collect());
+    assert_eq!(names, ["first-pkg::same", "second-pkg::same"].repeat(3));
 }

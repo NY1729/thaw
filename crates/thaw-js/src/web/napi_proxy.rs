@@ -4,7 +4,7 @@
 //! (`napi_bridge::install` calls `enable_if_requested`). Other realms keep the PR 6a
 //! "Native addon proxy layer is not installed" error.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::host::{default_realm, with_package};
@@ -22,6 +22,9 @@ fn next_reference() -> u64 {
 }
 
 thread_local! {
+    /// Released callback ids no layer has claimed yet: native code reports them in whichever reply comes next,
+    /// and the realm whose reply it was need not own them. Each layer claims its own at its next reply.
+    static UNCLAIMED_RELEASES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     /// Whether this thread's new realms get the layer. Thread-local, like the bridge's per-realm state, so
     /// one thread's opt-in never reaches another thread's realms.
     static ENABLED: Cell<bool> = const { Cell::new(false) };
@@ -126,8 +129,34 @@ fn cap_object(it: &mut Interp) -> Value {
         }
         Ok(Value::Undefined)
     });
+    let defer = it.native(|_, _, a| -> R<Value> {
+        if let Value::Number(n) = arg(a, 0) {
+            UNCLAIMED_RELEASES.with(|u| u.borrow_mut().push(n as u64));
+        }
+        Ok(Value::Undefined)
+    });
+    // The unclaimed ids as comma-separated text (empty when none), and the claim of one of them.
+    let deferred = it.native(|_, _, _| -> R<Value> {
+        let ids = UNCLAIMED_RELEASES.with(|u| {
+            u.borrow()
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        Ok(Value::str(&ids))
+    });
+    let claim = it.native(|_, _, a| -> R<Value> {
+        if let Value::Number(n) = arg(a, 0) {
+            UNCLAIMED_RELEASES.with(|u| u.borrow_mut().retain(|id| *id != n as u64));
+        }
+        Ok(Value::Undefined)
+    });
     let cap = Value::Object(new_obj(Some(it.object_proto.clone()), Kind::Plain));
     for (name, value) in [
+        ("defer", defer),
+        ("deferred", deferred),
+        ("claim", claim),
         ("exports", exports),
         ("owner", owner),
         ("invoker", invoker),

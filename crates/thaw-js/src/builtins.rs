@@ -1302,6 +1302,14 @@ impl Interp {
         }
         // globals are scope bindings: a defined data property must be visible as an identifier
         if let (Kind::Global, Some(v)) = (&*o.kind.borrow(), &d.value) {
+            // a new configurable property (or one already deletable) stays removable by `delete`
+            let deletable = d.configurable.as_ref().is_some_and(Value::truthy)
+                && self
+                    .global
+                    .vars
+                    .borrow()
+                    .get(key)
+                    .is_none_or(|b| matches!(b.origin, Origin::Defined));
             self.global.declare(
                 key,
                 v.clone(),
@@ -1310,6 +1318,9 @@ impl Interp {
             // a data descriptor ends a Node accessor global's accessor form (`node_accessor`).
             // ponytail: only a descriptor with a value redefines; a writable-only one keeps the accessor form.
             self.global.set_redefined(key);
+            if deletable {
+                self.global.set_origin(key, Origin::Defined);
+            }
             self.publish_global(key);
         }
         let existing = o.position(key);

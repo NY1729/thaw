@@ -652,6 +652,9 @@ enum Origin {
     Var,
     /// implicit global (assigned without a declaration): configurable, `delete` removes it.
     Prop,
+    /// created by `Object.defineProperty(globalThis, ...)` with `configurable: true`: shown as a builtin
+    /// (not enumerable), but `delete` removes it.
+    Defined,
     /// top-level let/const/class: a scope binding only, not an own property of `globalThis`.
     Lexical,
 }
@@ -870,7 +873,7 @@ fn global_view_flags(name: &str, b: &Binding) -> Option<(bool, bool, bool)> {
     }
     match b.origin {
         Origin::Lexical => None,
-        Origin::Decl => Some((false, b.mutable, true)),
+        Origin::Decl | Origin::Defined => Some((false, b.mutable, true)),
         Origin::Var => Some((true, b.mutable, false)),
         Origin::Prop => Some((true, b.mutable, true)),
     }
@@ -3911,6 +3914,12 @@ impl Interp {
             Origin::Var => Some(false),
             Origin::Prop => {
                 g.vars.borrow_mut().remove(name);
+                self.unpublish_global(name);
+                Some(true)
+            }
+            Origin::Defined => {
+                g.vars.borrow_mut().remove(name);
+                self.global_object.remove_prop(name);
                 self.unpublish_global(name);
                 Some(true)
             }

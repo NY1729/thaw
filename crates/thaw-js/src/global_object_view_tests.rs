@@ -134,3 +134,28 @@ fn timeout_handle_exposes_to_primitive_as_a_function() {
         "function"
     );
 }
+
+#[test]
+fn a_configurable_property_defined_on_globalthis_is_removed_by_delete() {
+    // Node: true undefined false true / false number / true undefined / true undefined / false
+    assert_eq!(
+        script("Object.defineProperty(globalThis, 'q', { value: 1, configurable: true }); console.log(delete globalThis.q, typeof q, 'q' in globalThis, Object.getOwnPropertyDescriptor(globalThis, 'q') === undefined);"),
+        "true undefined false true"
+    );
+    assert_eq!(
+        script("Object.defineProperty(globalThis, 'r', { value: 1 }); console.log(delete globalThis.r, typeof r);"),
+        "false number"
+    );
+    assert_eq!(
+        script("Object.defineProperty(globalThis, 's', { value: function () {}, writable: false, configurable: true }); console.log(Reflect.deleteProperty(globalThis, 's'), typeof s);"),
+        "true undefined"
+    );
+    assert_eq!(
+        script("Object.defineProperty(globalThis, 't', { value: 1, configurable: true }); Object.defineProperty(globalThis, 't', { value: 2, configurable: true }); console.log(delete globalThis.t, typeof t);"),
+        "true undefined"
+    );
+    assert_eq!(
+        script("Object.defineProperty(globalThis, 'u', { value: 1, configurable: true }); console.log(Object.keys(globalThis).includes('u'));"),
+        "false"
+    );
+}
