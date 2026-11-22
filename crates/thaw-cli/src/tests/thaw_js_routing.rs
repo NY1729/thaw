@@ -1121,7 +1121,7 @@ fn thaw_js_node_net_single_arg_functions_get_no_bare_alias() {
         &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
         &thaw_parser::common::FileName::Custom("node net.ts".into()),
         false, &dir.join("app"), Some(&dir.join("staging")),
-        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &routed,
+        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), &routed,
         &std::collections::HashSet::new(),
     ).unwrap();
     assert!(
@@ -1443,7 +1443,7 @@ fn thaw_js_class_value_handle_only_for_bare_value_uses() {
             &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
             &thaw_parser::common::FileName::Custom("class value.ts".into()),
             false, &dir.join("app"), Some(&dir.join("staging")),
-            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &routed,
+            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), &routed,
             &std::collections::HashSet::new(),
         ).unwrap();
         shims.0
@@ -1481,7 +1481,7 @@ fn random_fill_sync_declaration_keeps_bytes_only_when_thaw_js_routes_node_crypto
             &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
             &thaw_parser::common::FileName::Custom("random fill.ts".into()),
             false, &dir.join("app"), Some(&dir.join("staging")),
-            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, routed,
+            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), routed,
             &std::collections::HashSet::new(),
         ).unwrap();
         shims.0.lines()
@@ -1508,7 +1508,7 @@ fn imported_buffer_stays_native_when_thaw_js_routes_node_buffer() {
             &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
             &thaw_parser::common::FileName::Custom("imported buffer.ts".into()),
             false, &dir.join("app"), Some(&dir.join("staging")),
-            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, routed,
+            &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), routed,
             &std::collections::HashSet::new(),
         ).unwrap();
         shims.0
@@ -1549,7 +1549,7 @@ fn thaw_js_routes_node_http_when_the_program_calls_native_create_server() {
         &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
         &thaw_parser::common::FileName::Custom("http eligible.ts".into()),
         false, &dir.join("app"), Some(&dir.join("staging")),
-        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &ThawJsPackages::new(),
+        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), &ThawJsPackages::new(),
         &std::collections::HashSet::new(),
     ).unwrap();
     assert!(eligible.contains("node:http"), "{eligible:?}");
@@ -1567,7 +1567,7 @@ fn routed_node_http_keeps_the_native_create_server_declaration() {
         &registry, &packages, &active, &active, &std::collections::HashSet::new(), source,
         &thaw_parser::common::FileName::Custom("http decl.ts".into()),
         false, &dir.join("app"), Some(&dir.join("staging")),
-        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), true, &packages.iter().cloned().collect(),
+        &std::collections::HashSet::new(), &std::collections::HashSet::new(), &std::collections::HashSet::new(), &packages.iter().cloned().collect(),
         &std::collections::HashSet::new(),
     ).unwrap();
     let shim = shims.0;
