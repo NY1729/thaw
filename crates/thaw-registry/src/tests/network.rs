@@ -3845,13 +3845,8 @@ module.exports = function() {
 }
 
 // qjs_pending: fails on thaw-js: ERROR: Error: invalid port preserves active connection (expected true)
-mod qjs_pending_network_tls_custom_identity_finalizes_before_success_and_cleans_up_failures {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn tls_custom_identity_finalizes_before_success_and_cleans_up_failures() {
-    use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_tls_identity_finalizer");
     fs::write(dir.join("index.js"), r#"
 var tls = require('node:tls');
@@ -4026,14 +4021,9 @@ module.exports = function() {
 "#).unwrap();
     let empty_node_modules = temp_registry("builtin_tls_identity_finalizer_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsIdentityFinalizer = module.exports;")).unwrap();
-    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
-    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
-    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsIdentityFinalizer".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let result = run_js(&bundle);
     let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
-}
 }
 
 #[test]

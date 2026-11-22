@@ -2274,6 +2274,21 @@ impl Interp {
         Ok(self.to_str(&p))
     }
 
+    /// ToNumeric as a float, fallible: a Symbol throws a TypeError and an abrupt ToPrimitive propagates; a
+    /// BigInt converts (`Number(1n)`), the operators reject mixed BigInt/Number before they get here.
+    pub(crate) fn tonum_numeric(&mut self, v: &Value) -> R<f64> {
+        let p = match v {
+            Value::Object(_) if !is_symbol_object(v) => {
+                self.primitive_of(v, extras::Hint::Number)?
+            }
+            _ => v.clone(),
+        };
+        if is_symbol_object(&p) {
+            return self.throw_error("TypeError", "Cannot convert a Symbol value to a number");
+        }
+        Ok(self.num(&p))
+    }
+
     /// ToNumber (spec), fallible: a Symbol or a BigInt throws a TypeError, an abrupt ToPrimitive propagates.
     /// `num` stays the infallible form for host code.
     pub(crate) fn tonum(&mut self, v: &Value) -> R<f64> {
@@ -5300,16 +5315,16 @@ impl Interp {
                     a::UnaryOp::Bang => Value::Bool(!v.truthy()),
                     a::UnaryOp::Minus => match &v {
                         Value::BigInt(b) => bigint::big(-(**b).clone()),
-                        _ => Value::Number(-self.num(&v)),
+                        _ => Value::Number(-self.tonum_numeric(&v)?),
                     },
                     a::UnaryOp::Plus if matches!(v, Value::BigInt(_)) => {
                         return self
                             .throw_error("TypeError", "Cannot convert a BigInt value to a number")
                     }
-                    a::UnaryOp::Plus => Value::Number(self.num(&v)),
+                    a::UnaryOp::Plus => Value::Number(self.tonum_numeric(&v)?),
                     a::UnaryOp::Tilde => match &v {
                         Value::BigInt(b) => bigint::big(-(**b).clone() - 1),
-                        _ => Value::Number(!to_int32(self.num(&v)) as f64),
+                        _ => Value::Number(!to_int32(self.tonum_numeric(&v)?) as f64),
                     },
                     a::UnaryOp::Void => Value::Undefined,
                     _ => return unsupported("unary operator"),
@@ -5578,6 +5593,13 @@ impl Interp {
         if matches!(op, B::Add) {
             self.reject_symbol_operand(l)?;
             self.reject_symbol_operand(r)?;
+        } else if !matches!(
+            op,
+            B::EqEq | B::NotEq | B::EqEqEq | B::NotEqEq | B::In | B::InstanceOf
+        ) && (is_symbol_object(l) || is_symbol_object(r))
+        {
+            // ToPrimitive would turn the Symbol into its `toString` text, which then reads as NaN
+            return self.throw_error("TypeError", "Cannot convert a Symbol value to a number");
         }
         // objects take part in arithmetic / comparison through ToPrimitive
         let (lp0, rp0);
@@ -5620,7 +5642,8 @@ impl Interp {
                 return Ok(v);
             }
         }
-        let num = |it: &mut Interp| (it.num(l), it.num(r));
+        let num =
+            |it: &mut Interp| -> R<(f64, f64)> { Ok((it.tonum_numeric(l)?, it.tonum_numeric(r)?)) };
         Ok(match op {
             B::Add => {
                 let (lp, rp) = (l.clone(), r.clone());
@@ -5630,51 +5653,51 @@ impl Interp {
                     s.push_joined(&self.to_str(&rp));
                     Value::Str(s)
                 } else {
-                    Value::Number(self.num(&lp) + self.num(&rp))
+                    Value::Number(self.tonum_numeric(&lp)? + self.tonum_numeric(&rp)?)
                 }
             }
             B::Sub => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number(x - y)
             }
             B::Mul => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number(x * y)
             }
             B::Div => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number(x / y)
             }
             B::Mod => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number(x % y)
             }
             B::Exp => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number(x.powf(y))
             }
             B::BitAnd => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number((to_int32(x) & to_int32(y)) as f64)
             }
             B::BitOr => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number((to_int32(x) | to_int32(y)) as f64)
             }
             B::BitXor => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number((to_int32(x) ^ to_int32(y)) as f64)
             }
             B::LShift => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number(to_int32(x).wrapping_shl(to_int32(y) as u32 & 31) as f64)
             }
             B::RShift => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number((to_int32(x) >> (to_int32(y) as u32 & 31)) as f64)
             }
             B::ZeroFillRShift => {
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Number(((to_int32(x) as u32) >> (to_int32(y) as u32 & 31)) as f64)
             }
             B::EqEqEq => Value::Bool(strict_equals(l, r)),
@@ -5692,7 +5715,7 @@ impl Interp {
                         _ => ord.is_ge(),
                     }));
                 }
-                let (x, y) = num(self);
+                let (x, y) = num(self)?;
                 Value::Bool(match op {
                     B::Lt => x < y,
                     B::LtEq => x <= y,

@@ -12630,3 +12630,44 @@ fn runtime_paths_do_not_read_a_replaced_global_object() {
     // the Object replacement is visible and the descriptor helper still works on the intrinsics.
     assert_eq!(run(src), vec!["true 2", "TypeError"]);
 }
+
+/// ToNumber of a Symbol is a TypeError everywhere a number is expected (Number(), unary and binary
+/// operators, Math.*), not NaN. The expected lines are Node 22's.
+#[test]
+fn symbol_to_number_throws_type_error_not_nan() {
+    let src = r#"
+      var s = Symbol('x'), out = [];
+      function t(name, f) { try { out.push(name + ' ok ' + String(f())); } catch (e) { out.push(name + ' ' + e.constructor.name); } }
+      t('Number', function () { return Number(s); });
+      t('+', function () { return +s; });
+      t('-', function () { return -s; });
+      t('~', function () { return ~s; });
+      t('sub', function () { return s - 1; });
+      t('mul', function () { return 2 * s; });
+      t('lt', function () { return s < 1; });
+      t('ushr', function () { return s >>> 0; });
+      t('floor', function () { return Math.floor(s); });
+      t('wrapper', function () { return Number({ valueOf: function () { return s; } }); });
+      t('number-ok', function () { return Number('4') + Number(5n); });
+      t('string-concat', function () { return s + ''; });
+      console.log(out.join('|'));
+    "#;
+    assert_eq!(
+        one(src),
+        [
+            "Number TypeError",
+            "+ TypeError",
+            "- TypeError",
+            "~ TypeError",
+            "sub TypeError",
+            "mul TypeError",
+            "lt TypeError",
+            "ushr TypeError",
+            "floor TypeError",
+            "wrapper TypeError",
+            "number-ok ok 9",
+            "string-concat TypeError",
+        ]
+        .join("|")
+    );
+}
