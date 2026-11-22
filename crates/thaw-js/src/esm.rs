@@ -742,7 +742,17 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         },
         _ => return Err("native bundle payload is not a string".into()),
     };
-    let Ok(Native::Object(root)) = crate::json::parse_native(&json) else {
+    native_json_to_factories(&json, source, pure).map(Some)
+}
+
+/// The factory bundle of the native payload `json` (`__thaw_register_native_bundle`'s argument). `source` is the
+/// registry bundle text holding its export graphs (empty for a runtime registration).
+pub(crate) fn native_json_to_factories(
+    json: &str,
+    source: &str,
+    pure: bool,
+) -> Result<NativeBundle, String> {
+    let Ok(Native::Object(root)) = crate::json::parse_native(json) else {
         return Err("native bundle payload is not JSON".into());
     };
     let main = text(field(&root, "main"))
@@ -911,7 +921,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
     let bundle = format!(
         "module.exports = (function (require) {{\nvar __thaw_bundle_factories = {{\n{factories}}};\nvar __thaw_bundle_require_maps = {{\n{maps}}};\n{entry}}})(globalThis.require);\n"
     );
-    Ok(Some((bundle, problems, pure, esm_keys, esm_specs)))
+    Ok((bundle, problems, pure, esm_keys, esm_specs))
 }
 
 #[cfg(test)]
