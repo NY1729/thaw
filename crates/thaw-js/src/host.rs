@@ -1588,7 +1588,8 @@ fn parse_class_symbol(symbol: &str) -> Option<(&str, &str, &str, Option<&str>)> 
     let kind = parts.next()?;
     let class = parts.next()?;
     let rest = parts.next()?;
-    let (package, class_path) = class.split_once("::")?;
+    // a `loadScript` global has no package: `$setter$box$value` (the empty package is the default realm)
+    let (package, class_path) = class.split_once("::").unwrap_or(("", class));
     let member = match kind {
         "new" => None,
         // the member may itself start with `$` (`$disconnect`): cut at the trailing `$overloadK$arityN`
@@ -1654,6 +1655,7 @@ fn class_call(
         | ClassOp::Getter { receiver, .. } => slot(*receiver as u64)
             .map(|(p, _)| p)
             .ok_or_else(|| HostError::Bundle(stale_handle(*receiver as u64)))?,
+        _ if package.is_empty() => default_realm(),
         _ => BY_NAME
             .with(|m| m.borrow().get(package).copied())
             .ok_or_else(|| HostError::Bundle(not_loaded(package)))?,
@@ -8672,6 +8674,15 @@ mod class_symbol_thenable_tests {
         assert_eq!(
             parse_class_symbol("$new$p::C$arity0"),
             Some(("new", "p", "C", None))
+        );
+    }
+
+    /// A typed call on a `loadScript` global has no `pkg::`: the symbol is `$setter$<global>$<member>`.
+    #[test]
+    fn class_symbol_of_a_script_global_has_no_package() {
+        assert_eq!(
+            parse_class_symbol("$setter$box$value"),
+            Some(("setter", "", "box", Some("value")))
         );
     }
 

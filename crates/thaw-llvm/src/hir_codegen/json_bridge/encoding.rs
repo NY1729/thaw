@@ -108,7 +108,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let args_json_str = self.compile_check_json_stringify_error_with_inputs_and_handles(
             args_json_str, &[args_json_val], &[], &[], &raw_owned_handles,
         )?;
-        self.release_fresh_event_key_handles(owned_handles)?;
+        // A thaw-js call carries handle markers as text, so its fresh handles must outlive the call.
+        let release_after_call = backend_symbol.starts_with("thaw_tjs_");
+        if !release_after_call {
+            self.release_fresh_event_key_handles(owned_handles)?;
+        }
 
         let call_fn = self.module.get_function(backend_symbol).unwrap();
         let mut call_args = vec![name_val.into(), args_json_str.into()];
@@ -135,6 +139,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_extract_value(result, 1, "call_dynamic_error")
             .map_err(|e| e.to_string())?
             .into_pointer_value();
+        if release_after_call {
+            self.release_fresh_event_key_handles(owned_handles)?;
+        }
         // A thaw-js error string becomes the framed `Error` (name, message, code, properties) it was.
         let error = if backend_symbol.starts_with("thaw_tjs_") {
             self.compile_thaw_js_frame_error(error)?
