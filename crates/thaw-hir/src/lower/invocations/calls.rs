@@ -3843,7 +3843,11 @@ impl<'a> FnLowerer<'a> {
             signature.is_extern
                 && method_argument_sources_aligned
                 && dynamic_symbol(&callee_name)
-                    .is_some_and(|(backend, _)| backend == DynamicBackend::Jit)
+                    // thaw-js declares the same plain structural parameters, so a class
+                    // instance reaches them through the same projection as the JIT's
+                    .is_some_and(|(backend, _)| {
+                        matches!(backend, DynamicBackend::Jit | DynamicBackend::ThawJs)
+                    })
         });
         let mut lowered = Vec::with_capacity(call.args.len());
         let generic_placeholder = signature
@@ -5013,7 +5017,8 @@ impl<'a> FnLowerer<'a> {
                 let direct_quickjs_typed_call =
                     Self::is_ordinary_quickjs_typed_call(backend, &symbol);
                 let direct_jit_typed_call =
-                    backend == DynamicBackend::Jit && method_argument_sources_aligned;
+                    matches!(backend, DynamicBackend::Jit | DynamicBackend::ThawJs)
+                        && method_argument_sources_aligned;
                 let quickjs_instance_typed_method = method_argument_sources_aligned
                     && Self::is_quickjs_instance_typed_method(backend, &symbol);
                 let ret = if direct_quickjs_typed_call

@@ -1883,6 +1883,13 @@ impl Interp {
         };
         match crate::process_events::own_value(&events, name) {
             Some(v) if v.is_callable() => 1,
+            Some(Value::Object(o)) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
+                let dense = match &*o.kind.borrow() {
+                    Kind::Array(items) => items.len(),
+                    _ => 0,
+                };
+                crate::array_length(&o, dense) as usize
+            }
             Some(v) => self.array_items(&v).len(),
             None => 0,
         }
@@ -2324,6 +2331,7 @@ impl Interp {
             let ns = hrtime_ns();
             let (mut s, mut n) = ((ns / 1_000_000_000) as f64, (ns % 1_000_000_000) as f64);
             if let Value::Object(_) = arg(a, 0) {
+                it.sparse_unsupported(&arg(a, 0))?;
                 let prev = it.array_items(&arg(a, 0));
                 if prev.len() == 2 {
                     s -= it.num(&prev[0]);
@@ -2666,7 +2674,7 @@ fn buffer_json_bytes(it: &mut Interp, v: &Value) -> Option<Vec<u8>> {
     }
     let data = it.get(v, "data").ok()?;
     let Value::Object(d) = &data else { return None };
-    if !matches!(&*d.kind.borrow(), Kind::Array(_)) {
+    if !matches!(&*d.kind.borrow(), Kind::Array(_)) || crate::array_snapshot_unsafe(d) {
         return None;
     }
     it.array_items_raw(&data)

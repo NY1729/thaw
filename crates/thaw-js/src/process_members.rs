@@ -493,6 +493,7 @@ fn setegid(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
 }
 
 fn setgroups(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
+    it.sparse_unsupported(&arg(a, 0))?;
     let groups: Vec<libc::gid_t> = it
         .array_items(&arg(a, 0))
         .iter()
@@ -638,7 +639,10 @@ fn execve(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
     let args_v = arg(a, 1);
     let items: Vec<Value> = match &args_v {
         Value::Undefined => vec![path_v.clone()],
-        Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => it.array_items(&args_v),
+        Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
+            it.sparse_unsupported(&args_v)?;
+            it.array_items(&args_v)
+        }
         _ => {
             return Err(invalid_type(
                 it,
