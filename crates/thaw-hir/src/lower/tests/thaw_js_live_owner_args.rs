@@ -237,3 +237,16 @@ fn thaw_js_any_slot_marker_for_decorated_flattened_class_with_a_method() {
     assert!(body.contains("ret: Json }, [Call(Var(\"__thaw_tjs_live_owner_arg\")"), "{body}");
     assert!(!body.contains("__thaw_decorator_instance_json_"), "{body}");
 }
+
+// The live view's `constructor` getter is a lifted lambda reading the decorator-token global; it must
+// capture it, or codegen fails with "unknown variable" inside the lambda.
+#[test]
+fn thaw_js_live_view_constructor_getter_captures_the_decorator_token_global() {
+    let identity = thaw_js_owner_symbol("tjs", "k::identity");
+    let decls = format!(
+        "function __thawmod0_Mark(value: JsValue): JsValue {{ return value; }}\n@__thawmod0_Mark class __thawmod0_Item {{ value: number = 3; }}\ndeclare function {identity}(value: any): any;"
+    );
+    let body = thaw_js_owner_main_body(&decls, &identity, "const item = new __thawmod0_Item(); const other: any = item;", "item");
+    let token = "__thaw_class___thawmod0_Item_static_field___thaw_decorator_target__";
+    assert!(body.contains(&format!("Lambda([HirParam {{ name: \"{token}\"")), "{body}");
+}

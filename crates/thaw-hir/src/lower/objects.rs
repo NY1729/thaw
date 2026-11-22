@@ -5381,8 +5381,16 @@ impl<'a> FnLowerer<'a> {
             read = adapted_read;
             read_type = adapted_type;
         }
+        // A class's static-field/decorator-token globals are not reachable from a
+        // lifted lambda unless captured like any other referenced global.
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&read, &mut referenced);
+        let captures = referenced.into_iter()
+            .filter(|name| is_class_static_field_symbol(name))
+            .filter_map(|name| self.scope.get(&name).cloned().map(|ty| HirParam { name, ty }))
+            .collect();
         let callback = HirExpr::Lambda(
-            Vec::new(),
+            captures,
             vec![HirParam { name: this_name.into(), ty: source_type.clone() }],
             read_type, Box::new(read),
         );

@@ -535,6 +535,21 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        let lowered = self.lower_call_unread(call)?;
+        // `readDynamicValue` reads a `JsValue` handle into data; an operand that is already
+        // `Json` (a thaw-js typed result) is that data, so reading it is the identity.
+        if let HirExpr::Call(callee, arguments) = &lowered {
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "readDynamicValue")
+                && matches!(arguments.as_slice(), [argument]
+                    if self.infer_expr_type(argument).is_ok_and(|ty| ty == HirType::Json))
+            {
+                return Ok(arguments[0].clone());
+            }
+        }
+        Ok(lowered)
+    }
+
+    fn lower_call_unread(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         if let Some(has_own) = self.lower_prototype_has_own_symbol_call(call)? {
             return Ok(has_own);
         }
