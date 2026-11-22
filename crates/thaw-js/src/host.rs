@@ -4496,6 +4496,14 @@ pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResul
     }))
 }
 
+/// An `any` result that a copy would damage: a Buffer, or a plain object with a function-valued member
+/// (`{ toString() {} }`), which must stay a live handle so its methods keep running.
+fn is_live_any_result(v: &Value) -> bool {
+    is_buffer_value(v)
+        || matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Plain)
+            && o.props().borrow().iter().any(|p| matches!(&p.slot, Slot::Data(m) if m.is_callable())))
+}
+
 /// A function or class instance: it cannot cross as plain data, so compiled code keeps it by handle.
 /// A prototype stand-in (accessors or non-enumerable members on a Plain object) is live too: a copy would lose them.
 /// Generators, Map/Set iterators and Proxies have no plain-data form either (a copy would be `{}`).
@@ -4513,12 +4521,10 @@ fn is_live_value(it: &Interp, v: &Value) -> bool {
                         .borrow()
                         .as_ref()
                         .is_some_and(|p| !Rc::ptr_eq(p, &it.object_proto))
-                        || o.props().borrow().iter().any(|p| {
-                            !p.enumerable
-                                || matches!(p.slot, Slot::Accessor { .. })
-                                // a function-valued member is lost by a copy (`{ toString() {} }`)
-                                || matches!(&p.slot, Slot::Data(m) if m.is_callable())
-                        })))
+                        || o.props()
+                            .borrow()
+                            .iter()
+                            .any(|p| !p.enumerable || matches!(p.slot, Slot::Accessor { .. }))))
         }
         _ => false,
     }
@@ -7644,8 +7650,8 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             s if s.starts_with('\u{4}') => (false, false, true, &s[1..]),
             s => (false, false, false, s),
         };
-        // `\u{5}`: a `Json` (`any`) result, where a Buffer stays a live handle (see `is_live_value`)
-        let (want_live_buffer, symbol) = match symbol.strip_prefix('\u{5}') {
+        // `\u{5}`: a `Json` (`any`) result, where a Buffer or an object with function members stays a live handle
+        let (want_live_any, symbol) = match symbol.strip_prefix('\u{5}') {
             Some(rest) => (true, rest),
             None => (false, symbol),
         };
@@ -7673,7 +7679,7 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             if want_handle {
                 return Ok(store_handle(handle, r).to_string());
             }
-            if (is_live_value(&p.interp, &r) || (want_live_buffer && is_buffer_value(&r)))
+            if (is_live_value(&p.interp, &r) || (want_live_any && is_live_any_result(&r)))
                 && !(want_date && p.interp.date_target(&r))
             {
                 return Ok(handle_marker_json(store_handle(handle, r)));
