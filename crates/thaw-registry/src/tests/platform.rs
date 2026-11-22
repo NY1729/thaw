@@ -2161,7 +2161,8 @@ fn nested_worker_cousin_post_message_reaches_the_sibling_subtree() {
             w1.postMessage({ cmd: 'to', target: w2.threadId });
             var result = await Promise.race([both.then(function () { return seen; }), new Promise(function (r) { setTimeout(function () { r(['timeout']); }, 3000); })]);
             await Promise.all([w1.terminate(), w2.terminate()]);
-            return result;
+            // the receiver's message and the sender's ack race across two threads; compare in a fixed order
+            return result.sort(function (x, y) { return (typeof x === 'string') - (typeof y === 'string'); });
         };"#,
     )
     .unwrap();
