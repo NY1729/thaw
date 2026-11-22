@@ -191,6 +191,37 @@ fn compile_and_run(source: &str, test_name: &str) -> String {
     compile_and_run_with_env(source, test_name, &[])
 }
 
+/// Which JavaScript engine a harness-built program links. The default stays QuickJS;
+/// `THAW_TEST_LANE=thaw-js` switches every `compile_and_run*` helper to the routed
+/// thaw-js build (what `thaw-cli` produces), `compile_and_run_lane` picks explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+    QuickJs,
+    ThawJs,
+}
+
+impl Lane {
+    fn from_env() -> Lane {
+        match std::env::var("THAW_TEST_LANE").as_deref() {
+            Ok("thaw-js") => Lane::ThawJs,
+            _ => Lane::QuickJs,
+        }
+    }
+}
+
+fn compile_and_run_lane(source: &str, test_name: &str, lane: Lane) -> String {
+    let output = compile_and_run_raw_lane(source, test_name, &[], false, lane);
+    assert!(
+        output.status.success(),
+        "binary exited {:?} (signal {:?}): stdout: {} stderr: {}",
+        output.status.code(),
+        std::os::unix::process::ExitStatusExt::signal(&output.status),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 fn compile_and_run_with_env(source: &str, test_name: &str, envs: &[(&str, &str)]) -> String {
     compile_and_run_output_with_env(source, test_name, envs).0
 }
@@ -263,19 +294,65 @@ fn compile_and_run_raw_with_opt(
     commonjs: bool,
     codegen_opt: inkwell::OptimizationLevel,
 ) -> std::process::Output {
+    compile_and_run_raw_lane_opt(
+        source,
+        test_name,
+        envs,
+        commonjs,
+        codegen_opt,
+        Lane::from_env(),
+    )
+}
+
+fn compile_and_run_raw_lane(
+    source: &str,
+    test_name: &str,
+    envs: &[(&str, &str)],
+    commonjs: bool,
+    lane: Lane,
+) -> std::process::Output {
+    compile_and_run_raw_lane_opt(
+        source,
+        test_name,
+        envs,
+        commonjs,
+        inkwell::OptimizationLevel::Default,
+        lane,
+    )
+}
+
+fn compile_and_run_raw_lane_opt(
+    source: &str,
+    test_name: &str,
+    envs: &[(&str, &str)],
+    commonjs: bool,
+    codegen_opt: inkwell::OptimizationLevel,
+    lane: Lane,
+) -> std::process::Output {
     // The shared source map keeps the spans resolvable, so `Error.stack` frames get `file:line:col`.
     let (module, _) = thaw_parser::parse_typescript_with_shared_source_map_named(
         source,
         thaw_parser::common::FileName::Custom("input.ts".into()),
     )
     .unwrap();
+    // Routed mode, as thaw-cli sets it (HIR lowering reads a thread-local, the compiler a field).
+    let thaw_js = lane == Lane::ThawJs;
+    thaw_hir::set_thaw_js_routed(thaw_js);
     let program = thaw_hir::lower_module(&module).unwrap();
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, test_name);
     compiler.set_commonjs_entry(commonjs);
     compiler.set_codegen_opt(codegen_opt);
+    compiler.set_thaw_js_routed(thaw_js);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
+    // thaw-cli rejects a routed build that still needs QuickJS; the blockers are PR2 data.
+    assert!(
+        !(thaw_js && compiler.uses_quickjs()),
+        "thaw-js lane: program still needs QuickJS: {}",
+        compiler.quickjs_blockers().join(",")
+    );
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-{test_name}-{}",
@@ -293,16 +370,24 @@ fn compile_and_run_raw_with_opt(
     let arena_lib = build_staticlib("thaw-arena");
     let runtime_lib = build_staticlib("thaw-runtime");
     let std_lib = build_staticlib("thaw-std");
-    let quickjs_lib = build_staticlib("thaw-quickjs");
+    let quickjs_lib = (!thaw_js).then(|| build_staticlib("thaw-quickjs"));
+    // thaw-js carries its own thaw-intl copy (feature `intl`), like thaw-cli.
+    let thaw_js_lib = thaw_js.then(|| {
+        if compiler.uses_intl() {
+            build_staticlib_with_features("thaw-js", &["intl"])
+        } else {
+            build_staticlib("thaw-js")
+        }
+    });
     // Like thaw-cli: the locale runtime is linked only when the program calls it.
-    let intl_lib = compiler.uses_intl().then(|| build_staticlib("thaw-intl"));
+    let intl_lib = (compiler.uses_intl() && !thaw_js).then(|| build_staticlib("thaw-intl"));
 
     let mut linker = cc_command();
     linker.arg(&obj_path).arg(&arena_lib);
     if let Some(intl_lib) = &intl_lib {
         linker.arg(intl_lib).arg(&arena_lib);
     }
-    let link_status = linker
+    linker
         // `std_lib`/`runtime_lib` have a genuine two-way symbol
         // dependency now (see the sibling `compile_and_invoke_lambda`'s
         // own comment on this same pattern) -- listed twice each so a
@@ -310,8 +395,37 @@ fn compile_and_run_raw_with_opt(
         .arg(&std_lib)
         .arg(&runtime_lib)
         .arg(&std_lib)
-        .arg(&runtime_lib)
-        .arg(&quickjs_lib)
+        .arg(&runtime_lib);
+    if let Some(thaw_js_lib) = &thaw_js_lib {
+        linker.arg(thaw_js_lib);
+    }
+    if let Some(quickjs_lib) = &quickjs_lib {
+        linker.arg(quickjs_lib);
+    }
+    // thaw-js reaches std/runtime through `extern "C"` only: trailing pass, as thaw-cli.
+    linker.arg(&std_lib).arg(&runtime_lib);
+    if thaw_js {
+        // thaw-js looks these up via RTLD_DEFAULT (thaw-cli's thaw_js_extra/ready_export_args).
+        for sym in [
+            "thaw_runtime_run_until_idle",
+            "thaw_http_poll_servers",
+            "thaw_error_set_prop",
+            "thaw_error_delete_prop",
+            "thaw_json_borrowed_tracked_handle_id",
+            "thaw_function_label_for",
+            "thaw_mock_clock_set",
+            "thaw_mock_clock_clear",
+            "thaw_runtime_async_hooks_set",
+            "thaw_runtime_async_frames_set",
+            "thaw_runtime_abort_pending_work",
+            "thaw_runtime_park_ready",
+            "thaw_runtime_adopt_ready",
+        ] {
+            linker.arg(format!("-Wl,--export-dynamic-symbol={sym}"));
+        }
+        linker.arg("-ldl");
+    }
+    let link_status = linker
         // QuickJS-NG's C code calls libm math functions directly;
         // `rustc` normally adds `-lm` automatically when it does the
         // final link, but this is a manual `cc` invocation instead.
@@ -416,8 +530,19 @@ fn diagnose_crashed_binary(exe_path: &std::path::Path, envs: &[(&str, &str)]) {
 /// artifact output -- robust to `CARGO_TARGET_DIR` overrides, unlike
 /// guessing a relative path.
 fn build_staticlib(pkg: &str) -> std::path::PathBuf {
+    build_staticlib_with_features(pkg, &[])
+}
+
+/// `build_staticlib` with explicit cargo features (default features stay on, as for plain
+/// `build_staticlib`; thaw-js has none by default).
+fn build_staticlib_with_features(pkg: &str, features: &[&str]) -> std::path::PathBuf {
+    let mut args = vec!["build", "--release", "-p", pkg, "--message-format=json"];
+    let joined = features.join(",");
+    if !features.is_empty() {
+        args.extend(["--features", &joined]);
+    }
     let output = Command::new("cargo")
-        .args(["build", "--release", "-p", pkg, "--message-format=json"])
+        .args(args)
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke `cargo build -p {pkg}`: {e}"));
     assert!(output.status.success(), "building {pkg} failed");
