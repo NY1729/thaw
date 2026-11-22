@@ -11398,6 +11398,23 @@ fn invalid_date_to_json_is_null() {
     );
 }
 
+/// A Proxy in a prototype chain answers `[[Get]]` for keys the objects below it lack (checked with node 22).
+#[test]
+fn a_proxy_in_the_prototype_chain_answers_get() {
+    assert_eq!(
+        one(
+            r#"const object = Proxy.revocable({}, {}).proxy; const prototype = Proxy.revocable({ inherited: 7 }, {}).proxy;
+          Object.setPrototypeOf(object, prototype);
+          const log = []; const traced = new Proxy({ a: 1 }, { get(t, k, r) { log.push(String(k)); return Reflect.get(t, k, r); } });
+          const child = Object.create(traced); child.own = 2;
+          const rev = Proxy.revocable({}, {}); const c3 = Object.create(rev.proxy); rev.revoke();
+          let revoked = 'none'; try { c3.x; } catch (e) { revoked = e.constructor.name; }
+          console.log(object.inherited, child.a, child.own, child.missing, log.join(), revoked);"#
+        ),
+        "7 1 2 undefined a,missing TypeError"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {
