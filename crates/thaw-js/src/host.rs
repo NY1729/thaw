@@ -3428,6 +3428,8 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             8 => from_value(it, &v, 0)
                 .map(|n| n.to_json())
                 .unwrap_or_else(|_| "null".into()),
+            // the text a user-facing `JSON.stringify` writes for a live value (no handle marker)
+            34 => crate::napi_eval::json_stringify(it, &v)?.unwrap_or_else(|| "null".into()),
             9 => flag(is_object),
             10 => number(it, &v),
             14 => flag(v.is_callable()),

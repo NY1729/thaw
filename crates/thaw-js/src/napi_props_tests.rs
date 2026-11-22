@@ -867,3 +867,13 @@ fn well_known_symbol_wire_text_as_a_graph_value_decodes_to_the_symbol() {
     load("globalThis.__wvok = __wv.slot === Symbol.iterator ? 1 : 0;");
     assert!(is_number(global("__wvok"), 1.0));
 }
+
+#[test]
+fn host_query_34_writes_the_json_text_of_a_live_value_where_query_8_keeps_the_handle_marker() {
+    // an accessor makes the object a live (prototype stand-in) value
+    load("globalThis.__lv = { a: 1, get b() { return 2; } };");
+    let object = global("__lv");
+    let marker = query(object, 8).unwrap();
+    assert!(marker.contains("__thaw_tjs_handle__"), "{marker}");
+    assert_eq!(query(object, 34).unwrap(), r#"{"a":1,"b":2}"#);
+}
