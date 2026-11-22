@@ -12715,3 +12715,28 @@ fn typed_call_without_a_package_prefix_calls_a_default_realm_global() {
         .unwrap_err()
         .contains("missingFn"));
 }
+
+#[test]
+fn instanceof_follows_instanceof_operator_and_ordinary_has_instance() {
+    let src = r#"
+        function t(f) { try { return String(f()); } catch (e) { return e.constructor.name + ': ' + e.message; } }
+        function F() {}
+        const B = F.bind(null);
+        const P = new Proxy(F, {});
+        const out = [
+            t(() => 1 instanceof null), t(() => 1 instanceof 3), t(() => 1 instanceof {}),
+            t(() => ({}) instanceof (() => {})), t(() => 1 instanceof (() => {})),
+            t(() => 1 instanceof { [Symbol.hasInstance]: 1 }).slice(0, 9),
+            t(() => 1 instanceof { [Symbol.hasInstance]: null }),
+            t(() => 1 instanceof { [Symbol.hasInstance]() { return 'x'; } }),
+            t(() => new F() instanceof B), t(() => new F() instanceof P),
+            t(() => ({}) instanceof new Proxy({}, {})),
+            t(() => ({}) instanceof Proxy),
+        ];
+        console.log(out.join('|'));
+    "#;
+    assert_eq!(
+        one(src),
+        "TypeError: Right-hand side of 'instanceof' is not an object|TypeError: Right-hand side of 'instanceof' is not an object|TypeError: Right-hand side of 'instanceof' is not callable|TypeError: Function has non-object prototype 'undefined' in instanceof check|false|TypeError|TypeError: Right-hand side of 'instanceof' is not callable|true|true|true|TypeError: Right-hand side of 'instanceof' is not callable|TypeError: Function has non-object prototype 'undefined' in instanceof check"
+    );
+}

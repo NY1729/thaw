@@ -5741,41 +5741,80 @@ impl Interp {
                     _ => x >= y,
                 })
             }
-            B::InstanceOf => {
-                if matches!(r, Value::Object(_)) {
-                    let key = match self.rt.has_instance_key.clone() {
-                        Some(k) => k,
-                        None => {
-                            let k = self.well_known_key("hasInstance");
-                            self.rt.has_instance_key = Some(k.clone());
-                            k
-                        }
-                    };
-                    let custom = self.get(r, &key)?;
-                    if custom.is_callable() && !self.is_default_has_instance(&custom) {
-                        let res = self.call(&custom, r, std::slice::from_ref(l))?;
-                        return Ok(Value::Bool(res.truthy()));
-                    }
-                }
-                let proto = self.get(r, "prototype")?;
-                let (Value::Object(o), Value::Object(p)) = (l, &proto) else {
-                    return Ok(Value::Bool(false));
-                };
-                let mut cur = o.proto.borrow().clone();
-                while let Some(c) = cur {
-                    if Rc::ptr_eq(&c, p) {
-                        return Ok(Value::Bool(true));
-                    }
-                    cur = c.proto.borrow().clone();
-                }
-                Value::Bool(false)
-            }
+            B::InstanceOf => Value::Bool(self.instance_of(l, r)?),
             B::In => {
                 let key = self.key_of(l);
                 Value::Bool(self.has_property(r, &key)?)
             }
             _ => return unsupported("binary operator"),
         })
+    }
+
+    /// InstanceofOperator(l, r): a non-object `r` and a non-callable `r` without a usable `@@hasInstance` throw.
+    pub(crate) fn instance_of(&mut self, l: &Value, r: &Value) -> R<bool> {
+        if !matches!(r, Value::Object(_)) {
+            return self.throw_error(
+                "TypeError",
+                "Right-hand side of 'instanceof' is not an object",
+            );
+        }
+        let key = match self.rt.has_instance_key.clone() {
+            Some(k) => k,
+            None => {
+                let k = self.well_known_key("hasInstance");
+                self.rt.has_instance_key = Some(k.clone());
+                k
+            }
+        };
+        let handler = self.get(r, &key)?;
+        if !matches!(handler, Value::Undefined | Value::Null) {
+            if !handler.is_callable() {
+                let shown = match &handler {
+                    Value::Object(_) => "#<Object>".to_string(),
+                    v => self.to_str(v).to_string(),
+                };
+                return self.throw_error("TypeError", &format!("{shown} is not a function"));
+            }
+            if !self.is_default_has_instance(&handler) {
+                let res = self.call(&handler, r, std::slice::from_ref(l))?;
+                return Ok(res.truthy());
+            }
+        }
+        if !r.is_callable() {
+            return self.throw_error(
+                "TypeError",
+                "Right-hand side of 'instanceof' is not callable",
+            );
+        }
+        self.ordinary_has_instance(r, l)
+    }
+
+    /// OrdinaryHasInstance(c, o) for a callable `c`; a bound function defers to its target.
+    pub(crate) fn ordinary_has_instance(&mut self, c: &Value, o: &Value) -> R<bool> {
+        if let Value::Object(co) = c {
+            if let Some(t) = self.rt.bound_target(co) {
+                return self.instance_of(o, &t);
+            }
+        }
+        let Value::Object(o) = o else {
+            return Ok(false);
+        };
+        let proto = self.get(c, "prototype")?;
+        let Value::Object(p) = &proto else {
+            let shown = self.to_str(&proto);
+            return self.throw_error(
+                "TypeError",
+                &format!("Function has non-object prototype '{shown}' in instanceof check"),
+            );
+        };
+        let mut cur = o.proto.borrow().clone();
+        while let Some(c) = cur {
+            if Rc::ptr_eq(&c, p) {
+                return Ok(true);
+            }
+            cur = c.proto.borrow().clone();
+        }
+        Ok(false)
     }
 
     fn loose_equals(&mut self, l: &Value, r: &Value) -> bool {
