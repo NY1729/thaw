@@ -2132,6 +2132,12 @@ pub(crate) fn graph_token(
         return Err("malformed graph token".into());
     };
     match (key.as_str(), payload) {
+        // A well-known symbol crosses as its private `"\u{1f}@@name"` string: re-key it here so a
+        // dynamic `defineProperty`/`fromEntries` key is the real symbol (the QuickJS graph decoder did).
+        ("v", Native::Str(s)) if s.starts_with("\u{1f}@@") => match dynamic_property_key(it, s) {
+            Ok(key) => Ok(it.key_value(&key)),
+            Err(_) => Ok(to_value(it, payload)),
+        },
         ("v", v) => Ok(to_value(it, v)),
         ("u", _) => Ok(Value::Undefined),
         ("nf", Native::Str(s)) => Ok(Value::Number(match s.as_str() {
@@ -2768,6 +2774,7 @@ pub(crate) fn dynamic_property_key(it: &mut Interp, name: &str) -> Result<String
     {
         return Ok(name.to_string());
     }
+    default_realm_prelude_check(it)?;
     let global = it.global.clone();
     let Some(decode) = it.lookup(&global, "__thaw_property_key") else {
         return Ok(name.to_string());

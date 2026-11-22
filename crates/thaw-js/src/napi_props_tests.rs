@@ -825,3 +825,16 @@ fn well_known_symbol_wire_text_names_the_symbol_keyed_property() {
     load("globalThis.__wkok = __wk[Symbol.asyncDispose] === __wkf && !('\\u001f@@asyncDispose' in __wk) ? 1 : 0;");
     assert!(is_number(global("__wkok"), 1.0));
 }
+
+#[test]
+fn well_known_symbol_wire_text_as_a_graph_value_decodes_to_the_symbol() {
+    load("globalThis.__wv = {};");
+    let wire = q(r#"{"root":{"v":"\u001f@@iterator"},"nodes":[]}"#);
+    ok_value(thaw_tjs_set_property_graph_with_exception_result(
+        global("__wv"),
+        key("slot").as_ptr(),
+        wire.as_ptr(),
+    ));
+    load("globalThis.__wvok = __wv.slot === Symbol.iterator ? 1 : 0;");
+    assert!(is_number(global("__wvok"), 1.0));
+}
