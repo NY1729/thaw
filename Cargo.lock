@@ -3410,7 +3410,6 @@ dependencies = [
  "thaw-js-infer",
  "thaw-node-builtins",
  "thaw-parser",
- "thaw-quickjs",
  "ureq",
 ]
 
