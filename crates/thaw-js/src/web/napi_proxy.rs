@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::host::{default_realm, with_package};
-use crate::{arg, napi_bridge, napi_graph, new_obj, Interp, Kind, Value, R};
+use crate::{arg, napi_bridge, napi_graph, napi_weak, new_obj, Interp, Kind, Value, R};
 
 const SOURCE: &str = include_str!("napi_proxy.js");
 
@@ -104,12 +104,37 @@ fn cap_object(it: &mut Interp) -> Value {
         .unwrap_or(Value::Undefined);
     let invoker = napi_bridge::graph_invoker_factory(it);
     let reference = it.native(|_, _, _| -> R<Value> { Ok(Value::Number(next_reference() as f64)) });
+    // Weak references of the non-function objects sent to native code (napi_weak): the id of an object, the object
+    // of an id, and the flagging of an object with its id.
+    let weak_id = it.native(|_, _, a| -> R<Value> {
+        Ok(match arg(a, 0) {
+            Value::Object(o) => {
+                napi_weak::id_of(&o).map_or(Value::Undefined, |id| Value::Number(id as f64))
+            }
+            _ => Value::Undefined,
+        })
+    });
+    let weak_value = it.native(|_, _, a| -> R<Value> {
+        Ok(match arg(a, 0) {
+            Value::Number(n) => napi_weak::value_of(n as u64),
+            _ => Value::Undefined,
+        })
+    });
+    let weak_watch = it.native(|_, _, a| -> R<Value> {
+        if let (Value::Object(o), Value::Number(n)) = (arg(a, 0), arg(a, 1)) {
+            napi_weak::watch(&o, n as u64);
+        }
+        Ok(Value::Undefined)
+    });
     let cap = Value::Object(new_obj(Some(it.object_proto.clone()), Kind::Plain));
     for (name, value) in [
         ("exports", exports),
         ("owner", owner),
         ("invoker", invoker),
         ("reference", reference),
+        ("weakId", weak_id),
+        ("weakValue", weak_value),
+        ("weakWatch", weak_watch),
     ] {
         let _ = it.set(&cap, name, value);
     }

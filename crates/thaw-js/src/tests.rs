@@ -705,6 +705,24 @@ fn scan_reports_reachable_blockers_only() {
     assert!(crate::scan::scan_bundle("var x = 1;").is_err());
 }
 
+/// `__thaw_gc` is a host global thaw-js now serves (it runs the cycle collector and releases collected native
+/// references); an unknown `__thaw_*` name is still a blocker.
+#[test]
+fn scan_accepts_thaw_gc_and_still_blocks_unknown_host_globals() {
+    let gc = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.collect = () => { __thaw_gc(); };",
+    );
+    let report = crate::scan::scan_bundle(&gc).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    let unknown = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.collect = () => { __thaw_probe(); };",
+    );
+    let report = crate::scan::scan_bundle(&unknown).ok().unwrap();
+    assert!(report.blockers.contains_key("global:__thaw_probe"));
+}
+
 /// A three-module registry bundle: `p/index.js` (the given body), `p/b.js` (clean) and `p/c.js` (a blocker,
 /// `process.dlopen`). The map of `p/index.js` lists both `./b` and `./c`, as a bundler's catch-all map does.
 fn index_bundle(index_body: &str) -> String {
