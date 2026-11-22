@@ -175,24 +175,97 @@ const MAX_ERROR_NEST: usize = 4;
 /// index at or past it makes the array exotic (see `SparseArr`) instead of allocating.
 pub(crate) const MAX_DENSE_ARRAY_LEN: usize = 1 << 26;
 
-/// An exotic array's `length` and its elements at indices past the dense slots (`items`). Those indices
-/// are `>= items.len()`, so a dense slot and a sparse entry never share an index.
+/// An exotic array's `length` and its elements that are not plain dense slots. `elems` holds every index past
+/// the dense slots (plain data, `set_sparse_elem`) and every index whose dense slot is a hole because the element
+/// is an accessor or has non-default attributes (`put_elem`, invariant: a non-hole dense slot has no entry).
 #[derive(Default)]
 pub(crate) struct SparseArr {
     pub(crate) len: u32,
-    pub(crate) elems: BTreeMap<u32, Value>,
+    pub(crate) elems: BTreeMap<u32, Elem>,
 }
 
-/// The present element `i` of array `o` whose dense slots are `items`: a non-hole dense slot, or a sparse entry.
-pub(crate) fn array_elem(o: &ObjData, items: &[Value], i: usize) -> Option<Value> {
-    match items.get(i) {
-        Some(Value::Hole) => None,
-        Some(v) => Some(v.clone()),
-        None => {
-            let key = u32::try_from(i).ok()?;
-            o.sparse.get()?.borrow().elems.get(&key).cloned()
+/// An element kept in the side table: an accessor, or a data element whose attributes are not the defaults.
+#[derive(Clone)]
+pub(crate) struct Elem {
+    pub(crate) slot: Slot,
+    pub(crate) enumerable: bool,
+    pub(crate) writable: bool,
+    pub(crate) configurable: bool,
+}
+
+impl Elem {
+    fn data(v: Value) -> Elem {
+        Elem {
+            slot: Slot::Data(v),
+            enumerable: true,
+            writable: true,
+            configurable: true,
         }
     }
+
+    /// The values a GC edge must reach: the data value, or the getter and setter.
+    pub(crate) fn into_values(self) -> Vec<Value> {
+        match self.slot {
+            Slot::Data(v) => vec![v],
+            Slot::Accessor { get, set } => get.into_iter().chain(set).collect(),
+            Slot::LazyProto { .. } => Vec::new(),
+        }
+    }
+}
+
+/// The side-table entry of element `i` of array `o` whose dense slots are `items`, when element `i` is not a
+/// non-hole dense slot (a hole with an entry, or a sparse tail entry).
+pub(crate) fn array_entry(o: &ObjData, items: &[Value], i: usize) -> Option<Elem> {
+    if matches!(items.get(i), Some(v) if !matches!(v, Value::Hole)) {
+        return None;
+    }
+    let key = u32::try_from(i).ok()?;
+    o.sparse.get()?.borrow().elems.get(&key).cloned()
+}
+
+/// The present element `i` of array `o` whose dense slots are `items`, as a data value: a non-hole dense slot,
+/// or a data entry. An accessor entry is not a value here (`array_entry`).
+pub(crate) fn array_elem(o: &ObjData, items: &[Value], i: usize) -> Option<Value> {
+    match items.get(i) {
+        Some(Value::Hole) | None => match array_entry(o, items, i)?.slot {
+            Slot::Data(v) => Some(v),
+            _ => None,
+        },
+        Some(v) => Some(v.clone()),
+    }
+}
+
+/// True when element `i` of array `o` is present, as a value or as an accessor.
+pub(crate) fn array_has_index(o: &ObjData, items: &[Value], i: usize) -> bool {
+    array_elem(o, items, i).is_some() || array_entry(o, items, i).is_some()
+}
+
+/// True for an exotic array with any side-table entry (its tail or an accessor/attribute element).
+pub(crate) fn array_has_elems(o: &ObjData) -> bool {
+    o.sparse.get().is_some_and(|s| !s.borrow().elems.is_empty())
+}
+
+/// True when the dense slots of array `o` alone do not hold its elements (a sparse tail or a side-table
+/// element): a dense snapshot of it is wrong, so a builtin reads it live or fails closed on it.
+pub(crate) fn array_snapshot_unsafe(o: &ObjData) -> bool {
+    array_has_sparse_tail(o) || array_has_elems(o)
+}
+
+/// Stores element `i` of array `o` in the side table as `e` (its dense slot, if any, becomes a hole), growing
+/// `length` to cover it. The caller holds no borrow of `o`'s kind.
+pub(crate) fn put_elem(o: &ObjData, i: u32, e: Elem) {
+    let dense = match &mut *o.kind.borrow_mut() {
+        Kind::Array(items) => {
+            if let Some(slot) = items.get_mut(i as usize) {
+                *slot = Value::Hole;
+            }
+            items.len()
+        }
+        _ => 0,
+    };
+    let mut s = o.sparse.get_or_init(Default::default).borrow_mut();
+    s.len = s.len.max(dense as u32).max(i + 1);
+    s.elems.insert(i, e);
 }
 
 /// The `length` of array `o` whose dense slots number `dense`.
@@ -212,27 +285,6 @@ pub(crate) fn array_has_sparse_tail(o: &ObjData) -> bool {
     o.is_exotic() && array_length(o, dense) != dense as f64
 }
 
-/// The `length` of array `o` and its present elements (non-hole dense slots, then the sparse tail) as
-/// (index, value) in index order.
-pub(crate) fn array_present(o: &ObjData) -> (f64, Vec<(f64, Value)>) {
-    let (dense, mut out) = match &*o.kind.borrow() {
-        Kind::Array(items) => (
-            items.len(),
-            items
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| !matches!(v, Value::Hole))
-                .map(|(i, v)| (i as f64, v.clone()))
-                .collect::<Vec<_>>(),
-        ),
-        _ => (0, Vec::new()),
-    };
-    if let Some(s) = o.sparse.get() {
-        out.extend(s.borrow().elems.iter().map(|(k, v)| (*k as f64, v.clone())));
-    }
-    (array_length(o, dense), out)
-}
-
 /// Makes array `o` exotic (if it is not yet) with `length` `len`, dropping sparse entries at `len` and past it.
 /// The caller has already cut the dense slots down to `len` when it shrinks.
 pub(crate) fn set_exotic_len(o: &ObjData, len: u32) {
@@ -245,7 +297,7 @@ pub(crate) fn set_exotic_len(o: &ObjData, len: u32) {
 pub(crate) fn set_sparse_elem(o: &ObjData, i: u32, value: Value) {
     let mut s = o.sparse.get_or_init(Default::default).borrow_mut();
     s.len = s.len.max(i + 1);
-    s.elems.insert(i, value);
+    s.elems.insert(i, Elem::data(value));
 }
 
 #[derive(Clone)]
@@ -2319,6 +2371,11 @@ impl Interp {
                 return self.try_join(v, ",");
             }
             let p = self.primitive_of(v, extras::Hint::String)?;
+            // ToString of a boxed Symbol whose ToPrimitive gives the symbol itself throws (a bare symbol is
+            // stringified by the caller, as `String(sym)` does)
+            if is_symbol_object(&p) && !is_symbol_object(v) {
+                return self.throw_error("TypeError", "Cannot convert a Symbol value to a string");
+            }
             return Ok(self.to_str(&p));
         }
         Ok(self.to_str(v))
@@ -2326,22 +2383,49 @@ impl Interp {
 
     /// `Array.prototype.join`, fallible: a nested array past the stack guard is a `RangeError`, as in Node.
     pub(crate) fn try_join(&mut self, this: &Value, sep: &str) -> R<JsStr> {
-        self.sparse_unsupported(this)?;
         let Value::Object(o) = this else {
             return Ok("".into());
         };
-        let items = match &*o.kind.borrow() {
-            Kind::Array(v) => v.clone(),
-            _ => return Ok("".into()),
-        };
+        if !matches!(&*o.kind.borrow(), Kind::Array(_)) {
+            return Ok("".into());
+        }
         // ES: an array that reaches itself joins that reference as the empty string
         if !self.enter_walk(o) {
             return Ok("".into());
         }
         // the walk entry is popped on every path, the error ones included
-        let out = self.join_items(&items, sep);
+        let out = if o.is_exotic() {
+            self.exotic_items(this)
+                .and_then(|items| self.join_items(&items, sep))
+        } else {
+            let items = match &*o.kind.borrow() {
+                Kind::Array(v) => v.clone(),
+                _ => Vec::new(),
+            };
+            self.join_items(&items, sep)
+        };
         self.leave_walk();
         out.map(Into::into)
+    }
+
+    /// The elements of exotic array `this`, each read through [[Get]] so accessors run and holes chain up.
+    // ponytail: O(length) like V8's generic join; a length past the dense ceiling stays a RangeError
+    pub(crate) fn exotic_items(&mut self, this: &Value) -> R<Vec<Value>> {
+        let len = match this {
+            Value::Object(o) => match &*o.kind.borrow() {
+                Kind::Array(items) => array_length(o, items.len()),
+                _ => 0.0,
+            },
+            _ => 0.0,
+        };
+        if len > MAX_DENSE_ARRAY_LEN as f64 {
+            return self.throw_error("RangeError", "Invalid array length");
+        }
+        let mut out = Vec::with_capacity(len as usize);
+        for k in 0..len as usize {
+            out.push(self.get_index(this, k)?);
+        }
+        Ok(out)
     }
 
     fn join_items(&mut self, items: &[Value], sep: &str) -> R<String> {
@@ -2521,19 +2605,34 @@ impl Interp {
                 let text: String = match kind {
                     K::Arr(items) if items.is_empty() && !array_has_sparse_tail(o) => "[]".into(),
                     K::Arr(items) => {
+                        // side-table elements (accessors, attribute elements, the tail) print from their entry
+                        let side: BTreeMap<u32, Elem> = o
+                            .sparse
+                            .get()
+                            .map(|s| s.borrow().elems.clone())
+                            .unwrap_or_default();
                         let mut parts: Vec<String> = Vec::new();
                         let mut i = 0;
                         while i < items.len() {
-                            if matches!(items[i], Value::Hole) {
+                            if matches!(items[i], Value::Hole) && !side.contains_key(&(i as u32)) {
                                 let n = items[i..]
                                     .iter()
-                                    .take_while(|v| matches!(v, Value::Hole))
+                                    .enumerate()
+                                    .take_while(|(j, v)| {
+                                        matches!(v, Value::Hole)
+                                            && !side.contains_key(&((i + j) as u32))
+                                    })
                                     .count();
                                 parts.push(format!(
                                     "<{n} empty item{}>",
                                     if n == 1 { "" } else { "s" }
                                 ));
                                 i += n;
+                            } else if let (Value::Hole, Some(e)) =
+                                (&items[i], side.get(&(i as u32)))
+                            {
+                                parts.push(self.array_entry_text(e));
+                                i += 1;
                             } else {
                                 parts.push(self.inspect(&items[i], false));
                                 i += 1;
@@ -2541,15 +2640,10 @@ impl Interp {
                         }
                         // the sparse tail: each gap between its present indices (and the end of `length`)
                         // is a run of empty items, so a huge length prints without being materialized
-                        let tail: Vec<(u32, Value)> = match o.sparse.get() {
-                            Some(s) => s
-                                .borrow()
-                                .elems
-                                .iter()
-                                .map(|(k, v)| (*k, v.clone()))
-                                .collect(),
-                            None => Vec::new(),
-                        };
+                        let tail: Vec<(u32, Elem)> = side
+                            .range(items.len() as u32..)
+                            .map(|(k, e)| (*k, e.clone()))
+                            .collect();
                         let mut next = items.len() as f64;
                         let gap = |parts: &mut Vec<String>, n: f64| {
                             if n > 0.0 {
@@ -2560,9 +2654,9 @@ impl Interp {
                                 ));
                             }
                         };
-                        for (k, v) in tail {
+                        for (k, e) in tail {
                             gap(&mut parts, k as f64 - next);
-                            parts.push(self.inspect(&v, false));
+                            parts.push(self.array_entry_text(&e));
                             next = k as f64 + 1.0;
                         }
                         gap(&mut parts, array_length(o, items.len()) - next);
@@ -2688,15 +2782,24 @@ impl Interp {
                 }
                 let mut keys: Vec<Rc<str>> = Vec::new();
                 if let Kind::Array(items) = &*o.kind.borrow() {
-                    keys.extend(
-                        (0..items.len())
-                            .filter(|&i| !matches!(items[i], Value::Hole))
-                            .map(|i| Rc::from(i.to_string())),
-                    );
-                    // the sparse tail: its indices are past the dense slots, so they come after them in order
+                    let mut idx: Vec<u32> = (0..items.len())
+                        .filter(|&i| !matches!(items[i], Value::Hole))
+                        .map(|i| i as u32)
+                        .collect();
+                    // side-table entries (the sparse tail, accessors, attribute elements) merge in index order
                     if let Some(s) = o.sparse.get() {
-                        keys.extend(s.borrow().elems.keys().map(|k| Rc::from(k.to_string())));
+                        let s = s.borrow();
+                        if !s.elems.is_empty() {
+                            idx.extend(
+                                s.elems
+                                    .iter()
+                                    .filter(|(_, e)| e.enumerable)
+                                    .map(|(k, _)| *k),
+                            );
+                            idx.sort_unstable();
+                        }
                     }
+                    keys.extend(idx.into_iter().map(|k| Rc::from(k.to_string())));
                 }
                 if let Kind::Typed(t) = &*o.kind.borrow() {
                     keys.extend((0..t.cur_len()).map(|i| Rc::from(i.to_string())));
@@ -2821,7 +2924,11 @@ impl Interp {
                             Fast::Hit(Value::Number(array_length(o, items.len())))
                         } else {
                             array_index(key).map_or(Fast::Chain, |i| {
-                                Fast::Hit(array_elem(o, items, i).unwrap_or(Value::Undefined))
+                                match array_elem(o, items, i) {
+                                    Some(v) => Fast::Hit(v),
+                                    None if o.is_exotic() => Fast::Chain,
+                                    None => Fast::Hit(Value::Undefined),
+                                }
                             })
                         }
                     }
@@ -2899,6 +3006,48 @@ impl Interp {
 
     /// `[[Set]]` of `key`. `strict` is the lexical strictness of the writing code: only then does a refused
     /// write throw (see `strict.rs`).
+    /// An array element held in the side table, as `util.inspect` shows it without running the getter.
+    fn array_entry_text(&mut self, e: &Elem) -> String {
+        match &e.slot {
+            Slot::Data(v) => self.inspect(v, false),
+            Slot::Accessor { get, set } => match (get.is_some(), set.is_some()) {
+                (true, true) => "[Getter/Setter]".into(),
+                (true, false) => "[Getter]".into(),
+                (false, true) => "[Setter]".into(),
+                (false, false) => "undefined".into(),
+            },
+            Slot::LazyProto { .. } => "undefined".into(),
+        }
+    }
+
+    /// `o[i] = value` for element `i` held in exotic array `o`'s side table `e`: an accessor runs its setter, a
+    /// data element takes the value unless it is read-only (frozen or non-writable).
+    fn set_array_entry(&mut self, o: &Obj, i: usize, e: Elem, value: Value, strict: bool) -> R<()> {
+        let key = i.to_string();
+        match e.slot {
+            Slot::Accessor {
+                set: Some(setter), ..
+            } => {
+                self.call(&setter, &Value::Object(o.clone()), &[value])?;
+                Ok(())
+            }
+            Slot::Accessor { set: None, .. } => {
+                self.refuse_write(strict, o, &key, Refusal::GetterOnly)
+            }
+            _ if o.frozen.get() || !e.writable => {
+                self.refuse_write(strict, o, &key, Refusal::ReadOnly)
+            }
+            _ => {
+                if let Some(s) = o.sparse.get() {
+                    if let Some(entry) = s.borrow_mut().elems.get_mut(&(i as u32)) {
+                        entry.slot = Slot::Data(value);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) fn set_impl(
         &mut self,
         target: &Value,
@@ -2942,6 +3091,28 @@ impl Interp {
         let frozen = o.frozen.get();
         let not_ext = frozen || o.ext.get() != 0;
         let len_ro = o.len_ro.get();
+        // fast path: an existing dense data element takes the write. A non-hole dense slot never has a side-table
+        // entry, and only a frozen array refuses writing one, so this is the whole check for an ordinary array.
+        if !frozen {
+            if let Some(i) = array_index(key) {
+                if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
+                    if let Some(slot) = items.get_mut(i).filter(|s| !matches!(s, Value::Hole)) {
+                        *slot = value.clone();
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        // an element held in the side table (an accessor, or a non-default attribute) takes the write itself
+        if let Some(i) = array_index(key).filter(|_| o.is_exotic()) {
+            let entry = match &*o.kind.borrow() {
+                Kind::Array(items) => array_entry(o, items, i),
+                _ => None,
+            };
+            if let Some(e) = entry {
+                return self.set_array_entry(o, i, e, value, strict);
+            }
+        }
         // set when a new array length is not a uint32 (a RangeError below)
         let mut bad_len = false;
         let refused = {
@@ -2988,17 +3159,37 @@ impl Interp {
                                 None
                             } else {
                                 let n = n as usize;
-                                if n < dense {
-                                    items.truncate(n);
-                                }
-                                if o.is_exotic() || n >= MAX_DENSE_ARRAY_LEN {
-                                    set_exotic_len(o, n as u32);
+                                // a non-configurable element at or past `n` stops the truncation just above it
+                                let pinned = o.sparse.get().and_then(|s| {
+                                    s.borrow()
+                                        .elems
+                                        .range(n as u32..)
+                                        .rev()
+                                        .find(|(_, e)| !e.configurable)
+                                        .map(|(k, _)| *k)
+                                });
+                                if let Some(k) = pinned {
+                                    set_exotic_len(o, k + 1);
+                                    items.truncate(k as usize + 1);
+                                    Some((k.to_string(), Refusal::NotDeletable))
+                                } else {
+                                    if n < dense {
+                                        items.truncate(n);
+                                    }
+                                    if o.is_exotic() || n >= MAX_DENSE_ARRAY_LEN {
+                                        set_exotic_len(o, n as u32);
+                                        return Ok(());
+                                    }
+                                    let cap = items.capacity();
+                                    items.resize(n, Value::Hole);
+                                    grow_slots(
+                                        o,
+                                        std::mem::size_of::<Value>(),
+                                        cap,
+                                        items.capacity(),
+                                    );
                                     return Ok(());
                                 }
-                                let cap = items.capacity();
-                                items.resize(n, Value::Hole);
-                                grow_slots(o, std::mem::size_of::<Value>(), cap, items.capacity());
-                                return Ok(());
                             }
                         }
                     } else {
@@ -5569,12 +5760,18 @@ impl Interp {
         if let Value::Object(o) = obj {
             match &*o.kind.borrow() {
                 Kind::Array(items) => {
-                    return Ok(array_elem(o, items, i).unwrap_or(Value::Undefined))
+                    if let Some(v) = array_elem(o, items, i) {
+                        return Ok(v);
+                    }
+                    if !o.is_exotic() {
+                        return Ok(Value::Undefined);
+                    }
                 }
                 Kind::Typed(t) => return Ok(t.get_value(i).unwrap_or(Value::Undefined)),
                 _ => {}
             }
         }
+        // an exotic array's hole may be an accessor in its side table: the generic [[Get]] decides
         self.get(obj, &i.to_string())
     }
 
@@ -5583,7 +5780,8 @@ impl Interp {
         if let Value::Object(o) = obj {
             if !o.frozen.get() && o.ext.get() == 0 && !o.len_ro.get() {
                 if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
-                    if i < items.len() {
+                    // a hole may be a side-table element (an accessor): the generic path decides
+                    if i < items.len() && (!o.is_exotic() || !matches!(items[i], Value::Hole)) {
                         items[i] = value;
                         return Ok(());
                     }
@@ -5913,9 +6111,16 @@ fn read_own(o: &ObjData, key: &str) -> Option<Read> {
             Kind::Array(items) if key == "length" => {
                 Some(Read::Data(Value::Number(array_length(o, items.len()))))
             }
-            Kind::Array(items) => array_index(key)
-                .and_then(|i| array_elem(o, items, i))
-                .map(Read::Data),
+            Kind::Array(items) => array_index(key).and_then(|i| {
+                if let Some(v) = array_elem(o, items, i) {
+                    return Some(Read::Data(v));
+                }
+                array_entry(o, items, i).map(|e| match e.slot {
+                    Slot::Data(v) => Read::Data(v),
+                    Slot::Accessor { get: Some(g), .. } => Read::Getter(g),
+                    _ => Read::NoGetter,
+                })
+            }),
             _ => None,
         };
     };
@@ -5948,6 +6153,12 @@ fn find_in_chain(o: &Obj, key: &str) -> Option<Slot> {
     while let Some(c) = cur {
         if let Some((s, _)) = find_own(&c, key) {
             return Some(s);
+        }
+        // an array's side-table element (an accessor or attribute element, e.g. on Array.prototype) is an own property
+        if let (Some(i), Kind::Array(items)) = (array_index(key), &*c.kind.borrow()) {
+            if let Some(e) = array_entry(&c, items, i) {
+                return Some(e.slot);
+            }
         }
         cur = c.proto.borrow().clone();
     }

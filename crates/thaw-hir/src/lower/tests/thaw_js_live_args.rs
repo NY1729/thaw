@@ -129,3 +129,37 @@ fn thaw_js_ctor_callback_object_literal_with_an_undeclared_key_keeps_the_typed_l
     let error = lower_module(&module).expect_err("an undeclared option key is rejected");
     assert!(!error.contains("__thaw_dynamic_object_literal"), "{error}");
 }
+
+#[test]
+fn json_value_flows_into_an_array_union_parameter_by_runtime_tag() {
+    let callee = thaw_js_live_arg_symbol("tjs", "k::reversed");
+    let source = format!(
+        r#"
+        declare function {callee}(value: number[] | string[]): string;
+        function main(): void {{
+            const numbers: number[] = [1, 2];
+            const dynamic: any = numbers;
+            console.log({callee}(numbers));
+        }}
+        "#
+    );
+    let program = lower(&source);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("__thaw_json_to_union_"));
+}
+
+#[test]
+fn thaw_js_direct_call_projects_a_class_instance_onto_a_structural_parameter() {
+    let callee = thaw_js_live_arg_symbol("tjs", "shape-kit::inspect");
+    let source = format!(
+        r#"
+        declare function {callee}(value: {{ child: {{ value: number }}; children: {{ value: number }}[] }}): number;
+        class Child {{ value: number = 17; extra: string = "ok"; }}
+        class Holder {{ child: Child = new Child(); children: Child[] = [new Child()]; extra = true; }}
+        function main(): void {{ console.log({callee}(new Holder())); }}
+        "#
+    );
+    let program = lower(&source);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("__thaw_json_decode_native_argument"));
+}

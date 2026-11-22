@@ -318,7 +318,7 @@ impl Interp {
                     .collect(),
             ),
             // a sparse array takes the protocol path (live Get per index), which sees its tail
-            Value::Object(o) if array_has_sparse_tail(o) => None,
+            Value::Object(o) if crate::array_snapshot_unsafe(o) => None,
             Value::Object(o) => {
                 let pairs = match &*o.kind.borrow() {
                     Kind::Array(items) => {
