@@ -7355,6 +7355,8 @@ pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
     let source = crate::napi_eval::unpack_script(source);
     let owner = default_realm();
     let result = with_package(owner, |p| {
+        // Bridge bundles call prelude helpers (`__thaw_bind_preserving_statics`) while loading.
+        default_realm_prelude_check(&mut p.interp)?;
         p.interp
             .run_sloppy(&source)
             .map_err(|c| classify(&mut p.interp, c))

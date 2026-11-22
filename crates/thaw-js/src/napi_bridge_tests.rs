@@ -218,17 +218,20 @@ fn registering_again_replaces_the_callbacks() {
     );
 }
 
+/// The graph helpers are hidden and read-only; the `__thaw_napi_bridge_*` entry points are hidden but assignable
+/// (as on QuickJS), so a host or test can substitute a bridge.
 #[test]
-fn realm_globals_are_hidden_and_read_only() {
+fn realm_globals_are_hidden_and_bridge_entry_points_assignable() {
     let _guard = setup();
     assert_eq!(
         output(
-            "try { __thaw_napi_bridge_call = 1; } catch (e) { console.log(e.name); } \
-             console.log(typeof __thaw_napi_bridge_call, \
+            "try { __thaw_napi_graph_owner = 1; } catch (e) { console.log(e.name); } \
+             __thaw_napi_bridge_call = () => 'stub'; \
+             console.log(typeof __thaw_napi_graph_owner, __thaw_napi_bridge_call(), \
              Object.keys(globalThis).indexOf('__thaw_napi_bridge_call'), \
              Object.keys(globalThis).indexOf('__thaw_napi_graph_owner'))"
         ),
-        "TypeError\nfunction -1 -1"
+        "TypeError\nfunction stub -1 -1"
     );
 }
 
