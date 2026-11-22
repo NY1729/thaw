@@ -73,6 +73,17 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
     }
 }
 
+/// A callback parameter whose result is `Promise<T>` of plain data (or nothing), settled by the host.
+pub(crate) fn thaw_js_async_callback_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Optional(inner) => thaw_js_async_callback_type(inner),
+        _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
+            params.iter().all(|p| thaw_js_plain_type(p) && !thaw_js_contains_bytes(p))
+                && matches!(&ret, HirType::Promise(inner) if thaw_js_plain_type(inner))
+        }),
+    }
+}
+
 /// A class instance parameter (a registry class such as `PerformanceObserverEntryList`): the object carries the
 /// `__thaw_class_identity_` marker. It crosses as a live handle lease, so it is never plain JSON data. Date has
 /// the same marker but keeps its own plain wire (`thaw_js_date_type`). The single source for "class instance
@@ -1883,7 +1894,14 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(bad) = signature
             .params
             .iter()
-            .find(|ty| !thaw_js_param_type(ty) || (**ty != HirType::Bytes && thaw_js_contains_bytes(ty)))
+            .zip(args)
+            .find(|(ty, arg)| {
+                // a callback returning `Promise<plain>` is registered through the receiver-callback route
+                let async_callback = self.closure_returns_promise(arg) && thaw_js_async_callback_type(ty);
+                !(thaw_js_param_type(ty) || async_callback)
+                    || (**ty != HirType::Bytes && thaw_js_contains_bytes(ty))
+            })
+            .map(|(ty, _)| ty)
             .or_else(|| {
                 // a `Promise<Date>` would decode as a plain object: only plain `Promise<T>` routes
                 let unroutable = (!thaw_js_result_type(awaited) && signature.ret != HirType::JsValue)
