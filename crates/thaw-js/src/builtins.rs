@@ -1709,19 +1709,7 @@ impl Interp {
                 Ok(obj)
             });
             self.set_native(o, "defineProperty", |it, _, args| {
-                let key = it.key_of(&arg(args, 1));
-                if let Value::Object(po) = arg(args, 0) {
-                    if let Some((target, handler, trap)) = it.proxy_trap(&po, "defineProperty")? {
-                        it.prop_desc_of(&arg(args, 2))?;
-                        if trap.is_callable() {
-                            it.call(&trap, &handler, &[target, arg(args, 1), arg(args, 2)])?;
-                        } else {
-                            it.define_property(&target, &key, &arg(args, 2))?;
-                        }
-                        return Ok(arg(args, 0));
-                    }
-                }
-                it.define_property(&arg(args, 0), &key, &arg(args, 2))?;
+                it.define_through_proxy(&arg(args, 0), &arg(args, 1), &arg(args, 2))?;
                 Ok(arg(args, 0))
             });
             self.set_native(o, "defineProperties", |it, _, args| {
@@ -1733,7 +1721,8 @@ impl Interp {
                     .collect();
                 for k in keys {
                     let d = it.get(&props, &k)?;
-                    it.define_property(&arg(args, 0), &k, &d)?;
+                    let key = it.key_value(&k);
+                    it.define_through_proxy(&arg(args, 0), &key, &d)?;
                 }
                 Ok(arg(args, 0))
             });
@@ -3418,6 +3407,27 @@ impl Interp {
         let json = self.plain();
         self.install_json(&json);
         g.declare("JSON", Value::Object(json), true);
+    }
+}
+
+impl Interp {
+    /// `Object.defineProperty(target, key, desc)`: a Proxy target runs its `defineProperty` trap (or defines on
+    /// its target), anything else defines directly.
+    fn define_through_proxy(&mut self, target: &Value, key: &Value, desc: &Value) -> R<()> {
+        let key_text = self.key_of(key);
+        if let Value::Object(po) = target {
+            if let Some((inner, handler, trap)) = self.proxy_trap(po, "defineProperty")? {
+                self.prop_desc_of(desc)?;
+                if trap.is_callable() {
+                    self.call(&trap, &handler, &[inner, key.clone(), desc.clone()])?;
+                } else {
+                    self.define_through_proxy(&inner, key, desc)?;
+                }
+                return Ok(());
+            }
+        }
+        self.define_property(target, &key_text, desc)?;
+        Ok(())
     }
 }
 

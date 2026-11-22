@@ -11415,6 +11415,19 @@ fn a_proxy_in_the_prototype_chain_answers_get() {
     );
 }
 
+/// `Object.defineProperties` on a Proxy defines through its `defineProperty` trap or its target (node 22).
+#[test]
+fn define_properties_on_a_proxy_forwards_to_the_target_and_trap() {
+    assert_eq!(
+        one(r#"const object = Proxy.revocable({}, {}).proxy;
+          Object.defineProperties(object, { doubled: { get: () => 18 }, text: { value: "ok" } });
+          const seen = []; const trapped = new Proxy({}, { defineProperty(t, k, d) { seen.push(String(k)); return Reflect.defineProperty(t, k, d); } });
+          Object.defineProperties(trapped, { a: { value: 1 }, [Symbol.iterator]: { value: 2 } });
+          console.log(object.doubled, object.text, seen.join(), trapped.a, trapped[Symbol.iterator]);"#),
+        "18 ok a,Symbol(Symbol.iterator) 1 2"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {
