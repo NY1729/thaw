@@ -1288,6 +1288,8 @@ const DATE_ID_KEY: &str = "__thaw_tjs_id__";
 const BIGINT_KEY: &str = "__thaw_tjs_bigint__";
 /// `{"__thaw_tjs_num__": "-0"}`: a compiled negative zero, which JSON integers lose; also `"NaN"`/`"Infinity"`/`"-Infinity"`.
 const NUM_KEY: &str = "__thaw_tjs_num__";
+/// `{"__thaw_tjs_hole__": 1}` as an array element: a hole of a compiled sparse array.
+const HOLE_KEY: &str = "__thaw_tjs_hole__";
 /// `{"__thaw_tjs_bytes__": {"k": "Buffer" | "Uint8Array" | "ArrayBuffer" | "DataView", "b64": "..."}}`:
 /// compiled `Bytes` crossing as base64 text. `k` selects the JS kind; a missing or unknown `k` is a Buffer.
 /// ArrayBuffer and DataView cross by copy (a DataView over a fresh ArrayBuffer of exactly its window).
@@ -3000,7 +3002,7 @@ fn array_buffer_bytes_json(v: &Value) -> String {
 /// 8 Json copy, 9 is object, 10 number text, 11 is Buffer, 12-13 Date check/time, 14 callable, 15 UTF-16 units,
 /// 16 number coercion, 17-20 and 22-24 engine-prelude queries, 21 native owner pointer, 25-26 origin/prototype,
 /// 27 typed-array text, 28 Error properties, 29 must stay live, 30 call-argument identity, 31 ArrayBuffer bytes,
-/// 32 Object.prototype.toString tag.
+/// 32 Object.prototype.toString tag, 33 array hole indices.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> ThawResult {
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
@@ -3092,6 +3094,23 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             // 31: the bytes of an ArrayBuffer (a resizable or SharedArrayBuffer answers its current bytes) as a
             // JSON number array, so a Json number[] request can read a digest result; `null` for any other value
             31 => array_buffer_bytes_json(&v),
+            // 33: the hole indices of an array as a JSON number array (`[]` for anything else): the native
+            // array a `number[]` decode builds keeps them absent
+            33 => match &v {
+                Value::Object(o) => match &*o.kind.borrow() {
+                    Kind::Array(items) => {
+                        let holes: Vec<String> = items
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| matches!(item, Value::Hole))
+                            .map(|(index, _)| index.to_string())
+                            .collect();
+                        format!("[{}]", holes.join(","))
+                    }
+                    _ => "[]".to_string(),
+                },
+                _ => "[]".to_string(),
+            },
             // 32: the value's Object.prototype.toString tag (`[object Map]`, ...), by the interpreter's own implementation
             32 => match crate::builtins::object_prototype_to_string(it, &v)
                 .map_err(|c| classify(it, c))?
@@ -6205,7 +6224,15 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         Native::Number(x) => Value::Number(*x),
         Native::Str(s) => framed_error(it, s).unwrap_or_else(|| Value::str(s)),
         Native::Array(items) => {
-            let v = items.iter().map(|i| to_value(it, i)).collect();
+            let v = items
+                .iter()
+                .map(|i| match i {
+                    Native::Object(f) if matches!(f.as_slice(), [(k, _)] if k == HOLE_KEY) => {
+                        Value::Hole
+                    }
+                    _ => to_value(it, i),
+                })
+                .collect();
             it.array(v)
         }
         // `{"__thaw_tjs_cb__": id}`: a compiled callback registered with `thaw_tjs_register_callback`.
