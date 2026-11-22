@@ -5852,6 +5852,28 @@ fn primitive_reason(packet: &thaw_arena::exception::ExceptionPacket) -> Option<V
     })
 }
 
+/// The exact value of a thrown primitive of a callback result: `primitive_reason`, plus tag 4 (a string
+/// throw: the result text itself, unless it is a framed native Error), as the QuickJS host rebuilt it.
+fn thrown_primitive(
+    packet: Option<&thaw_arena::exception::ExceptionPacket>,
+    text: &str,
+) -> Option<Value> {
+    let packet = packet?;
+    // a thrown callback result is marked with a leading `\u{2}`
+    let text = text.strip_prefix('\u{2}').unwrap_or(text);
+    if packet.tag == 4
+        && packet.object == 0
+        && packet.native == 0
+        && packet.aggregate == 0
+        && packet.native_text != 0
+        && packet.native_error_identity == 0
+        && !text.starts_with('\u{1}')
+    {
+        return Some(Value::str(text));
+    }
+    primitive_reason(packet)
+}
+
 /// The text of an arena string. A string with an embedded NUL has a recorded length (`owned_string`), which a
 /// C-string read would cut at the NUL; error messages may hold NULs.
 ///
@@ -5881,7 +5903,7 @@ pub(crate) fn take_callback_result(
         retain_restored_packet(it, packet.clone(), &original);
         return Err(Ctl::Throw(original));
     }
-    if let Some(reason) = packet.as_deref().and_then(primitive_reason) {
+    if let Some(reason) = thrown_primitive(packet.as_deref(), &out) {
         return Err(Ctl::Throw(reason));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
@@ -6459,6 +6481,9 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
     if let Some(original) = packet.as_deref().and_then(original_js_exception) {
         retain_restored_packet(it, packet.clone(), &original);
         return Err(Ctl::Throw(original));
+    }
+    if let Some(reason) = thrown_primitive(packet.as_deref(), &out) {
+        return Err(Ctl::Throw(reason));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
         return Err(packet_error(it, packet, &out));

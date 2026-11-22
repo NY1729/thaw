@@ -2094,6 +2094,20 @@ fn carrier_error_keeps_its_packet_through_frame_error() {
     assert!(text.starts_with("\u{1}Error\u{1}"), "not framed: {text:?}");
 }
 
+/// A native callback that throws a string reaches the engine as that string (tag 4), not as an Error built from
+/// its text; a framed native Error text still becomes an Error.
+#[test]
+fn native_string_throw_through_a_callback_stays_a_string() {
+    let mut packet = primitive_exception_packet(4, 0.0, 0, false, 0);
+    packet.native_text = 1;
+    let (thrown, _) = thrown_through_callback(packet, b"\x02str");
+    assert!(matches!(&thrown, Value::Str(s) if &**s == "str"));
+    let mut framed = primitive_exception_packet(4, 0.0, 0, false, 0);
+    framed.native_text = 1;
+    let (thrown, _) = thrown_through_callback(framed, b"\x02\x01Error\x01boom");
+    assert!(matches!(thrown, Value::Object(_)));
+}
+
 /// A thrown primitive keeps its type through the error string: the packet names the tag and payload, so the
 /// native catch sees the number / string / `undefined` / `null`, not the text of its conversion.
 #[test]
