@@ -1643,6 +1643,7 @@ impl Interp {
         crate::worker::set_winding(self, false);
         let mut first = true;
         while self.loop_alive() {
+            crate::napi_weak::drain();
             if crate::gc_registry::due() {
                 self.gc_safe_point();
             }
@@ -2092,6 +2093,16 @@ impl Interp {
             Ok(Value::Undefined)
         });
         g.declare("clearImmediate", f, true);
+        // Host-internal (not a Node global): runs the cycle collector so native finalizers of unreachable objects fire.
+        let f = self.native(|it, _, _| {
+            let cleared = it.collect_cycles();
+            crate::napi_weak::drain();
+            // A finalizer that posts its work (`node_api_post_finalizer`) runs on the next poll: take it now, so a
+            // program that collects and then reads the finalizer's effect does not wait for a loop turn.
+            crate::napi_bridge::poll();
+            Ok(Value::Number(cleared as f64))
+        });
+        g.declare("__thaw_gc", f, true);
         let f = self.native(|it, _, a| {
             let cb = arg(a, 0);
             it.need_callback(&cb)?;
