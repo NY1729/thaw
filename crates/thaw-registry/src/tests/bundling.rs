@@ -2520,29 +2520,22 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
     );
 }
 
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (failedEntry.readNative); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_failed_link_never_marks_source_linked {
-
 #[test]
 fn native_esm_failed_link_never_marks_source_linked() {
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
-          globalThis.failedEntry = __thaw_register_native_bundle(JSON.stringify({
-            main: 'bad', modules: [{ key: 'bad', imports: {}, source:
-              'import "./unmapped"; export const value = 1;' }]
-          }));
-          failedEntry().catch(() => {});
-          globalThis.failedRead = function() {
-            try { failedEntry.readNative('thaw-bundle:1:bad', 'value'); return false; }
-            catch (_) { return true; }
-          };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"failedRead".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
-    }).join().unwrap();
-}
+    // Node 22.23.1: an entry that imports an unmapped specifier fails to link with ERR_MODULE_NOT_FOUND; no body ran
+    // and the failure is cached (g2-probes/fl; the esm.rs host tests `failed_link_*` pin the code, the no-body and the
+    // caching on the native route). The registry bundles an unmappable import through its own ESM transform, whose
+    // load error is MODULE_NOT_FOUND. The old pin (a QuickJS-private readNative of it throws) becomes: the load fails.
+    let root = temp_registry("native-esm-failed-link");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-failed-link-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "globalThis.failedLinkRuns = (globalThis.failedLinkRuns || 0) + 1; import './unmapped.mjs'; export const value = 1;").unwrap();
+    let bundled = bundle_commonjs_package(&modules, "native-failed-link-pkg", &package, "index.mjs");
+    let (bundle, _, _, _) = bundled.unwrap();
+    let outcome = run_js_probe(&bundle, "[globalThis.failedLinkRuns]");
+    assert!(outcome.starts_with("ERROR: ") && outcome.contains("Cannot find module './unmapped.mjs'"), "{outcome}");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

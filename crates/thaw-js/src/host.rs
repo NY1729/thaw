@@ -75,6 +75,8 @@ struct Loader {
     /// The thrown value of each module whose factory threw synchronously: its cache entry stays, so a later
     /// `import()` rejects with the same error instead of resolving the partial exports (Node caches the failure).
     failed: RefCell<HashMap<String, Value>>,
+    /// ES-module keys whose static graph `link_check` found fully resolvable.
+    linked: RefCell<HashSet<String>>,
     /// The keys whose factory is running right now (a synchronous evaluation in progress). A `require` that
     /// re-enters one across the CommonJS/ES boundary is a cycle Node refuses (`cycle_refused`).
     loading: RefCell<HashSet<String>>,
@@ -516,12 +518,73 @@ fn peer_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
         .map_err(|e| js_error(it, &e.to_string()))
 }
 
+/// Whether `peer_exports(spec)` would find a package (no load happens).
+fn peer_known(spec: &str) -> bool {
+    BOOTING.with(|b| b.borrow().iter().any(|(name, _)| name == spec))
+        || BY_NAME.with(|m| m.borrow().contains_key(spec))
+        || PEER_SOURCES.with(|s| s.borrow().contains_key(spec))
+}
+
 /// The module key of a node builtin the bundle serves for a spec the map does not name (`fs`, `node:fs`):
 /// the QuickJS lane's global `require(spec)` fallback. Builtins are the `node:<name>` factories.
 fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
     let name = spec.strip_prefix("node:").unwrap_or(spec);
     let key = format!("node:{name}");
     (loader.factories.contains_key(&key) || key == "node:crypto").then_some(key)
+}
+
+/// Node's link phase for a native ES-module graph: every static specifier of every module reachable from `root` must
+/// resolve before ANY module body runs. A failure is `ERR_MODULE_NOT_FOUND` (as `import()` of an unmapped spec), cached
+/// for the importing module and the modules above it on the walk (the same Error object each time, and it
+/// stays cached when the file appears later); unrelated modules are untouched and load normally.
+// ponytail: named-export existence (`does not provide an export named`) is not checked here, only resolution.
+fn link_check(loader: &Rc<Loader>, it: &mut Interp, root: &str) -> R<()> {
+    fn walk(loader: &Rc<Loader>, it: &mut Interp, key: &str, seen: &mut HashSet<String>) -> R<()> {
+        let specs = loader
+            .parts
+            .esm_specs
+            .get(base_of(loader, key))
+            .cloned()
+            .unwrap_or_default();
+        for spec in specs {
+            if spec == "bindings" || spec == "node-gyp-build" || spec.ends_with(".node") {
+                continue;
+            }
+            match module_key(loader, key, &spec, false) {
+                Some(next) => {
+                    if is_esm(loader, &next)
+                        && !loader.linked.borrow().contains(&next)
+                        && !loader.cache.borrow().contains_key(&next)
+                        && seen.insert(next.clone())
+                    {
+                        if let Err(Ctl::Throw(reason)) = walk(loader, it, &next, seen) {
+                            loader
+                                .failed
+                                .borrow_mut()
+                                .insert(key.to_string(), reason.clone());
+                            return Err(Ctl::Throw(reason));
+                        }
+                    }
+                }
+                None if peer_known(&spec) => {}
+                None => {
+                    let err = import_not_found(it, key, &spec);
+                    if let Ctl::Throw(reason) = &err {
+                        loader
+                            .failed
+                            .borrow_mut()
+                            .insert(key.to_string(), reason.clone());
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut seen = HashSet::from([root.to_string()]);
+    walk(loader, it, root, &mut seen)?;
+    loader.linked.borrow_mut().extend(seen);
+    Ok(())
 }
 
 fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
@@ -540,6 +603,16 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     } else {
         loader.cache.borrow().get(key).cloned()
     };
+    if cached.is_none() && !commonjs && is_esm(loader, key) {
+        // a failed link is cached (there is no cache entry to hold it), and a graph links before any body runs
+        let failed = loader.failed.borrow().get(key).cloned();
+        if let Some(reason) = failed {
+            return Err(Ctl::Throw(reason));
+        }
+        if !loader.linked.borrow().contains(key) {
+            link_check(loader, it, key)?;
+        }
+    }
     if let Some(m) = cached {
         // a failed ES module stays failed: every later require rethrows its evaluation error (Node caches it)
         let failed = loader.failed.borrow().get(key).cloned();
@@ -944,6 +1017,7 @@ fn make_loader(
         namespaces: RefCell::new(HashMap::new()),
         ready: RefCell::new(HashMap::new()),
         failed: RefCell::new(HashMap::new()),
+        linked: RefCell::new(HashSet::new()),
         loading: RefCell::new(HashSet::new()),
         promise_of,
         cjs_namespace,
@@ -998,13 +1072,14 @@ fn install_native_registrar(it: &mut Interp) {
 /// promise (also when a module re-enters it while evaluating); `evaluate.readNative(id, name)` reads an export
 /// of a source of THIS bundle that has been linked (reached by evaluation), nothing else.
 fn register_native_bundle(it: &mut Interp, json: &str) -> R<Value> {
-    let (text, problems, _, esm_keys) =
+    let (text, problems, _, esm_keys, esm_specs) =
         crate::esm::native_json_to_factories(json, "", true).map_err(|e| js_error(it, &e))?;
     if let Some(problem) = problems.iter().next() {
         return Err(js_error(it, &format!("unsupported: {problem}")));
     }
     let mut parts = parse_bundle(&text).map_err(|e| js_error(it, &e))?;
     parts.esm_keys = esm_keys.into_iter().collect();
+    parts.esm_specs = esm_specs;
     let main = parts.entry.clone();
     let run_id = it.run_id;
     let loader = make_loader(it, parts, &text, "");
