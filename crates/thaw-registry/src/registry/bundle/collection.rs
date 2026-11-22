@@ -1,18 +1,26 @@
-fn package_instance_prefix(node_modules_dir: &Path, name: &str, directory: &Path) -> String {
-    let Ok(relative) = directory.strip_prefix(node_modules_dir) else {
-        // The test helper and linked packages may provide an external root.
-        // Keep its historical key; claim_module_key below rejects a collision.
-        return name.to_string();
-    };
-    if relative.as_os_str().is_empty()
-        || relative.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
-        return name.to_string();
+/// The module-key prefix of one package instance. A copy under `node_modules_dir` is keyed by its path there
+/// (`pkg`, `pkg/a/node_modules/dep`). `root` is the bundled package `(name, directory)`: a copy nested inside
+/// its tree when that tree is outside `node_modules_dir` (test helper, linked package) is keyed by its path under
+/// `root`, so two nested copies of one name stay distinct. Anything else keeps the bare name, and
+/// `claim_module_key` rejects a real collision.
+fn package_instance_prefix(node_modules_dir: &Path, root: (&str, &Path), name: &str, directory: &Path) -> String {
+    let escapes = |relative: &Path| relative.as_os_str().is_empty()
+        || relative.components().any(|component| matches!(component, std::path::Component::ParentDir));
+    if let Ok(relative) = directory.strip_prefix(node_modules_dir) {
+        if escapes(relative) {
+            return name.to_string();
+        }
+        return normalize_path_string(&relative.to_string_lossy());
     }
-    normalize_path_string(&relative.to_string_lossy())
+    let (root_name, root_dir) = root;
+    match directory.strip_prefix(root_dir) {
+        Ok(relative) if !escapes(relative) => format!("{root_name}/{}", normalize_path_string(&relative.to_string_lossy())),
+        _ => name.to_string(),
+    }
 }
 
-fn package_module_key(node_modules_dir: &Path, name: &str, directory: &Path, relative: &str, suffix: &str) -> String {
-    format!("{}/{}{}", package_instance_prefix(node_modules_dir, name, directory), relative, suffix)
+fn package_module_key(node_modules_dir: &Path, root: (&str, &Path), name: &str, directory: &Path, relative: &str, suffix: &str) -> String {
+    format!("{}/{}{}", package_instance_prefix(node_modules_dir, root, name, directory), relative, suffix)
 }
 
 fn claim_module_key(identities: &mut HashMap<String, PathBuf>, key: &str, path: &Path) -> Result<(), String> {
@@ -434,7 +442,8 @@ fn bundle_commonjs_package_cached(
     source_cache: &mut SourceCache,
 ) -> Result<(String, String, usize, BTreeMap<String, String>), String> {
     let (main_relative_key, main_abs) = resolve_module_path(root_package_dir, main_relative)?;
-    let main_key = package_module_key(node_modules_dir, root_package, root_package_dir, &main_relative_key, "");
+    let root = (root_package, root_package_dir);
+    let main_key = package_module_key(node_modules_dir, root, root_package, root_package_dir, &main_relative_key, "");
 
     let mut modules: Vec<BundledModule> = Vec::new();
     let mut visited: Vec<String> = vec![main_key.clone()];
@@ -448,10 +457,10 @@ fn bundle_commonjs_package_cached(
     )];
     let mut package_versions: BTreeMap<PathBuf, (String, String, String)> = BTreeMap::new();
     let mut uses_global_fetch = false;
-    record_package_version(&mut package_versions, node_modules_dir, root_package, root_package_dir);
+    record_package_version(&mut package_versions, node_modules_dir, root, root_package, root_package_dir);
 
     while let Some((key, abs_path, pkg_name, pkg_dir)) = worklist.pop() {
-        let pkg_key = package_instance_prefix(node_modules_dir, &pkg_name, &pkg_dir);
+        let pkg_key = package_instance_prefix(node_modules_dir, root, &pkg_name, &pkg_dir);
         let caller_dir = abs_path.parent().unwrap_or(&pkg_dir);
         if abs_path
             .extension()
@@ -546,7 +555,7 @@ fn bundle_commonjs_package_cached(
                         Some("js" | "cjs" | "mjs" | "json")
                     )
             }) {
-                let target_key = package_module_key(node_modules_dir, &pkg_name, &pkg_dir, &relative, "");
+                let target_key = package_module_key(node_modules_dir, root, &pkg_name, &pkg_dir, &relative, "");
                 if target_key == key {
                     continue;
                 }
@@ -604,12 +613,12 @@ fn bundle_commonjs_package_cached(
                             resolve_bare_require(node_modules_dir, caller_dir, &specifier)
                         };
                         if let Some((name, relative, absolute, directory)) = resolved {
-                            let target = package_module_key(node_modules_dir, &name, &directory, &relative, "");
+                            let target = package_module_key(node_modules_dir, root, &name, &directory, &relative, "");
                             targets.push((specifier.clone(), target.clone()));
                             claim_module_key(&mut identities, &target, &absolute)?;
                             if !visited.contains(&target) {
                                 visited.push(target.clone());
-                                record_package_version(&mut package_versions, node_modules_dir, &name, &directory);
+                                record_package_version(&mut package_versions, node_modules_dir, root, &name, &directory);
                                 worklist.push((target, absolute, name, directory));
                             }
                         }
@@ -624,7 +633,7 @@ fn bundle_commonjs_package_cached(
                             resolve_bare_require(node_modules_dir, caller_dir, subpath)
                         };
                         if let Some((sub_name, relative, absolute, directory)) = resolved {
-                            let target = package_module_key(node_modules_dir, &sub_name, &directory, &relative, "");
+                            let target = package_module_key(node_modules_dir, root, &sub_name, &directory, &relative, "");
                             targets.push((subpath.clone(), target.clone()));
                             claim_module_key(&mut identities, &target, &absolute)?;
                             if !visited.contains(&target) {
@@ -632,6 +641,7 @@ fn bundle_commonjs_package_cached(
                                 record_package_version(
                                     &mut package_versions,
                                     node_modules_dir,
+                                    root,
                                     &sub_name,
                                     &directory,
                                 );
@@ -674,7 +684,7 @@ fn bundle_commonjs_package_cached(
             if let Ok((resolved_relative, resolved_abs)) =
                 resolve_module_path(&pkg_dir, &resolution_path)
             {
-                let resolved_key = package_module_key(node_modules_dir, &pkg_name, &pkg_dir, &resolved_relative, suffix);
+                let resolved_key = package_module_key(node_modules_dir, root, &pkg_name, &pkg_dir, &resolved_relative, suffix);
                 if analysis.require_condition_specs.contains(&spec) {
                     requires.push((spec.clone(), resolved_key.clone()));
                 }
@@ -747,12 +757,12 @@ fn bundle_commonjs_package_cached(
                 if relative.is_empty() {
                     continue;
                 }
-                let resolved_key = package_module_key(node_modules_dir, &name, &directory, &relative, suffix);
+                let resolved_key = package_module_key(node_modules_dir, root, &name, &directory, &relative, suffix);
                 targets.push((spec.clone(), resolved_key.clone()));
                 claim_module_key(&mut identities, &resolved_key, &absolute)?;
                 if !visited.contains(&resolved_key) {
                     visited.push(resolved_key.clone());
-                    record_package_version(&mut package_versions, node_modules_dir, &name, &directory);
+                    record_package_version(&mut package_versions, node_modules_dir, root, &name, &directory);
                     worklist.push((resolved_key, absolute, name, directory));
                 }
                 continue;
@@ -763,12 +773,12 @@ fn bundle_commonjs_package_cached(
                 resolve_bare_require(node_modules_dir, caller_dir, resolution_spec)
             };
             if let Some((dep_name, dep_relative, dep_abs, dep_dir)) = resolved {
-                let dep_key = package_module_key(node_modules_dir, &dep_name, &dep_dir, &dep_relative, suffix);
+                let dep_key = package_module_key(node_modules_dir, root, &dep_name, &dep_dir, &dep_relative, suffix);
                 targets.push((spec.clone(), dep_key.clone()));
                 claim_module_key(&mut identities, &dep_key, &dep_abs)?;
                 if !visited.contains(&dep_key) {
                     visited.push(dep_key.clone());
-                    record_package_version(&mut package_versions, node_modules_dir, &dep_name, &dep_dir);
+                    record_package_version(&mut package_versions, node_modules_dir, root, &dep_name, &dep_dir);
                     worklist.push((dep_key, dep_abs, dep_name, dep_dir));
                 }
                 continue;
@@ -873,13 +883,14 @@ fn bundle_commonjs_package_cached(
 fn record_package_version(
     versions: &mut BTreeMap<PathBuf, (String, String, String)>,
     node_modules_dir: &Path,
+    root: (&str, &Path),
     name: &str,
     dir: &Path,
 ) {
     if let Ok(manifest) = read_manifest(dir) {
         if let Some(v) = manifest.get("version").and_then(|v| v.as_str()) {
             let identity = dir.to_path_buf();
-            versions.insert(identity, (name.to_string(), package_instance_prefix(node_modules_dir, name, dir), v.to_string()));
+            versions.insert(identity, (name.to_string(), package_instance_prefix(node_modules_dir, root, name, dir), v.to_string()));
         }
     }
 }
