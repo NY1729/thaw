@@ -397,6 +397,7 @@ pub(crate) const EXTRAS: &str = r#"
     return m[1] + '0.' + '0'.repeat(-e - 1) + digits;
   });
   def(Math, 'fround', function (x) { return new Float32Array([x])[0]; });
+  def(Math, 'f16round', function f16round(x) { return new Float16Array([x])[0]; });
   def(Map, 'groupBy', function (items, f) {
     var out = new Map(), i = 0;
     for (var x of items) { var k = f(x, i++); if (out.has(k)) out.get(k).push(x); else out.set(k, [x]); }
@@ -521,7 +522,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   var scratch = new Uint8Array(8);
   var kinds = {
     Int8: [1, Int8Array], Uint8: [1, Uint8Array], Int16: [2, Int16Array], Uint16: [2, Uint16Array],
-    Int32: [4, Int32Array], Uint32: [4, Uint32Array], Float32: [4, Float32Array], Float64: [8, Float64Array]
+    Int32: [4, Int32Array], Uint32: [4, Uint32Array], Float16: [2, Float16Array], Float32: [4, Float32Array], Float64: [8, Float64Array]
   };
   function check(dv, index, size) {
     index = Math.trunc(index) || 0;
@@ -695,7 +696,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   var brand = __thaw_brand;
   function one(name) { return function (v) { return brand(v) === name; }; }
   function any(names) { return function (v) { return names.indexOf(brand(v)) !== -1; }; }
-  var TYPED = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'];
+  var TYPED = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'];
   var never = function () { return false; };
   var utilTypes = {
     isDate: one('Date'),

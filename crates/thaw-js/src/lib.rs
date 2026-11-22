@@ -699,6 +699,7 @@ const NODE_GLOBAL_FLAGS: &[(&str, &str)] = &[
     ("Int16Array", "-wc"),
     ("Uint32Array", "-wc"),
     ("Int32Array", "-wc"),
+    ("Float16Array", "-wc"),
     ("Float32Array", "-wc"),
     ("Float64Array", "-wc"),
     ("Uint8ClampedArray", "-wc"),

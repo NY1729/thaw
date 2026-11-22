@@ -2120,11 +2120,12 @@ fn thrown_primitives_bind_a_primitive_packet() {
         (Value::Null, 6),
     ] {
         let result = error_result_of(value);
-        let packet = thaw_arena::owned_exception(result.error).expect("a primitive packet");
+        // taken, so no packet is left bound when this thread's locals are destroyed
+        let packet = thaw_arena::take_owned_exception(result.error).expect("a primitive packet");
         assert_eq!(packet.tag, tag);
     }
     let result = error_result_of(Value::Number(17.0));
-    let packet = thaw_arena::owned_exception(result.error).unwrap();
+    let packet = thaw_arena::take_owned_exception(result.error).unwrap();
     assert_eq!(f64::from_bits(packet.number), 17.0);
 }
 
@@ -11366,6 +11367,24 @@ fn es_next_library_additions_follow_the_spec() {
           a.use({ [Symbol.dispose]() { console.log("sync-fallback"); } });
           await a.disposeAsync(); })()"#),
         "sync-fallback|async"
+    );
+}
+
+/// Float16Array, `Math.f16round` and `DataView` half floats (ES2025): values checked against IEEE binary16
+/// (round to nearest, ties to even, straight from the double).
+#[test]
+fn float16_array_math_f16round_and_data_view_round_like_ieee_half() {
+    assert_eq!(
+        one(r#"const v = new Float16Array([1.337, 2.5, 65504, 65520, 1e-8, 2049, 5.960464477539063e-8]);
+          console.log(v.length, v.BYTES_PER_ELEMENT, Array.from(v).join(), Object.prototype.toString.call(v), Float16Array.name);"#),
+        "7 2 1.3369140625,2.5,65504,Infinity,0,2048,5.960464477539063e-8 [object Float16Array] Float16Array"
+    );
+    assert_eq!(
+        one(
+            r#"const dv = new DataView(new ArrayBuffer(4)); dv.setFloat16(0, 1.337, true); dv.setFloat16(2, -2.5);
+          console.log(Math.f16round(0.1), Math.f16round(65519.99), dv.getFloat16(0, true), dv.getFloat16(2), new Uint8Array(dv.buffer).join());"#
+        ),
+        "0.0999755859375 65504 1.3369140625 -2.5 89,61,193,0"
     );
 }
 

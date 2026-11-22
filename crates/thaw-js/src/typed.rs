@@ -16,6 +16,8 @@ pub(crate) enum Ty {
     U16,
     I32,
     U32,
+    /// Float16Array (ES2025): elements are IEEE half floats, read and written through `f16_to_f64` / `f64_to_f16`.
+    F16,
     F32,
     F64,
     // BigInt64Array / BigUint64Array: elements are BigInts, so they have no f64 form (see `TypedArr::get`)
@@ -23,11 +25,55 @@ pub(crate) enum Ty {
     U64,
 }
 
+/// IEEE 754 binary16 bits as a number.
+pub(crate) fn f16_to_f64(bits: u16) -> f64 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = i32::from((bits >> 10) & 0x1f);
+    let mant = f64::from(bits & 0x3ff);
+    match exp {
+        0 => sign * mant * 2f64.powi(-24),
+        31 if mant == 0.0 => sign * f64::INFINITY,
+        31 => f64::NAN,
+        _ => sign * (1.0 + mant / 1024.0) * 2f64.powi(exp - 15),
+    }
+}
+
+/// A number as IEEE 754 binary16 bits, rounded to nearest, ties to even (the value goes straight from f64, no
+/// double rounding through f32).
+pub(crate) fn f64_to_f16(v: f64) -> u16 {
+    if v.is_nan() {
+        return 0x7e00;
+    }
+    let sign: u16 = if v.is_sign_negative() { 0x8000 } else { 0 };
+    let abs = v.abs();
+    if abs == 0.0 {
+        return sign;
+    }
+    // 65520 is the midpoint between the largest half (65504) and the next power step: it rounds to infinity
+    if abs >= 65520.0 {
+        return sign | 0x7c00;
+    }
+    // below the smallest normal (2^-14) the unit is 2^-24; a result of 1024 is the smallest normal's bits
+    if abs < 2f64.powi(-14) {
+        return sign | (abs * 2f64.powi(24)).round_ties_even() as u16;
+    }
+    let mut exp = ((abs.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    let mut mant = ((abs / 2f64.powi(exp) - 1.0) * 1024.0).round_ties_even() as u32;
+    if mant == 1024 {
+        mant = 0;
+        exp += 1;
+    }
+    if exp > 15 {
+        return sign | 0x7c00;
+    }
+    sign | (((exp + 15) as u16) << 10) | mant as u16
+}
+
 impl Ty {
     pub(crate) fn size(self) -> usize {
         match self {
             Ty::I8 | Ty::U8 | Ty::U8C => 1,
-            Ty::I16 | Ty::U16 => 2,
+            Ty::I16 | Ty::U16 | Ty::F16 => 2,
             Ty::I32 | Ty::U32 | Ty::F32 => 4,
             Ty::F64 | Ty::I64 | Ty::U64 => 8,
         }
@@ -47,6 +93,7 @@ impl Ty {
             Ty::U16 => "[object Uint16Array]",
             Ty::I32 => "[object Int32Array]",
             Ty::U32 => "[object Uint32Array]",
+            Ty::F16 => "[object Float16Array]",
             Ty::F32 => "[object Float32Array]",
             Ty::F64 => "[object Float64Array]",
             Ty::I64 => "[object BigInt64Array]",
@@ -63,6 +110,7 @@ impl Ty {
             Ty::U16 => "Uint16Array",
             Ty::I32 => "Int32Array",
             Ty::U32 => "Uint32Array",
+            Ty::F16 => "Float16Array",
             Ty::F32 => "Float32Array",
             Ty::F64 => "Float64Array",
             Ty::I64 => "BigInt64Array",
@@ -71,7 +119,7 @@ impl Ty {
     }
 }
 
-const ALL: [Ty; 11] = [
+const ALL: [Ty; 12] = [
     Ty::I8,
     Ty::U8,
     Ty::U8C,
@@ -79,6 +127,7 @@ const ALL: [Ty; 11] = [
     Ty::U16,
     Ty::I32,
     Ty::U32,
+    Ty::F16,
     Ty::F32,
     Ty::F64,
     Ty::I64,
@@ -384,6 +433,7 @@ impl TypedArr {
             Ty::U16 => u16::from_le_bytes(d.get(p..p + 2)?.try_into().ok()?) as f64,
             Ty::I32 => i32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?) as f64,
             Ty::U32 => u32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?) as f64,
+            Ty::F16 => f16_to_f64(u16::from_le_bytes(d.get(p..p + 2)?.try_into().ok()?)),
             Ty::F32 => f32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?) as f64,
             Ty::F64 => f64::from_le_bytes(d.get(p..p + 8)?.try_into().ok()?),
             // no f64 form: the caller takes its slow path (`get_value`)
@@ -482,6 +532,7 @@ impl TypedArr {
             }
             Ty::I16 | Ty::U16 => d[p..p + 2].copy_from_slice(&(wrap(16) as u16).to_le_bytes()),
             Ty::I32 | Ty::U32 => d[p..p + 4].copy_from_slice(&(wrap(32) as u32).to_le_bytes()),
+            Ty::F16 => d[p..p + 2].copy_from_slice(&f64_to_f16(v).to_le_bytes()),
             Ty::F32 => d[p..p + 4].copy_from_slice(&(v as f32).to_le_bytes()),
             Ty::F64 => d[p..p + 8].copy_from_slice(&v.to_le_bytes()),
             Ty::I64 | Ty::U64 => unreachable!("guarded above"),
