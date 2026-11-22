@@ -57,6 +57,19 @@ fn thaw_js_date_type(ty: &HirType) -> bool {
             if marker == "__thaw_class_identity_\u{1e}Date" && timestamp == "timestamp"))
 }
 
+/// A callback parameter type: plain data, where a `Promise<plain>` union member stands for the plain value
+/// thaw-js passes (an already-resolved promise, as in `thaw_js_result_type`).
+fn thaw_js_callback_arg_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Union(members) => members.iter().all(|m| match m {
+            HirType::Promise(inner) => thaw_js_plain_type(inner),
+            other => thaw_js_callback_arg_type(other),
+        }),
+        HirType::Optional(e) | HirType::Nullable(e) | HirType::Nullish(e) => thaw_js_callback_arg_type(e),
+        other => thaw_js_plain_type(other),
+    }
+}
+
 /// A callback parameter thaw-js can call back into: a plain-data function that returns plain data
 /// synchronously (no Promise), optionally absent.
 pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
@@ -66,9 +79,20 @@ pub(crate) fn thaw_js_callback_type(ty: &HirType) -> bool {
                 && thaw_js_callback_type(inner)
         }
         _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
-            params.iter().all(|p| thaw_js_plain_type(p) && !thaw_js_contains_bytes(p))
+            params.iter().all(|p| thaw_js_callback_arg_type(p) && !thaw_js_contains_bytes(p))
                 && thaw_js_plain_type(&ret)
                 && !thaw_js_contains_bytes(&ret)
+        }),
+    }
+}
+
+/// A callback parameter whose result is `Promise<T>` of plain data (or nothing), settled by the host.
+pub(crate) fn thaw_js_async_callback_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Optional(inner) => thaw_js_async_callback_type(inner),
+        _ => thaw_js_callback_abi(ty).is_some_and(|(params, ret, _)| {
+            params.iter().all(|p| thaw_js_callback_arg_type(p) && !thaw_js_contains_bytes(p))
+                && matches!(&ret, HirType::Promise(inner) if thaw_js_plain_type(inner))
         }),
     }
 }
@@ -1883,7 +1907,14 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(bad) = signature
             .params
             .iter()
-            .find(|ty| !thaw_js_param_type(ty) || (**ty != HirType::Bytes && thaw_js_contains_bytes(ty)))
+            .zip(args)
+            .find(|(ty, arg)| {
+                // a callback returning `Promise<plain>` is registered through the receiver-callback route
+                let async_callback = self.closure_returns_promise(arg) && thaw_js_async_callback_type(ty);
+                !(thaw_js_param_type(ty) || async_callback)
+                    || (**ty != HirType::Bytes && thaw_js_contains_bytes(ty))
+            })
+            .map(|(ty, _)| ty)
             .or_else(|| {
                 // a `Promise<Date>` would decode as a plain object: only plain `Promise<T>` routes
                 let unroutable = (!thaw_js_result_type(awaited) && signature.ret != HirType::JsValue)
@@ -1973,13 +2004,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| format!("thaw-js argument {} ({ty:?}): {error}", index + 1))?;
         }
         // `\u{2}` asks for the result as a handle id (a `JsValue` result), whatever its kind;
-        // `\u{3}` for a `Date` result as its `{"__thaw_tjs_date__": ms}` wire node.
+        // `\u{3}` for a `Date` result as its `{"__thaw_tjs_date__": ms}` wire node; `\u{5}` for a `Json` result.
         let symbol = if signature.ret == HirType::JsValue {
             format!("\u{2}{}", signature.symbol)
         } else if thaw_js_date_type(awaited) {
             format!("\u{3}{}", signature.symbol)
         } else if pending_site {
             format!("\u{4}{}", signature.symbol)
+        } else if *awaited == HirType::Json {
+            // an `any` result keeps a Buffer live, so its methods (`toString('hex')`) run on the real object
+            format!("\u{5}{}", signature.symbol)
         } else {
             signature.symbol.clone()
         };
@@ -2101,6 +2135,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_global_string_ptr("__thaw_tjs_date__", "thaw_js_date_key")
                     .map_err(|error| error.to_string())?;
+                // only a real Date crosses as the date node: any other object (a plain `{timestamp}`, a
+                // forged identity marker) is not a Date
+                let is_node = self.builder.build_call(
+                    self.module.get_function("thaw_json_has_own").unwrap(),
+                    &[json.into(), key.as_pointer_value().into()],
+                    "thaw_js_date_is_node",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_has_own returned no value")?.into_int_value();
+                let is_node = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE, is_node, is_node.get_type().const_zero(), "thaw_js_date_has_node",
+                ).map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let valid = self.context.append_basic_block(function, "thaw_js_date_valid");
+                let invalid = self.context.append_basic_block(function, "thaw_js_date_invalid");
+                self.builder.build_conditional_branch(is_node, valid, invalid)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(invalid);
+                self.compile_throw_type_error("typed call result is not a Date")?;
+                self.builder.position_at_end(valid);
                 let ms = self.builder.build_call(
                     self.module.get_function("thaw_json_get").unwrap(),
                     &[json.into(), key.as_pointer_value().into()],
@@ -2413,6 +2466,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        // a fresh event key (`Symbol(..)` as a `JsValue` argument) is released once the array has encoded it
+        self.begin_fresh_event_key_argument_scope();
         for (index, (arg, ty)) in rest.iter().zip(signature.params.iter().skip(usize::from(is_method))).enumerate() {
             let reads_receiver = self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg);
             let live_listener = self.live_json_listener(arg, ty);
@@ -2481,6 +2536,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("thaw-js class argument {} ({ty:?}): {error}", index + 1))?;
         }
+        let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
         let name = self.intern_string(symbol, "thaw_js_class_symbol")
             .map_err(|error| error.to_string())?;
         // bit 0: the result is a handle id; bit 1: await a returned Promise (see `class_call`);
@@ -2497,7 +2553,7 @@ impl<'ctx> HirCompiler<'ctx> {
             array,
             "thaw_tjs_class_call",
             &[receiver.into(), want_handle.into()],
-            &[],
+            &fresh_handles,
         )?;
         if ret_handle || promise_handle {
             self.uses_thaw_js_handles = true;

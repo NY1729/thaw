@@ -4693,7 +4693,11 @@ impl<'a> FnLowerer<'a> {
                 if let Some(declared) = declared_slot.filter(|_| thaw_js_live_owner_slot) {
                     let aggregate = matches!(declared, HirType::Object(_))
                         && Self::object_holds_array(declared);
-                    if generic_call || aggregate || Self::type_holds_any(declared) {
+                    if generic_call
+                        || aggregate
+                        || Self::type_holds_any(declared)
+                        || Self::is_class_instance_type(declared)
+                    {
                         // An aggregate's array fields stay live views of the caller's arrays.
                         let outer = std::mem::replace(&mut self.alias_native_arrays, aggregate);
                         let marked = self.thaw_js_live_owner_argument(
