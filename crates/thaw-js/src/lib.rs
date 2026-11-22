@@ -2386,6 +2386,9 @@ impl Interp {
         let Value::Object(o) = this else {
             return Ok("".into());
         };
+        if let Some(items) = self.proxy_array_elements(this)? {
+            return self.join_items(&items, sep).map(Into::into);
+        }
         if !matches!(&*o.kind.borrow(), Kind::Array(_)) {
             return Ok("".into());
         }
@@ -2406,6 +2409,32 @@ impl Interp {
         };
         self.leave_walk();
         out.map(Into::into)
+    }
+
+    /// The elements of `this` when it is a Proxy over an array (a native-array view), each read
+    /// through the proxy's traps (`length`, then each index), as `Array.prototype` methods do on a
+    /// proxy; `None` for anything else.
+    pub(crate) fn proxy_array_elements(&mut self, this: &Value) -> R<Option<Vec<Value>>> {
+        let Value::Object(o) = this else {
+            return Ok(None);
+        };
+        if !matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+            return Ok(None);
+        }
+        let is_array = matches!(
+            &self.proxy_unwrap(this, "isArray")?,
+            Value::Object(t) if matches!(&*t.kind.borrow(), Kind::Array(_))
+        );
+        if !is_array {
+            return Ok(None);
+        }
+        let length = self.get(this, "length")?;
+        let len = self.num(&length).clamp(0.0, MAX_DENSE_ARRAY_LEN as f64);
+        let mut out = Vec::with_capacity(len as usize);
+        for k in 0..len as usize {
+            out.push(self.get_index(this, k)?);
+        }
+        Ok(Some(out))
     }
 
     /// The elements of exotic array `this`, each read through [[Get]] so accessors run and holes chain up.

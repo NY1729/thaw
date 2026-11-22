@@ -169,3 +169,21 @@ fn object_keys_values_entries_propagate_a_throwing_own_keys_trap() {
         );
     }
 }
+
+/// Array methods on a native-array view (a Proxy over an array) read through its traps and
+/// produce ordinary arrays, exactly as on a plain array (expected text is Node v22's output for
+/// the same calls on `[2, 4, 6, 8]`).
+#[test]
+fn native_array_view_array_methods_match_a_plain_array() {
+    let source = r#"var view = __thaw_array_with_native_view(true, () => 4, i => (i + 1) * 2, () => {}, () => {}, () => {}, () => {}, () => true, () => undefined);
+console.log(view.join(','), String(view), view.toString(), view.map(x => x + 1).join('|'), view.filter(x => x > 2).join('|'), view.slice(1).join('|'));
+console.log([...view].join('|'), Array.from(view).join('|'), view.concat([9]).join('|'), [0].concat(view).join('|'), Array.isArray(view));
+console.log(view.indexOf(6), view.includes(8), view.reduce((a, b) => a + b, 0), view.some(x => x === 4), view.every(x => x > 0), view.find(x => x > 4), view.findIndex(x => x === 6), view.at(-1), view.lastIndexOf(2));
+console.log(view.flat().join('|'), view.flatMap(x => [x, x]).join('|'), [].concat(view, view).length, view.entries().next().value, Array.prototype.join.call(view, '+'), view.reverse === Array.prototype.reverse);
+console.log(view.toSorted((a, b) => b - a).join('|'), view.toReversed().join('|'), view.with(0, 7).join('|'), view.toSpliced(0, 1).join('|'), view.keys().next().value, JSON.stringify(view), view.length);
+"#;
+    assert_eq!(
+        one_after_prelude(source),
+        "2,4,6,8 2,4,6,8 2,4,6,8 3|5|7|9 4|6|8 4|6|8|2|4|6|8 2|4|6|8 2|4|6|8|9 0|2|4|6|8 true|2 true 20 true true 6 2 8 0|2|4|6|8 2|2|4|4|6|6|8|8 8 [ 0, 2 ] 2+4+6+8 true|8|6|4|2 8|6|4|2 7|4|6|8 4|6|8 0 [2,4,6,8] 4"
+    );
+}
