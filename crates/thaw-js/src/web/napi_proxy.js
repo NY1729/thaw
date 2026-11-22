@@ -62,6 +62,33 @@
 
   const ownerOf = handle => cap.owner(handle);
 
+  // The callbacks native code no longer holds (a reply's `released` list): their `__thaw_napi_reference_<id>`
+  // global and the callback go, and the same function sent again registers under a fresh id. Ids are process-wide
+  // and a reply need not belong to the realm that owns them, so an id this layer does not own waits in the shared
+  // unclaimed list for the layer that does (each layer claims its own at its next reply).
+  const dropCallback = id => {
+    const callback = referenceValues.get(id);
+    if (callback === undefined) return false;
+    referenceIds.delete(callback);
+    referenceValues.delete(id);
+    reflectDelete(globalThis, '__thaw_napi_reference_' + id);
+    return true;
+  };
+  const parseReply = text => {
+    const response = jsonParse(text);
+    if (response && isArrayOf(response.released)) {
+      response.released.forEach(id => { if (!dropCallback(id)) cap.defer(id); });
+    }
+    const waiting = cap.deferred();
+    if (waiting !== '') {
+      waiting.split(',').forEach(text => {
+        const id = Number(text);
+        if (dropCallback(id)) cap.claim(id);
+      });
+    }
+    return response;
+  };
+
   // A parsed bridge reply, with its exception graph thrown and its error raised (RJ bridgeReply).
   const checkReply = (response, message) => {
     if (response && hasOwn(response, '__thaw_exception_graph__')) {
@@ -76,7 +103,7 @@
 
   // One bridge operation's reply.
   const bridgeReply = (operation, handle, packet, message) =>
-    checkReply(jsonParse(bridgeHandle(operation, handle, '', packet)), message);
+    checkReply(parseReply(bridgeHandle(operation, handle, '', packet)), message);
 
   // The value of a bridge reply: a graph is decoded (and its leases released), anything else is its value.
   const replyValue = (operation, handle, packet, message) => {
@@ -207,7 +234,7 @@
       throw new TypeError('Invalid native addon graph owner');
     const existing = proxies.get(handle);
     if (existing !== undefined) return existing;
-    const arrayKind = jsonParse(bridgeHandle('array_kind_graph', handle, '', '[]'));
+    const arrayKind = parseReply(bridgeHandle('array_kind_graph', handle, '', '[]'));
     if (!arrayKind || typeof arrayKind.value !== 'boolean')
       throw new TypeError('Invalid native array kind');
     const isArray = arrayKind.value;
@@ -478,7 +505,7 @@
         const returned = Reflect.apply(target, receiver, args);
         return typeof returned === 'function' ? argument(returned) : returned;
       },
-      writable: false, configurable: false,
+      writable: false, configurable: true,
     });
   };
 
@@ -618,7 +645,7 @@
   // One bridge operation with its arguments encoded and its reply decoded (RJ __thaw_napi_handle). `sync_reference`
   // keeps its raw reply: the caller reads its origins itself.
   const handle = (operation, target, name, args) => {
-    const result = jsonParse(bridgeHandle(operation, String(target), name || '',
+    const result = parseReply(bridgeHandle(operation, String(target), name || '',
       jsonStringify(argumentsOf(args || []))));
     if (result && hasOwn(result, '__thaw_error__')) throw new Error(result.__thaw_error__);
     if (result && hasOwn(result, 'value') && result.kind !== 'method' && operation !== 'sync_reference')
@@ -689,7 +716,7 @@
     const invoke = cap.invoker(handle);
     const invokeNative = (values, construct, forceHandle) => {
       const packet = encodeGraph(values, 0, true, false, forceHandle);
-      const result = checkReply(jsonParse(invoke(packet, construct)), 'Native Function call failed');
+      const result = checkReply(parseReply(invoke(packet, construct)), 'Native Function call failed');
       if (result.kind !== 'graph' || typeof result.value !== 'string')
         throw new TypeError('Invalid native Function graph result');
       return decodeOwned(result.value);
@@ -872,7 +899,7 @@
   const callExport = (name, args) => {
     ownerForExport(name);
     const values = arrayFrom(args);
-    const result = jsonParse(bridgeCall(name, jsonStringify(argumentsOf(values))));
+    const result = parseReply(bridgeCall(name, jsonStringify(argumentsOf(values))));
     if (result && hasOwn(result, '__thaw_error__')) throw new TypeError(result.__thaw_error__);
     syncArguments(values);
     return decodeValue(result.value, result.origins);
