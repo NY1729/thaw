@@ -1575,12 +1575,16 @@ impl Package {
 
 pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
     let packet = match &c {
-        Ctl::Throw(v) => carrier_packet(it, v),
+        Ctl::Throw(v) => carrier_packet(it, v).or_else(|| primitive_packet(v, it)),
         _ => None,
     };
     LAST_PACKET.with(|p| *p.borrow_mut() = packet);
-    if let Ctl::Throw(v @ Value::Object(_)) = &c {
-        LAST_THROWN.with(|t| *t.borrow_mut() = Some(v.clone()));
+    // A thrown string shaped like a framed Error would be rebuilt as that Error from its text: keep the
+    // original value too, so the native catch gets the string.
+    if let Ctl::Throw(v) = &c {
+        if matches!(v, Value::Object(_)) || matches!(v, Value::Str(s) if s.starts_with('\u{1}')) {
+            LAST_THROWN.with(|t| *t.borrow_mut() = Some(v.clone()));
+        }
     }
     match c {
         Ctl::Unsupported(f) => HostError::Unsupported(f),
@@ -6486,6 +6490,45 @@ thread_local! {
 #[no_mangle]
 pub extern "C" fn thaw_tjs_take_thrown_handle() -> i64 {
     LAST_THROWN_HANDLE.with(Cell::take)
+}
+
+/// A packet for a thrown primitive (boolean, number, string, `undefined`, `null`), so the native `catch`
+/// receives the original value, not the text of its conversion (the QuickJS host's `primitive_exception_packet`).
+fn primitive_packet(
+    v: &Value,
+    it: &mut Interp,
+) -> Option<Rc<thaw_arena::exception::ExceptionPacket>> {
+    let (tag, number, boolean) = match v {
+        Value::Bool(b) => (3, 0, u64::from(*b)),
+        Value::Number(n) => (1, n.to_bits(), 0),
+        Value::Str(_) => (4, 0, 0),
+        Value::Undefined => (5, 0, 0),
+        Value::Null => (6, 0, 0),
+        _ => return None,
+    };
+    let text = it.to_str(v).to_string();
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    let owned = bytes.into_boxed_slice();
+    let address = owned.as_ptr() as usize;
+    thaw_arena::register_exception_bytes(address as *const c_char, text.len());
+    thaw_arena::exception::register_packet(thaw_arena::exception::ExceptionPacket {
+        id: 0,
+        pending: address,
+        native_text: address,
+        native_error_identity: 0,
+        object: 0,
+        native: 0,
+        aggregate: 0,
+        tag,
+        number,
+        bigint: 0,
+        boolean,
+        _roots: Vec::new(),
+        _owned_bytes: vec![owned],
+        _leases: Vec::new(),
+    })
+    .map(|(_, packet)| packet)
 }
 
 /// The live native packet a thrown carrier names in its hidden `\0pkt`, if any.

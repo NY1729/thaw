@@ -2094,6 +2094,26 @@ fn carrier_error_keeps_its_packet_through_frame_error() {
     assert!(text.starts_with("\u{1}Error\u{1}"), "not framed: {text:?}");
 }
 
+/// A thrown primitive keeps its type through the error string: the packet names the tag and payload, so the
+/// native catch sees the number / string / `undefined` / `null`, not the text of its conversion.
+#[test]
+fn thrown_primitives_bind_a_primitive_packet() {
+    for (value, tag) in [
+        (Value::Number(17.0), 1),
+        (Value::Bool(true), 3),
+        (Value::str("\u{1}Error\u{1}framed lookalike"), 4),
+        (Value::Undefined, 5),
+        (Value::Null, 6),
+    ] {
+        let result = error_result_of(value);
+        let packet = thaw_arena::owned_exception(result.error).expect("a primitive packet");
+        assert_eq!(packet.tag, tag);
+    }
+    let result = error_result_of(Value::Number(17.0));
+    let packet = thaw_arena::owned_exception(result.error).unwrap();
+    assert_eq!(f64::from_bits(packet.number), 17.0);
+}
+
 /// T3: a plain Error classified after a carrier, with no call in between, binds no stale packet.
 #[test]
 fn plain_error_after_carrier_has_no_packet() {
