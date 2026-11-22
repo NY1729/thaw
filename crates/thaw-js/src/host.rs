@@ -1301,11 +1301,14 @@ impl Package {
             return (self.exports.clone(), path);
         };
         let (name, body) = rest.split_once('\u{0}').unwrap_or((rest, ""));
-        let root = self
-            .roots
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| self.exports.clone());
+        let root = if name.is_empty() {
+            Value::Object(self.interp.global_object.clone())
+        } else {
+            self.roots
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| self.exports.clone())
+        };
         (root, body)
     }
 
@@ -6817,13 +6820,18 @@ pub(crate) fn with_package<T>(
             let running = RUNNING.with(|r| r.borrow().get(&handle).copied());
             return match running {
                 // SAFETY: the pointer is a live stack local of an enclosing `with_package`.
-                Some(ptr) => f(unsafe { &mut *ptr }),
+                Some(ptr) => {
+                    let package = unsafe { &mut *ptr };
+                    refresh_handle_refs(&mut package.interp);
+                    f(package)
+                }
                 None => Err(HostError::Bundle("thaw-js package is unloaded".into())),
             };
         }
         None => return Err(HostError::Bundle("bad handle".into())),
     };
     LAST_PACKAGE.with(|l| l.set(handle));
+    refresh_handle_refs(&mut package.interp);
     RUNNING.with(|r| r.borrow_mut().insert(handle, &mut package as *mut Package));
     let result = f(&mut package);
     RUNNING.with(|r| r.borrow_mut().remove(&handle));
@@ -7629,6 +7637,9 @@ fn register_bundle(name: String, src: &str) -> Result<(), HostError> {
 pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
     let Some(source) = cstr(source) else { return 0 };
     let source = crate::napi_eval::unpack_script(source);
+    if source.contains("__thaw_value_handle_refs") {
+        TRACK_HANDLE_REFS.with(|t| t.set(true));
+    }
     let owner = default_realm();
     let result = with_package(owner, |p| {
         // Bridge bundles call prelude helpers (`__thaw_bind_preserving_statics`) while loading.
@@ -7644,6 +7655,36 @@ pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
             0
         }
     }
+}
+
+thread_local! {
+    /// Set once a loaded script names `__thaw_value_handle_refs`; until then no realm pays for the mirror.
+    static TRACK_HANDLE_REFS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Mirror the outstanding handle reference counts (index = id - 1) into the realm's
+/// `__thaw_value_handle_refs` global on entry, the array QuickJS exposes for lease-accounting scripts.
+fn refresh_handle_refs(it: &mut Interp) {
+    if !TRACK_HANDLE_REFS.with(Cell::get) {
+        return;
+    }
+    let refs: Vec<Value> = HANDLE_REFS.with(|r| {
+        r.borrow()
+            .iter()
+            .map(|n| Value::Number(f64::from(*n)))
+            .collect()
+    });
+    let array = it.array(refs);
+    if let Some(binding) = it
+        .global
+        .vars
+        .borrow_mut()
+        .get_mut("__thaw_value_handle_refs")
+    {
+        binding.value = array;
+        return;
+    }
+    it.global.declare("__thaw_value_handle_refs", array, true);
 }
 
 /// The main thread's stack limit (`RLIMIT_STACK`), capped at 1 GiB (256 MiB when unlimited); 0 when unknown.
@@ -7808,11 +7849,16 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
             eprintln!("thaw-js call: {symbol} {args}");
         }
-        let (package, export) = symbol.split_once("::").ok_or("malformed thaw-js symbol")?;
-        // the outermost entry of this typed call; the `with_package` inside is nested and not counted
-        let _profile = crate::profile::enter(|| crate::profile::typed_key(package, export));
-        let (handle, export) =
-            resolve_export(package, export).ok_or_else(|| not_loaded(package))?;
+        // `<package>::<export>` names a package export; a bare name is a global of the default realm
+        // (a function a `loadScript` defined), read through the empty-named root.
+        let (handle, export) = match symbol.split_once("::") {
+            Some((package, export)) => {
+                // the outermost entry of this typed call; the `with_package` inside is nested and not counted
+                let _profile = crate::profile::enter(|| crate::profile::typed_key(package, export));
+                resolve_export(package, export).ok_or_else(|| not_loaded(package))?
+            }
+            None => (default_realm(), format!("\u{0}\u{0}{symbol}")),
+        };
         let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
             return Err("arguments must be a JSON array".into());
         };

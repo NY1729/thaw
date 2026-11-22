@@ -1858,6 +1858,22 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // Fresh handles made while evaluating the arguments (event keys, projections) are owned by
+        // this call: a later argument that throws releases them through the scope, and so does the
+        // normal exit (the call took its own references), as on the QuickJS path.
+        self.begin_fresh_event_key_argument_scope();
+        let result = self.compile_typed_thaw_js_call_scoped(signature, args);
+        let handles = self.finish_fresh_event_key_argument_scope()?;
+        let value = result?;
+        self.release_fresh_event_key_handles(&handles)?;
+        Ok(value)
+    }
+
+    fn compile_typed_thaw_js_call_scoped(
+        &mut self,
+        signature: &DynamicSignature,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         if signature.symbol.starts_with('$') {
             return self.compile_typed_thaw_js_class_call(signature, args);
         }
