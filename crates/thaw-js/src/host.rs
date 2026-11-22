@@ -169,14 +169,14 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
     if spec.ends_with(".node") {
         return addon_of(loader, it);
     }
-    match module_key(loader, from, spec) {
+    match module_key(loader, from, spec, false) {
         Some(key) if key.ends_with(".node") => addon_of(loader, it),
         // refused before the cache insert and before the factory runs, as Node refuses it
-        Some(key) if loader.parts.async_keys.contains(&key) => Err(require_async_error(it)),
+        Some(key) if is_async(loader, &key) => Err(require_async_error(it)),
         Some(key)
             if loader.loading.borrow().contains(&key) && cycle_refused(loader, from, &key) =>
         {
-            let target_is_esm = loader.esm_keys.contains(&key);
+            let target_is_esm = is_esm(loader, &key);
             Err(require_cycle_error(it, from, spec, &key, target_is_esm))
         }
         Some(key) => load_module(loader, it, &key),
@@ -200,7 +200,7 @@ fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R
 /// `require.resolve(spec)` from module `from`: a builtin answers the spec as given (`path`, `node:path`, as Node
 /// does), a bundled module its virtual path. MODULE_NOT_FOUND when neither names it.
 fn resolve_in(loader: &Loader, it: &mut Interp, from: &str, spec: &str) -> R<Value> {
-    match module_key(loader, from, spec) {
+    match module_key(loader, from, spec, false) {
         Some(found) if found.starts_with("node:") => Ok(Value::str(spec)),
         Some(found) => Ok(Value::str(&format!("/thaw_modules/{found}"))),
         None => {
@@ -218,15 +218,79 @@ fn resolve_in(loader: &Loader, it: &mut Interp, from: &str, spec: &str) -> R<Val
 }
 
 /// The module key `spec` names when required from `from`: the bundle's require map, then the builtin table.
-/// `None` when neither names it (the peer fallback or MODULE_NOT_FOUND of `require_in`).
-fn module_key(loader: &Loader, from: &str, spec: &str) -> Option<String> {
-    loader
-        .parts
-        .require_maps
-        .get(from)
-        .and_then(|m| m.get(spec))
-        .cloned()
-        .or_else(|| builtin_key(loader, spec))
+/// `None` when neither names it (the peer fallback or MODULE_NOT_FOUND of `require_in`). `query_ok` is `import()`
+/// only: a `?query`/`#fragment` spec the map does not hold literally names its base module's clone (a computed
+/// `import('./x.mjs?' + s)`); `require` never takes one (Node: MODULE_NOT_FOUND).
+fn module_key(loader: &Loader, from: &str, spec: &str, query_ok: bool) -> Option<String> {
+    let maps = &loader.parts.require_maps;
+    let map = maps.get(from).or_else(|| maps.get(base_of(loader, from)));
+    map.and_then(|m| {
+        m.get(spec).cloned().or_else(|| {
+            let (head, suffix) = split_suffix(spec);
+            let key = m
+                .get(head)
+                .filter(|_| query_ok && head.len() != spec.len())?;
+            Some(format!("{key}{suffix}"))
+        })
+    })
+    .map(|key| canonical_key(loader, key))
+    .or_else(|| builtin_key(loader, spec))
+}
+
+/// `key` cut at its first `?` (or a `#` after the first character); an empty suffix (`?`, `#`, `?#`) is none,
+/// as in Node, where `./x.mjs?` is the plain module. Returns the head and the (normalised) suffix.
+fn split_suffix(key: &str) -> (&str, &str) {
+    match key
+        .char_indices()
+        .find(|&(i, c)| c == '?' || (c == '#' && i > 0))
+    {
+        Some((i, _)) => {
+            let (head, suffix) = key.split_at(i);
+            (
+                head,
+                if matches!(suffix, "?" | "#" | "?#") {
+                    ""
+                } else {
+                    suffix
+                },
+            )
+        }
+        None => (key, ""),
+    }
+}
+
+/// The key without its `?query`/`#fragment`, when that base is a bundled module; else `key` itself (a real file
+/// whose name holds a `?`/`#` is its own key).
+fn base_of<'a>(loader: &Loader, key: &'a str) -> &'a str {
+    let (head, _) = split_suffix(key);
+    if head.len() != key.len() && loader.factories.contains_key(head) {
+        head
+    } else {
+        key
+    }
+}
+
+/// Node's identity rule for a suffixed key: a CommonJS (or builtin) target ignores the suffix and lives under its
+/// base key; an ES module keeps a distinct instance per suffix (a clone of the base factory); an empty suffix is none.
+fn canonical_key(loader: &Loader, key: String) -> String {
+    let base = base_of(loader, &key);
+    if base.len() == key.len() {
+        return key;
+    }
+    if split_suffix(&key).1.is_empty() || !loader.esm_keys.contains(base) {
+        return base.to_string();
+    }
+    key
+}
+
+/// Whether `key` is an ES module: an export-graph key, or a `?query` clone of one.
+fn is_esm(loader: &Loader, key: &str) -> bool {
+    loader.esm_keys.contains(key) || loader.esm_keys.contains(base_of(loader, key))
+}
+
+/// Whether `key` (or the module it clones) has top-level await.
+fn is_async(loader: &Loader, key: &str) -> bool {
+    loader.parts.async_keys.contains(key) || loader.parts.async_keys.contains(base_of(loader, key))
 }
 
 /// The `requireAsync(spec)` thunk of module `from` (`load_module`): the namespace dynamic `import()` gives.
@@ -240,7 +304,7 @@ fn require_async_namespace(
     from: &str,
     spec: &str,
 ) -> R<Value> {
-    let key = match module_key(loader, from, spec) {
+    let key = match module_key(loader, from, spec, true) {
         Some(key) if !key.ends_with(".node") => key,
         _ => {
             let exports = match require_in(loader, it, from, spec) {
@@ -258,7 +322,7 @@ fn require_async_namespace(
     }
     let exports = load_module(loader, it, &key)?;
     let ready = loader.ready.borrow().get(&key).cloned();
-    if let (true, Some(ready)) = (loader.parts.async_keys.contains(&key), ready) {
+    if let (true, Some(ready)) = (is_async(loader, &key), ready) {
         let (l, k) = (loader.clone(), key.clone());
         let namespace_once_ready = it.native(move |it, _, _| {
             let exports = load_module(&l, it, &k)?;
@@ -272,7 +336,7 @@ fn require_async_namespace(
 
 /// The namespace `import()` of the loaded module `key` gives (see [`require_async_namespace`]), built once per key.
 fn module_namespace(loader: &Rc<Loader>, it: &mut Interp, key: &str, exports: Value) -> R<Value> {
-    if loader.esm_keys.contains(key) {
+    if is_esm(loader, key) {
         return Ok(exports);
     }
     if let Some(ns) = loader.namespaces.borrow().get(key).cloned() {
@@ -314,7 +378,7 @@ fn coded_error(it: &mut Interp, code: &str, message: &str) -> Ctl {
 /// a CommonJS `require` of an ES module under evaluation, or an ES module importing a CommonJS module still loading.
 /// Same-format cycles (CJS to CJS, ESM to ESM) keep their partial exports.
 fn cycle_refused(loader: &Loader, from: &str, key: &str) -> bool {
-    !key.starts_with("node:") && loader.esm_keys.contains(key) != loader.esm_keys.contains(from)
+    !key.starts_with("node:") && is_esm(loader, key) != is_esm(loader, from)
 }
 
 /// ERR_REQUIRE_CYCLE_MODULE with Node 22's first line of message (the importer's path stands in for Node's).
@@ -463,7 +527,7 @@ fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
 fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     // A CommonJS file module is cached only in `require.cache` (by filename), so deleting its entry makes the next
     // require run the factory again, as in Node. ESM keys and builtins stay in `loader.cache`.
-    let commonjs = !key.starts_with("node:") && !loader.esm_keys.contains(key);
+    let commonjs = !key.starts_with("node:") && !is_esm(loader, key);
     let file = format!("/thaw_modules/{key}");
     if commonjs {
         let cached = it.get(&loader.cache_obj, &file)?;
@@ -479,12 +543,17 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     if let Some(m) = cached {
         // a failed ES module stays failed: every later require rethrows its evaluation error (Node caches it)
         let failed = loader.failed.borrow().get(key).cloned();
-        if let Some(reason) = failed.filter(|_| loader.esm_keys.contains(key)) {
+        if let Some(reason) = failed.filter(|_| is_esm(loader, key)) {
             return Err(Ctl::Throw(reason));
         }
         return it.get(&m, "exports");
     }
-    let Some(factory) = loader.factories.get(key).cloned() else {
+    let Some(factory) = loader
+        .factories
+        .get(key)
+        .or_else(|| loader.factories.get(base_of(loader, key)))
+        .cloned()
+    else {
         // ponytail: only the crypto stand-in is a builtin module; add others as packages need them
         if matches!(key, "node:crypto" | "crypto") {
             return Ok(it
@@ -500,8 +569,10 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     };
     // The virtual file path and its directory mirror the QuickJS lane (`render.rs`, `__thaw_bundle_load`), so
     // `import.meta.url` (`'file://' + __filename`) is an absolute `file:///thaw_modules/...` URL.
-    let dir = match file.rfind('/') {
-        Some(slash) => file[..slash].to_string(),
+    // (from the base key: a `/` inside a `?query` is not a path separator)
+    let base_file = format!("/thaw_modules/{}", base_of(loader, key));
+    let dir = match base_file.rfind('/') {
+        Some(slash) => base_file[..slash].to_string(),
         None => ".".to_string(),
     };
     let module = Value::Object(it.plain());
@@ -560,7 +631,7 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     let mut f = factory;
     if it.get(&f, "length")?.as_number() == Some(1.0) {
         let origin = match &loader.origins {
-            Some(make) => it.call(make, &Value::Undefined, &[Value::str(key)])?,
+            Some(make) => it.call(make, &Value::Undefined, &[Value::str(base_of(loader, key))])?,
             None => Value::Undefined,
         };
         f = it.call(&f, &Value::Undefined, &[origin])?;
@@ -2614,7 +2685,7 @@ impl WireOut {
                 let node = if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                     let mut parts = Vec::new();
                     // a sparse array has no dense copy (stage-1 guard; see `Interp::sparse_unsupported`)
-                    if crate::array_has_sparse_tail(o) {
+                    if crate::array_snapshot_unsafe(o) {
                         return Err(HostError::Unsupported("sparse array".into()));
                     }
                     for item in it.array_items_raw(&v) {
@@ -4687,6 +4758,10 @@ fn array_elements_are_plain(it: &mut Interp, o: &Obj, ancestors: &mut Vec<usize>
     if ancestors.contains(&ptr) {
         return true;
     }
+    // the dense slots miss an accessor or attribute element: not plain (the handle path reads it live)
+    if crate::array_snapshot_unsafe(o) {
+        return false;
+    }
     let items = match &*o.kind.borrow() {
         Kind::Array(items) => items.clone(),
         _ => return false,
@@ -6350,6 +6425,11 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                 return Err(HostError::NotPlainData("RegExp".into()));
             }
             if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                if crate::array_snapshot_unsafe(o) {
+                    return Err(HostError::NotPlainData(
+                        "array with accessor or non-default elements".into(),
+                    ));
+                }
                 let items = it.array_items(v);
                 return Ok(Native::Array(
                     items

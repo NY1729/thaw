@@ -179,12 +179,11 @@ fn elem_counters_and_negative_controls() {
         ("[1, 2, 3]", "2 ** 32", false),
         ("undefined", "0", false),
         ("new Proxy([1, 2, 3], {})", "1", false),
-        // thaw-js ignores an accessor defined on an array index (Node answers 9, the interpreter answers 2), so
-        // the compiled read agrees with the interpreter on the stored element. Not a compiler divergence.
+        // an accessor defined on an array index is a side-table element: the read takes the helper (Node answers 9)
         (
             "Object.defineProperty([1, 2, 3], 1, { get() { return 9; } })",
             "1",
-            true,
+            false,
         ),
         ("\"abc\"", "1", false),
         ("5", "0", false),

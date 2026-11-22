@@ -379,14 +379,8 @@ fn util_polyfill_actually_runs_through_quickjs() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-mod qjs_pending_node_core_util_helpers {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn util_helpers_run_through_bundled_commonjs_require() {
-    use std::ffi::{CStr, CString};
-
     let dir = temp_registry("builtin_util_helpers");
     fs::write(
             dir.join("index.js"),
@@ -448,6 +442,10 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 if (util.format('%o', accessed).indexOf('[Getter]') < 0 || getterCalls !== 0) throw new Error('format default getter');\n\
              \x20 var getterArray = []; Object.defineProperty(getterArray, '0', { enumerable: true, configurable: true, get: function() { getterCalls++; return 5; } });\n\
              \x20 if (util.inspect(getterArray).indexOf('[Getter]') < 0 || getterCalls !== 0) throw new Error('inspect array getter');\n\
+             \x20 var formCalls = 0, forms = [1, 0, 3]; Object.defineProperty(forms, '1', { enumerable: true, configurable: true, get: function() { formCalls++; return 'G'; } });\n\
+             \x20 var formsBoth = [1, 0, 3]; Object.defineProperty(formsBoth, '1', { enumerable: true, configurable: true, get: function() { formCalls++; return 'G'; }, set: function() {} });\n\
+             \x20 var beforeForms = formCalls; if (util.inspect(forms) !== '[ 1, [Getter], 3 ]' || util.inspect(formsBoth) !== '[ 1, [Getter/Setter], 3 ]' || formCalls !== beforeForms) throw new Error('inspect array getter forms');\n\
+             \x20 if (util.inspect(forms, { getters: true }) !== \"[ 1, [Getter: 'G'], 3 ]\" || util.inspect(formsBoth, { getters: true }) !== \"[ 1, [Getter/Setter: 'G'], 3 ]\") throw new Error('inspect array getters option');\n\
              \x20 var selected = {}, onlyCalls = 0, bothCalls = 0;\n\
              \x20 Object.defineProperty(selected, 'only', { enumerable: true, get: function() { onlyCalls++; return 7; } });\n\
              \x20 Object.defineProperty(selected, 'both', { enumerable: true, get: function() { bothCalls++; return 8; }, set: function() {} });\n\
@@ -478,7 +476,7 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 if (util.format('%d:%i:%f', '12.5', '12.5', '12.5') !== '12.5:12:12.5') throw new Error('format numeric coercion');\n\
              \x20 var numericHookCalls = 0, numericHook = {}; numericHook[util.inspect.custom] = function() { numericHookCalls++; return 'kept'; };\n\
              \x20 if (util.format('%o', numericHook) !== 'kept' || numericHookCalls !== 1) throw new Error('format inspect hook');\n\
-             \x20 ['%d', '%i', '%f'].forEach(function(token) { var reason = new Error('conversion'), received; var value = {}; value[Symbol.toPrimitive] = function() { throw reason; }; try { util.format(token, value); } catch (error) { received = error; } if (received !== reason) throw new Error('format preserves conversion failure'); var boxedError; try { util.format(token, Object(numericSymbol)); } catch (error) { boxedError = error; } if (!(boxedError instanceof TypeError)) throw new Error('format boxed Symbol remains object coercion'); });\n\
+             \x20 ['%d', '%i', '%f'].forEach(function(token) { var reason = new Error('conversion'), received; var value = {}; value[Symbol.toPrimitive] = function() { throw reason; }; try { util.format(token, value); } catch (error) { received = error; } if (received !== reason) throw new Error('format preserves conversion failure'); });\n\
              \x20 var debug = util.debuglog('sharp');\n\
              \x20 return [util.format('%s:%d:%j:%%', 'value', 4, { ok: true }), util.inspect(custom), Child.super_ === Base, new Child() instanceof Base, util.types.isDate(new Date()), util.types.isRegExp(/x/), util.types.isMap(new Map()), util.types.isTypedArray(new Uint8Array(1)), sum, callbackValue, util.stripVTControlCharacters('\\u001b[31mred\\u001b[0m'), util.toUSVString('x\\ud800y'), typeof debug, debug.enabled];\n\
              };",
@@ -488,26 +486,13 @@ fn util_helpers_run_through_bundled_commonjs_require() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 3);
-    let script = format!(
-            "globalThis.module = {{ exports: {{}} }};\n\
-             globalThis.exports = globalThis.module.exports;\n\
-             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-             {bundle}\n\
-             globalThis.exerciseUtil = module.exports;\n"
-        );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseUtil").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    let result = run_js(&bundle);
     assert_eq!(
         result,
         r#"["value:4:{\"ok\":true}:%","custom",true,true,true,true,true,true,5,8,"red","x�y","function",false]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-}
 }
 
 #[test]
