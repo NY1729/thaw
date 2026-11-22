@@ -12922,3 +12922,148 @@ fn typed_call_without_a_package_prefix_calls_a_default_realm_global() {
         .unwrap_err()
         .contains("missingFn"));
 }
+
+/// `Object.keys/values/entries/assign/hasOwn/getOwnProperty*`, `hasOwnProperty`/`propertyIsEnumerable`/`valueOf`/`isPrototypeOf`
+/// `.call(nullish)`, `delete nullish.x` and `'x' in nullish` throw the spec's TypeError (expected text recorded from node 22).
+#[test]
+fn nullish_receivers_throw_for_object_introspection() {
+    let expected = "keys(null): threw TypeError Cannot convert undefined or null to object|values(null): threw TypeError Cannot convert undefined or null to object|entries(null): threw TypeError Cannot convert undefined or null to object|hasOwn(null): threw TypeError Cannot convert undefined or null to object|gopn(null): threw TypeError Cannot convert undefined or null to object|gops(null): threw TypeError Cannot convert undefined or null to object|gopd(null): threw TypeError Cannot convert undefined or null to object|gopds(null): threw TypeError Cannot convert undefined or null to object|assignSrc(null): {}|assignTarget(null): threw TypeError Cannot convert undefined or null to object|ppe(null): threw TypeError Cannot convert undefined or null to object|hop(null): threw TypeError Cannot convert undefined or null to object|valueOf(null): threw TypeError Cannot convert undefined or null to object|isProtoOf(null): threw TypeError Cannot convert undefined or null to object|isProtoOfPrimitive(null): false|inOp(null): threw TypeError Cannot use 'in' operator to search for 'x' in null|del(null): threw TypeError Cannot convert undefined or null to object|spread(null): {}|keys(undefined): threw TypeError Cannot convert undefined or null to object|values(undefined): threw TypeError Cannot convert undefined or null to object|entries(undefined): threw TypeError Cannot convert undefined or null to object|hasOwn(undefined): threw TypeError Cannot convert undefined or null to object|gopn(undefined): threw TypeError Cannot convert undefined or null to object|gops(undefined): threw TypeError Cannot convert undefined or null to object|gopd(undefined): threw TypeError Cannot convert undefined or null to object|gopds(undefined): threw TypeError Cannot convert undefined or null to object|assignSrc(undefined): {}|assignTarget(undefined): threw TypeError Cannot convert undefined or null to object|ppe(undefined): threw TypeError Cannot convert undefined or null to object|hop(undefined): threw TypeError Cannot convert undefined or null to object|valueOf(undefined): threw TypeError Cannot convert undefined or null to object|isProtoOf(undefined): threw TypeError Cannot convert undefined or null to object|isProtoOfPrimitive(undefined): false|inOp(undefined): threw TypeError Cannot use 'in' operator to search for 'x' in undefined|del(undefined): threw TypeError Cannot convert undefined or null to object|spread(undefined): {}";
+    assert_eq!(
+        one_sloppy(
+            r####"const out=[];
+const cases = {
+ keys:v=>Object.keys(v), values:v=>Object.values(v), entries:v=>Object.entries(v), hasOwn:v=>Object.hasOwn(v,'x'),
+ gopn:v=>Object.getOwnPropertyNames(v), gops:v=>Object.getOwnPropertySymbols(v), gopd:v=>Object.getOwnPropertyDescriptor(v,'x'),
+ gopds:v=>Object.getOwnPropertyDescriptors(v), assignSrc:v=>Object.assign({}, v), assignTarget:v=>Object.assign(v),
+ ppe:v=>Object.prototype.propertyIsEnumerable.call(v,'x'), hop:v=>Object.prototype.hasOwnProperty.call(v,'x'),
+ valueOf:v=>Object.prototype.valueOf.call(v), isProtoOf:v=>Object.prototype.isPrototypeOf.call(v,{}),
+ isProtoOfPrimitive:v=>Object.prototype.isPrototypeOf.call(v,1), inOp:v=>'x' in v, del:v=>delete v.x, spread:v=>({...v}),
+};
+for (const v of [null, undefined]) for (const [n,f] of Object.entries(cases)) { let r; try { r=JSON.stringify(f(v)) } catch(e){ r='threw '+e.constructor.name+' '+e.message } out.push(n+'('+v+'): '+r); }
+console.log(out.join('|'));"####
+        ),
+        expected
+    );
+}
+
+#[test]
+fn instanceof_follows_instanceof_operator_and_ordinary_has_instance() {
+    let src = r#"
+        function t(f) { try { return String(f()); } catch (e) { return e.constructor.name + ': ' + e.message; } }
+        function F() {}
+        const B = F.bind(null);
+        const P = new Proxy(F, {});
+        const out = [
+            t(() => 1 instanceof null), t(() => 1 instanceof 3), t(() => 1 instanceof {}),
+            t(() => ({}) instanceof (() => {})), t(() => 1 instanceof (() => {})),
+            t(() => 1 instanceof { [Symbol.hasInstance]: 1 }).slice(0, 9),
+            t(() => 1 instanceof { [Symbol.hasInstance]: null }),
+            t(() => 1 instanceof { [Symbol.hasInstance]() { return 'x'; } }),
+            t(() => new F() instanceof B), t(() => new F() instanceof P),
+            t(() => ({}) instanceof new Proxy({}, {})),
+            t(() => ({}) instanceof Proxy),
+        ];
+        console.log(out.join('|'));
+    "#;
+    assert_eq!(
+        one(src),
+        "TypeError: Right-hand side of 'instanceof' is not an object|TypeError: Right-hand side of 'instanceof' is not an object|TypeError: Right-hand side of 'instanceof' is not callable|TypeError: Function has non-object prototype 'undefined' in instanceof check|false|TypeError|TypeError: Right-hand side of 'instanceof' is not callable|true|true|true|TypeError: Right-hand side of 'instanceof' is not callable|TypeError: Function has non-object prototype 'undefined' in instanceof check"
+    );
+}
+
+/// A framed native error whose message holds a NUL crosses the callback result string intact
+/// (the arena string keeps its length; a C-string read would stop at the NUL).
+#[test]
+fn callback_error_text_keeps_an_embedded_nul() {
+    let frame =
+        thaw_arena::error_wire::encode_tagged(b"TypeError", b"before\0after", None).unwrap();
+    let mut text = vec![2u8];
+    text.extend_from_slice(&frame);
+    let pointer = thaw_arena::owned_string(&text);
+    let message = crate::host::with_package(crate::host::default_realm(), |p| {
+        let Err(Ctl::Throw(error)) = crate::host::take_callback_result(&mut p.interp, pointer)
+        else {
+            panic!("expected a throw");
+        };
+        let message = p.interp.get(&error, "message").unwrap();
+        Ok(p.interp.to_str(&message).to_string())
+    })
+    .unwrap_or_else(|_| panic!("the default realm is unavailable"));
+    assert_eq!(message, "before\0after");
+}
+
+const HOLES: &str = r#"module.exports = (function(require){
+var __thaw_bundle_factories = {
+"hl/index.js": function(module, exports, require) {
+  exports.probe = function (values) { return [Object.hasOwn(values, 0), values[0] === undefined, values.length].join(','); };
+},
+};
+var __thaw_bundle_require_maps = { "hl/index.js": {}, };
+var __thaw_bundle_entry_key = "hl/index.js";
+})(globalThis.require);"#;
+
+/// A native array hole crosses the typed ABI as `{"__thaw_tjs_hole__":1}` and stays a hole.
+#[test]
+fn array_holes_cross_the_typed_abi_as_wire_nodes() {
+    use std::ffi::CString;
+    let bundle = CString::new(HOLES).unwrap();
+    assert_eq!(
+        crate::host::thaw_tjs_register(c"hl".as_ptr(), bundle.as_ptr()),
+        1
+    );
+    assert_eq!(
+        typed_call("hl::probe", r#"[[{"__thaw_tjs_hole__":1},5]]"#).unwrap(),
+        "\"false,true,2\""
+    );
+    assert_eq!(
+        typed_call("hl::probe", r#"[[null,5]]"#).unwrap(),
+        "\"true,false,2\""
+    );
+}
+
+#[test]
+fn date_constructor_converts_a_single_value_like_the_spec() {
+    // a Date reads its time value without calling `getTime`; any other object goes through ToPrimitive
+    let src = r#"
+        const D = Date;
+        const live = new D(1704067200500);
+        D.prototype.getTime = () => { throw new Error('getTime changed'); };
+        const t = (f) => { try { return String(f()); } catch (e) { return e.constructor.name; } };
+        console.log([
+          t(() => Number(D.prototype.valueOf.call(new D(live)))),
+          t(() => Number(D.prototype.valueOf.call(new D({ [Symbol.toPrimitive](hint) { return hint === 'default' ? '2024-01-01T00:00:00.000Z' : 0; } })))),
+          t(() => new D({ valueOf() { return 5; } }).valueOf()),
+          t(() => new D({ [Symbol.toPrimitive]() { throw new RangeError('hook'); } })),
+          t(() => new D(1n)),
+          t(() => new D(Symbol('d'))),
+          t(() => new D(true).valueOf()),
+        ].join('|'));
+    "#;
+    assert_eq!(
+        one(src),
+        "1704067200500|1704067200000|5|RangeError|TypeError|TypeError|1"
+    );
+}
+
+/// An object literal's `__proto__: v` (identifier or string key) sets the prototype for an object or null and is
+/// otherwise ignored; computed and shorthand `__proto__` stay own keys. highlight.js's `MODES` relies on it.
+#[test]
+fn object_literal_proto_key_sets_the_prototype() {
+    let expected = r#""a"|["a"]|true|false|"b,inh"|["b"]|1|true|["__proto__"]|["__proto__"]|["c"]|true|["d"]|true|["__proto__"]|true"#;
+    assert_eq!(
+        one_sloppy(
+            r####"const o = { __proto__: null, a: 1 };
+const p = { __proto__: { inh: 1 }, b: 2 };
+const q = { ['__proto__']: 5 }; const k = '__proto__'; const r = { [k]: 6 };
+const s = { __proto__: 7, c: 1 };
+const t = { "__proto__": null, d: 1 };
+const u = { __proto__ };  var __proto__ = 3;
+const keys = x => { const a=[]; for (const key in x) a.push(key); return a.join(); };
+console.log([keys(o), Object.keys(o), Object.getPrototypeOf(o) === null, '__proto__' in o,
+ keys(p), Object.keys(p), p.inh, Object.getPrototypeOf(q) === Object.prototype, Object.keys(q), Object.keys(r),
+ Object.keys(s), Object.getPrototypeOf(s) === Object.prototype, Object.keys(t), Object.getPrototypeOf(t) === null, Object.keys(u), Object.getPrototypeOf(u)===Object.prototype].map(x=>JSON.stringify(x)).join('|'));
+"####
+        ),
+        expected
+    );
+}

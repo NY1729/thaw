@@ -1582,6 +1582,8 @@ const DATE_ID_KEY: &str = "__thaw_tjs_id__";
 const BIGINT_KEY: &str = "__thaw_tjs_bigint__";
 /// `{"__thaw_tjs_num__": "-0"}`: a compiled negative zero, which JSON integers lose; also `"NaN"`/`"Infinity"`/`"-Infinity"`.
 const NUM_KEY: &str = "__thaw_tjs_num__";
+/// `{"__thaw_tjs_hole__": 1}` as an array element: a hole of a compiled sparse array.
+const HOLE_KEY: &str = "__thaw_tjs_hole__";
 /// `{"__thaw_tjs_bytes__": {"k": "Buffer" | "Uint8Array" | "ArrayBuffer" | "DataView", "b64": "..."}}`:
 /// compiled `Bytes` crossing as base64 text. `k` selects the JS kind; a missing or unknown `k` is a Buffer.
 /// ArrayBuffer and DataView cross by copy (a DataView over a fresh ArrayBuffer of exactly its window).
@@ -1882,7 +1884,8 @@ fn parse_class_symbol(symbol: &str) -> Option<(&str, &str, &str, Option<&str>)> 
     let kind = parts.next()?;
     let class = parts.next()?;
     let rest = parts.next()?;
-    let (package, class_path) = class.split_once("::")?;
+    // a `loadScript` global has no package: `$setter$box$value` (the empty package is the default realm)
+    let (package, class_path) = class.split_once("::").unwrap_or(("", class));
     let member = match kind {
         "new" => None,
         // the member may itself start with `$` (`$disconnect`): cut at the trailing `$overloadK$arityN`
@@ -1948,6 +1951,7 @@ fn class_call(
         | ClassOp::Getter { receiver, .. } => slot(*receiver as u64)
             .map(|(p, _)| p)
             .ok_or_else(|| HostError::Bundle(stale_handle(*receiver as u64)))?,
+        _ if package.is_empty() => default_realm(),
         _ => BY_NAME
             .with(|m| m.borrow().get(package).copied())
             .ok_or_else(|| HostError::Bundle(not_loaded(package)))?,
@@ -2491,6 +2495,7 @@ pub extern "C" fn thaw_tjs_call_graph_result(
                 f = it.get(&this, part).map_err(|c| classify(it, c))?;
             }
             let result = it.call(&f, &this, &args).map_err(|c| classify(it, c))?;
+            let result = adopt_thenable(it, result)?;
             let result = awaited(it, result)?;
             let mut out = WireOut {
                 owner,
@@ -3294,7 +3299,7 @@ fn array_buffer_bytes_json(v: &Value) -> String {
 /// 8 Json copy, 9 is object, 10 number text, 11 is Buffer, 12-13 Date check/time, 14 callable, 15 UTF-16 units,
 /// 16 number coercion, 17-20 and 22-24 engine-prelude queries, 21 native owner pointer, 25-26 origin/prototype,
 /// 27 typed-array text, 28 Error properties, 29 must stay live, 30 call-argument identity, 31 ArrayBuffer bytes,
-/// 32 Object.prototype.toString tag.
+/// 32 Object.prototype.toString tag, 33 array hole indices.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> ThawResult {
     if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
@@ -3386,6 +3391,23 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             // 31: the bytes of an ArrayBuffer (a resizable or SharedArrayBuffer answers its current bytes) as a
             // JSON number array, so a Json number[] request can read a digest result; `null` for any other value
             31 => array_buffer_bytes_json(&v),
+            // 33: the hole indices of an array as a JSON number array (`[]` for anything else): the native
+            // array a `number[]` decode builds keeps them absent
+            33 => match &v {
+                Value::Object(o) => match &*o.kind.borrow() {
+                    Kind::Array(items) => {
+                        let holes: Vec<String> = items
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| matches!(item, Value::Hole))
+                            .map(|(index, _)| index.to_string())
+                            .collect();
+                        format!("[{}]", holes.join(","))
+                    }
+                    _ => "[]".to_string(),
+                },
+                _ => "[]".to_string(),
+            },
             // 32: the value's Object.prototype.toString tag (`[object Map]`, ...), by the interpreter's own implementation
             32 => match crate::builtins::object_prototype_to_string(it, &v)
                 .map_err(|c| classify(it, c))?
@@ -4832,6 +4854,14 @@ pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResul
     }))
 }
 
+/// An `any` result that a copy would damage: a Buffer, or a plain object with a function-valued member
+/// (`{ toString() {} }`), which must stay a live handle so its methods keep running.
+fn is_live_any_result(v: &Value) -> bool {
+    is_buffer_value(v)
+        || matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Plain)
+            && o.props().borrow().iter().any(|p| matches!(&p.slot, Slot::Data(m) if m.is_callable())))
+}
+
 /// A function or class instance: it cannot cross as plain data, so compiled code keeps it by handle.
 /// A prototype stand-in (accessors or non-enumerable members on a Plain object) is live too: a copy would lose them.
 /// Generators, Map/Set iterators and Proxies have no plain-data form either (a copy would be `{}`).
@@ -5740,6 +5770,15 @@ fn primitive_reason(packet: &thaw_arena::exception::ExceptionPacket) -> Option<V
     })
 }
 
+/// The text of an arena string. A string with an embedded NUL has a recorded length (`owned_string`), which a
+/// C-string read would cut at the NUL; error messages may hold NULs.
+///
+/// # Safety
+/// `pointer` must be non-null and an arena-owned or NUL-terminated string.
+unsafe fn owned_text_lossy(pointer: *const c_char) -> String {
+    String::from_utf8_lossy(thaw_arena::NativeStr::from_ptr(pointer).to_bytes()).into_owned()
+}
+
 /// Unwrap a callback result string: a thrown error (arena packet or `\u{2}` framing) becomes a JS throw.
 pub(crate) fn take_callback_result(
     it: &mut Interp,
@@ -5749,9 +5788,7 @@ pub(crate) fn take_callback_result(
     let out = if result.is_null() {
         String::new()
     } else {
-        let s = unsafe { CStr::from_ptr(result) }
-            .to_string_lossy()
-            .into_owned();
+        let s = unsafe { owned_text_lossy(result) };
         unsafe { thaw_arena::destroy_string(result) };
         s
     };
@@ -6330,9 +6367,7 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
     let out = if result.is_null() {
         String::new()
     } else {
-        let s = unsafe { CStr::from_ptr(result) }
-            .to_string_lossy()
-            .into_owned();
+        let s = unsafe { owned_text_lossy(result) };
         unsafe { thaw_arena::destroy_string(result) };
         s
     };
@@ -6558,7 +6593,15 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         Native::Number(x) => Value::Number(*x),
         Native::Str(s) => framed_error(it, s).unwrap_or_else(|| Value::str(s)),
         Native::Array(items) => {
-            let v = items.iter().map(|i| to_value(it, i)).collect();
+            let v = items
+                .iter()
+                .map(|i| match i {
+                    Native::Object(f) if matches!(f.as_slice(), [(k, _)] if k == HOLE_KEY) => {
+                        Value::Hole
+                    }
+                    _ => to_value(it, i),
+                })
+                .collect();
             it.array(v)
         }
         // `{"__thaw_tjs_cb__": id}`: a compiled callback registered with `thaw_tjs_register_callback`.
@@ -7910,16 +7953,21 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
 }
 
 fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, String>) {
-    let text = |s: String| CString::new(s.replace('\0', "\u{FFFD}")).unwrap();
+    // JSON text has no raw NUL; an error text may, so it travels as an arena string that records its length
     let (json, error) = match result {
-        Ok(json) => (Some(text(json)), None),
-        Err(error) => (None, Some(text(error))),
+        Ok(json) => (
+            Some(CString::new(json.replace('\0', "\u{FFFD}")).unwrap()),
+            ptr::null_mut(),
+        ),
+        Err(error) => (None, thaw_arena::owned_string(error)),
     };
     settle(
         native,
         json.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
-        error.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+        error,
     );
+    // SAFETY: `error` is null or the arena string made above, no longer used by the settler.
+    unsafe { thaw_arena::destroy_string(error) };
 }
 
 /// Drain the jobs of every package with a watched promise, then settle the watches that left Pending.
@@ -7999,6 +8047,11 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             s if s.starts_with('\u{4}') => (false, false, true, &s[1..]),
             s => (false, false, false, s),
         };
+        // `\u{5}`: a `Json` (`any`) result, where a Buffer or an object with function members stays a live handle
+        let (want_live_any, symbol) = match symbol.strip_prefix('\u{5}') {
+            Some(rest) => (true, rest),
+            None => (false, symbol),
+        };
         if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
             eprintln!("thaw-js call: {symbol} {args}");
         }
@@ -8025,7 +8078,9 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             if want_handle {
                 return Ok(store_handle(handle, r).to_string());
             }
-            if is_live_value(&p.interp, &r) && !(want_date && p.interp.date_target(&r)) {
+            if (is_live_value(&p.interp, &r) || (want_live_any && is_live_any_result(&r)))
+                && !(want_date && p.interp.date_target(&r))
+            {
                 return Ok(handle_marker_json(store_handle(handle, r)));
             }
             // A plain result that compiled code already holds by handle returns that handle (same identity).
@@ -9032,6 +9087,35 @@ mod class_symbol_thenable_tests {
             parse_class_symbol("$new$p::C$arity0"),
             Some(("new", "p", "C", None))
         );
+    }
+
+    /// A typed call on a `loadScript` global has no `pkg::`: the symbol is `$setter$<global>$<member>`.
+    #[test]
+    fn class_symbol_of_a_script_global_has_no_package() {
+        assert_eq!(
+            parse_class_symbol("$setter$box$value"),
+            Some(("setter", "", "box", Some("value")))
+        );
+    }
+
+    /// A function called by name (`callDynamic`) whose result is a thenable is assimilated like a Promise
+    /// (the first `resolve` wins), not handed back as an object.
+    #[test]
+    fn named_call_adopts_a_thenable_result() {
+        let script = CString::new(
+            "globalThis.foreignThenable = () => ({ then(resolve, reject) { resolve(84); reject('late'); resolve(99); } });",
+        )
+        .unwrap();
+        assert_eq!(thaw_tjs_load_script(script.as_ptr()), 1);
+        let name = CString::new("foreignThenable").unwrap();
+        let wire = CString::new(r#"{"root":{"r":0},"nodes":[{"a":[]}]}"#).unwrap();
+        let result = thaw_tjs_call_graph_result(name.as_ptr(), wire.as_ptr());
+        assert!(result.error.is_null());
+        let text = unsafe { CStr::from_ptr(result.value) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(text.contains("84"), "{text}");
     }
 
     #[test]

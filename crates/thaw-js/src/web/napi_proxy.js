@@ -648,7 +648,8 @@
         return;
       }
       if (proxyHandle !== undefined) return;
-      const updated = response.value;
+      // a reply without a value (the native side dropped the object) empties the object, as before
+      const updated = response.value == null ? {} : response.value;
       const originMap = new Map((response.origins || []).map(entry => [jsonStringify(entry[0]), entry]));
       if (Array.isArray(value)) value.length = updated.length;
       else {
