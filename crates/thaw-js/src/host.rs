@@ -1575,9 +1575,16 @@ impl Package {
 
 pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
     let packet = match &c {
-        Ctl::Throw(v) => carrier_packet(it, v).or_else(|| primitive_packet(v, it)),
+        Ctl::Throw(v) => carrier_packet(it, v),
         _ => None,
     };
+    // a thrown primitive gets its packet only when an error string is made (`error_string`): a packet parked
+    // in a thread-local would abort the process when its thread ends
+    let primitive = match (&c, &packet) {
+        (Ctl::Throw(v), None) => primitive_throw(v, it),
+        _ => None,
+    };
+    LAST_PRIMITIVE.with(|p| *p.borrow_mut() = primitive);
     LAST_PACKET.with(|p| *p.borrow_mut() = packet);
     // A thrown string shaped like a framed Error would be rebuilt as that Error from its text: keep the
     // original value too, so the native catch gets the string.
@@ -6478,6 +6485,8 @@ thread_local! {
     static LAST_FRAME: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     /// The native packet of the last carrier `classify` saw; `error_string` binds it to the error text.
     static LAST_PACKET: RefCell<Option<Rc<thaw_arena::exception::ExceptionPacket>>> = const { RefCell::new(None) };
+    /// The thrown primitive `classify` saw last, as plain data; `error_string` turns it into a packet.
+    static LAST_PRIMITIVE: RefCell<Option<PrimitiveThrow>> = const { RefCell::new(None) };
     /// The last object `classify` saw thrown, so a failed typed call can hand the exact object to compiled code.
     static LAST_THROWN: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// The handle of the object the last failed typed call threw (see `thaw_tjs_take_thrown_handle`); 0 for none.
@@ -6492,12 +6501,15 @@ pub extern "C" fn thaw_tjs_take_thrown_handle() -> i64 {
     LAST_THROWN_HANDLE.with(Cell::take)
 }
 
-/// A packet for a thrown primitive (boolean, number, string, `undefined`, `null`), so the native `catch`
-/// receives the original value, not the text of its conversion (the QuickJS host's `primitive_exception_packet`).
-fn primitive_packet(
-    v: &Value,
-    it: &mut Interp,
-) -> Option<Rc<thaw_arena::exception::ExceptionPacket>> {
+/// A thrown boolean, number, string, `undefined` or `null`: kept as plain data until an error string is made.
+struct PrimitiveThrow {
+    tag: i64,
+    number: u64,
+    boolean: u64,
+    text: String,
+}
+
+fn primitive_throw(v: &Value, it: &mut Interp) -> Option<PrimitiveThrow> {
     let (tag, number, boolean) = match v {
         Value::Bool(b) => (3, 0, u64::from(*b)),
         Value::Number(n) => (1, n.to_bits(), 0),
@@ -6506,29 +6518,41 @@ fn primitive_packet(
         Value::Null => (6, 0, 0),
         _ => return None,
     };
-    let text = it.to_str(v).to_string();
-    let mut bytes = text.as_bytes().to_vec();
-    bytes.push(0);
-    let owned = bytes.into_boxed_slice();
-    let address = owned.as_ptr() as usize;
-    thaw_arena::register_exception_bytes(address as *const c_char, text.len());
-    thaw_arena::exception::register_packet(thaw_arena::exception::ExceptionPacket {
-        id: 0,
-        pending: address,
-        native_text: address,
-        native_error_identity: 0,
-        object: 0,
-        native: 0,
-        aggregate: 0,
+    Some(PrimitiveThrow {
         tag,
         number,
-        bigint: 0,
         boolean,
-        _roots: Vec::new(),
-        _owned_bytes: vec![owned],
-        _leases: Vec::new(),
+        text: it.to_str(v).to_string(),
     })
-    .map(|(_, packet)| packet)
+}
+
+impl PrimitiveThrow {
+    /// The packet that carries the exact primitive to the native `catch` (the QuickJS host's
+    /// `primitive_exception_packet`).
+    fn into_packet(self) -> Option<Rc<thaw_arena::exception::ExceptionPacket>> {
+        let mut bytes = self.text.as_bytes().to_vec();
+        bytes.push(0);
+        let owned = bytes.into_boxed_slice();
+        let address = owned.as_ptr() as usize;
+        thaw_arena::register_exception_bytes(address as *const c_char, self.text.len());
+        thaw_arena::exception::register_packet(thaw_arena::exception::ExceptionPacket {
+            id: 0,
+            pending: address,
+            native_text: address,
+            native_error_identity: 0,
+            object: 0,
+            native: 0,
+            aggregate: 0,
+            tag: self.tag,
+            number: self.number,
+            bigint: 0,
+            boolean: self.boolean,
+            _roots: Vec::new(),
+            _owned_bytes: vec![owned],
+            _leases: Vec::new(),
+        })
+        .map(|(_, packet)| packet)
+    }
 }
 
 /// The live native packet a thrown carrier names in its hidden `\0pkt`, if any.
@@ -6546,8 +6570,13 @@ fn carrier_packet(
 /// the string, as a callback result does, so the native side resolves the same exception by token.
 pub(crate) fn error_string(e: String) -> *mut c_char {
     let pointer = thaw_arena::owned_string(e);
+    let primitive = LAST_PRIMITIVE.with(|p| p.borrow_mut().take());
     if let Some(packet) = LAST_PACKET.with(|p| p.borrow_mut().take()) {
         thaw_arena::bind_owned_exception(pointer, packet);
+    } else if let Some(primitive) = primitive {
+        if let Some(packet) = primitive.into_packet() {
+            thaw_arena::bind_owned_exception(pointer, packet);
+        }
     }
     pointer
 }
