@@ -1,3 +1,4 @@
+include!("tests/js_shim.rs");
 include!("tests/core_types.rs");
 include!("tests/generic_types.rs");
 include!("tests/exports.rs");
