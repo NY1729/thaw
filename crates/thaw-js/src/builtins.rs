@@ -1740,7 +1740,14 @@ impl Interp {
             self.set_native(o, "setPrototypeOf", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
                     let proto = arg(args, 1);
-                    if it.proxy_set_prototype_of(&o, &proto)?.is_none() {
+                    let by_proxy = it.proxy_set_prototype_of(&o, &proto)?;
+                    if by_proxy == Some(false) {
+                        return it.throw_error(
+                            "TypeError",
+                            "'setPrototypeOf' on proxy: trap returned falsish for property 'undefined'",
+                        );
+                    }
+                    if by_proxy.is_none() {
                         let next = match proto {
                             Value::Object(p) => Some(p),
                             _ => None,
@@ -2060,8 +2067,15 @@ impl Interp {
             });
             self.set_native(o, "preventExtensions", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    if it.proxy_prevent_extensions(&o)?.is_none() {
-                        o.ext.set(o.ext.get().max(1));
+                    match it.proxy_prevent_extensions(&o)? {
+                        None => o.ext.set(o.ext.get().max(1)),
+                        Some(true) => {}
+                        Some(false) => {
+                            return it.throw_error(
+                                "TypeError",
+                                "'preventExtensions' on proxy: trap returned falsish",
+                            )
+                        }
                     }
                 }
                 Ok(arg(args, 0))

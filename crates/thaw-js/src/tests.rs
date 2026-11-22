@@ -11444,6 +11444,19 @@ fn freeze_and_seal_of_a_proxy_reach_the_target() {
     );
 }
 
+/// A Proxy trap that refuses `preventExtensions` / `setPrototypeOf` makes the `Object.*` form throw (node 22).
+#[test]
+fn object_forms_throw_when_a_proxy_trap_refuses() {
+    assert_eq!(
+        one(r#"const a = Proxy.revocable({}, { preventExtensions: () => false }).proxy;
+          try { Object.preventExtensions(a); } catch (e) { console.log(e.constructor.name, e.message); }
+          const b = Proxy.revocable({}, { setPrototypeOf: () => false }).proxy;
+          try { Object.setPrototypeOf(b, null); } catch (e) { console.log(e.constructor.name, e.message); }
+          console.log(Reflect.preventExtensions(a), Reflect.setPrototypeOf(b, null));"#),
+        "TypeError 'preventExtensions' on proxy: trap returned falsish|TypeError 'setPrototypeOf' on proxy: trap returned falsish for property 'undefined'|false false"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {
