@@ -12740,3 +12740,24 @@ fn instanceof_follows_instanceof_operator_and_ordinary_has_instance() {
         "TypeError: Right-hand side of 'instanceof' is not an object|TypeError: Right-hand side of 'instanceof' is not an object|TypeError: Right-hand side of 'instanceof' is not callable|TypeError: Function has non-object prototype 'undefined' in instanceof check|false|TypeError|TypeError: Right-hand side of 'instanceof' is not callable|true|true|true|TypeError: Right-hand side of 'instanceof' is not callable|TypeError: Function has non-object prototype 'undefined' in instanceof check"
     );
 }
+
+/// A framed native error whose message holds a NUL crosses the callback result string intact
+/// (the arena string keeps its length; a C-string read would stop at the NUL).
+#[test]
+fn callback_error_text_keeps_an_embedded_nul() {
+    let frame =
+        thaw_arena::error_wire::encode_tagged(b"TypeError", b"before\0after", None).unwrap();
+    let mut text = vec![2u8];
+    text.extend_from_slice(&frame);
+    let pointer = thaw_arena::owned_string(&text);
+    let message = crate::host::with_package(crate::host::default_realm(), |p| {
+        let Err(Ctl::Throw(error)) = crate::host::take_callback_result(&mut p.interp, pointer)
+        else {
+            panic!("expected a throw");
+        };
+        let message = p.interp.get(&error, "message").unwrap();
+        Ok(p.interp.to_str(&message).to_string())
+    })
+    .unwrap_or_else(|_| panic!("the default realm is unavailable"));
+    assert_eq!(message, "before\0after");
+}
