@@ -2052,6 +2052,78 @@ module.exports = { run: () => {
     let _ = fs::remove_dir_all(root);
 }
 
+/// The package behind the `import('./x?query')` tests; outputs recorded from Node 22 (probed).
+fn query_clone_package(name: &str) -> (std::path::PathBuf, String) {
+    let root = temp_registry(name);
+    let modules = root.join("node_modules");
+    let package = modules.join("query-clone-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.cjs"), r#"module.exports = { run: async () => {
+  const q = (x) => import('./leaf.mjs?' + x), c = (x) => import('./dep.cjs?' + x), nope = (x) => import('./nope.mjs?' + x);
+  const base = await import('./leaf.mjs');
+  const one = await import('./leaf.mjs?one'), two = await import('./leaf.mjs?two');
+  const three = await q('two'), four = await q('four'), four2 = await q('four');
+  const e1 = await import('./leaf.mjs#'), e2 = await import('./leaf.mjs?#'), e3 = await q('');
+  const sl = await import('./leaf.mjs?next=/a/b'), sl2 = await q('next=/a/b');
+  const c1 = await import('./dep.cjs?x'), c2 = await import('./dep.cjs'), c3 = await c('y');
+  let missing; try { await nope('x'); missing = 'ok'; } catch (e) { missing = e.code; }
+  return [three === two, one === two, four === four2, four === base, e1 === base, e2 === base, e3 === base, sl === sl2, sl.url.endsWith('leaf.mjs?next=/a/b'), sl.viaDep, c1.default === c2.default, c3.default === c2.default, missing, globalThis.leafRuns, globalThis.sharedRuns, globalThis.depRuns];
+} };"#).unwrap();
+    fs::write(package.join("leaf.mjs"), "import { createRequire } from 'node:module';\nimport './shared.mjs';\nglobalThis.leafRuns = (globalThis.leafRuns || 0) + 1;\nconst r = createRequire(import.meta.url);\nexport const url = import.meta.url, viaDep = r('./dep.cjs') === r('./dep.cjs'), token = {};").unwrap();
+    fs::write(package.join("shared.mjs"), "globalThis.sharedRuns = (globalThis.sharedRuns || 0) + 1;").unwrap();
+    fs::write(package.join("dep.cjs"), "globalThis.depRuns = (globalThis.depRuns || 0) + 1; module.exports = {};").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "query-clone-pkg", &package, "index.cjs").unwrap();
+    (root, bundle)
+}
+
+#[test]
+fn import_of_computed_query_specifier_is_the_literal_instance() {
+    // Node: a computed ?query is the literal's instance; ?one != ?two; a clone is not the base; leaf ran for base/one/two/four/next=/a/b (5) while shared.mjs and dep.cjs ran once
+    let (root, bundle) = query_clone_package("g6-import_of_computed_query_specifier_is_the_literal_instance");
+    assert_eq!(run_js_probe(&bundle, "exports.run().then(r => r.slice(0, 4))"), r#"[true,false,true,false]"#);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn import_query_normalises_empty_suffix() {
+    // Node: `./x.mjs#`, `?#` and a computed empty `?` are the plain module
+    let (root, bundle) = query_clone_package("g6-import_query_normalises_empty_suffix");
+    assert_eq!(run_js_probe(&bundle, "exports.run().then(r => r.slice(4, 7))"), r#"[true,true,true]"#);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn import_query_with_slash_keeps_file_directory() {
+    // Node: `?next=/a/b` is one instance whose url keeps the query and whose createRequire(import.meta.url) still resolves next to the file
+    let (root, bundle) = query_clone_package("g6-import_query_with_slash_keeps_file_directory");
+    assert_eq!(run_js_probe(&bundle, "exports.run().then(r => r.slice(7, 10))"), r#"[true,true,true]"#);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn import_query_on_commonjs_target_is_the_same_module() {
+    // Node: a query on a CommonJS target creates no new instance (body runs once, same default)
+    let (root, bundle) = query_clone_package("g6-import_query_on_commonjs_target_is_the_same_module");
+    assert_eq!(run_js_probe(&bundle, "exports.run().then(r => r.slice(10, 12))"), r#"[true,true]"#);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn import_query_clones_share_dependencies_and_run_once() {
+    // Node: leaf ran for 5 distinct keys, shared.mjs and dep.cjs once
+    let (root, bundle) = query_clone_package("g6-import_query_clones_share_dependencies_and_run_once");
+    assert_eq!(run_js_probe(&bundle, "exports.run().then(r => r.slice(13))"), r#"[5,1,1]"#);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn import_of_missing_file_with_computed_query_rejects_err_module_not_found() {
+    // Node: import('./nope.mjs?x') rejects ERR_MODULE_NOT_FOUND
+    let (root, bundle) = query_clone_package("g6-import_of_missing_file_with_computed_query_rejects_err_module_not_found");
+    assert_eq!(run_js_probe(&bundle, "exports.run().then(r => r.slice(12, 13))"), r#"["ERR_MODULE_NOT_FOUND"]"#);
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn native_mixed_cjs_dynamic_import_uses_bound_native_ready() {
     // Unrun regression: the CJS factory starts after its native importer
