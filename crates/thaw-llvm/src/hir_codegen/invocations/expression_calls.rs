@@ -24,18 +24,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_inline_lambda_call(params, ret, &plan, args);
             }
         }
-        if let HirExpr::Lambda(_, params, ret, _) = callee {
+        if let HirExpr::Lambda(_, params, ret, body) = callee {
             let parameter_types = params
                 .iter()
                 .map(|parameter| parameter.ty.clone())
                 .collect::<Vec<_>>();
-            return self.compile_closure_call(
+            let result = self.compile_closure_call(
                 callee,
                 &parameter_types,
                 ret,
                 args,
                 "inline closure",
-            );
+            )?;
+            // `wrap_native_value_as_json` returns the box it `take`s out of its temporary object,
+            // so the caller owns it: register it, or a discarded result keeps its host leases.
+            if returns_wrapped_native_json(body) {
+                self.mark_fresh_owned_json_result(result)?;
+            }
+            return Ok(result);
         }
         if let HirExpr::PropAccess(_, HirType::Object(fields), field) = callee {
             if let Some((_, HirType::Function(params, ret))) =
@@ -152,5 +158,22 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
         self.builder.position_at_end(done);
         self.builder.build_load(ty, slot, "iife_value").map_err(|error| error.to_string())
+    }
+}
+
+/// Whether a lambda body ends in the `take` of a `wrap_native_value_as_json` temporary,
+/// possibly through the argument-binding lambdas wrapped around it.
+fn returns_wrapped_native_json(body: &HirExpr) -> bool {
+    match body {
+        HirExpr::Block(statements) => matches!(
+            statements.last(),
+            Some(HirStmt::Return(Some(HirExpr::JsonGet(object, _))))
+                if matches!(object.as_ref(), HirExpr::Var(name) if name.starts_with("__thaw_json_wrap_obj_"))
+        ),
+        HirExpr::Call(callee, _) => match callee.as_ref() {
+            HirExpr::Lambda(_, _, _, inner) => returns_wrapped_native_json(inner),
+            _ => false,
+        },
+        _ => false,
     }
 }

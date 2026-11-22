@@ -4519,9 +4519,90 @@ fn dynamic_symbol_decodes_the_thaw_js_backend_and_keeps_quickjs_untouched() {
         Some((DynamicBackend::ThawJs, "ms::ms".into())));
     assert_eq!(dynamic_symbol("__thaw_typed_js_6d733a3a6d73"),
         Some((DynamicBackend::QuickJs, "ms::ms".into())));
-    // thaw-js calls take plain data by value: they are not "ordinary QuickJS typed calls".
+    // A thaw-js plain function is a function value like a QuickJS one (live reference slots), but
+    // a thaw-js method symbol is not.
     assert!(ordinary_quickjs_typed_symbol("__thaw_typed_js_6d733a3a6d73").is_some());
-    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_none());
+    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_some());
+    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_246d6574686f6424782424").is_none());
+}
+
+#[test]
+fn thaw_js_array_parameter_function_value_takes_a_live_view() {
+    fn hex(text: &str) -> String {
+        text.bytes().map(|byte| format!("{byte:02x}")).collect()
+    }
+    let name = format!("__thaw_typed_tjs_{}", hex("k::append"));
+    let program = lower(&format!(
+        r#"
+        declare function {name}(values: number[]): number;
+        function main(): void {{
+            const append: (values: number[]) => number = {name};
+            const values: number[] = [1, 2];
+            append(values);
+        }}
+        "#
+    ));
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    // The call hands over a live view and the typed call's wire slot is `Json`, not a by-value
+    // `Array` copy.
+    assert_eq!(body.matches("__thaw_array_with_native_view").count(), 1, "{body}");
+    assert!(!body.contains("params: [Array"), "{body}");
+}
+
+#[test]
+fn thaw_js_only_array_containing_parameters_take_a_live_view() {
+    fn hex(text: &str) -> String {
+        text.bytes().map(|byte| format!("{byte:02x}")).collect()
+    }
+    fn main_body(param: &str, argument: &str) -> String {
+        let name = format!("__thaw_typed_tjs_{}", hex("k::probe"));
+        let program = lower(&format!(
+            r#"
+            declare function {name}(value: {param}): boolean;
+            function main(): void {{
+                {name}({argument});
+            }}
+            "#
+        ));
+        let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+        format!("{:?}", main.body)
+    }
+    for (param, argument) in [
+        ("Json", "new Map<string, number>()"),
+        ("Json", "new Set<number>()"),
+        ("Json", "new Date(0)"),
+        ("Json", "/x/"),
+        ("Map<string, number>", "new Map<string, number>()"),
+        ("Set<number>", "new Set<number>()"),
+        ("Date", "new Date(0)"),
+        ("RegExp", "/x/"),
+        ("Uint8Array", "new Uint8Array(2)"),
+    ] {
+        let body = main_body(param, argument);
+        assert!(!body.contains("__thaw_array_with_native_view"), "{param}: {body}");
+        assert!(!body.contains("__thaw_collection_with_native_view"), "{param}: {body}");
+        assert!(!body.contains("registerNativeCallbackGraph"), "{param}: {body}");
+        assert!(param == "Json" || !body.contains("params: [Json]"), "{param}: {body}");
+    }
+    // Arrays and aggregates holding an array stay live (through a function value, as the
+    // function-value test above).
+    for (param, init) in [("number[]", "[1, 2]"), ("{ values: number[] }", "{ values: [1] }")] {
+        let name = format!("__thaw_typed_tjs_{}", hex("k::probe"));
+        let program = lower(&format!(
+            r#"
+            declare function {name}(value: {param}): boolean;
+            function main(): void {{
+                const probe: (value: {param}) => boolean = {name};
+                const value: {param} = {init};
+                probe(value);
+            }}
+            "#
+        ));
+        let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+        let body = format!("{:?}", main.body);
+        assert!(body.contains("params: [Json]"), "{param}: {body}");
+    }
 }
 
 #[test]

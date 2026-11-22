@@ -48,6 +48,7 @@ mod costack;
 mod date;
 mod dns;
 mod esm;
+mod esm_link;
 pub mod esm_live;
 mod eventloop;
 mod extras;
@@ -68,6 +69,7 @@ mod napi_graph;
 mod napi_ops;
 mod napi_props;
 mod napi_symbols;
+mod napi_weak;
 mod net;
 mod node_crypto;
 mod numfmt;
@@ -356,6 +358,14 @@ pub struct ObjData {
     closure_counted: bool,
     /// Index in the `gc_registry` object list, or `gc_registry::NONE`.
     reg_idx: Cell<usize>,
+    /// An object a native addon holds a finalizable reference to (`napi_weak`): its drop queues the release.
+    watched: Cell<bool>,
+}
+
+impl ObjData {
+    pub(crate) fn set_watched(&self) {
+        self.watched.set(true);
+    }
 }
 
 impl Drop for ObjData {
@@ -363,6 +373,9 @@ impl Drop for ObjData {
         heap_limit::credit(self.charged.get());
         crate::mem_trace::obj_dropped(self.closure_counted);
         gc_registry::unregister_obj(self);
+        if self.watched.get() {
+            napi_weak::died(self as *const ObjData as usize);
+        }
     }
 }
 
@@ -1376,6 +1389,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         charged: Cell::new(0),
         closure_counted,
         reg_idx: Cell::new(gc_registry::NONE),
+        watched: Cell::new(false),
     });
     gc_registry::register_obj(&obj);
     account(&obj);
@@ -1486,6 +1500,8 @@ pub struct Interp {
     names: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<FxHasher>>,
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
+    /// Native bundles registered in this realm (`__thaw_register_native_bundle`); the next id is this + 1.
+    pub(crate) native_bundles: u64,
     /// Read-hint slots, one per annotated identifier (`hints.rs`). Slot 0 is never used.
     ident_hints: Vec<hints::HintSlot>,
     /// Hint counters (`THAW_JS_HINT_STATS=1`).
@@ -1677,6 +1693,7 @@ impl Interp {
             loop_captures: FxMap::default(),
             names: Default::default(),
             run_id: 0,
+            native_bundles: 0,
             ident_hints: vec![hints::HintSlot::default()],
             share_preludes: !host,
             share_globals: false,
@@ -2386,6 +2403,9 @@ impl Interp {
         let Value::Object(o) = this else {
             return Ok("".into());
         };
+        if let Some(items) = self.proxy_array_elements(this)? {
+            return self.join_items(&items, sep).map(Into::into);
+        }
         if !matches!(&*o.kind.borrow(), Kind::Array(_)) {
             return Ok("".into());
         }
@@ -2406,6 +2426,32 @@ impl Interp {
         };
         self.leave_walk();
         out.map(Into::into)
+    }
+
+    /// The elements of `this` when it is a Proxy over an array (a native-array view), each read
+    /// through the proxy's traps (`length`, then each index), as `Array.prototype` methods do on a
+    /// proxy; `None` for anything else.
+    pub(crate) fn proxy_array_elements(&mut self, this: &Value) -> R<Option<Vec<Value>>> {
+        let Value::Object(o) = this else {
+            return Ok(None);
+        };
+        if !matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+            return Ok(None);
+        }
+        let is_array = matches!(
+            &self.proxy_unwrap(this, "isArray")?,
+            Value::Object(t) if matches!(&*t.kind.borrow(), Kind::Array(_))
+        );
+        if !is_array {
+            return Ok(None);
+        }
+        let length = self.get(this, "length")?;
+        let len = self.num(&length).clamp(0.0, MAX_DENSE_ARRAY_LEN as f64);
+        let mut out = Vec::with_capacity(len as usize);
+        for k in 0..len as usize {
+            out.push(self.get_index(this, k)?);
+        }
+        Ok(Some(out))
     }
 
     /// The elements of exotic array `this`, each read through [[Get]] so accessors run and holes chain up.
@@ -6664,6 +6710,8 @@ mod direct_eval_tests;
 mod dynamic_helper_contract_tests;
 #[cfg(test)]
 mod errors_stack_tests;
+#[cfg(test)]
+mod esm_private_tests;
 #[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]

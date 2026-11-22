@@ -2462,7 +2462,10 @@ impl Interp {
                     }
                 }
                 let needle = arg(args, 0);
-                let items = it.array_items_raw(this);
+                let items = match it.proxy_array_elements(this)? {
+                    Some(items) => items,
+                    None => it.array_items_raw(this),
+                };
                 let len = items.len() as f64;
                 let pos = if last {
                     let from = match arg(args, 1) {
@@ -2510,7 +2513,10 @@ impl Interp {
             it.sparse_unsupported(this)?;
             let needle = arg(args, 0);
             let same_zero = |v: &Value| strict_equals(v, &needle) || matches!((v, &needle), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan());
-            let items = it.array_items(this);
+            let items = match it.proxy_array_elements(this)? {
+                Some(items) => items,
+                None => it.array_items(this),
+            };
             let len = items.len() as f64;
             let from = match arg(args, 1) {
                 Value::Undefined => 0.0,
@@ -2552,9 +2558,21 @@ impl Interp {
         });
         self.set_native(&ap, "concat", |it, this, args| {
             it.sparse_unsupported(this)?;
-            let mut items = it.array_items_raw(this);
+            let mut items = match it.proxy_array_elements(this)? {
+                Some(items) => items,
+                None => it.array_items_raw(this),
+            };
             for v in args {
                 match v {
+                    Value::Object(_) if it.proxy_array_elements(v)?.is_some() => {
+                        let key = it.well_known_key("isConcatSpreadable");
+                        let flag = it.get(v, &key)?;
+                        if matches!(flag, Value::Undefined) || flag.truthy() {
+                            items.extend(it.proxy_array_elements(v)?.unwrap_or_default());
+                        } else {
+                            items.push(v.clone());
+                        }
+                    }
                     Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
                         it.sparse_unsupported(v)?;
                         items.extend(it.array_items_raw(v))

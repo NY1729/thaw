@@ -598,6 +598,19 @@ impl<'a> FnLowerer<'a> {
         Ok(Some(inner.clone()))
     }
 
+    /// Whether a declared aggregate slot (a fixed object) holds an array, so a callee's mutation of
+    /// it must reach the caller's array.
+    pub(in crate::lower) fn object_holds_array(declared: &HirType) -> bool {
+        match declared {
+            HirType::Array(_) => true,
+            HirType::Object(fields) => fields.iter().any(|(_, ty)| Self::object_holds_array(ty)),
+            HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+                Self::object_holds_array(inner)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a declared slot stores `any` values (directly or as an element).
     fn type_holds_any(declared: &HirType) -> bool {
         match declared {
@@ -1890,7 +1903,10 @@ impl<'a> FnLowerer<'a> {
                 );
             }
             // A native Map/Set that may be aliased stays one object behind `any`: a live view.
-            if self.alias_native_arrays && Self::native_collection_view_supported(&actual) {
+            if self.alias_native_arrays
+                && !self.alias_arrays_only
+                && Self::native_collection_view_supported(&actual)
+            {
                 let fresh = matches!(&value, HirExpr::Call(callee, _)
                         if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_map_new"))
                     || matches!(&value, HirExpr::Var(name) if self.fresh_object_bindings.contains(name));

@@ -1726,6 +1726,40 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
 }
 
 #[test]
+fn native_esm_self_import_during_evaluation_runs_once() {
+    // Node 22.23.1 prints [1,7,true,"function"] (g2b-probes/self): a module that import()s itself while evaluating runs
+    // its body once, and two import() calls are two different promises. The QuickJS-private pin (re-entering the bound
+    // evaluator returns the SAME ready promise) has no Node analogue and stays in its pending test.
+    let root = temp_registry("native-esm-self-import");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-self-import-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "globalThis.nativeRuns = (globalThis.nativeRuns || 0) + 1; const p1 = import('./index.mjs'); const p2 = import('./index.mjs'); export const ps = [p1, p2]; export const value = 7;").unwrap();
+    let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-self-import-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(run_js_probe(&bundle, "[globalThis.nativeRuns, exports.value, exports.ps[0] !== exports.ps[1], typeof exports.ps[0].then]"), "[1,7,true,\"function\"]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_cycle_peer_reads_hoisted_not_tdz_and_unused_modules_stay_unlinked() {
+    // Node 22.23.1 prints [7,true,9,false] (g2b-probes/linked): the cycle peer reads the hoisted export and gets TDZ
+    // for the const; a module reachable only through a dynamic import() has not run. (Node also keeps it unrun right
+    // after calling import(); thaw-js loads a non-async module synchronously inside import(), so that moment is not pinned.)
+    let root = temp_registry("native-esm-linked-read");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-linked-read-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "import './lazy_b.mjs'; export function available() { return 7; } export const late = 9; export function loadUnused() { return import('./unused.mjs'); }").unwrap();
+    fs::write(package.join("lazy_b.mjs"), "import * as A from './index.mjs'; import { available } from './index.mjs'; globalThis.hoisted = available(); try { A.late; } catch (e) { globalThis.tdz = e instanceof ReferenceError; } export const peer = 3;").unwrap();
+    fs::write(package.join("unused.mjs"), "globalThis.unusedRan = true; export const hidden = 4;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-linked-read-pkg", &package, "index.mjs").unwrap();
+    assert!(bundle.contains("__thaw_register_native_bundle"));
+    assert_eq!(run_js_probe(&bundle, "[globalThis.hoisted, globalThis.tdz, exports.late, !!globalThis.unusedRan]"), "[7,true,9,false]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
     let root = temp_registry("native-esm-mixed-fallback");
     let modules = root.join("node_modules");
@@ -1776,22 +1810,16 @@ fn native_node_path_default_and_namespace_match_node() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: needs in-context helpers and namespace identity after load; script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_mixed_pure_namespace_keeps_engine_identity {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_mixed_pure_namespace_keeps_engine_identity() {
-    // Unrun: a mixed facade's namespace reexport of a pure native module
-    // must be the same engine namespace used by untouched and dynamic imports.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1 (probes g2b-probes/pure_ns, same sources): [true,18,true,true,9,1] then [true,true,18,1]. A mixed
+    // facade's namespace reexport of a pure native module is the namespace used by untouched and dynamic imports.
     let root = temp_registry("native-mixed-pure-namespace");
     let modules = root.join("node_modules");
     let package = modules.join("native-namespace-identity-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "import legacy from './legacy.cjs'; import * as mixedImported from './mixed.mjs'; import * as imported from './pure.mjs'; export * as mixedNs from './mixed.mjs'; export * from './left.mjs'; export * from './right.mjs'; export { imported, mixedImported }; export const value = legacy; export const loadPure = () => import('./pure.mjs'); export const loadMixed = () => import('./mixed.mjs');").unwrap();
-    fs::write(package.join("pure.mjs"), "globalThis.__thaw_pure_runs++; export let value = 17; export function set(value_) { value = value_; }").unwrap();
+    fs::write(package.join("pure.mjs"), "globalThis.__thaw_pure_runs = (globalThis.__thaw_pure_runs || 0) + 1; export let value = 17; export function set(value_) { value = value_; }").unwrap();
     fs::write(package.join("bridge.mjs"), "export * as ns from './pure.mjs';").unwrap();
     fs::write(package.join("left.mjs"), "export { ns } from './bridge.mjs';").unwrap();
     fs::write(package.join("right.mjs"), "export { ns } from './bridge.mjs';").unwrap();
@@ -1799,44 +1827,38 @@ fn native_mixed_pure_namespace_keeps_engine_identity() {
     fs::write(package.join("legacy.cjs"), "module.exports = 9;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-namespace-identity-pkg", &package, "index.mjs").unwrap();
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.__thaw_pure_runs = 0; globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readNamespaceIdentity = function() {{ var exported = module.exports; exported.ns.set(18); return [exported.ns === exported.imported, exported.ns.value, exported.mixedNs === exported.mixedImported, exported.mixedNs.earlyNs === exported.ns, exported.mixedNs.value, __thaw_pure_runs]; }}; globalThis.readDynamicNamespaceIdentity = function() {{ var exported = module.exports; return Promise.all([exported.loadPure(), exported.loadMixed()]).then(function(values) {{ return [values[0] === exported.ns, values[1] === exported.mixedNs, values[0].value, __thaw_pure_runs]; }}); }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let direct = thaw_quickjs::thaw_js_call(c"readNamespaceIdentity".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(direct) }.to_string_lossy(), "[true,18,true,true,9,1]");
-    let dynamic = thaw_quickjs::thaw_js_call(c"readDynamicNamespaceIdentity".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(dynamic) }.to_string_lossy(), "[true,true,18,1]");
+    assert_eq!(
+        run_js_probe(&bundle, "(exports.ns.set(18), [exports.ns === exports.imported, exports.ns.value, exports.mixedNs === exports.mixedImported, exports.mixedNs.earlyNs === exports.ns, exports.mixedNs.value, globalThis.__thaw_pure_runs])"),
+        "[true,18,true,true,9,1]"
+    );
+    assert_eq!(
+        run_js_probe(&bundle, "(exports.ns.set(18), Promise.all([exports.loadPure(), exports.loadMixed()]).then(function (values) { return [values[0] === exports.ns, values[1] === exports.mixedNs, values[0].value, globalThis.__thaw_pure_runs]; }))"),
+        "[true,true,18,1]"
+    );
     let _ = fs::remove_dir_all(root);
 }
-}
-
-// qjs_pending: needs JS globals read after load (__thaw_early_ns, __thaw_pure_runs); script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_mixed_namespace_anchor_reseeds_after_stripped_edge {
-    use super::*;
-    use ::thaw_quickjs;
 
 #[test]
 fn native_mixed_namespace_anchor_reseeds_after_stripped_edge() {
-    // Unrun three-module cycle: A's export through mixed D is stripped, but
-    // D's export of pure B is native. Reader R runs before D's later B edge,
-    // so its import of A.ns must read D's retained alias before B evaluates.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1 (probes g2b-probes/anchor, same sources): [true,true,17,1]. Three-module cycle: reader R runs
+    // before mixed D evaluates its later `export * as ns from pure`, yet R's import of index's `ns` is the final
+    // namespace, which is populated once pure has run.
     let root = temp_registry("native-namespace-anchor-reseed");
     let modules = root.join("node_modules");
     let package = modules.join("native-anchor-reseed-pkg");
     fs::create_dir_all(&package).unwrap();
     fs::write(package.join("index.mjs"), "import './legacy.cjs'; import './mixed.mjs'; export { ns } from './mixed.mjs';").unwrap();
     fs::write(package.join("mixed.mjs"), "import './reader.mjs'; export * as ns from './pure.mjs';").unwrap();
-    fs::write(package.join("reader.mjs"), "import { ns } from './index.mjs'; globalThis.__thaw_early_before_pure = globalThis.__thaw_pure_runs === 0; globalThis.__thaw_early_ns = ns; export const early = ns;").unwrap();
-    fs::write(package.join("pure.mjs"), "globalThis.__thaw_pure_runs++; export const value = 17;").unwrap();
+    fs::write(package.join("reader.mjs"), "import { ns } from './index.mjs'; globalThis.__thaw_early_before_pure = !globalThis.__thaw_pure_runs; globalThis.__thaw_early_ns = ns; export const early = ns;").unwrap();
+    fs::write(package.join("pure.mjs"), "globalThis.__thaw_pure_runs = (globalThis.__thaw_pure_runs || 0) + 1; export const value = 17;").unwrap();
     fs::write(package.join("legacy.cjs"), "module.exports = 9;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-anchor-reseed-pkg", &package, "index.mjs").unwrap();
     assert!(bundle.contains("__thaw_register_native_bundle"));
-    let script = format!("globalThis.__thaw_pure_runs = 0; globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readAnchorReseed = function() {{ return [__thaw_early_before_pure, __thaw_early_ns === module.exports.ns, __thaw_early_ns.value, __thaw_pure_runs]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"readAnchorReseed".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,17,1]");
+    assert_eq!(
+        run_js_probe(&bundle, "[globalThis.__thaw_early_before_pure, globalThis.__thaw_early_ns === exports.ns, globalThis.__thaw_early_ns.value, globalThis.__thaw_pure_runs]"),
+        "[true,true,17,1]"
+    );
     let _ = fs::remove_dir_all(root);
-}
 }
 
 #[test]
@@ -2168,13 +2190,32 @@ fn native_mixed_async_opaque_back_edge_keeps_legacy_bridge() {
 }
 
 #[test]
+fn native_esm_barrel_default_namespace_and_star_shapes_keep_class_identity() {
+    // Node 22.23.1 (g2b-probes/barrel, same sources): [1,1,true,2,3,2,true,true,"Queue,default,f,ns,qns,u"]. The p-limit
+    // shape: a barrel re-exports a default class (`export { default } from`, `export { default as Queue } from`), a star
+    // and namespaces; the consumer constructs through the default and the named import.
+    let root = temp_registry("native-esm-barrel-shapes");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-barrel-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "export { default as Queue } from './queue.mjs'; export { default } from './queue.mjs'; export * from './util.mjs'; export * as ns from './util.mjs'; export * as qns from './queue.mjs';").unwrap();
+    fs::write(package.join("queue.mjs"), "export default class Queue { constructor() { this.k = 1; } }").unwrap();
+    fs::write(package.join("util.mjs"), "export const u = 2; export function f() { return 3; }").unwrap();
+    fs::write(package.join("use.mjs"), "import Dflt, { Queue, u, f, ns, qns } from './index.mjs'; import * as all from './index.mjs'; export const result = [new Dflt().k, new Queue().k, Dflt === Queue, u, f(), ns.u, ns === all.ns, qns.default === Queue, Object.keys(all).sort().join()];").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-barrel-pkg", &package, "use.mjs").unwrap();
+    assert!(bundle.contains("__thaw_register_native_bundle"));
+    assert_eq!(run_js_get(&bundle, "result"), "[1,1,true,2,3,2,true,true,\"Queue,default,f,ns,qns,u\"]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
-    // Unrun regression: rewriting an unused named import to an opaque shell
-    // must retain native link-time missing/ambiguous export validation.
-    use std::ffi::{CStr, CString};
-    for (kind, middle, extras) in [
-        ("missing", "import legacy from './legacy.cjs'; export const present = legacy;", false),
-        ("ambiguous", "import legacy from './legacy.cjs'; export * from './left.mjs'; export * from './right.mjs'; export const present = legacy;", true),
+    // Node 22.23.1 (probes g2b-probes/lazy, lazy2; the same graphs entered statically): rewriting an unused named
+    // import to an opaque shell must retain link-time missing/ambiguous export validation, and nothing runs first.
+    // A CommonJS dependency that throws when it runs shows that no factory ran: the load fails with the SyntaxError.
+    for (kind, middle, extras, message) in [
+        ("missing", "import legacy from './legacy.cjs'; export const present = legacy;", false, "SyntaxError: The requested module './middle.mjs' does not provide an export named 'absent'"),
+        ("ambiguous", "import legacy from './legacy.cjs'; export * from './left.mjs'; export * from './right.mjs'; export const present = legacy;", true, "SyntaxError: The requested module './middle.mjs' contains conflicting star exports for name 'duplicate'"),
     ] {
         let root = temp_registry(&format!("native-mixed-link-{kind}"));
         let modules = root.join("node_modules");
@@ -2183,17 +2224,14 @@ fn native_mixed_removed_named_edges_fail_before_any_factory_runs() {
         let requested = if extras { "duplicate" } else { "absent" };
         fs::write(package.join("index.mjs"), format!("import {{ {requested} }} from './middle.mjs'; export const value = 1;")).unwrap();
         fs::write(package.join("middle.mjs"), middle).unwrap();
-        fs::write(package.join("legacy.cjs"), "globalThis.__thaw_link_runs++; module.exports = 9;").unwrap();
+        fs::write(package.join("legacy.cjs"), "throw new Error('FACTORY RAN'); module.exports = 9;").unwrap();
         if extras {
-            fs::write(package.join("left.mjs"), "globalThis.__thaw_link_runs++; export const duplicate = 1;").unwrap();
-            fs::write(package.join("right.mjs"), "globalThis.__thaw_link_runs++; export const duplicate = 2;").unwrap();
+            fs::write(package.join("left.mjs"), "throw new Error('FACTORY RAN'); export const duplicate = 1;").unwrap();
+            fs::write(package.join("right.mjs"), "throw new Error('FACTORY RAN'); export const duplicate = 2;").unwrap();
         }
         let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-mixed-link-pkg", &package, "index.mjs").unwrap();
         assert!(bundle.contains("validateStatic"), "{kind}: {bundle}");
-        let script = format!("globalThis.__thaw_link_runs = 0; globalThis.readMixedLinkRuns = function() {{ return __thaw_link_runs; }}; globalThis.module = {{ exports: {{}} }}; {bundle}");
-        assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 0);
-        let result = thaw_js_shim::thaw_js_call(c"readMixedLinkRuns".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "0");
+        assert_eq!(run_js_get(&bundle, ""), format!("ERROR: {message}"), "{kind}");
         let _ = fs::remove_dir_all(root);
     }
 }
@@ -2216,19 +2254,12 @@ fn native_mixed_static_then_cjs_dynamic_import_reuses_declared_sibling() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: needs in-context lazy-load helpers across calls; script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_mixed_lazy_link_errors_wait_for_the_dynamic_entry {
-    use super::*;
-    use ::thaw_quickjs;
-
 #[test]
 fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
-    // Unrun controls for both native import() and the registration-bound CJS
-    // import(): unrelated lazy modules cannot fail the initial entry, and
-    // their missing/ambiguous names reject before their factories execute.
-    use std::ffi::{CStr, CString};
+    // Node 22.23.1 (probes g2b-probes/lazy): unrelated lazy modules cannot fail the initial entry, and their
+    // missing/ambiguous names reject the import() with a SyntaxError before any of their dependencies execute.
     for (kind, entry, middle, extra) in [
-        ("native", "import front from './front.cjs'; export const load = () => import('./lazy.mjs'); export const loadValid = () => import('./valid.mjs'); export const ready = front; Promise.reject = () => { throw new Error('mutated reject'); }; Promise.prototype.then = () => { throw new Error('mutated then'); };", "import late from './late.cjs'; export const present = late;", false),
+        ("native", "import front from './front.cjs'; export const load = () => import('./lazy.mjs'); export const loadValid = () => import('./valid.mjs'); export const ready = front;", "import late from './late.cjs'; export const present = late;", false),
         ("cjs", "import front from './front.cjs'; export const load = front;", "import late from './late.cjs'; export * from './left.mjs'; export * from './right.mjs'; export const present = late;", true),
     ] {
         let root = temp_registry(&format!("native-mixed-lazy-link-{kind}"));
@@ -2243,34 +2274,31 @@ fn native_mixed_lazy_link_errors_wait_for_the_dynamic_entry() {
             fs::write(package.join("valid.mjs"), "export const value = 17;").unwrap();
         }
         fs::write(package.join("middle.mjs"), middle).unwrap();
-        fs::write(package.join("late.cjs"), "globalThis.__thaw_late_runs++; module.exports = 3;").unwrap();
+        fs::write(package.join("late.cjs"), "globalThis.__thaw_late_runs = (globalThis.__thaw_late_runs || 0) + 1; module.exports = 3;").unwrap();
         if extra {
-            fs::write(package.join("left.mjs"), "globalThis.__thaw_late_runs++; export const duplicate = 1;").unwrap();
-            fs::write(package.join("right.mjs"), "globalThis.__thaw_late_runs++; export const duplicate = 2;").unwrap();
+            fs::write(package.join("left.mjs"), "globalThis.__thaw_late_runs = (globalThis.__thaw_late_runs || 0) + 1; export const duplicate = 1;").unwrap();
+            fs::write(package.join("right.mjs"), "globalThis.__thaw_late_runs = (globalThis.__thaw_late_runs || 0) + 1; export const duplicate = 2;").unwrap();
         }
         let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-mixed-lazy-link-pkg", &package, "index.mjs").unwrap();
         assert!(bundle.contains("__thaw_register_native_bundle"));
-        let script = format!("globalThis.__thaw_late_runs = 0; globalThis.__thaw_saved_then = Promise.prototype.then; globalThis.__thaw_saved_reject = Promise.reject; globalThis.__thaw_saved_apply = Reflect.apply; globalThis.module = {{ exports: {{}} }}; {bundle} globalThis.readLazyState = function() {{ return [module.exports.ready, __thaw_late_runs]; }}; globalThis.loadValidLazy = function() {{ return __thaw_saved_apply(__thaw_saved_then, module.exports.loadValid(), [namespace => [namespace.value, __thaw_late_runs], error => ['unexpected', error.name]]); }}; globalThis.loadLazy = function() {{ return __thaw_saved_apply(__thaw_saved_then, module.exports.load(), [() => ['unexpected'], error => [error.name, __thaw_late_runs]]); }}; globalThis.restoreLazyPromise = function() {{ Promise.prototype.then = __thaw_saved_then; Promise.reject = __thaw_saved_reject; return true; }};");
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let ready = thaw_quickjs::thaw_js_call(c"readLazyState".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(ready) }.to_string_lossy(), if extra { "[null,0]" } else { "[9,0]" });
-        let valid = if extra {
-            None
-        } else {
-            let result = thaw_quickjs::thaw_js_call(c"loadValidLazy".as_ptr(), c"[]".as_ptr());
-            Some(unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned())
-        };
-        let failed = thaw_quickjs::thaw_js_call(c"loadLazy".as_ptr(), c"[]".as_ptr());
-        let failed = unsafe { CStr::from_ptr(failed) }.to_string_lossy().into_owned();
-        let restored = thaw_quickjs::thaw_js_call(c"restoreLazyPromise".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(restored) }.to_string_lossy(), "true");
-        if let Some(valid) = valid {
-            assert_eq!(valid, "[17,0]");
+            assert_eq!(
+            run_js_probe(&bundle, "[exports.ready === undefined ? null : exports.ready, globalThis.__thaw_late_runs || 0]"),
+            if extra { "[null,0]" } else { "[9,0]" },
+            "{kind}"
+        );
+        if !extra {
+            assert_eq!(
+                run_js_probe(&bundle, "exports.loadValid().then(function (ns) { return [ns.value, globalThis.__thaw_late_runs || 0]; })"),
+                "[17,0]"
+            );
         }
-        assert_eq!(failed, "[\"SyntaxError\",0]");
+        assert_eq!(
+            run_js_probe(&bundle, "exports.load().then(function () { return ['unexpected']; }, function (e) { return [e.name, globalThis.__thaw_late_runs || 0]; })"),
+            "[\"SyntaxError\",0]",
+            "{kind}"
+        );
         let _ = fs::remove_dir_all(root);
     }
-}
 }
 
 #[test]
@@ -2398,46 +2426,45 @@ fn native_esm_rebundle_with_new_source_yields_new_value() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private entry reentry); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_private_entry_reentry_and_intrinsic_then {
+/// A hand-written bundle whose entry is the CommonJS script `script` (it registers native bundles itself
+/// through the host-internal `__thaw_register_native_bundle(json)` global and may define globals to probe).
+fn private_bundle_script_bundle(script: &str) -> String {
+    format!(
+        "module.exports = (function(require) {{\nvar __thaw_bundle_factories = {{ \"s.js\": function (module, exports, require) {{\n{script}\n}} }};\n\
+         var __thaw_bundle_require_maps = {{ \"s.js\": {{}} }};\nvar __thaw_bundle_entry_key = \"s.js\";\n}})(globalThis.require);"
+    )
+}
 
+// Ported from the QuickJS-private test: the entry evaluator is bound to its bundle; the module reenters it while
+// evaluating and receives the same ready Promise. Dropped: the `Promise.prototype.then` mutation (Node throws
+// there; the thaw-only pin is `mutated_promise_then_does_not_break_the_evaluator` in thaw-js).
 #[test]
 fn native_esm_private_entry_reentry_and_intrinsic_then() {
-    // Unrun: a bound evaluator, not a public token, owns this entry. The
-    // module reenters it while evaluating and receives the same ready Promise.
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
+    let bundle = private_bundle_script_bundle(
+        r#"
           globalThis.nativeRuns = 0;
           globalThis.nativeSelfEval = __thaw_register_native_bundle(JSON.stringify({
             main: 'self/index.mjs', modules: [{ key: 'self/index.mjs', imports: {},
               source: 'globalThis.nativeRuns++; globalThis.nativeSelfReady = globalThis.nativeSelfEval(); export const value = 7;'
             }]
           }));
-          Promise.prototype.then = function() { throw Error('mutated then'); };
-          globalThis.__thaw_module_ready = globalThis.nativeSelfEval();
-          globalThis.privateEntryResult = function() {
+          globalThis.nativeReady = globalThis.nativeSelfEval();
+          globalThis.privateEntryResult = async function() {
+            await globalThis.nativeReady;
             return [globalThis.nativeRuns, globalThis.nativeSelfReady === globalThis.nativeSelfEval(),
               typeof globalThis.__thaw_eval_native_entry, typeof globalThis.__thaw_native_esm_sources];
           };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"privateEntryResult".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true,\"undefined\",\"undefined\"]");
-    }).join().unwrap();
-}
+        "#,
+    );
+    assert_eq!(run_js_probe(&bundle, "privateEntryResult()"), "[1,true,\"undefined\",\"undefined\"]");
 }
 
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private linked read); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_private_linked_read_is_owner_scoped_and_live {
-
+// Ported from the QuickJS-private test: owner-scoped readNative, foreign-bundle isolation, descriptor flags,
+// same ready promise. `__thaw_module_ready` (a QuickJS host protocol) is replaced by awaiting the ready promises.
 #[test]
 fn native_esm_private_linked_read_is_owner_scoped_and_live() {
-    // Unrun: each source's first private marker runs after linking, before
-    // that source body. A cyclic peer can read hoisted exports but not TDZ.
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
+    let bundle = private_bundle_script_bundle(
+        r#"
           globalThis.entryA = __thaw_register_native_bundle(JSON.stringify({
             main: 'a', modules: [
               { key: 'a', imports: { './b': 'b', './unused': 'unused' }, source:
@@ -2460,8 +2487,8 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
           }));
           globalThis.readyA = entryA();
           globalThis.readyB = entryB();
-          globalThis.__thaw_module_ready = Promise.all([readyA, readyB]);
-          globalThis.privateLinkedResult = function() {
+          globalThis.privateLinkedResult = async function() {
+            await Promise.all([readyA, readyB]);
             let unused, unusedNamespace, foreign, foreignNamespace;
             try { entryA.readNative('thaw-bundle:1:unused', 'hidden'); unused = false; }
             catch (_) { unused = true; }
@@ -2479,37 +2506,30 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
               descriptor.enumerable === false && descriptor.writable === false,
               entryA() === readyA];
           };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"privateLinkedResult".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,7,true,9,3,true,true,true,true,true,true,true,true]");
-    }).join().unwrap();
+        "#,
+    );
+    assert_eq!(
+        run_js_probe(&bundle, "privateLinkedResult()"),
+        "[true,true,7,true,9,3,true,true,true,true,true,true,true,true]"
+    );
 }
-}
-
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (failedEntry.readNative); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_failed_link_never_marks_source_linked {
 
 #[test]
 fn native_esm_failed_link_never_marks_source_linked() {
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
-          globalThis.failedEntry = __thaw_register_native_bundle(JSON.stringify({
-            main: 'bad', modules: [{ key: 'bad', imports: {}, source:
-              'import "./unmapped"; export const value = 1;' }]
-          }));
-          failedEntry().catch(() => {});
-          globalThis.failedRead = function() {
-            try { failedEntry.readNative('thaw-bundle:1:bad', 'value'); return false; }
-            catch (_) { return true; }
-          };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"failedRead".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
-    }).join().unwrap();
-}
+    // Node 22.23.1: an entry that imports an unmapped specifier fails to link with ERR_MODULE_NOT_FOUND; no body ran
+    // and the failure is cached (g2-probes/fl; the esm.rs host tests `failed_link_*` pin the code, the no-body and the
+    // caching on the native route). The registry bundles an unmappable import through its own ESM transform, whose
+    // load error is MODULE_NOT_FOUND. The old pin (a QuickJS-private readNative of it throws) becomes: the load fails.
+    let root = temp_registry("native-esm-failed-link");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-failed-link-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "globalThis.failedLinkRuns = (globalThis.failedLinkRuns || 0) + 1; import './unmapped.mjs'; export const value = 1;").unwrap();
+    let bundled = bundle_commonjs_package(&modules, "native-failed-link-pkg", &package, "index.mjs");
+    let (bundle, _, _, _) = bundled.unwrap();
+    let outcome = run_js_probe(&bundle, "[globalThis.failedLinkRuns]");
+    assert!(outcome.starts_with("ERROR: ") && outcome.contains("Cannot find module './unmapped.mjs'"), "{outcome}");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

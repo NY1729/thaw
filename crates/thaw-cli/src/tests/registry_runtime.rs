@@ -3355,7 +3355,7 @@ fn jit_aggregate_exports_fall_back_for_exposed_mutable_aliases() {
     let output = dir.join("app");
     build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    assert_eq!(manifest["quickjs"], false);
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
@@ -3363,6 +3363,42 @@ fn jit_aggregate_exports_fall_back_for_exposed_mutable_aliases() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+#[test]
+fn thaw_js_direct_array_parameter_calls_alias_the_callers_array() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-thawjs-direct-live-array-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("direct-live-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function append(values: number[]): number;\nexport declare function appendPair(values: number[], tail: number): number;\nexport declare function echoNullable(values: number[] | null): number[] | null;\nexport declare function echoUnion(values: number[] | { values: number[] }): number[] | { values: number[] };\nexport declare function sum(obj: { values: number[] }): number;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.append = values => { values.push(9); return values.length; }; module.exports.appendPair = (values, tail) => { values.push(tail); return values.length; }; module.exports.echoNullable = v => v; module.exports.echoUnion = v => v; module.exports.sum = obj => { obj.values.push(5); return obj.values.length; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "import { append, appendPair, echoNullable, echoUnion, sum } from 'direct-live-kit';\nfunction main(): void { const a = [1, 2]; console.log(append(a), a.length, a[2]); const b = [1]; appendPair(b, 7); console.log(b[1]); const c = [6]; const e = echoNullable(c); console.log(e === c); e!.push(8); console.log(c[1]); const d = [1]; console.log(append.call(null, d), append.apply(null, [d]), d.length); const u = [11]; const su = echoUnion(u); console.log(su === u); const o = { values: [1] }; console.log(sum(o), o.values.length, o.values[1]); const n: number[] | null = null; console.log(echoNullable(n)); }\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(manifest["quickjs"], false);
+    std::fs::remove_dir_all(&registry).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "3 3 9\n7\ntrue\n8\n2 3 3\ntrue\n2 2 5\nnull\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
 
 #[test]
 fn json_host_index_assignment_keeps_valid_graph_and_discards_invalid_graph() {

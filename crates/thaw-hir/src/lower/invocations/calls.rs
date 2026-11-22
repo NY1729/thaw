@@ -535,6 +535,21 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        let lowered = self.lower_call_unread(call)?;
+        // `readDynamicValue` reads a `JsValue` handle into data; an operand that is already
+        // `Json` (a thaw-js typed result) is that data, so reading it is the identity.
+        if let HirExpr::Call(callee, arguments) = &lowered {
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "readDynamicValue")
+                && matches!(arguments.as_slice(), [argument]
+                    if self.infer_expr_type(argument).is_ok_and(|ty| ty == HirType::Json))
+            {
+                return Ok(arguments[0].clone());
+            }
+        }
+        Ok(lowered)
+    }
+
+    fn lower_call_unread(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         if let Some(has_own) = self.lower_prototype_has_own_symbol_call(call)? {
             return Ok(has_own);
         }
@@ -4666,6 +4681,7 @@ impl<'a> FnLowerer<'a> {
                 })
         });
         let mut json_lease_args: Vec<usize> = Vec::new();
+        let mut live_owner_args: Vec<usize> = Vec::new();
         let mut args = lowered_arguments
             .into_iter()
             .enumerate()
@@ -4675,10 +4691,21 @@ impl<'a> FnLowerer<'a> {
                     .and_then(|p| p.get(i))
                     .or_else(|| signature.as_ref().and_then(|sig| sig.variadic.as_ref()));
                 if let Some(declared) = declared_slot.filter(|_| thaw_js_live_owner_slot) {
-                    if generic_call || Self::type_holds_any(declared) {
-                        if let Some(marked) =
-                            self.thaw_js_live_owner_argument(&value, declared, generic_call)?
-                        {
+                    let aggregate = matches!(declared, HirType::Object(_))
+                        && Self::object_holds_array(declared);
+                    if generic_call || aggregate || Self::type_holds_any(declared) {
+                        // An aggregate's array fields stay live views of the caller's arrays.
+                        let outer = std::mem::replace(&mut self.alias_native_arrays, aggregate);
+                        let marked = self.thaw_js_live_owner_argument(
+                            &value,
+                            declared,
+                            generic_call || aggregate,
+                        );
+                        self.alias_native_arrays = outer;
+                        if let Some(marked) = marked? {
+                            if aggregate {
+                                live_owner_args.push(i);
+                            }
                             return Ok(marked);
                         }
                         if generic_call || *declared == HirType::Json {
@@ -4769,7 +4796,13 @@ impl<'a> FnLowerer<'a> {
                                 && i > 0
                                 && Self::type_holds_any(declared))
                         {
-                            self.coerce_primitive_array_argument_aliasing(value, declared)
+                            let outer = std::mem::replace(
+                                &mut self.alias_arrays_only,
+                                matches!(dynamic_symbol(&callee_name), Some((DynamicBackend::ThawJs, symbol)) if !symbol.starts_with('$')),
+                            );
+                            let coerced = self.coerce_primitive_array_argument_aliasing(value, declared);
+                            self.alias_arrays_only = outer;
+                            coerced
                         } else if signature.as_ref().is_some_and(|sig| sig.is_extern)
                             && dynamic_symbol(&callee_name).is_none()
                         {
@@ -5197,7 +5230,14 @@ impl<'a> FnLowerer<'a> {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 } else {
+                    // A live owner handle replaces the aggregate's by-value layout in the wire slot.
                     params
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, declared)| {
+                            if live_owner_args.contains(&i) { HirType::Json } else { declared }
+                        })
+                        .collect()
                 };
                 let mut result = HirExpr::DynamicCall(
                     DynamicSignature {

@@ -935,20 +935,27 @@ fn soak_mid_sample(pid: u32, requests: usize, series: &mut Vec<(u64, usize)>) {
 }
 
 /// Per-request RSS growth (KiB/request) over a series of (RSS KiB, request count) samples, needing at least two.
-/// The single largest interval jump is removed from both growth and window, so one discrete event (a Vec or arena
-/// doubling) does not count as a leak; a smooth leak loses only one interval's share of its growth.
+/// The two largest interval jumps are removed from both growth and window, so up to two discrete events (a Vec or
+/// arena doubling, allocator page growth on a slow shared runner: CI series show 2-6 MB steps) do not count as a
+/// leak. A smooth leak loses only those intervals' proportional share of growth and window, so its slope is kept.
 #[cfg(target_os = "linux")]
 fn soak_slope(series: &[(u64, usize)]) -> f64 {
     assert!(series.len() >= 2, "a slope needs two samples");
     let (first, last) = (series[0], series[series.len() - 1]);
-    let grown = last.0 as i64 - first.0 as i64;
-    let between = (last.1 - first.1) as i64;
-    let (jump, jump_requests) = series
+    let mut grown = last.0 as i64 - first.0 as i64;
+    let mut between = (last.1 - first.1) as i64;
+    let mut jumps: Vec<(i64, i64)> = series
         .windows(2)
         .map(|pair| (pair[1].0 as i64 - pair[0].0 as i64, (pair[1].1 - pair[0].1) as i64))
-        .max_by_key(|&(kib, _)| kib)
-        .unwrap();
-    (grown - jump) as f64 / (between - jump_requests) as f64
+        .collect();
+    jumps.sort_by_key(|&(kib, _)| std::cmp::Reverse(kib));
+    // keep at least half of the intervals: a very short series must not be reduced to nothing
+    let drop = 2.min(jumps.len() / 2);
+    for &(kib, requests) in &jumps[..drop] {
+        grown -= kib;
+        between -= requests;
+    }
+    grown as f64 / between as f64
 }
 
 /// Judges a soak run by slope, not total (see `soak_slope`). A run too short for a usable window skips only that
@@ -1003,6 +1010,32 @@ fn soak_slope_ignores_a_lone_step() {
     let slope = soak_slope(&series);
     assert!(slope.abs() < 1e-9, "lone step slope {slope}");
     assert!(slope <= SOAK_MAX_KIB_PER_REQUEST);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_ignores_two_steps() {
+    // Flat RSS with two 4.4 MB jumps (the CI shape that failed three PRs): two discrete events, not a leak.
+    let mut series = soak_synthetic_series(0.0, Some((13_000, 4_500)));
+    let late = series.iter().position(|&(_, requests)| requests >= 16_000).unwrap();
+    for sample in &mut series[late..] {
+        sample.0 += 4_500;
+    }
+    let slope = soak_slope(&series);
+    assert!(slope.abs() < 1e-9, "two-step slope {slope}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_fails_a_ramp_with_two_steps_on_top() {
+    // A 0.5 KiB/request ramp plus two steps still fails: removing steps keeps the ramp's slope.
+    let mut series = soak_synthetic_series(0.5, Some((13_000, 4_500)));
+    let late = series.iter().position(|&(_, requests)| requests >= 16_000).unwrap();
+    for sample in &mut series[late..] {
+        sample.0 += 4_500;
+    }
+    let slope = soak_slope(&series);
+    assert!(slope > SOAK_MAX_KIB_PER_REQUEST, "ramp plus steps slope {slope}");
 }
 
 #[cfg(target_os = "linux")]

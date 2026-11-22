@@ -705,6 +705,24 @@ fn scan_reports_reachable_blockers_only() {
     assert!(crate::scan::scan_bundle("var x = 1;").is_err());
 }
 
+/// `__thaw_gc` is a host global thaw-js now serves (it runs the cycle collector and releases collected native
+/// references); an unknown `__thaw_*` name is still a blocker.
+#[test]
+fn scan_accepts_thaw_gc_and_still_blocks_unknown_host_globals() {
+    let gc = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.collect = () => { __thaw_gc(); };",
+    );
+    let report = crate::scan::scan_bundle(&gc).ok().unwrap();
+    assert!(report.is_clean(), "{:?}", report.blockers);
+    let unknown = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.collect = () => { __thaw_probe(); };",
+    );
+    let report = crate::scan::scan_bundle(&unknown).ok().unwrap();
+    assert!(report.blockers.contains_key("global:__thaw_probe"));
+}
+
 /// A three-module registry bundle: `p/index.js` (the given body), `p/b.js` (clean) and `p/c.js` (a blocker,
 /// `process.dlopen`). The map of `p/index.js` lists both `./b` and `./c`, as a bundler's catch-all map does.
 fn index_bundle(index_body: &str) -> String {
@@ -12670,4 +12688,48 @@ fn symbol_to_number_throws_type_error_not_nan() {
         ]
         .join("|")
     );
+}
+
+#[test]
+fn load_script_sees_the_live_handle_reference_counts() {
+    use crate::host::{thaw_tjs_load_script, thaw_tjs_release_handle};
+    use std::ffi::CString;
+    let run = |src: &str| {
+        let src = CString::new(src).unwrap();
+        thaw_tjs_load_script(src.as_ptr())
+    };
+    assert_eq!(run("if (typeof globalThis.__thaw_value_handle_refs !== 'object') throw new Error('type ' + typeof globalThis.__thaw_value_handle_refs);"), 1);
+    // read at load time, as the compiled lease-accounting scripts do, and again from a later call
+    assert_eq!(
+        run("globalThis.refsAtLoad = __thaw_value_handle_refs.reduce((a, b) => a + b, 0); globalThis.refsNow = () => __thaw_value_handle_refs.reduce((a, b) => a + b, 0);"),
+        1
+    );
+    assert_eq!(run("globalThis.held = {};"), 1);
+    let name = CString::new("held").unwrap();
+    let handle = crate::host::thaw_tjs_get_global(name.as_ptr());
+    assert!(handle > 0);
+    assert_eq!(
+        run("if (refsNow() !== 1) throw new Error('refs ' + refsNow());"),
+        1
+    );
+    thaw_tjs_release_handle(handle);
+    assert_eq!(
+        run("if (refsNow() !== 0) throw new Error('refs ' + refsNow());"),
+        1
+    );
+}
+
+#[test]
+fn typed_call_without_a_package_prefix_calls_a_default_realm_global() {
+    use crate::host::thaw_tjs_load_script;
+    use std::ffi::CString;
+    let src =
+        CString::new("globalThis.addTwo = (a, b) => a + b; globalThis.ns = { inc: (a) => a + 1 };")
+            .unwrap();
+    assert_eq!(thaw_tjs_load_script(src.as_ptr()), 1);
+    assert_eq!(typed_call("addTwo", "[1,2]").unwrap(), "3");
+    assert_eq!(typed_call("ns.inc", "[4]").unwrap(), "5");
+    assert!(typed_call("missingFn", "[]")
+        .unwrap_err()
+        .contains("missingFn"));
 }
