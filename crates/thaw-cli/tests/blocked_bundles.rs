@@ -9,13 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// The reasons a row may carry. `scanner-precision` and `missing-node-api` are open rows that the D1 gate forbids.
-const REASONS: [&str; 4] = [
-    "other-runtime-only",
-    "native-addon-dlopen",
-    "scanner-precision",
-    "missing-node-api",
-];
+/// The reasons a row may carry: only final ones. `scanner-precision` and `missing-node-api` were open reasons (a gap thaw
+/// has to close); every such row is closed, and the D1 gate forbids new ones.
+const REASONS: [&str; 2] = ["other-runtime-only", "native-addon-dlopen"];
 
 struct Fixture {
     name: String,
