@@ -2351,6 +2351,36 @@ var __thaw_bundle_entry_key = "pend/index.js";
     assert_eq!(typed_call("\u{4}pend::now", "[]"), Ok("1".into()));
 }
 
+/// A nested await in one realm waits on a promise that only another realm's timer resolves (hono awaiting a body
+/// that `@hono/node-server`'s socket delivers): the wait must drive the other realm, not report "never settled".
+#[test]
+fn nested_await_drives_the_timer_of_another_realm() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = |name: &str, body: &str| {
+        format!(
+            r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{ "{name}/index.js": function(module, exports, require) {{ {body} }}, }};
+var __thaw_bundle_require_maps = {{ "{name}/index.js": {{}}, }};
+var __thaw_bundle_entry_key = "{name}/index.js";
+}})(globalThis.require);"#
+        )
+    };
+    let a = bundle(
+        "wa",
+        "exports.f = async function () { return await new Promise(function (r) { globalThis.nestedWaiters = [r]; }); };",
+    );
+    let b = bundle(
+        "wb",
+        "var t = setInterval(function () { var w = globalThis.nestedWaiters; if (w && w.length) { clearInterval(t); w.shift()(5); } }, 5);",
+    );
+    for (n, src) in [("wa", a), ("wb", b)] {
+        let (name, source) = (CString::new(n).unwrap(), CString::new(src).unwrap());
+        assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    }
+    assert_eq!(typed_call("wa::f", "[]"), Ok("5".into()));
+}
+
 #[test]
 fn pending_promise_settles_in_the_event_loop_without_a_later_call() {
     use crate::host::{thaw_tjs_register, thaw_tjs_run_event_loop, thaw_tjs_watch_promise};
@@ -10957,8 +10987,8 @@ fn q9_addon_mode_tolerates_method_exports_only() {
 }
 
 #[test]
-fn scan_addon_mode_keeps_process_dlopen_blocked() {
-    // process.dlopen is not served on thaw-js: addon mode must not tolerate a dlopen method either
+fn scan_addon_mode_tolerates_process_dlopen() {
+    // process.dlopen of the package's own engine library is served by the napi bridge: addon mode tolerates it
     let bundle = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "addon/index.js": function(module, exports, require) {
@@ -10969,15 +10999,12 @@ var __thaw_bundle_require_maps = { "addon/index.js": {}, };
 var __thaw_bundle_entry_key = "addon/index.js";
 })(globalThis.require);"#;
     let addon = crate::scan::scan_addon_bundle(bundle).ok().unwrap();
+    assert!(addon.is_clean(), "{:?}", addon.blockers);
+    let plain = crate::scan::scan_bundle(bundle).ok().unwrap();
     assert!(
-        !addon.is_clean(),
-        "dlopen must stay blocked: {:?}",
-        addon.blockers
-    );
-    assert!(
-        addon.blockers.keys().any(|k| k == "method:dlopen"),
+        plain.blockers.contains_key("method:dlopen"),
         "{:?}",
-        addon.blockers
+        plain.blockers
     );
 }
 
@@ -10993,16 +11020,15 @@ fn scan_refuses_process_dlopen_even_when_the_bundle_defines_a_dlopen_key() {
         "exports.a = function (m, p) { return process.dlopen && process.dlopen(m, p); };",
     ] {
         let bundle = one_module_bundle(code, "");
-        for report in [
-            crate::scan::scan_bundle(&bundle).ok().unwrap(),
-            crate::scan::scan_addon_bundle(&bundle).ok().unwrap(),
-        ] {
-            assert!(
-                report.blockers.contains_key("method:dlopen"),
-                "{code}: {:?}",
-                report.blockers
-            );
-        }
+        let report = crate::scan::scan_bundle(&bundle).ok().unwrap();
+        assert!(
+            report.blockers.contains_key("method:dlopen"),
+            "{code}: {:?}",
+            report.blockers
+        );
+        // addon mode serves the call through the napi bridge
+        let addon = crate::scan::scan_addon_bundle(&bundle).ok().unwrap();
+        assert!(!addon.blockers.contains_key("method:dlopen"), "{code}: {:?}", addon.blockers);
     }
 }
 

@@ -596,9 +596,14 @@ fn load_env_file(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
     Ok(Value::Undefined)
 }
 
-/// `process.dlopen(module, filename)`: argument validation as Node, then ERR_DLOPEN_FAILED. Addons are loaded by the
-/// N-API host linked into the compiled program (thaw-napi), not at runtime, so a valid addon path is refused here too.
-/// ponytail: no runtime addon load; wire to thaw-napi's loader if a program needs process.dlopen.
+/// Global object `package -> () => addon` that `host.rs` fills for every package loader while the napi bridge is
+/// registered (`register_dlopen_addon`).
+pub(crate) const DLOPEN_ADDONS: &str = "__thaw_dlopen_addons";
+
+/// `process.dlopen(module, filename)`: argument validation as Node. A path that names the napi addon of a registered
+/// package (`/thaw_modules/<pkg>/`, `node_modules/<pkg>/`, or any `*.node` when exactly one addon is registered, as for
+/// Prisma's generated engine) sets `module.exports` to that package's addon, which thaw-napi hosts; any other path
+/// throws ERR_DLOPEN_FAILED, as the runtime loads no other native library.
 fn dlopen(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
     if a.len() < 2 {
         return Err(node_error(
@@ -611,6 +616,63 @@ fn dlopen(it: &mut Interp, _: &Value, a: &[Value]) -> R<Value> {
     if matches!(arg(a, 0), Value::Undefined | Value::Null) {
         let err = it.make_error("TypeError", "Cannot convert undefined or null to object")?;
         return Err(Ctl::Throw(err));
+    }
+    let target = arg(a, 0);
+    let global = it.global.clone();
+    if let (Some(addons), Value::Str(_)) = (it.lookup(&global, DLOPEN_ADDONS), arg(a, 1)) {
+        let path = it.to_str(&arg(a, 1)).to_string();
+        let module_file = match it.get(&target, "filename")? {
+            Value::Str(s) => s.to_string(),
+            _ => String::new(),
+        };
+        let names = it.own_keys(&addons);
+        // the executable embeds every addon: its own path (`process.execPath`, `/proc/<pid>/exe`; Prisma's
+        // `PRISMA_QUERY_ENGINE_LIBRARY=$self`) names all of them at once, earlier-registered winning a name clash
+        let exec_path = match it.lookup(&global, "process") {
+            Some(process) => match it.get(&process, "execPath")? {
+                Value::Str(p) => p.to_string(),
+                _ => String::new(),
+            },
+            None => String::new(),
+        };
+        let self_path = path == "/proc/self/exe"
+            || path == format!("/proc/{}/exe", std::process::id())
+            || (!exec_path.is_empty() && path == exec_path);
+        if self_path {
+            let merged = Value::Object(it.plain());
+            for name in &names {
+                let thunk = it.get(&addons, name)?;
+                let exports = it.call(&thunk, &Value::Undefined, &[])?;
+                for key in it.own_keys(&exports) {
+                    if !it.own_keys(&merged).contains(&key) {
+                        let v = it.get(&exports, &key)?;
+                        it.set(&merged, &key, v)?;
+                    }
+                }
+            }
+            it.set(&target, "exports", merged)?;
+            return Ok(Value::Undefined);
+        }
+        let owns = |name: &str| {
+            [
+                format!("/thaw_modules/{name}/"),
+                format!("/node_modules/{name}/"),
+            ]
+            .iter()
+            .any(|marker| path.contains(marker) || module_file.contains(marker))
+        };
+        let chosen = names
+            .iter()
+            .filter(|n| owns(n))
+            .max_by_key(|n| n.len())
+            .cloned()
+            .or_else(|| (names.len() == 1 && path.ends_with(".node")).then(|| names[0].clone()));
+        if let Some(name) = chosen {
+            let thunk = it.get(&addons, &name)?;
+            let exports = it.call(&thunk, &Value::Undefined, &[])?;
+            it.set(&target, "exports", exports)?;
+            return Ok(Value::Undefined);
+        }
     }
     let file = it.to_str(&arg(a, 1)).to_string();
     let reason = match std::fs::metadata(&file) {
