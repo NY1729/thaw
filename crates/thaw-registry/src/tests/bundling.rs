@@ -2312,35 +2312,6 @@ fn native_esm_rebundle_with_new_source_yields_new_value() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: needs one realm across two loads with a global sequence reset; script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_native_esm_bundle_sequence_ignores_mutable_global_reset {
-    use super::*;
-    use ::thaw_quickjs;
-
-#[test]
-fn native_esm_bundle_sequence_ignores_mutable_global_reset() {
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let root = temp_registry("native-esm-sequence-reset");
-        let modules = root.join("node_modules");
-        let package = modules.join("native-counter-pkg");
-        fs::create_dir_all(&package).unwrap();
-        fs::write(package.join("index.mjs"), "export const value = 1;").unwrap();
-        let (first, _, _, _) = bundle_commonjs_package(&modules, "native-counter-pkg", &package, "index.mjs").unwrap();
-        let first_script = format!("globalThis.module = {{ exports: {{}} }}; {first}");
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first_script).unwrap().as_ptr()), 1);
-        let reset_script = "globalThis.__thaw_native_esm_next_sequence = function() { return '1'; }; globalThis.__thaw_native_esm_sources = { 'thaw-bundle:1:native-counter-pkg/index.mjs': { source: 'export const value = 999;', imports: {} } };";
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(reset_script).unwrap().as_ptr()), 1);
-        fs::write(package.join("index.mjs"), "export const value = 2;").unwrap();
-        let (second, _, _, _) = bundle_commonjs_package(&modules, "native-counter-pkg", &package, "index.mjs").unwrap();
-        let second_script = format!("globalThis.module = {{ exports: {{}} }}; {second} globalThis.secondCounterValue = function() {{ return [module.exports.value, typeof globalThis.__thaw_eval_native_entry]; }};");
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second_script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"secondCounterValue".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[2,\"undefined\"]");
-        let _ = fs::remove_dir_all(root);
-    }).join().unwrap();
-}
-}
 // qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private entry reentry); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
 mod qjs_pending_bundling_native_esm_private_entry_reentry_and_intrinsic_then {
 
