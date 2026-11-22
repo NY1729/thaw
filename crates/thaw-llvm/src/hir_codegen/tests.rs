@@ -383,8 +383,10 @@ fn compile_and_run_raw_lane_opt(
     let std_lib = build_staticlib("thaw-std");
     let quickjs_lib = (!thaw_js).then(|| build_staticlib("thaw-quickjs"));
     // thaw-js carries its own thaw-intl copy (feature `intl`), like thaw-cli.
+    // (thaw-cli also enables it when the source names the `Intl` global: `required_runtime_features`.)
+    let wants_intl = compiler.uses_intl() || source.contains("Intl");
     let thaw_js_lib = thaw_js.then(|| {
-        if compiler.uses_intl() {
+        if wants_intl {
             build_staticlib_with_features("thaw-js", &["intl"])
         } else {
             build_staticlib("thaw-js")
