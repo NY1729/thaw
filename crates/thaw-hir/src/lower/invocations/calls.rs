@@ -4662,6 +4662,7 @@ impl<'a> FnLowerer<'a> {
                 })
         });
         let mut json_lease_args: Vec<usize> = Vec::new();
+        let mut live_owner_args: Vec<usize> = Vec::new();
         let mut args = lowered_arguments
             .into_iter()
             .enumerate()
@@ -4671,10 +4672,21 @@ impl<'a> FnLowerer<'a> {
                     .and_then(|p| p.get(i))
                     .or_else(|| signature.as_ref().and_then(|sig| sig.variadic.as_ref()));
                 if let Some(declared) = declared_slot.filter(|_| thaw_js_live_owner_slot) {
-                    if generic_call || Self::type_holds_any(declared) {
-                        if let Some(marked) =
-                            self.thaw_js_live_owner_argument(&value, declared, generic_call)?
-                        {
+                    let aggregate = matches!(declared, HirType::Object(_))
+                        && Self::object_holds_array(declared);
+                    if generic_call || aggregate || Self::type_holds_any(declared) {
+                        // An aggregate's array fields stay live views of the caller's arrays.
+                        let outer = std::mem::replace(&mut self.alias_native_arrays, aggregate);
+                        let marked = self.thaw_js_live_owner_argument(
+                            &value,
+                            declared,
+                            generic_call || aggregate,
+                        );
+                        self.alias_native_arrays = outer;
+                        if let Some(marked) = marked? {
+                            if aggregate {
+                                live_owner_args.push(i);
+                            }
                             return Ok(marked);
                         }
                         if generic_call || *declared == HirType::Json {
@@ -5192,7 +5204,14 @@ impl<'a> FnLowerer<'a> {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 } else {
+                    // A live owner handle replaces the aggregate's by-value layout in the wire slot.
                     params
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, declared)| {
+                            if live_owner_args.contains(&i) { HirType::Json } else { declared }
+                        })
+                        .collect()
                 };
                 let mut result = HirExpr::DynamicCall(
                     DynamicSignature {

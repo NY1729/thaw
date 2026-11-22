@@ -598,6 +598,19 @@ impl<'a> FnLowerer<'a> {
         Ok(Some(inner.clone()))
     }
 
+    /// Whether a declared aggregate slot (a fixed object) holds an array, so a callee's mutation of
+    /// it must reach the caller's array.
+    pub(in crate::lower) fn object_holds_array(declared: &HirType) -> bool {
+        match declared {
+            HirType::Array(_) => true,
+            HirType::Object(fields) => fields.iter().any(|(_, ty)| Self::object_holds_array(ty)),
+            HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+                Self::object_holds_array(inner)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a declared slot stores `any` values (directly or as an element).
     fn type_holds_any(declared: &HirType) -> bool {
         match declared {

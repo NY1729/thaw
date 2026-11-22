@@ -4519,9 +4519,35 @@ fn dynamic_symbol_decodes_the_thaw_js_backend_and_keeps_quickjs_untouched() {
         Some((DynamicBackend::ThawJs, "ms::ms".into())));
     assert_eq!(dynamic_symbol("__thaw_typed_js_6d733a3a6d73"),
         Some((DynamicBackend::QuickJs, "ms::ms".into())));
-    // thaw-js calls take plain data by value: they are not "ordinary QuickJS typed calls".
+    // A thaw-js plain function is a function value like a QuickJS one (live reference slots), but
+    // a thaw-js method symbol is not.
     assert!(ordinary_quickjs_typed_symbol("__thaw_typed_js_6d733a3a6d73").is_some());
-    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_none());
+    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_some());
+    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_246d6574686f6424782424").is_none());
+}
+
+#[test]
+fn thaw_js_array_parameter_function_value_takes_a_live_view() {
+    fn hex(text: &str) -> String {
+        text.bytes().map(|byte| format!("{byte:02x}")).collect()
+    }
+    let name = format!("__thaw_typed_tjs_{}", hex("k::append"));
+    let program = lower(&format!(
+        r#"
+        declare function {name}(values: number[]): number;
+        function main(): void {{
+            const append: (values: number[]) => number = {name};
+            const values: number[] = [1, 2];
+            append(values);
+        }}
+        "#
+    ));
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    // The call hands over a live view and the typed call's wire slot is `Json`, not a by-value
+    // `Array` copy.
+    assert_eq!(body.matches("__thaw_array_with_native_view").count(), 1, "{body}");
+    assert!(!body.contains("params: [Array"), "{body}");
 }
 
 #[test]
