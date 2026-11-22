@@ -1640,6 +1640,7 @@ impl Interp {
         mark_loop_started();
         let depth = LoopDepth::enter();
         self.run_jobs()?;
+        crate::worker::set_winding(self, false);
         let mut first = true;
         while self.loop_alive() {
             if crate::gc_registry::due() {
@@ -1700,6 +1701,7 @@ impl Interp {
                 loop_idle_sleep(Duration::from_millis(2));
             }
         }
+        crate::worker::set_winding(self, true);
         Ok(())
     }
 

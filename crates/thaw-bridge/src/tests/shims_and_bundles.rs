@@ -379,11 +379,11 @@ fn function_modules_do_not_replace_globals_with_their_named_methods() {
     let js_source = "module.exports = function lodash() {}; module.exports.isNaN = function() { return false; };";
     let wrapped = wrap_as_commonjs_module(js_source, &["isNaN".to_string()], &[], &[], "");
     let source = CString::new(wrapped).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
 
     let name = CString::new("isNaN").unwrap();
     let args = CString::new("[1]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(name.as_ptr(), args.as_ptr());
+    let result = thaw_js_shim::thaw_js_call(name.as_ptr(), args.as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "false");
 }
 
@@ -416,8 +416,8 @@ fn native_callback_arguments_restore_only_origin_marked_instances() {
              {{__thaw_napi_handle__: '7'}}, special); \
          }};"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"inspectNativeCallbackArgs".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"inspectNativeCallbackArgs".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), r#"["7",true,"7",null,"7",true]"#);
 }
 
@@ -463,8 +463,8 @@ fn commonjs_addon_bridge_can_become_available_after_earlier_bundle() {
         {wrapped}
         globalThis.checkLateAddonBridge = () => [bridgeReadBeforeLoad, bridgeExportsRead, require.addon().direct()];
     "#);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"checkLateAddonBridge".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"checkLateAddonBridge".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[0,1,7]");
 }
 
@@ -472,6 +472,7 @@ fn commonjs_addon_bridge_can_become_available_after_earlier_bundle() {
 fn native_addon_export_filter_uses_captured_intrinsics() {
     use std::ffi::{CStr, CString};
 
+    thaw_js_shim::enable_napi_proxy_layer();
     let source = CString::new(
         r#"
         globalThis.checkNativeAddonExportFilter = function () {
@@ -502,8 +503,8 @@ fn native_addon_export_filter_uses_captured_intrinsics() {
         "#,
     )
     .unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"checkNativeAddonExportFilter".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"checkNativeAddonExportFilter".as_ptr(), c"[]".as_ptr());
     assert_eq!(
         unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
         "[[[\"a::one\",\"one\"]],[[\"plain\",\"plain\"]]]"
@@ -525,14 +526,14 @@ fn binds_esm_default_export_under_the_fallback_name() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("escapeIt").unwrap();
     let args = CString::new("[\"hi\"]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -557,14 +558,14 @@ fn binds_a_bare_default_only_object_under_the_fallback_name() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("isValid").unwrap();
     let args = CString::new("[\"x\"]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -601,14 +602,14 @@ fn a_getter_named_default_is_never_read_while_binding_named_exports() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("combined").unwrap();
     let args = CString::new("[\"hi\"]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -636,14 +637,14 @@ fn a_key_that_cannot_bind_to_globalthis_does_not_block_later_exports() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("after").unwrap();
     let args = CString::new("[\"hi\"]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -670,8 +671,8 @@ fn bare_global_function_bundle_is_unaffected_by_commonjs_wrapping() {
     // second package loads, while the declared fallback remains public.
     assert!(wrapped.contains("(function(module, exports, require, __filename, __dirname)"));
     assert!(wrapped.contains("globalThis.greet = greet"));
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(wrapped).unwrap().as_ptr()), 1);
-    assert_eq!(thaw_quickjs::eval_json("greet('Ada')"), Ok(Some("\"hi, Ada\"".into())));
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(wrapped).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::eval_json("greet('Ada')"), Ok(Some("\"hi, Ada\"".into())));
 }
 
 /// The exact pattern found in a real npm package (`@hapi/hoek`):
@@ -695,14 +696,14 @@ fn guarded_buffer_reference_does_not_throw() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("checkBuffer").unwrap();
     let args = CString::new("[1]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -731,7 +732,7 @@ fn unguarded_url_prototype_access_does_not_throw() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
@@ -764,14 +765,14 @@ fn unguarded_process_global_reference_does_not_throw() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("readIt").unwrap();
     let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -928,8 +929,8 @@ fn private_napi_value_envelopes_preserve_origins_across_result_paths() {
             Number.isNaN(numericObject['0'])];
         };
     "#].join("\n");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"inspectPrivateNapiWire".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"inspectPrivateNapiWire".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
 }
 
@@ -973,8 +974,8 @@ fn stale_native_proxy_finalizer_cannot_release_replacement() {
             releasedNativeHandles.length === 2 && releasedNativeHandles.every(handle => handle === '91')];
         };
     "#].join("\n");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"inspectStaleProxyFinalizer".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"inspectStaleProxyFinalizer".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true]");
 }
 
@@ -1020,8 +1021,8 @@ fn stale_native_binary_finalizer_cannot_release_replacement() {
             releasedNativeHandles.length === 2 && releasedNativeHandles.every(handle => handle === '92')];
         };
     "#].join("\n");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"inspectStaleBinaryFinalizer".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"inspectStaleBinaryFinalizer".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true]");
 }
 
@@ -1060,8 +1061,8 @@ fn native_addon_codecs_and_delayed_commonjs_bindings_survive_another_package() {
           return JSON.stringify({kind:'value',value:{},origins:[]});
         };
     "#;
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(setup).unwrap().as_ptr()), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(first).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(setup).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(first).unwrap().as_ptr()), 1);
     let before = r#"
         globalThis.firstProxy = firstAddon.make();
         globalThis.sharedPlainObject = {value:1};
@@ -1072,9 +1073,9 @@ fn native_addon_codecs_and_delayed_commonjs_bindings_survive_another_package() {
         globalThis.firstProxyRegistry = fakeRegistries.find(registry => registry.records.some(record => record.held && record.held.id === 'first-handle'));
         globalThis.firstProxyRecord = firstProxyRegistry.records.find(record => record.held.id === 'first-handle');
     "#;
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(before).unwrap().as_ptr()), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(second).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::eval_json(r#"(function() {
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(before).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(second).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::eval_json(r#"(function() {
         secondAddon.accept(sharedPlainObject);
         const secondObjectId = seenNativeCalls[seenNativeCalls.length - 1].args[0].__thaw_napi_object__;
         firstAddon.accept(sharedPlainObject);
@@ -1106,38 +1107,38 @@ fn commonjs_native_addon_view_uses_its_packages_qualified_exports() {
         "globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = function() { return JSON.stringify({ names: ['first-pkg::same', 'second-pkg::same', '@scope/third::same', 'legacy'], qualifiedPackages: ['first-pkg', 'second-pkg', '@scope/third', 'zero-pkg'] }); };\n\
          globalThis.__thaw_napi_bridge_call = function(name) { return JSON.stringify({kind:'value',value:name,origins:[]}); };"
     ).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(bridge.as_ptr()), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.__thaw_saved_process = globalThis.process; globalThis.process = {env:{}, execPath:'/opt/app/main', pid:4242};").unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(bridge.as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new("globalThis.__thaw_saved_process = globalThis.process; globalThis.process = {env:{}, execPath:'/opt/app/main', pid:4242};").unwrap().as_ptr()), 1);
     for (package, slot) in [("first-pkg", "firstAddon"), ("second-pkg", "secondAddon"), ("@scope/third", "scopedAddon"), ("zero-pkg", "zeroAddon"), ("legacy-pkg", "legacyAddon"), ("", "emptyAddon")] {
         let source = format!("globalThis.{slot} = require('binding.node'); globalThis.{slot}Require = require; globalThis.{slot}Dlopen = process.dlopen;");
         let wrapped = wrap_as_commonjs_module(&source, &[], &[], &[], package);
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(wrapped).unwrap().as_ptr()), 1);
+        assert_eq!(thaw_js_shim::thaw_js_load(CString::new(wrapped).unwrap().as_ptr()), 1);
         if package == "first-pkg" {
-            assert_eq!(thaw_quickjs::thaw_js_load(CString::new("Object.defineProperty(process, 'dlopen', {value:process.dlopen, configurable:false, writable:false});").unwrap().as_ptr()), 1);
+            assert_eq!(thaw_js_shim::thaw_js_load(CString::new("Object.defineProperty(process, 'dlopen', {value:process.dlopen, configurable:false, writable:false});").unwrap().as_ptr()), 1);
         }
     }
-    assert_eq!(thaw_quickjs::eval_json("firstAddon.same()"), Ok(Some("\"first-pkg::same\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("secondAddon.same()"), Ok(Some("\"second-pkg::same\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("firstAddonRequire('binding.node').same()"), Ok(Some("\"first-pkg::same\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("secondAddonRequire('binding.node').same()"), Ok(Some("\"second-pkg::same\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("firstAddonDlopen({exports:{},filename:'/thaw_modules/first-pkg/index.js'}, 'binding.node').same()"), Ok(Some("\"first-pkg::same\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("secondAddonDlopen({exports:{},filename:'/thaw_modules/second-pkg/index.js'}, 'binding.node').same()"), Ok(Some("\"second-pkg::same\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("scopedAddonDlopen({exports:{},filename:'/thaw_modules/@scope/third/index.js'}, 'binding.node').same()"), Ok(Some("\"@scope/third::same\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("process === globalThis.process"), Ok(Some("true".into())));
-    assert_eq!(thaw_quickjs::eval_json("firstAddonDlopen === secondAddonDlopen"), Ok(Some("true".into())));
-    assert_eq!(thaw_quickjs::eval_json("firstAddon.legacy"), Ok(None));
-    assert_eq!(thaw_quickjs::eval_json("Object.keys(zeroAddon).length"), Ok(Some("0".into())));
-    assert_eq!(thaw_quickjs::eval_json("legacyAddon.legacy()"), Ok(Some("\"legacy\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("legacyAddonDlopen({exports:{},filename:'/thaw_modules/legacy-pkg/index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("emptyAddonDlopen({exports:{},filename:'/thaw_modules//index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("firstAddon.same()"), Ok(Some("\"first-pkg::same\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("secondAddon.same()"), Ok(Some("\"second-pkg::same\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("firstAddonRequire('binding.node').same()"), Ok(Some("\"first-pkg::same\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("secondAddonRequire('binding.node').same()"), Ok(Some("\"second-pkg::same\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("firstAddonDlopen({exports:{},filename:'/thaw_modules/first-pkg/index.js'}, 'binding.node').same()"), Ok(Some("\"first-pkg::same\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("secondAddonDlopen({exports:{},filename:'/thaw_modules/second-pkg/index.js'}, 'binding.node').same()"), Ok(Some("\"second-pkg::same\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("scopedAddonDlopen({exports:{},filename:'/thaw_modules/@scope/third/index.js'}, 'binding.node').same()"), Ok(Some("\"@scope/third::same\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("process === globalThis.process"), Ok(Some("true".into())));
+    assert_eq!(thaw_js_shim::eval_json("firstAddonDlopen === secondAddonDlopen"), Ok(Some("true".into())));
+    assert_eq!(thaw_js_shim::eval_json("firstAddon.legacy"), Ok(None));
+    assert_eq!(thaw_js_shim::eval_json("Object.keys(zeroAddon).length"), Ok(Some("0".into())));
+    assert_eq!(thaw_js_shim::eval_json("legacyAddon.legacy()"), Ok(Some("\"legacy\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("legacyAddonDlopen({exports:{},filename:'/thaw_modules/legacy-pkg/index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("emptyAddonDlopen({exports:{},filename:'/thaw_modules//index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
     // Any alias of the executable itself names every embedded addon at once; the earlier-registered
     // package wins a name clash (`same`), and each package-only export stays reachable.
     for alias in ["/proc/self/exe", "/opt/app/main", "/proc/4242/exe"] {
-        assert_eq!(thaw_quickjs::eval_json(&format!("firstAddonDlopen({{exports:{{}}}}, '{alias}').same()")), Ok(Some("\"first-pkg::same\"".into())));
-        assert_eq!(thaw_quickjs::eval_json(&format!("firstAddonDlopen({{exports:{{}}}}, '{alias}').legacy()")), Ok(Some("\"legacy\"".into())));
+        assert_eq!(thaw_js_shim::eval_json(&format!("firstAddonDlopen({{exports:{{}}}}, '{alias}').same()")), Ok(Some("\"first-pkg::same\"".into())));
+        assert_eq!(thaw_js_shim::eval_json(&format!("firstAddonDlopen({{exports:{{}}}}, '{alias}').legacy()")), Ok(Some("\"legacy\"".into())));
     }
-    assert_eq!(thaw_quickjs::eval_json("Object.getOwnPropertyDescriptor(process, 'dlopen').configurable"), Ok(Some("false".into())));
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__thaw_saved_process; delete globalThis.__thaw_saved_process;").unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::eval_json("Object.getOwnPropertyDescriptor(process, 'dlopen').configurable"), Ok(Some("false".into())));
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new("globalThis.process = globalThis.__thaw_saved_process; delete globalThis.__thaw_saved_process;").unwrap().as_ptr()), 1);
 }
 
 // Native code reports callbacks it no longer holds with its next response; the
@@ -1164,8 +1165,8 @@ fn released_native_callback_references_drop_the_strong_global() {
            return [present, gone, second !== first, typeof globalThis['__thaw_napi_reference_' + second] === 'function']; \
          }};"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"releaseProbe".as_ptr(), c"[]".as_ptr());
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_js_shim::thaw_js_call(c"releaseProbe".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true]");
 }
 

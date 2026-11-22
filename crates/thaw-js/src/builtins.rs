@@ -1533,9 +1533,9 @@ impl Interp {
         macro_rules! math1 {
             ($name:literal, $f:expr) => {
                 self.set_native(&math, $name, |it, _, args| {
-                    Ok(Value::Number($f(
-                        it.num(args.first().unwrap_or(&Value::Undefined))
-                    )))
+                    Ok(Value::Number($f(it.tonum_numeric(
+                        args.first().unwrap_or(&Value::Undefined),
+                    )?)))
                 });
             };
         }
@@ -1639,13 +1639,13 @@ impl Interp {
             put_hidden(o, "prototype", Value::Object(op.clone()));
             put_hidden(&op, "constructor", object.clone());
             self.set_native(o, "keys", |it, _, args| {
-                let keys = it.own_keys(&arg(args, 0));
+                let keys = it.own_keys_checked(&arg(args, 0))?;
                 Ok(it.array(keys.into_iter().map(|k| Value::Str(k.into())).collect()))
             });
             self.set_native(o, "values", |it, _, args| {
                 let t = arg(args, 0);
                 let mut out = Vec::new();
-                for k in it.own_keys(&t) {
+                for k in it.own_keys_checked(&t)? {
                     out.push(it.get(&t, &k)?);
                 }
                 Ok(it.array(out))
@@ -1653,7 +1653,7 @@ impl Interp {
             self.set_native(o, "entries", |it, _, args| {
                 let t = arg(args, 0);
                 let mut out = Vec::new();
-                for k in it.own_keys(&t) {
+                for k in it.own_keys_checked(&t)? {
                     let v = it.get(&t, &k)?;
                     out.push(it.array(vec![Value::Str(k.into()), v]));
                 }
@@ -3005,11 +3005,10 @@ impl Interp {
 
         // ----- Number / Boolean / globals -----
         let number = self.native(|it, _, args| {
-            Ok(Value::Number(match args.first() {
-                None => 0.0,
-                // an object's ToPrimitive may throw: that exception propagates
-                Some(v @ Value::Object(_)) => it.tonum(v)?,
-                Some(v) => it.num(v),
+            Ok(Value::Number(if args.is_empty() {
+                0.0
+            } else {
+                it.tonum_numeric(&args[0])?
             }))
         });
         if let Value::Object(o) = &number {

@@ -3136,8 +3136,8 @@ dependencies = [
  "flate2",
  "swc_ecma_ast",
  "thaw-hir",
+ "thaw-js",
  "thaw-parser",
- "thaw-quickjs",
 ]
 
 [[package]]

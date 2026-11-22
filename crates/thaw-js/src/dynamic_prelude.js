@@ -136,6 +136,23 @@
     writable: false, configurable: false,
   });
   globalThis.__thaw_storage_value = (values) => values;
+  const thawFunctionBind = Function.prototype.bind;
+  const thawOwnNames = Object.getOwnPropertyNames;
+  const thawOwnDescriptor = Object.getOwnPropertyDescriptor;
+  globalThis.__thaw_bind_preserving_statics = (fn, receiver) => {
+    if (typeof fn !== 'function') return fn;
+    const bound = thawDateApply(thawFunctionBind, fn, [receiver]);
+    const names = thawOwnNames(fn);
+    for (let index = 0; index < names.length; index++) {
+      const prop = names[index];
+      if (prop === 'length' || prop === 'name' || prop === 'prototype'
+        || prop === 'arguments' || prop === 'caller') continue;
+      try {
+        thawGraphDefineProperty(bound, prop, thawOwnDescriptor(fn, prop));
+      } catch (error) { /* non-configurable on `fn` itself -- leave unset */ }
+    }
+    return bound;
+  };
   globalThis.__thaw_json_host_instanceof = (value, constructor) => value instanceof constructor;
   // Stand-in class prototypes by suffix ancestry (`Derived\u001fBase`), shared by all wrappers.
   const thawProjectionChains = new thawGraphMapConstructor();

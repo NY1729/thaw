@@ -109,6 +109,8 @@ struct Worker {
     interrupt: Arc<AtomicBool>,
     refd: bool,
     exited: bool,
+    /// The worker's loop has run dry and it is only winding down (exit handlers, teardown): its `exit` is imminent.
+    winding: Arc<AtomicBool>,
     /// The worker's port token (its port routes name it as their owner).
     token: u64,
     join: Option<JoinHandle<()>>,
@@ -130,6 +132,8 @@ struct Side {
     interrupt: Arc<AtomicBool>,
     /// The worker's parentPort has a referenced `message` listener (set by the bootstrap).
     alive: Arc<AtomicBool>,
+    /// Shared with the parent's `Worker::winding`.
+    winding: Arc<AtomicBool>,
     cpu: Arc<CpuProbe>,
     /// The entry is an ES module (`__thaw_run_main_esm`): it runs without the CommonJS globals.
     esm: bool,
@@ -644,6 +648,7 @@ fn spawn(
             token: tokens.0,
         },
     );
+    let winding = Arc::new(AtomicBool::new(false));
     let side = Side {
         rx: cmd_rx,
         tx: evt_tx,
@@ -654,6 +659,7 @@ fn spawn(
         ids,
         interrupt: interrupt.clone(),
         alive: Arc::new(AtomicBool::new(false)),
+        winding: winding.clone(),
         cpu: cpu.clone(),
         esm,
     };
@@ -672,6 +678,7 @@ fn spawn(
             interrupt,
             refd: true,
             exited: false,
+            winding,
             token: tokens.0,
             join: Some(join),
             cpu,
@@ -1024,7 +1031,18 @@ pub(crate) fn active(it: &Interp) -> bool {
     listening
         || it.worker.ports_live
         || !it.worker.local.is_empty()
-        || it.worker.workers.values().any(|w| w.refd && !w.exited)
+        // an unref'd worker that already finished its work still delivers its imminent exit (it is not idle-listening,
+        // so waiting is bounded); otherwise a loaded host that schedules a sibling's exit first loses it
+        || it.worker.workers.values().any(|w| {
+            !w.exited && (w.refd || w.winding.load(Ordering::Acquire))
+        })
+}
+
+/// A worker thread marks its loop as run dry (`true`) or running again (`false`); the parent reads it in `active`.
+pub(crate) fn set_winding(it: &Interp, winding: bool) {
+    if let Some(side) = &it.worker.side {
+        side.winding.store(winding, Ordering::Release);
+    }
 }
 
 /// One pending item of a poll, in arrival order: a dispatch JSON item, or a port event to route once the loop over
@@ -1524,6 +1542,7 @@ mod teardown_tests {
                 interrupt: Arc::new(AtomicBool::new(false)),
                 refd: true,
                 exited: false,
+                winding: Arc::new(AtomicBool::new(false)),
                 token: port_address(),
                 join: Some(join),
                 cpu: Arc::new(CpuProbe::default()),

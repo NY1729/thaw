@@ -72,4 +72,7 @@ include!("registry/install.rs");
 include!("registry/bundle.rs");
 
 #[cfg(test)]
+mod thaw_js_shim;
+
+#[cfg(test)]
 mod tests;
