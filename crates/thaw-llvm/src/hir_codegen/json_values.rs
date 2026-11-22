@@ -122,13 +122,14 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_store(self.pending_exception_object().as_pointer_value(), original)
             .map_err(|error| error.to_string())?;
         self.clear_pending_native_text()?;
+        // The handle id is recorded before the tag-7 store, as the async throw path does.
+        let handle_id = self.compile_borrowed_handle_id(original)?;
+        self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(), handle_id)
+            .map_err(|error| error.to_string())?;
         self.builder.build_store(
             self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
             self.context.i64_type().const_int(7, false),
         ).map_err(|error| error.to_string())?;
-        let handle_id = self.compile_borrowed_handle_id(original)?;
-        self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(), handle_id)
-            .map_err(|error| error.to_string())?;
         let zeros: [(&str, BasicValueEnum<'ctx>); 2] = [
             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
             (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
