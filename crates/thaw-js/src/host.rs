@@ -2685,7 +2685,7 @@ impl WireOut {
                 let node = if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                     let mut parts = Vec::new();
                     // a sparse array has no dense copy (stage-1 guard; see `Interp::sparse_unsupported`)
-                    if crate::array_has_sparse_tail(o) {
+                    if crate::array_snapshot_unsafe(o) {
                         return Err(HostError::Unsupported("sparse array".into()));
                     }
                     for item in it.array_items_raw(&v) {
@@ -4715,6 +4715,10 @@ fn array_elements_are_plain(it: &mut Interp, o: &Obj, ancestors: &mut Vec<usize>
     if ancestors.contains(&ptr) {
         return true;
     }
+    // the dense slots miss an accessor or attribute element: not plain (the handle path reads it live)
+    if crate::array_snapshot_unsafe(o) {
+        return false;
+    }
     let items = match &*o.kind.borrow() {
         Kind::Array(items) => items.clone(),
         _ => return false,
@@ -6366,6 +6370,11 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
                 return Err(HostError::NotPlainData("RegExp".into()));
             }
             if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                if crate::array_snapshot_unsafe(o) {
+                    return Err(HostError::NotPlainData(
+                        "array with accessor or non-default elements".into(),
+                    ));
+                }
                 let items = it.array_items(v);
                 return Ok(Native::Array(
                     items

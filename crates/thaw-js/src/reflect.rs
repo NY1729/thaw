@@ -65,6 +65,9 @@ fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
                 o.len_writable(),
             ));
         }
+        if let Some(e) = array_index(key).and_then(|i| array_entry(o, items, i)) {
+            return Some((e.slot, e.writable && writable));
+        }
         if let Some(v) = array_index(key).and_then(|i| array_elem(o, items, i)) {
             return Some((Slot::Data(v), writable));
         }
@@ -283,6 +286,21 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
     // array elements have no Prop: they are configurable unless the object is frozen or sealed
     if o.frozen.get() || o.ext.get() == 2 {
         return Ok(false);
+    }
+    // a side-table element carries its own [[Configurable]]
+    if let Some(i) = array_index(key) {
+        let entry = match &*o.kind.borrow() {
+            Kind::Array(items) => array_entry(o, items, i),
+            _ => None,
+        };
+        if let Some(e) = entry {
+            if !e.configurable {
+                return Ok(false);
+            }
+            if let Some(s) = o.sparse.get() {
+                s.borrow_mut().elems.remove(&(i as u32));
+            }
+        }
     }
     if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
         if key == "length" {

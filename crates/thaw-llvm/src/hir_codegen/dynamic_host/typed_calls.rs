@@ -138,12 +138,14 @@ fn thaw_js_ctor_option_callback(ty: &HirType) -> bool {
         HirType::Optional(inner) => inner.as_ref(),
         other => other,
     };
-    let (HirType::Function(params, ret) | HirType::CallableFunction(params, _, None, ret)) = ty else {
+    let Some((params, ret, _)) = thaw_js_callback_abi(ty) else {
         return false;
     };
+    let ret = &ret;
+    // a rest parameter (`...rest: string[]`) is the trailing array of the callback ABI
     params.iter().all(|param| {
         thaw_js_param_leaf_type(param) || thaw_js_ctor_nested_callback(param)
-    }) && (**ret == HirType::Void || (thaw_js_param_leaf_type(ret) && !thaw_js_contains_bytes(ret)))
+    }) && (*ret == HirType::Void || (thaw_js_param_leaf_type(ret) && !thaw_js_contains_bytes(ret)))
 }
 
 /// A nested callback parameter (`cb` of `write(chunk, enc, cb)`): no-argument-or-plain params, no result.

@@ -44,6 +44,10 @@ fn snapshot(it: &mut Interp, v: &Value) -> Option<Value> {
         ct.data.borrow_mut()[..src.len()].copy_from_slice(&src);
         return Some(copy);
     }
+    // ponytail: a side-table element (accessor, attribute) is not in the copy, so the check cannot see it
+    if crate::array_has_elems(o) {
+        return None;
+    }
     let items = match &*o.kind.borrow() {
         Kind::Array(items) => items.clone(),
         _ => return None,

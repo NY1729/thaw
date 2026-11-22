@@ -38,6 +38,8 @@ pub(crate) enum Refusal {
     NotExtensible,
     /// An accessor without a setter.
     GetterOnly,
+    /// A `length` truncation stopped at this non-configurable element (named by the key).
+    NotDeletable,
 }
 
 impl Interp {
@@ -127,6 +129,9 @@ impl Interp {
                 "Cannot set property {key} of {} which has only a getter",
                 self.obj_name(o)
             ),
+            Refusal::NotDeletable => {
+                format!("Cannot delete property '{key}' of {}", self.obj_name(o))
+            }
         }
     }
 

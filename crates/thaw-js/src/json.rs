@@ -259,8 +259,9 @@ impl Interp {
                 if is_arr {
                     let items = if is_proxy {
                         self.proxy_array_items(&v)?
+                    } else if matches!(&v, Value::Object(o) if o.is_exotic()) {
+                        self.exotic_items(&v)?
                     } else {
-                        self.sparse_unsupported(&v)?;
                         self.array_items(&v)
                     };
                     for (i, item) in items.into_iter().enumerate() {
