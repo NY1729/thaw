@@ -4313,3 +4313,35 @@ fn stored_json_alias_survives_nested_outer_quickjs_call() {
     "#;
     assert_eq!(compile_and_run(source, "nested_unproven_wrapper_owner"), "true\n");
 }
+
+/// Harness proof for the thaw-js lane: the same `loadScript` program runs on both engines.
+fn lane_proof_source() -> &'static str {
+    r#"
+        function main(): void {
+            const ok: boolean = loadScript("globalThis.dynamicText = 'hello';");
+            console.log(ok);
+            const text: JsValue = getDynamicValue("dynamicText");
+            const length: JsValue = getDynamicProperty(text, "length");
+            console.log(Number(readDynamicValue(length)));
+            console.log(String(callDynamicMethod(text, "toUpperCase", JSON.parse("[]"))));
+            console.log(String(callDynamicMethod(text, "slice", JSON.parse("[1, 3]"))));
+        }
+    "#
+}
+
+#[test]
+fn lane_proof_dynamic_primitive_string_quickjs() {
+    assert_eq!(
+        compile_and_run_lane(lane_proof_source(), "lane_proof_qjs", Lane::QuickJs),
+        "true\n5\nHELLO\nel\n"
+    );
+}
+
+#[test]
+#[ignore = "needs compile_load_script to route non-class scripts to thaw_tjs_load_script (compiler lane removal plan, PR2)"]
+fn lane_proof_dynamic_primitive_string_thaw_js() {
+    assert_eq!(
+        compile_and_run_lane(lane_proof_source(), "lane_proof_tjs", Lane::ThawJs),
+        "true\n5\nHELLO\nel\n"
+    );
+}
