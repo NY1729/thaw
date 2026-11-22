@@ -52,6 +52,9 @@ pub struct BundleParts {
     pub async_keys: HashSet<String>,
     /// Keys of the converted ES modules of a native bundle: their namespace is their exports object.
     pub esm_keys: HashSet<String>,
+    /// The static `import` / `export .. from` specifiers of each native module: what Node resolves before it runs
+    /// any module body (the link phase, `host::link_check`).
+    pub esm_specs: HashMap<String, Vec<String>>,
 }
 
 /// Makes a factory's body strict: a `"use strict"` directive first, in the inner function of an ES-module origin
@@ -212,6 +215,7 @@ fn substitute_builtin_factory(
     combined.factories = kept;
     combined.esm_problems = std::mem::take(&mut parts.esm_problems);
     combined.esm_keys = std::mem::take(&mut parts.esm_keys);
+    combined.esm_specs = std::mem::take(&mut parts.esm_specs);
     combined.require_maps = std::mem::take(&mut parts.require_maps);
     combined
         .require_maps
@@ -255,6 +259,7 @@ fn stub_cheerio_undici(parts: &mut BundleParts) -> Result<(), String> {
     let mut combined = parse_factories(&format!("{}\n{stub}", parts.source))?;
     combined.esm_problems = std::mem::take(&mut parts.esm_problems);
     combined.esm_keys = std::mem::take(&mut parts.esm_keys);
+    combined.esm_specs = std::mem::take(&mut parts.esm_specs);
     combined.require_maps = std::mem::take(&mut parts.require_maps);
     combined.realm = parts.realm.take();
     combined.group = parts.group.take();
@@ -263,13 +268,14 @@ fn stub_cheerio_undici(parts: &mut BundleParts) -> Result<(), String> {
 }
 
 fn parse_bundle_raw(source: &str) -> Result<BundleParts, String> {
-    if let Some((native, problems, pure, esm_keys)) =
+    if let Some((native, problems, pure, esm_keys, esm_specs)) =
         crate::esm::native_bundle_to_factories(source)?
     {
         if pure {
             let mut parts = parse_factories(&native)?;
             parts.esm_problems = problems;
             parts.esm_keys = esm_keys.into_iter().collect();
+            parts.esm_specs = esm_specs;
             return Ok(parts);
         }
         // mixed bundle: the converted native modules follow the original text and replace its stubs
@@ -293,6 +299,7 @@ fn parse_bundle_raw(source: &str) -> Result<BundleParts, String> {
             .collect();
         parts.esm_problems = problems;
         parts.esm_keys = esm_keys.into_iter().collect();
+        parts.esm_specs = esm_specs;
         return Ok(parts);
     }
     parse_factories(source)
@@ -433,6 +440,7 @@ fn parse_factories(source: &str) -> Result<BundleParts, String> {
         group,
         async_keys,
         esm_keys: HashSet::new(),
+        esm_specs: HashMap::new(),
     })
 }
 

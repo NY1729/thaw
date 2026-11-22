@@ -1726,6 +1726,40 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
 }
 
 #[test]
+fn native_esm_self_import_during_evaluation_runs_once() {
+    // Node 22.23.1 prints [1,7,true,"function"] (g2b-probes/self): a module that import()s itself while evaluating runs
+    // its body once, and two import() calls are two different promises. The QuickJS-private pin (re-entering the bound
+    // evaluator returns the SAME ready promise) has no Node analogue and stays in its pending test.
+    let root = temp_registry("native-esm-self-import");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-self-import-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "globalThis.nativeRuns = (globalThis.nativeRuns || 0) + 1; const p1 = import('./index.mjs'); const p2 = import('./index.mjs'); export const ps = [p1, p2]; export const value = 7;").unwrap();
+    let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-self-import-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(run_js_probe(&bundle, "[globalThis.nativeRuns, exports.value, exports.ps[0] !== exports.ps[1], typeof exports.ps[0].then]"), "[1,7,true,\"function\"]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_cycle_peer_reads_hoisted_not_tdz_and_unused_modules_stay_unlinked() {
+    // Node 22.23.1 prints [7,true,9,false] (g2b-probes/linked): the cycle peer reads the hoisted export and gets TDZ
+    // for the const; a module reachable only through a dynamic import() has not run. (Node also keeps it unrun right
+    // after calling import(); thaw-js loads a non-async module synchronously inside import(), so that moment is not pinned.)
+    let root = temp_registry("native-esm-linked-read");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-linked-read-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "import './lazy_b.mjs'; export function available() { return 7; } export const late = 9; export function loadUnused() { return import('./unused.mjs'); }").unwrap();
+    fs::write(package.join("lazy_b.mjs"), "import * as A from './index.mjs'; import { available } from './index.mjs'; globalThis.hoisted = available(); try { A.late; } catch (e) { globalThis.tdz = e instanceof ReferenceError; } export const peer = 3;").unwrap();
+    fs::write(package.join("unused.mjs"), "globalThis.unusedRan = true; export const hidden = 4;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-linked-read-pkg", &package, "index.mjs").unwrap();
+    assert!(bundle.contains("__thaw_register_native_bundle"));
+    assert_eq!(run_js_probe(&bundle, "[globalThis.hoisted, globalThis.tdz, exports.late, !!globalThis.unusedRan]"), "[7,true,9,false]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
     let root = temp_registry("native-esm-mixed-fallback");
     let modules = root.join("node_modules");
@@ -2398,46 +2432,45 @@ fn native_esm_rebundle_with_new_source_yields_new_value() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private entry reentry); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_private_entry_reentry_and_intrinsic_then {
+/// A hand-written bundle whose entry is the CommonJS script `script` (it registers native bundles itself
+/// through the host-internal `__thaw_register_native_bundle(json)` global and may define globals to probe).
+fn private_bundle_script_bundle(script: &str) -> String {
+    format!(
+        "module.exports = (function(require) {{\nvar __thaw_bundle_factories = {{ \"s.js\": function (module, exports, require) {{\n{script}\n}} }};\n\
+         var __thaw_bundle_require_maps = {{ \"s.js\": {{}} }};\nvar __thaw_bundle_entry_key = \"s.js\";\n}})(globalThis.require);"
+    )
+}
 
+// Ported from the QuickJS-private test: the entry evaluator is bound to its bundle; the module reenters it while
+// evaluating and receives the same ready Promise. Dropped: the `Promise.prototype.then` mutation (Node throws
+// there; the thaw-only pin is `mutated_promise_then_does_not_break_the_evaluator` in thaw-js).
 #[test]
 fn native_esm_private_entry_reentry_and_intrinsic_then() {
-    // Unrun: a bound evaluator, not a public token, owns this entry. The
-    // module reenters it while evaluating and receives the same ready Promise.
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
+    let bundle = private_bundle_script_bundle(
+        r#"
           globalThis.nativeRuns = 0;
           globalThis.nativeSelfEval = __thaw_register_native_bundle(JSON.stringify({
             main: 'self/index.mjs', modules: [{ key: 'self/index.mjs', imports: {},
               source: 'globalThis.nativeRuns++; globalThis.nativeSelfReady = globalThis.nativeSelfEval(); export const value = 7;'
             }]
           }));
-          Promise.prototype.then = function() { throw Error('mutated then'); };
-          globalThis.__thaw_module_ready = globalThis.nativeSelfEval();
-          globalThis.privateEntryResult = function() {
+          globalThis.nativeReady = globalThis.nativeSelfEval();
+          globalThis.privateEntryResult = async function() {
+            await globalThis.nativeReady;
             return [globalThis.nativeRuns, globalThis.nativeSelfReady === globalThis.nativeSelfEval(),
               typeof globalThis.__thaw_eval_native_entry, typeof globalThis.__thaw_native_esm_sources];
           };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"privateEntryResult".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true,\"undefined\",\"undefined\"]");
-    }).join().unwrap();
-}
+        "#,
+    );
+    assert_eq!(run_js_probe(&bundle, "privateEntryResult()"), "[1,true,\"undefined\",\"undefined\"]");
 }
 
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private linked read); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_private_linked_read_is_owner_scoped_and_live {
-
+// Ported from the QuickJS-private test: owner-scoped readNative, foreign-bundle isolation, descriptor flags,
+// same ready promise. `__thaw_module_ready` (a QuickJS host protocol) is replaced by awaiting the ready promises.
 #[test]
 fn native_esm_private_linked_read_is_owner_scoped_and_live() {
-    // Unrun: each source's first private marker runs after linking, before
-    // that source body. A cyclic peer can read hoisted exports but not TDZ.
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
+    let bundle = private_bundle_script_bundle(
+        r#"
           globalThis.entryA = __thaw_register_native_bundle(JSON.stringify({
             main: 'a', modules: [
               { key: 'a', imports: { './b': 'b', './unused': 'unused' }, source:
@@ -2460,8 +2493,8 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
           }));
           globalThis.readyA = entryA();
           globalThis.readyB = entryB();
-          globalThis.__thaw_module_ready = Promise.all([readyA, readyB]);
-          globalThis.privateLinkedResult = function() {
+          globalThis.privateLinkedResult = async function() {
+            await Promise.all([readyA, readyB]);
             let unused, unusedNamespace, foreign, foreignNamespace;
             try { entryA.readNative('thaw-bundle:1:unused', 'hidden'); unused = false; }
             catch (_) { unused = true; }
@@ -2479,37 +2512,30 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
               descriptor.enumerable === false && descriptor.writable === false,
               entryA() === readyA];
           };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"privateLinkedResult".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,7,true,9,3,true,true,true,true,true,true,true,true]");
-    }).join().unwrap();
+        "#,
+    );
+    assert_eq!(
+        run_js_probe(&bundle, "privateLinkedResult()"),
+        "[true,true,7,true,9,3,true,true,true,true,true,true,true,true]"
+    );
 }
-}
-
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (failedEntry.readNative); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_failed_link_never_marks_source_linked {
 
 #[test]
 fn native_esm_failed_link_never_marks_source_linked() {
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
-          globalThis.failedEntry = __thaw_register_native_bundle(JSON.stringify({
-            main: 'bad', modules: [{ key: 'bad', imports: {}, source:
-              'import "./unmapped"; export const value = 1;' }]
-          }));
-          failedEntry().catch(() => {});
-          globalThis.failedRead = function() {
-            try { failedEntry.readNative('thaw-bundle:1:bad', 'value'); return false; }
-            catch (_) { return true; }
-          };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"failedRead".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
-    }).join().unwrap();
-}
+    // Node 22.23.1: an entry that imports an unmapped specifier fails to link with ERR_MODULE_NOT_FOUND; no body ran
+    // and the failure is cached (g2-probes/fl; the esm.rs host tests `failed_link_*` pin the code, the no-body and the
+    // caching on the native route). The registry bundles an unmappable import through its own ESM transform, whose
+    // load error is MODULE_NOT_FOUND. The old pin (a QuickJS-private readNative of it throws) becomes: the load fails.
+    let root = temp_registry("native-esm-failed-link");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-failed-link-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "globalThis.failedLinkRuns = (globalThis.failedLinkRuns || 0) + 1; import './unmapped.mjs'; export const value = 1;").unwrap();
+    let bundled = bundle_commonjs_package(&modules, "native-failed-link-pkg", &package, "index.mjs");
+    let (bundle, _, _, _) = bundled.unwrap();
+    let outcome = run_js_probe(&bundle, "[globalThis.failedLinkRuns]");
+    assert!(outcome.starts_with("ERROR: ") && outcome.contains("Cannot find module './unmapped.mjs'"), "{outcome}");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

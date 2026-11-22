@@ -705,7 +705,13 @@ const STAR_HELPER: &str = r#"function __thaw_esm_star(ex, m) { var own = Object.
 
 /// The factory text, the unsound-construct feature names, whether the bundle is the pure native shape, and the
 /// keys of the converted ES modules (their namespace is their exports object).
-pub(crate) type NativeBundle = (String, BTreeSet<&'static str>, bool, BTreeSet<String>);
+pub(crate) type NativeBundle = (
+    String,
+    BTreeSet<&'static str>,
+    bool,
+    BTreeSet<String>,
+    std::collections::HashMap<String, Vec<String>>,
+);
 
 /// A converted native module; its body is re-converted as an async one when it awaits (see `native_bundle_to_factories`).
 struct Staged<'a> {
@@ -736,7 +742,17 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         },
         _ => return Err("native bundle payload is not a string".into()),
     };
-    let Ok(Native::Object(root)) = crate::json::parse_native(&json) else {
+    native_json_to_factories(&json, source, pure).map(Some)
+}
+
+/// The factory bundle of the native payload `json` (`__thaw_register_native_bundle`'s argument). `source` is the
+/// registry bundle text holding its export graphs (empty for a runtime registration).
+pub(crate) fn native_json_to_factories(
+    json: &str,
+    source: &str,
+    pure: bool,
+) -> Result<NativeBundle, String> {
+    let Ok(Native::Object(root)) = crate::json::parse_native(json) else {
         return Err("native bundle payload is not JSON".into());
     };
     let main = text(field(&root, "main"))
@@ -829,6 +845,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
     }
     let staged_keys: Vec<String> = staged.iter().map(|s| s.key.clone()).collect();
     let mut esm_keys = BTreeSet::new();
+    let mut esm_specs = std::collections::HashMap::new();
     for s in staged {
         let is_async = asyncs.contains(&s.key);
         let body = if is_async {
@@ -860,6 +877,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
             })
             .collect();
         maps.push_str(&format!("{qk}: {{ {} }},\n", entries.join(", ")));
+        esm_specs.insert(s.key.clone(), s.specs);
         esm_keys.insert(s.key);
     }
     // A synchronous cycle links like Node (live reads, TDZ at the read); an async one cannot be evaluated depth-first.
@@ -903,7 +921,7 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
     let bundle = format!(
         "module.exports = (function (require) {{\nvar __thaw_bundle_factories = {{\n{factories}}};\nvar __thaw_bundle_require_maps = {{\n{maps}}};\n{entry}}})(globalThis.require);\n"
     );
-    Ok(Some((bundle, problems, pure, esm_keys)))
+    Ok((bundle, problems, pure, esm_keys, esm_specs))
 }
 
 #[cfg(test)]
@@ -1081,6 +1099,7 @@ export { replaceOption } from './e.js';\n";
 mod live_binding_tests {
     use crate::builtins::json_quote;
     use crate::host::{Native, Package};
+    use crate::Value;
 
     // A mixed bundle: the native `modules` (`key`, `source`, `imports`) with main `main`, and the CommonJS
     // entry `m/index.js` whose body is `index`; every module `m/x.mjs` is requirable as `./x.mjs`.
@@ -1107,7 +1126,7 @@ mod live_binding_tests {
         format!(
             r#"module.exports = (function(require) {{
 var __thaw_bundle_factories = {{
-"m/index.js": function(module, exports, require) {{ {index} }},
+"m/index.js": function(module, exports, require, requireAsync) {{ {index} }},
 {stubs}}};
 var __thaw_bundle_require_maps = {{ "m/index.js": {{{map}}}, {empties}}};
 var __thaw_bundle_entry_key = "m/index.js";
@@ -1212,6 +1231,57 @@ exports.run = function () {
             run(modules, index),
             Native::Str("2,p,shadow,2,2,number,undefined,4,2,7,TypeError,TypeError,2".into())
         );
+    }
+
+    // Node 22.23.1 (g2-probes/fl): a module that imports an unresolvable specifier fails to LINK with
+    // ERR_MODULE_NOT_FOUND before its own body runs.
+    #[test]
+    fn failed_link_runs_no_body_and_reports_err_module_not_found() {
+        let modules = serde_json::json!([
+            { "key": "m/bad.mjs", "source": "globalThis.badRuns = (globalThis.badRuns || 0) + 1; import \"./unmapped.mjs\"; export const value = 1;\n", "imports": {} }
+        ]);
+        let index = r#"exports.run = function () { try { require("./bad.mjs"); } catch (e) { return [e.code, e.message, String(globalThis.badRuns)].join('|'); } return 'no throw'; };"#;
+        let mut p = Package::load(&bundle("m/bad.mjs", modules, index)).expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("ERR_MODULE_NOT_FOUND|Cannot find module '/thaw_modules/m/unmapped.mjs' imported from /thaw_modules/m/bad.mjs|undefined".into())
+        );
+    }
+
+    // graph p -> {ok, bad}: nothing in ok.mjs ran, every later import of p or bad rejects with the SAME error object,
+    // and ok.mjs alone still loads (its counter is 1).
+    #[test]
+    fn failed_link_is_cached_and_does_not_poison_unrelated_modules() {
+        let modules = serde_json::json!([
+            { "key": "m/p.mjs", "source": "import \"./ok.mjs\"; import \"./bad.mjs\";\nglobalThis.parentRuns = (globalThis.parentRuns || 0) + 1;\n", "imports": { "./ok.mjs": "m/ok.mjs", "./bad.mjs": "m/bad.mjs" } },
+            { "key": "m/ok.mjs", "source": "globalThis.okRuns = (globalThis.okRuns || 0) + 1; export const o = 1;\n", "imports": {} },
+            { "key": "m/bad.mjs", "source": "globalThis.badRuns = (globalThis.badRuns || 0) + 1; import \"./unmapped.mjs\"; export const value = 1;\n", "imports": {} }
+        ]);
+        let index = r#"var grab = function (spec) { try { require(spec); } catch (e) { return e; } };
+exports.run = function () {
+  var first = grab("./p.mjs"), okBefore = globalThis.okRuns, again = grab("./p.mjs"), bad = grab("./bad.mjs");
+  var ok = require("./ok.mjs");
+  globalThis.firstError = first;
+  return [first.code, String(okBefore), String(globalThis.badRuns), String(globalThis.parentRuns), first === again, first === bad, ok.o, globalThis.okRuns].join('|');
+};
+exports.again = function () { return requireAsync("./bad.mjs"); };
+exports.isFirst = function (e) { return e === globalThis.firstError; };"#;
+        let mut p = Package::load(&bundle("m/p.mjs", modules, index)).expect("loads");
+        assert_eq!(
+            p.call("run", &[]).unwrap(),
+            Native::Str("ERR_MODULE_NOT_FOUND|undefined|undefined|undefined|true|true|1|1".into())
+        );
+        // a later import() rejects with the same Error object
+        let exports = p.exports();
+        let it = p.interp();
+        let again = it.get(&exports, "again").unwrap();
+        let promise = it.call(&again, &Value::Undefined, &[]).unwrap();
+        let Some(Err(reason)) = it.await_settled(&promise).unwrap() else {
+            panic!("import() of a failed link must reject")
+        };
+        let is_first = it.get(&exports, "isFirst").unwrap();
+        let same = it.call(&is_first, &Value::Undefined, &[reason]).unwrap();
+        assert!(matches!(same, Value::Bool(true)));
     }
 
     // Node 22.23.1 (probes g2-probes/cyc2): depth-first, dependencies first; the cycle peer sees the hoisted function

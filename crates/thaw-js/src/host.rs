@@ -75,6 +75,8 @@ struct Loader {
     /// The thrown value of each module whose factory threw synchronously: its cache entry stays, so a later
     /// `import()` rejects with the same error instead of resolving the partial exports (Node caches the failure).
     failed: RefCell<HashMap<String, Value>>,
+    /// ES-module keys whose static graph `link_check` found fully resolvable.
+    linked: RefCell<HashSet<String>>,
     /// The keys whose factory is running right now (a synchronous evaluation in progress). A `require` that
     /// re-enters one across the CommonJS/ES boundary is a cycle Node refuses (`cycle_refused`).
     loading: RefCell<HashSet<String>>,
@@ -516,12 +518,73 @@ fn peer_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
         .map_err(|e| js_error(it, &e.to_string()))
 }
 
+/// Whether `peer_exports(spec)` would find a package (no load happens).
+fn peer_known(spec: &str) -> bool {
+    BOOTING.with(|b| b.borrow().iter().any(|(name, _)| name == spec))
+        || BY_NAME.with(|m| m.borrow().contains_key(spec))
+        || PEER_SOURCES.with(|s| s.borrow().contains_key(spec))
+}
+
 /// The module key of a node builtin the bundle serves for a spec the map does not name (`fs`, `node:fs`):
 /// the QuickJS lane's global `require(spec)` fallback. Builtins are the `node:<name>` factories.
 fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
     let name = spec.strip_prefix("node:").unwrap_or(spec);
     let key = format!("node:{name}");
     (loader.factories.contains_key(&key) || key == "node:crypto").then_some(key)
+}
+
+/// Node's link phase for a native ES-module graph: every static specifier of every module reachable from `root` must
+/// resolve before ANY module body runs. A failure is `ERR_MODULE_NOT_FOUND` (as `import()` of an unmapped spec), cached
+/// for the importing module and the modules above it on the walk (the same Error object each time, and it
+/// stays cached when the file appears later); unrelated modules are untouched and load normally.
+// ponytail: named-export existence (`does not provide an export named`) is not checked here, only resolution.
+fn link_check(loader: &Rc<Loader>, it: &mut Interp, root: &str) -> R<()> {
+    fn walk(loader: &Rc<Loader>, it: &mut Interp, key: &str, seen: &mut HashSet<String>) -> R<()> {
+        let specs = loader
+            .parts
+            .esm_specs
+            .get(base_of(loader, key))
+            .cloned()
+            .unwrap_or_default();
+        for spec in specs {
+            if spec == "bindings" || spec == "node-gyp-build" || spec.ends_with(".node") {
+                continue;
+            }
+            match module_key(loader, key, &spec, false) {
+                Some(next) => {
+                    if is_esm(loader, &next)
+                        && !loader.linked.borrow().contains(&next)
+                        && !loader.cache.borrow().contains_key(&next)
+                        && seen.insert(next.clone())
+                    {
+                        if let Err(Ctl::Throw(reason)) = walk(loader, it, &next, seen) {
+                            loader
+                                .failed
+                                .borrow_mut()
+                                .insert(key.to_string(), reason.clone());
+                            return Err(Ctl::Throw(reason));
+                        }
+                    }
+                }
+                None if peer_known(&spec) => {}
+                None => {
+                    let err = import_not_found(it, key, &spec);
+                    if let Ctl::Throw(reason) = &err {
+                        loader
+                            .failed
+                            .borrow_mut()
+                            .insert(key.to_string(), reason.clone());
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut seen = HashSet::from([root.to_string()]);
+    walk(loader, it, root, &mut seen)?;
+    loader.linked.borrow_mut().extend(seen);
+    Ok(())
 }
 
 fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
@@ -540,6 +603,16 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     } else {
         loader.cache.borrow().get(key).cloned()
     };
+    if cached.is_none() && !commonjs && is_esm(loader, key) {
+        // a failed link is cached (there is no cache entry to hold it), and a graph links before any body runs
+        let failed = loader.failed.borrow().get(key).cloned();
+        if let Some(reason) = failed {
+            return Err(Ctl::Throw(reason));
+        }
+        if !loader.linked.borrow().contains(key) {
+            link_check(loader, it, key)?;
+        }
+    }
     if let Some(m) = cached {
         // a failed ES module stays failed: every later require rethrows its evaluation error (Node caches it)
         let failed = loader.failed.borrow().get(key).cloned();
@@ -876,16 +949,13 @@ fn install_fetch_transport(it: &mut Interp, loader: &Rc<Loader>) -> R<()> {
     Ok(())
 }
 
-/// Evaluates the factories of `parts` on `it` and returns module `key`'s exports, and for the package entry
-/// with top-level await its pending promise (`await_entry` settles it). The package entry
-/// ([`Package::load_named`]) and a worker realm's main module ([`run_bundle_main`]) both boot through here.
-fn boot_bundle(
+/// The [`Loader`] of the factories of `parts` (package `name`), nothing evaluated yet.
+fn make_loader(
     it: &mut Interp,
     mut parts: BundleParts,
     bundle_js: &str,
     name: &str,
-    key: &str,
-) -> R<(Value, Option<Value>)> {
+) -> R<Rc<Loader>> {
     // Evaluated before `run_id` is set and before any factory exists: a later eval perturbs the interpreter
     // state the factories rely on. Helpers are stored in `Loader`, so no eval runs mid-module.
     let promise_of = it.eval_function(PROMISE_OF)?;
@@ -947,6 +1017,7 @@ fn boot_bundle(
         namespaces: RefCell::new(HashMap::new()),
         ready: RefCell::new(HashMap::new()),
         failed: RefCell::new(HashMap::new()),
+        linked: RefCell::new(HashSet::new()),
         loading: RefCell::new(HashSet::new()),
         promise_of,
         cjs_namespace,
@@ -957,6 +1028,21 @@ fn boot_bundle(
     if loader.factories.contains_key("node:http") {
         install_fetch_transport(it, &loader)?;
     }
+    Ok(loader)
+}
+
+/// Evaluates the factories of `parts` on `it` and returns module `key`'s exports, and for the package entry
+/// with top-level await its pending promise (`await_entry` settles it). The package entry
+/// ([`Package::load_named`]) and a worker realm's main module ([`run_bundle_main`]) both boot through here.
+fn boot_bundle(
+    it: &mut Interp,
+    parts: BundleParts,
+    bundle_js: &str,
+    name: &str,
+    key: &str,
+) -> R<(Value, Option<Value>)> {
+    install_native_registrar(it);
+    let loader = make_loader(it, parts, bundle_js, name)?;
     let exports = load_module(&loader, it, key)?;
     let pending = if key == loader.parts.entry {
         loader.ready.borrow().get(key).cloned()
@@ -964,6 +1050,116 @@ fn boot_bundle(
         None
     };
     Ok((exports, pending))
+}
+
+/// Declares the host-internal global `__thaw_register_native_bundle(json)` (once per realm; hidden from
+/// `Object.keys(globalThis)` like the other `__thaw_*` host globals). It registers a native ES module bundle at
+/// run time, the QuickJS-private evaluator contract: one [`Loader`] per registration, ids `thaw-bundle:N:key`
+/// (N counts registrations in this realm from 1), and a returned evaluator function.
+fn install_native_registrar(it: &mut Interp) {
+    const NAME: &str = "__thaw_register_native_bundle";
+    if it.lookup(&it.global.clone(), NAME).is_some() {
+        return;
+    }
+    let registrar = it.native(|it, _, args| {
+        let json = it.to_str(&crate::arg(args, 0)).to_string();
+        register_native_bundle(it, &json)
+    });
+    it.global.declare(NAME, registrar, false);
+}
+
+/// The evaluator of one registered bundle: `evaluate()` runs the entry once and always returns the same ready
+/// promise (also when a module re-enters it while evaluating); `evaluate.readNative(id, name)` reads an export
+/// of a source of THIS bundle that has been linked (reached by evaluation), nothing else.
+fn register_native_bundle(it: &mut Interp, json: &str) -> R<Value> {
+    let (text, problems, _, esm_keys, esm_specs) =
+        crate::esm::native_json_to_factories(json, "", true).map_err(|e| js_error(it, &e))?;
+    if let Some(problem) = problems.iter().next() {
+        return Err(js_error(it, &format!("unsupported: {problem}")));
+    }
+    let mut parts = parse_bundle(&text).map_err(|e| js_error(it, &e))?;
+    parts.esm_keys = esm_keys.into_iter().collect();
+    parts.esm_specs = esm_specs;
+    let main = parts.entry.clone();
+    let run_id = it.run_id;
+    let loader = make_loader(it, parts, &text, "");
+    it.run_id = run_id;
+    let loader = loader?;
+    it.native_bundles += 1;
+    let sequence = it.native_bundles;
+    let ready: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+    let (l, key) = (loader.clone(), main);
+    let evaluate = it.native(move |it, _, _| {
+        if let Some(promise) = ready.borrow().clone() {
+            return Ok(promise);
+        }
+        let promise = it.new_promise();
+        *ready.borrow_mut() = Some(Value::Object(promise.clone()));
+        match load_module(&l, it, &key) {
+            Ok(exports) => {
+                let pending = l.ready.borrow().get(&key).cloned();
+                let (l2, k2) = (l.clone(), key.clone());
+                let namespace = it.native(move |it, _, _| {
+                    let exports = load_module(&l2, it, &k2)?;
+                    module_namespace(&l2, it, &k2, exports)
+                });
+                match pending {
+                    Some(then) if is_async(&l, &key) => {
+                        let (ok, bad) = (promise.clone(), promise.clone());
+                        let on_ok = it.native(move |it, _, _| {
+                            match it.call(&namespace, &Value::Undefined, &[]) {
+                                Ok(ns) => it.resolve_promise(&ok, ns).map(|_| Value::Undefined),
+                                Err(Ctl::Throw(r)) => {
+                                    it.reject_promise(&ok, r);
+                                    Ok(Value::Undefined)
+                                }
+                                Err(other) => Err(other),
+                            }
+                        });
+                        let on_bad = it.native(move |it, _, args| {
+                            it.reject_promise(&bad, crate::arg(args, 0));
+                            Ok(Value::Undefined)
+                        });
+                        it.promise_then_native(&then, on_ok, on_bad);
+                    }
+                    _ => match module_namespace(&l, it, &key, exports) {
+                        Ok(ns) => it.resolve_promise(&promise, ns)?,
+                        Err(Ctl::Throw(r)) => it.reject_promise(&promise, r),
+                        Err(other) => return Err(other),
+                    },
+                }
+            }
+            Err(Ctl::Throw(reason)) => it.reject_promise(&promise, reason),
+            Err(other) => return Err(other),
+        }
+        Ok(Value::Object(promise))
+    });
+    let l = loader;
+    let reader = it.native(move |it, _, args| {
+        let id = it.to_str(&crate::arg(args, 0)).to_string();
+        let prefix = format!("thaw-bundle:{sequence}:");
+        // a bare key names a source of this bundle; a minted id must carry this bundle's own sequence
+        let key = match id.strip_prefix("thaw-bundle:") {
+            Some(_) => id.strip_prefix(&prefix),
+            None => Some(id.as_str()),
+        };
+        let module = key.and_then(|k| l.cache.borrow().get(k).cloned().map(|m| (k.to_string(), m)));
+        let Some((key, module)) = module else {
+            return Err(js_error(it, "unlinked or foreign native source"));
+        };
+        let exports = it.get(&module, "exports")?;
+        match crate::arg(args, 1) {
+            Value::Undefined => module_namespace(&l, it, &key, exports),
+            name => {
+                let name = it.to_str(&name).to_string();
+                it.get(&exports, &name)
+            }
+        }
+    });
+    if let Value::Object(f) = &evaluate {
+        crate::put_with(f, "readNative", reader, false, false, false);
+    }
+    Ok(evaluate)
 }
 
 /// Settles the package entry booted by [`boot_bundle`] when its factory is async: runs the event loop until its
