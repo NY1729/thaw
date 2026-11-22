@@ -794,3 +794,34 @@ fn own_entries_frozen_object_drops_writable_and_configurable() {
     load("globalThis.__c3aFrozen = Object.freeze({ a: 1 });");
     assert_eq!(attr_bits(global("__c3aFrozen"), "a"), 2);
 }
+
+#[test]
+fn well_known_symbol_wire_text_names_the_symbol_keyed_property() {
+    // The compiler addresses `obj[Symbol.dispose]` on a dynamic object as `\u{1f}@@dispose` text.
+    load(
+        "globalThis.__wk = { [Symbol.dispose]: 5, [Symbol.iterator]: 6 };\
+         globalThis.__wkf = () => 9;",
+    );
+    let object = global("__wk");
+    assert!(is_number(
+        value(thaw_tjs_get_property_result(
+            object,
+            q("\u{1f}@@dispose").as_ptr()
+        )),
+        5.0
+    ));
+    assert_eq!(
+        value(thaw_tjs_has_property_result(
+            object,
+            q("\u{1f}@@iterator").as_ptr()
+        )),
+        1
+    );
+    value(thaw_tjs_set_property_result(
+        object,
+        q("\u{1f}@@asyncDispose").as_ptr(),
+        global("__wkf"),
+    ));
+    load("globalThis.__wkok = __wk[Symbol.asyncDispose] === __wkf && !('\\u001f@@asyncDispose' in __wk) ? 1 : 0;");
+    assert!(is_number(global("__wkok"), 1.0));
+}

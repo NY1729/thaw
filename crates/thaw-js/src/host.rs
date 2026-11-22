@@ -2758,9 +2758,30 @@ pub(crate) fn on_handle_strict<T>(
     with_package(owner, |p| f(p, owner, value)).map_err(error_text)
 }
 
+/// A host-supplied property name as the key the interpreter stores it under: Symbol wire text
+/// (`\u{1f}@@name`, `\u{3}<id>`, `__thaw_symbol_<name>`) goes through the prelude's
+/// `__thaw_property_key`, the same decoder the QuickJS host used (`dynamic_property_key`).
+pub(crate) fn dynamic_property_key(it: &mut Interp, name: &str) -> Result<String, HostError> {
+    if !(name.starts_with('\u{1f}')
+        || name.starts_with('\u{3}')
+        || name.starts_with("__thaw_symbol_"))
+    {
+        return Ok(name.to_string());
+    }
+    let global = it.global.clone();
+    let Some(decode) = it.lookup(&global, "__thaw_property_key") else {
+        return Ok(name.to_string());
+    };
+    let key = it
+        .call(&decode, &Value::Undefined, &[Value::str(name)])
+        .map_err(|c| classify(it, c))?;
+    Ok(it.key_of(&key).to_string())
+}
+
 fn property(p: &mut Package, owner: usize, value: &Value, key: &str) -> Result<i64, HostError> {
     let it = &mut p.interp;
-    let v = it.get(value, key).map_err(|c| classify(it, c))?;
+    let key = dynamic_property_key(it, key)?;
+    let v = it.get(value, &key).map_err(|c| classify(it, c))?;
     Ok(store_handle(owner, v))
 }
 
@@ -2819,6 +2840,7 @@ pub extern "C" fn thaw_tjs_get_property_exact_result(
     };
     let result = on_handle(handle, |p, owner, v| {
         let it = &mut p.interp;
+        let name = dynamic_property_key(it, &name)?;
         Ok(match it.get(&v, &name) {
             Ok(v) => Ok(store_handle(owner, v)),
             Err(Ctl::Throw(t)) => {
@@ -3663,6 +3685,7 @@ pub extern "C" fn thaw_tjs_call_method_graph_result(
         let (_, args) = decode_wire(&cstr(args_json).ok_or("invalid arguments")?)?;
         on_handle(handle, |p, owner, this| {
             let it = &mut p.interp;
+            let name = dynamic_property_key(it, &name)?;
             let method = it.get(&this, &name).map_err(|c| classify(it, c))?;
             let args = it.array_items(&args);
             let method = native_server_overload(it, &this, &name, &args).unwrap_or(method);
@@ -3698,6 +3721,7 @@ pub extern "C" fn thaw_tjs_set_property_result(
         let value = on_handle(value_handle, |_, _, v| Ok(v))?;
         on_handle(handle, |p, _, target| {
             let it = &mut p.interp;
+            let name = dynamic_property_key(it, &name)?;
             strict_host_set(it, &target, &name, value).map_err(|c| classify(it, c))?;
             Ok(1)
         })
@@ -3709,6 +3733,7 @@ fn property_predicate(handle: u64, name: *const c_char, delete: bool) -> HandleR
         let name = cstr(name).ok_or("invalid property name")?;
         on_handle(handle, |p, _, target| {
             let it = &mut p.interp;
+            let name = dynamic_property_key(it, &name)?;
             let result = if delete {
                 match &target {
                     Value::Object(o) => {
@@ -4615,6 +4640,7 @@ pub extern "C" fn thaw_tjs_call_method_handle_graph_args_result(
         let (_, args) = decode_wire(&cstr(args_json).ok_or("invalid arguments")?)?;
         on_handle(handle, |p, owner, this| {
             let it = &mut p.interp;
+            let name = dynamic_property_key(it, &name)?;
             let method = it.get(&this, &name).map_err(|c| classify(it, c))?;
             let args = it.array_items(&args);
             let method = native_server_overload(it, &this, &name, &args).unwrap_or(method);
@@ -4648,6 +4674,7 @@ pub extern "C" fn thaw_tjs_set_property_json_graph_result(
                 .into_iter()
                 .next()
                 .unwrap_or(Value::Undefined);
+            let name = dynamic_property_key(it, &name)?;
             strict_host_set(it, &target, &name, value.clone()).map_err(|c| classify(it, c))?;
             let mut out = WireOut {
                 owner,
