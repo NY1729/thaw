@@ -1286,6 +1286,90 @@ fn worker_get_heap_statistics_has_node_keys_and_rejects_when_not_running() {
     );
 }
 
+// Node 22.23.1 (3 runs each, scratch tmp-run/diag3/red): a missing or non-string name throws ERR_INVALID_ARG_TYPE
+// synchronously; a start before 'online' rejects ERR_WORKER_NOT_RUNNING.
+#[test]
+fn worker_cpu_profile_start_requires_a_string_name() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+      (async () => {
+        let sync; try { w.startCpuProfile(); sync = 'no throw'; } catch (e) { sync = e.code + ' ' + e.message; }
+        const early = await w.startCpuProfile('x').then(() => 'resolved', (e) => e.code + ' ' + e.message);
+        await new Promise((resolve) => w.once('online', resolve));
+        let bad; try { w.startCpuProfile(7); bad = 'no throw'; } catch (e) { bad = e.code + ' ' + e.message; }
+        console.log('sync ' + sync + '|early ' + early + '|bad ' + bad);
+        await w.terminate();
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });"#;
+    assert_eq!(
+        run_main(src),
+        r#"sync ERR_INVALID_ARG_TYPE The "name" argument must be of type string. Received undefined|early ERR_WORKER_NOT_RUNNING Worker instance not running|bad ERR_INVALID_ARG_TYPE The "name" argument must be of type string. Received type number (7)"#
+    );
+}
+
+#[test]
+fn worker_cpu_profile_stop_resolves_a_node_profile_json() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+      (async () => {
+        await new Promise((resolve) => w.once('online', resolve));
+        const profile = await w.startCpuProfile('p');
+        const text = await profile.stop();
+        const p = JSON.parse(text);
+        const ids = new Set(p.nodes.map((n) => n.id));
+        console.log('type ' + typeof text + '|keys ' + Object.keys(p).join(',') + '|nodes ' + (p.nodes.length >= 1) + '|samples ' + (p.samples.length >= 1) + '|deltas ' + (p.timeDeltas.length === p.samples.length) + '|root ' + p.nodes[0].callFrame.functionName + '|times ' + (p.startTime <= p.endTime) + '|leaves ' + p.samples.every((id) => ids.has(id)));
+        await w.terminate();
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });"#;
+    assert_eq!(
+        run_main(src),
+        "type string|keys nodes,startTime,endTime,samples,timeDeltas|nodes true|samples true|deltas true|root (root)|times true|leaves true"
+    );
+}
+
+#[test]
+fn worker_cpu_profile_samples_a_busy_named_function() {
+    // the worker's own interrupt checks take the samples; the loop repeats until `hot` shows up (3 s at most)
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      const w = new wt.Worker(`const { parentPort } = require('node:worker_threads');
+        function hot(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; }
+        parentPort.on('message', () => { const end = Date.now() + 50; while (Date.now() < end) hot(1000); parentPort.postMessage('done'); });`, { eval: true });
+      (async () => {
+        await new Promise((resolve) => w.once('online', resolve));
+        let found = false;
+        const started = Date.now();
+        while (!found && Date.now() - started < 3000) {
+          const profile = await w.startCpuProfile('hot');
+          await new Promise((resolve) => { w.once('message', resolve); w.postMessage('busy'); });
+          const p = JSON.parse(await profile.stop());
+          found = p.nodes.some((n) => n.callFrame.functionName === 'hot' && n.hitCount > 0);
+        }
+        console.log('hot sampled ' + found);
+        await w.terminate();
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });"#;
+    assert_eq!(run_main(src), "hot sampled true");
+}
+
+#[test]
+fn worker_cpu_profile_handle_duplicates_and_terminated_stops_follow_node() {
+    let src = r#"const wt = __thaw_worker_threads_exports;
+      const w = new wt.Worker(`require('node:worker_threads').parentPort.on('message',()=>{});`, { eval: true });
+      (async () => {
+        await new Promise((resolve) => w.once('online', resolve));
+        const profile = await w.startCpuProfile('dup');
+        const dup = await w.startCpuProfile('dup').then(() => 'resolved', (e) => e.code + ' ' + e.message);
+        const own = Object.keys(profile).join(',');
+        const dispose = typeof profile[Symbol.asyncDispose];
+        const first = await profile.stop();
+        const second = await profile.stop();
+        await w.terminate();
+        const after = await profile.stop().then(() => 'resolved', (e) => e.code + ' ' + e.message);
+        console.log('dup ' + dup + '|own ' + own + '|dispose ' + dispose + '|twice ' + (first === second) + ' ' + typeof second + '|after ' + after);
+      })().catch((e) => { console.log('failed ' + e); w.terminate(); });"#;
+    assert_eq!(
+        run_main(src),
+        "dup ERR_CPU_PROFILE_ALREADY_STARTED CPU profile already started|own stop|dispose function|twice true string|after resolved"
+    );
+}
+
 #[test]
 fn worker_prepend_once_listener_runs_first_and_only_once() {
     // Node 22 (verified): `first,regular,regular 1 function true 10 true`

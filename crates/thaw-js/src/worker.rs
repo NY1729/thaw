@@ -63,15 +63,28 @@ enum Evt {
     Cpu(u32, u64, u64),
     /// The answer to a `getHeapStatistics` request: its ack id, then the worker thread's `__thaw_memory_usage` JSON.
     Heap(u32, String),
+    /// The answer to a profile start or stop: its ack id, the status (`started`, `exists`, `ok`, `unknown`), and the
+    /// profile JSON of a stop.
+    Profile(u32, &'static str, String),
 }
 
-/// `worker.cpuUsage()` and `worker.getHeapStatistics()` requests queued by the parent for the worker thread: (ack,
-/// is a heap request). The parent queues an ack and raises `requested`; the worker takes the queue in `serve_cpu`,
-/// from its interrupt check.
+/// A request queued by the parent for the worker thread (`worker.cpuUsage()`, `getHeapStatistics()`,
+/// `startCpuProfile()` and the profile's `stop()`).
+enum Req {
+    Cpu,
+    Heap,
+    ProfStart(String),
+    ProfStop(String),
+}
+
+/// `worker.cpuUsage()`, `getHeapStatistics()` and profile requests queued by the parent for the worker thread: (ack,
+/// request). The parent queues an ack and raises `requested`; the worker takes the queue in `serve_cpu`, from its
+/// interrupt check. `sample_due` is raised by the profiler's timer (cpu_profile.rs) together with `requested`.
 #[derive(Default)]
 pub(crate) struct CpuProbe {
     requested: AtomicBool,
-    acks: Mutex<Vec<(u32, bool)>>,
+    sample_due: AtomicBool,
+    acks: Mutex<Vec<(u32, Req)>>,
 }
 
 /// A worker that can receive a `postMessageToThread`: its command channel, and its port token (a port moved to it is
@@ -126,6 +139,8 @@ pub(crate) struct WorkerState {
     next: u32,
     workers: BTreeMap<u32, Worker>,
     side: Option<Side>,
+    /// The CPU profiles this worker is running (`worker.startCpuProfile`, cpu_profile.rs); it lives on the worker's Interp.
+    pub(crate) prof: std::cell::RefCell<crate::cpu_profile::Profiler>,
     /// The environment table this realm's `process.env` reads and writes (`process_env.rs`); None is the real
     /// process environment (the main realm until a `SHARE_ENV` worker is spawned).
     pub(crate) env_table: Option<EnvTable>,
@@ -663,10 +678,16 @@ fn spawn(
 }
 
 impl CpuProbe {
-    /// Parent side: queues `ack` (a heap request when `heap`) and wakes the worker's next interrupt check.
-    fn request(&self, ack: u32, heap: bool) {
+    /// Parent side: queues `ack` and wakes the worker's next interrupt check.
+    fn request(&self, ack: u32, req: Req) {
         let mut acks = self.acks.lock().unwrap_or_else(|e| e.into_inner());
-        acks.push((ack, heap));
+        acks.push((ack, req));
+        self.requested.store(true, Ordering::Relaxed);
+    }
+
+    /// The profile timer's tick (its thread only calls this): the next interrupt check takes a sample.
+    pub(crate) fn tick(&self) {
+        self.sample_due.store(true, Ordering::Relaxed);
         self.requested.store(true, Ordering::Relaxed);
     }
 }
@@ -706,6 +727,13 @@ fn serve_cpu(side: &Side, it: &Interp) {
         side.cpu.requested.store(false, Ordering::Relaxed);
         std::mem::take(&mut *acks)
     };
+    // a profile timer tick: every active profile takes this thread's stack
+    if side.cpu.sample_due.swap(false, Ordering::Relaxed) {
+        it.worker
+            .prof
+            .borrow_mut()
+            .sample_all(it, crate::cpu_profile::now_us());
+    }
     if acks.is_empty() {
         return;
     }
@@ -713,11 +741,19 @@ fn serve_cpu(side: &Side, it: &Interp) {
     // the memory walk is only paid for when a heap request is queued
     let usage = acks
         .iter()
-        .any(|&(_, heap)| heap)
+        .any(|(_, req)| matches!(req, Req::Heap))
         .then(|| crate::sysio::memory_usage_json(it));
-    for (ack, heap) in acks {
-        let evt = match &usage {
-            Some(json) if heap => Evt::Heap(ack, json.clone()),
+    for (ack, req) in acks {
+        let evt = match (req, &usage) {
+            (Req::Heap, Some(json)) => Evt::Heap(ack, json.clone()),
+            (Req::ProfStart(name), _) => {
+                let status = it.worker.prof.borrow_mut().start(&name, &side.cpu);
+                Evt::Profile(ack, status, String::new())
+            }
+            (Req::ProfStop(name), _) => match it.worker.prof.borrow_mut().finish(it, &name) {
+                Some(json) => Evt::Profile(ack, "ok", json),
+                None => Evt::Profile(ack, "unknown", String::new()),
+            },
             _ => Evt::Cpu(ack, user, system),
         };
         let _ = side.tx.send(evt);
@@ -1038,6 +1074,10 @@ fn pump(it: &mut Interp, ports_only: bool) -> String {
                 Evt::Heap(ack, usage) => {
                     format!(r#"{{"handle":{id},"type":"heap","ack":{ack},"usage":{usage}}}"#)
                 }
+                Evt::Profile(ack, status, value) => format!(
+                    r#"{{"handle":{id},"type":"profile","ack":{ack},"status":"{status}","value":{}}}"#,
+                    quoted(&value)
+                ),
             };
             items.push(Item::Json(json));
         }
@@ -1276,7 +1316,7 @@ pub(crate) fn install(it: &mut Interp) {
             let (h, ack) = (it.num(&arg(a, 0)) as u32, it.num(&arg(a, 1)) as u32);
             let sent = match it.worker.workers.get(&h) {
                 Some(w) if !w.exited => {
-                    w.cpu.request(ack, heap);
+                    w.cpu.request(ack, if heap { Req::Heap } else { Req::Cpu });
                     true
                 }
                 _ => false,
@@ -1285,6 +1325,31 @@ pub(crate) fn install(it: &mut Interp) {
         });
         g.declare(name, f, true);
     }
+    // worker.startCpuProfile(name) (op 0) and the profile's stop() (op 1): queues `ack` like the requests above
+    let f = it.native(|it, _, a| {
+        let (h, ack, stop) = (
+            it.num(&arg(a, 0)) as u32,
+            it.num(&arg(a, 1)) as u32,
+            it.num(&arg(a, 2)) == 1.0,
+        );
+        let name = it.to_str(&arg(a, 3)).to_string();
+        let sent = match it.worker.workers.get(&h) {
+            Some(w) if !w.exited => {
+                w.cpu.request(
+                    ack,
+                    if stop {
+                        Req::ProfStop(name)
+                    } else {
+                        Req::ProfStart(name)
+                    },
+                );
+                true
+            }
+            _ => false,
+        };
+        Ok(Value::Bool(sent))
+    });
+    g.declare("__thaw_worker_prof", f, true);
     let f = it.native(|it, _, a| {
         let (h, refd) = (it.num(&arg(a, 0)) as u32, arg(a, 1).truthy());
         if let Some(w) = it.worker.workers.get_mut(&h) {

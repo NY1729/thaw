@@ -32,6 +32,7 @@ mod builtins;
 mod call_frames;
 mod child;
 mod classes;
+mod cpu_profile;
 mod jsstr;
 pub mod mem_trace;
 mod profile;
