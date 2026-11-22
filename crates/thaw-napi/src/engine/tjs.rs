@@ -101,6 +101,7 @@ extern "C" {
         graph_json: *const c_char,
         attributes: u32,
     ) -> ThawHandleResult;
+    #[cfg_attr(not(test), allow(dead_code))] // test-only callers
     fn thaw_tjs_get_global(name: *const c_char) -> i64;
     fn thaw_tjs_get_property_json_key_result(
         handle: u64,
@@ -114,6 +115,7 @@ extern "C" {
         handle: u64,
         key_handle: u64,
     ) -> ThawCallWithExceptionResult;
+    #[cfg_attr(not(test), allow(dead_code))] // test-only callers
     fn thaw_tjs_get_property_result(handle: u64, name: *const c_char) -> ThawHandleResult;
     fn thaw_tjs_get_prototype_handle_result(handle: u64) -> ThawHandleResult;
     fn thaw_tjs_graph_native_pair_matches_result(
@@ -135,6 +137,7 @@ extern "C" {
         object_handle: u64,
         constructor_handle: u64,
     ) -> ThawHandleResult;
+    #[cfg_attr(not(test), allow(dead_code))] // test-only callers
     fn thaw_tjs_load_script(source: *const c_char) -> u8;
     fn thaw_tjs_napi_graph_symbol_register(owner: u64, handle: u64) -> u64;
     fn thaw_tjs_napi_handle_is_symbol(handle: u64) -> u8;
@@ -315,6 +318,7 @@ pub extern "C" fn thaw_js_define_data_property_key_handle_graph_result(
         )
     }
 }
+#[cfg_attr(not(test), allow(dead_code))] // test-only callers
 pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
     unsafe { thaw_tjs_get_global(name) as u64 }
 }
@@ -336,6 +340,7 @@ pub extern "C" fn thaw_js_get_property_key_handle_with_exception_result(
 ) -> ThawCallWithExceptionResult {
     unsafe { thaw_tjs_get_property_key_handle_with_exception_result(handle, key_handle) }
 }
+#[cfg_attr(not(test), allow(dead_code))] // test-only callers
 pub extern "C" fn thaw_js_get_property_result(
     handle: u64,
     name: *const c_char,
@@ -385,6 +390,7 @@ pub extern "C" fn thaw_js_instanceof_handles_result(
 ) -> ThawHandleResult {
     unsafe { thaw_tjs_instanceof_handles_result(object_handle, constructor_handle) }
 }
+#[cfg_attr(not(test), allow(dead_code))] // test-only callers
 pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
     unsafe { thaw_tjs_load_script(source) }
 }

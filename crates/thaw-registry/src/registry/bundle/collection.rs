@@ -663,6 +663,12 @@ fn bundle_commonjs_package_cached(
             .cloned()
         {
             let (resolution_spec, suffix) = split_module_suffix(&spec);
+            // A `?query`/`#fragment` is an `import` feature: Node's require() of
+            // such a specifier is MODULE_NOT_FOUND, so it is left unmapped.
+            let import_side = analysis.import_condition_specs.contains(&spec);
+            if !suffix.is_empty() && !import_side {
+                continue;
+            }
             let combined = if requiring_dir.as_os_str().is_empty() {
                 resolution_spec.to_string()
             } else {
@@ -685,10 +691,10 @@ fn bundle_commonjs_package_cached(
                 resolve_module_path(&pkg_dir, &resolution_path)
             {
                 let resolved_key = package_module_key(node_modules_dir, root, &pkg_name, &pkg_dir, &resolved_relative, suffix);
-                if analysis.require_condition_specs.contains(&spec) {
+                if analysis.require_condition_specs.contains(&spec) && suffix.is_empty() {
                     requires.push((spec.clone(), resolved_key.clone()));
                 }
-                if analysis.import_condition_specs.contains(&spec) {
+                if import_side {
                     imports.push((spec, resolved_key.clone()));
                 }
                 claim_module_key(&mut identities, &resolved_key, &resolved_abs)?;

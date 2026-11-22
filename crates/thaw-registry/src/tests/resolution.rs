@@ -3154,12 +3154,12 @@ fn resolved_package_applies_runtime_env_defaults_without_overriding_the_process_
     let source = resolved.bundle_js.unwrap();
     assert!(source.ends_with("globalThis.__env_pkg_loaded = true;\n"));
     let setup = "globalThis.__saved_process = globalThis.process; globalThis.process = { env: { USER_SET_VAR: 'mine' }, execPath: '/opt/app' };";
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(setup).unwrap().as_ptr()), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(source).unwrap().as_ptr()), 1);
-    assert_eq!(thaw_quickjs::eval_json("process.env.LIBRARY_PATH_VAR"), Ok(Some("\"/opt/app\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("process.env.NESTED_VAR"), Ok(Some("\"/opt/app/lib\"".into())));
-    assert_eq!(thaw_quickjs::eval_json("process.env.USER_SET_VAR"), Ok(Some("\"mine\"".into())));
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__saved_process;").unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(setup).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(source).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::eval_json("process.env.LIBRARY_PATH_VAR"), Ok(Some("\"/opt/app\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("process.env.NESTED_VAR"), Ok(Some("\"/opt/app/lib\"".into())));
+    assert_eq!(thaw_js_shim::eval_json("process.env.USER_SET_VAR"), Ok(Some("\"mine\"".into())));
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new("globalThis.process = globalThis.__saved_process;").unwrap().as_ptr()), 1);
     let _ = fs::remove_dir_all(registry);
 }
 

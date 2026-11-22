@@ -299,3 +299,19 @@ fn dynamic_projection_own_checks_do_not_invoke_inherited_accessor() {
     "#;
     assert_eq!(run_realm(src), vec!["false", "[]", "false", "42"]);
 }
+
+/// The bridge's module wrapper binds each exported function with `__thaw_bind_preserving_statics`; it must
+/// exist in the default realm (a missing helper is swallowed by the wrapper's try/catch, silently leaving
+/// named exports unbound) and keep own statics of the bound function. Node-irrelevant host helper; the
+/// expected values are those of the QuickJS runtime.js version.
+#[test]
+fn dynamic_bind_preserving_statics_keeps_own_properties() {
+    let src = r#"
+      function f() { return this.v; }
+      f.helper = 7;
+      Object.defineProperty(f, 'hidden', { value: 9, enumerable: false });
+      var b = __thaw_bind_preserving_statics(f, { v: 5 });
+      console.log(b(), b.helper, b.hidden, b.name, __thaw_bind_preserving_statics(3, {}));
+    "#;
+    assert_eq!(run_realm(src), vec!["5 7 9 bound f 3"]);
+}

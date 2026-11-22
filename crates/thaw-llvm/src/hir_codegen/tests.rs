@@ -536,13 +536,22 @@ fn build_staticlib(pkg: &str) -> std::path::PathBuf {
 /// `build_staticlib` with explicit cargo features (default features stay on, as for plain
 /// `build_staticlib`; thaw-js has none by default).
 fn build_staticlib_with_features(pkg: &str, features: &[&str]) -> std::path::PathBuf {
-    let mut args = vec!["build", "--release", "-p", pkg, "--message-format=json"];
+    let mut build = Command::new("cargo");
+    build.args(["build", "--release", "-p", pkg, "--message-format=json"]);
+    if pkg == "thaw-napi" {
+        // these tests link N-API with the QuickJS staticlib (the QuickJS lane), so they need the QuickJS-engine napi
+        // build, which used to be the crate's default; the default is now the thaw-js engine
+        build.args([
+            "--no-default-features",
+            "--features",
+            "quickjs-brotli,quickjs-tls,quickjs-wasm",
+        ]);
+    }
     let joined = features.join(",");
     if !features.is_empty() {
-        args.extend(["--features", &joined]);
+        build.args(["--features", &joined]);
     }
-    let output = Command::new("cargo")
-        .args(args)
+    let output = build
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke `cargo build -p {pkg}`: {e}"));
     assert!(output.status.success(), "building {pkg} failed");

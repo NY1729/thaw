@@ -8,7 +8,7 @@ license.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [features]
-default = ["quickjs-brotli", "quickjs-tls", "quickjs-wasm"]
+default = ["engine-thaw-js"]
 # `js-engine` = "some engine backend is present"; all existing cfg(feature="js-engine") gates keep working.
 js-engine = []
 engine-quickjs = ["js-engine", "dep:thaw-quickjs"]

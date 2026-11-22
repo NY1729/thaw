@@ -1417,3 +1417,25 @@ fn worker_post_message_to_thread_rejects_a_transfer_port_closed_by_a_getter() {
       })().catch((e) => console.log('failed ' + e));";
     assert_eq!(run_main(src), "rejected 0 0");
 }
+
+#[test]
+fn unreffed_worker_already_winding_down_still_delivers_its_exit() {
+    // The unref'd worker has finished its work and is on its way out (a slow exit handler stands in for a loaded
+    // machine); the referenced sibling exits first. The parent loop must not end before the winding-down worker's
+    // exit arrives, or the awaited exit never settles.
+    let src = "const wt = __thaw_worker_threads_exports;
+      (async () => {
+        const slow = `const wt = require('node:worker_threads'); wt.parentPort.on('message', () => { wt.parentPort.postMessage('done'); wt.parentPort.close(); }); process.on('exit', () => { const end = Date.now() + 400; while (Date.now() < end); });`;
+        const fast = `const wt = require('node:worker_threads'); wt.parentPort.on('message', () => { wt.parentPort.postMessage('done'); wt.parentPort.close(); });`;
+        const worker = new wt.Worker(slow, { eval: true });
+        worker.unref();
+        const sibling = new wt.Worker(fast, { eval: true });
+        const exits = [new Promise((r) => worker.on('exit', r)), new Promise((r) => sibling.on('exit', r))];
+        const got = new Promise((r) => worker.on('message', r));
+        worker.postMessage('go');
+        await got;
+        sibling.postMessage('go');
+        console.log((await Promise.all(exits)).join(','));
+      })().catch((e) => console.log('failed ' + e));";
+    assert_eq!(run_main(src), "0,0");
+}

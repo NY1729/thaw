@@ -24,6 +24,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+      - name: Blocked-bundles list has no open reasons
+        run: |
+          # only final reasons may remain: a scanner-precision or missing-node-api row is a gap thaw has to close
+          bad=$(grep -v '^#' tools/blocked-bundles.txt | grep -v '^[[:space:]]*$' | cut -f3 | grep -Ex 'scanner-precision|missing-node-api' || true)
+          if [ -n "$bad" ]; then echo "::error::tools/blocked-bundles.txt has open reasons: $bad"; exit 1; fi
       - name: Blocked-bundles list may only shrink
         env:
           BASE_REF: ${{ github.base_ref }}

@@ -8,6 +8,12 @@
   // captured as functions, so a later replacement of the owning object does not change them.
   const intrinsicObject = Object;
   const reflectConstruct = Reflect.construct;
+  const reflectApply = Reflect.apply;
+  const arrayIndexOf = Array.prototype.indexOf;
+  const arrayForEach = Array.prototype.forEach;
+  const stringStartsWith = String.prototype.startsWith;
+  const stringSlice = String.prototype.slice;
+  const stringIndexOf = String.prototype.indexOf;
   const reflectGet = Reflect.get;
   const reflectSet = Reflect.set;
   const reflectHas = Reflect.has;
@@ -43,15 +49,15 @@
 
   // RJ runtime.js each_export: qualified packages list only their own prefixed names.
   const eachExport = (info, prefix, packageName, install) => {
-    const qualified = info.qualifiedPackages.indexOf(packageName) !== -1;
-    info.names.forEach(name => {
+    const qualified = reflectApply(arrayIndexOf, info.qualifiedPackages, [packageName]) !== -1;
+    reflectApply(arrayForEach, info.names, [name => {
       if (qualified) {
-        if (!name.startsWith(prefix)) return;
-        install(name, name.slice(prefix.length));
-      } else if (name.indexOf('::') === -1) {
+        if (!reflectApply(stringStartsWith, name, [prefix])) return;
+        install(name, reflectApply(stringSlice, name, [prefix.length]));
+      } else if (reflectApply(stringIndexOf, name, ['::']) === -1) {
         install(name, name);
       }
-    });
+    }]);
   };
 
   const ownerOf = handle => cap.owner(handle);

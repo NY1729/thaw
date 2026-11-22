@@ -167,14 +167,14 @@ fn path_os_fs_polyfills_actually_run_through_quickjs() {
         );
     let source = CString::new(script).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "bundle failed to load"
     );
 
     let func = CString::new("locate").unwrap();
     let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -221,10 +221,10 @@ fn named_default_declarations_remain_local_bindings() {
             {rewritten} return function() {{ return {expression}; }}; }})();"
         );
         assert_eq!(
-            thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+            thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()),
             1
         );
-        let result = thaw_quickjs::thaw_js_call(
+        let result = thaw_js_shim::thaw_js_call(
             CString::new("__thaw_named_default").unwrap().as_ptr(),
             CString::new("[]").unwrap().as_ptr(),
         );
@@ -262,10 +262,10 @@ fn export_star_does_not_redefine_explicit_local_or_reexported_names() {
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.__thaw_star_explicit_case = function() {{ return [module.exports.local, module.exports.destructured, module.exports.chosen, module.exports.starOnly]; }};");
     assert_eq!(
-        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()),
         1
     );
-    let result = thaw_quickjs::thaw_js_call(
+    let result = thaw_js_shim::thaw_js_call(
         CString::new("__thaw_star_explicit_case").unwrap().as_ptr(),
         CString::new("[]").unwrap().as_ptr(),
     );
@@ -292,10 +292,10 @@ fn star_rewrite_uses_the_bundle_origin_graph() {
         bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.__thaw_star_import = function() {{ return [module.exports.x, module.exports.y]; }};");
     assert_eq!(
-        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()),
         1
     );
-    let result = thaw_quickjs::thaw_js_call(c"__thaw_star_import".as_ptr(), c"[]".as_ptr());
+    let result = thaw_js_shim::thaw_js_call(c"__thaw_star_import".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[4,5]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
@@ -390,10 +390,10 @@ fn named_import_calls_keep_unbound_this_and_live_export_values() {
          globalThis.__thaw_named_import_receiver = module.exports.run;"
     );
     assert_eq!(
-        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()),
         1
     );
-    let result = thaw_quickjs::thaw_js_call(
+    let result = thaw_js_shim::thaw_js_call(
         CString::new("__thaw_named_import_receiver")
             .unwrap()
             .as_ptr(),
@@ -583,10 +583,10 @@ fn import_meta_is_one_mutable_object_without_a_generated_name_collision() {
          {rewritten} return module.exports.check; }})();"
     );
     assert_eq!(
-        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        thaw_js_shim::thaw_js_load(CString::new(script).unwrap().as_ptr()),
         1
     );
-    let result = thaw_quickjs::thaw_js_call(
+    let result = thaw_js_shim::thaw_js_call(
         CString::new("__thaw_import_meta_identity_case")
             .unwrap()
             .as_ptr(),
@@ -812,14 +812,14 @@ fn esm_bundle_actually_runs_through_quickjs() {
         );
     let source = CString::new(script).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "ESM bundle failed to load"
     );
 
     let func = CString::new("run").unwrap();
     let args = CString::new("[21]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -881,10 +881,10 @@ fn mixed_esm_bundle_supports_live_exports_cycles_imports_json_and_dynamic_import
              globalThis.runMixed = module.exports.default;\n"
     );
     let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
     let function = CString::new("runMixed").unwrap();
     let args = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+    let result = thaw_js_shim::thaw_js_call(function.as_ptr(), args.as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
 
     let _ = fs::remove_dir_all(&dir);
@@ -1148,10 +1148,10 @@ fn nonliteral_dynamic_import_resolves_candidates_and_reuses_namespace() {
              globalThis.runRuntimeImport = module.exports.default;\n"
     );
     let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
     let function = CString::new("runRuntimeImport").unwrap();
     let args = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+    let result = thaw_js_shim::thaw_js_call(function.as_ptr(), args.as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1189,10 +1189,10 @@ fn module_query_and_fragment_are_part_of_cache_identity() {
              globalThis.runModuleIdentity = module.exports.default;\n"
     );
     let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
     let function = CString::new("runModuleIdentity").unwrap();
     let args = CString::new("[]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+    let result = thaw_js_shim::thaw_js_call(function.as_ptr(), args.as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1259,7 +1259,7 @@ fn runtime_dynamic_import_resolves_declared_external_packages() {
              globalThis.runConstantExternalImport = module.exports.default;\n"
     );
     let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
     let function = CString::new("runConstantExternalImport").unwrap();
     for (args, expected) in [
         (r#"["dep-a"]"#, "41"),
@@ -1273,7 +1273,7 @@ fn runtime_dynamic_import_resolves_declared_external_packages() {
         (r#"["dep-b/lib/tools"]"#, "46"),
     ] {
         let args = CString::new(args).unwrap();
-        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+        let result = thaw_js_shim::thaw_js_call(function.as_ptr(), args.as_ptr());
         assert_eq!(
             unsafe { CStr::from_ptr(result) }.to_string_lossy(),
             expected

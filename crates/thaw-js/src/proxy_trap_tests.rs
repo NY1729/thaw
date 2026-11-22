@@ -159,3 +159,13 @@ fn proxy_get_trap_symbol_to_primitive_accessor() {
         "G:default1"
     );
 }
+
+#[test]
+fn object_keys_values_entries_propagate_a_throwing_own_keys_trap() {
+    for f in ["keys", "values", "entries"] {
+        assert_eq!(
+            one(&format!("try {{ Object.{f}(new Proxy({{}}, {{ ownKeys() {{ throw new Error('boom'); }} }})); console.log('no throw'); }} catch (e) {{ console.log(e.message); }}")),
+            "boom"
+        );
+    }
+}
