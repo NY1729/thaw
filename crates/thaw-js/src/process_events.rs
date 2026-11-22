@@ -158,11 +158,14 @@ fn remove_key(target: &Obj, key: &str) {
 }
 
 /// The listeners `key` has, as stored: one function, or the array of them.
-fn listeners_list(it: &Interp, target: &Obj, key: &str) -> Vec<Value> {
+fn listeners_list(it: &mut Interp, target: &Obj, key: &str) -> R<Vec<Value>> {
     match own_events(target).and_then(|e| own_value(&e, key)) {
-        Some(list) if list.is_callable() => vec![list],
-        Some(list) => it.array_items(&list),
-        None => vec![],
+        Some(list) if list.is_callable() => Ok(vec![list]),
+        Some(list) => {
+            it.sparse_unsupported(&list)?;
+            Ok(it.array_items(&list))
+        }
+        None => Ok(vec![]),
     }
 }
 
@@ -383,6 +386,7 @@ fn remove_listener(it: &mut Interp, this: &Value, a: &[Value]) -> R<Value> {
             )?;
         }
     } else {
+        it.sparse_unsupported(&list)?;
         let mut items = it.array_items(&list);
         let Some(pos) = items.iter().rposition(|f| is_listener(f, &listener)) else {
             return Ok(this.clone());
@@ -430,7 +434,7 @@ fn remove_all_listeners(it: &mut Interp, this: &Value, a: &[Value]) -> R<Value> 
         reset_events(&target);
     } else {
         let key = it.key_of(&a[0]);
-        for f in listeners_list(it, &target, &key).iter().rev() {
+        for f in listeners_list(it, &target, &key)?.iter().rev() {
             invoke(it, this, "removeListener", &[a[0].clone(), f.clone()])?;
         }
     }
@@ -441,7 +445,7 @@ fn remove_all_listeners(it: &mut Interp, this: &Value, a: &[Value]) -> R<Value> 
 fn emit_event(it: &mut Interp, this: &Value, a: &[Value]) -> R<Value> {
     let target = receiver(it, this)?;
     let key = it.key_of(&arg(a, 0));
-    let list = listeners_list(it, &target, &key);
+    let list = listeners_list(it, &target, &key)?;
     if list.is_empty() {
         if &*key == "error" {
             let er = arg(a, 1);
@@ -471,7 +475,7 @@ fn emit_event(it: &mut Interp, this: &Value, a: &[Value]) -> R<Value> {
 fn listeners_of(it: &mut Interp, this: &Value, a: &[Value], unwrap: bool) -> R<Value> {
     let target = receiver(it, this)?;
     let key = it.key_of(&arg(a, 0));
-    let list = listeners_list(it, &target, &key);
+    let list = listeners_list(it, &target, &key)?;
     let out = if unwrap {
         list.iter().map(unwrap_listener).collect()
     } else {
@@ -484,7 +488,7 @@ fn listeners_of(it: &mut Interp, this: &Value, a: &[Value], unwrap: bool) -> R<V
 fn listener_count_method(it: &mut Interp, this: &Value, a: &[Value]) -> R<Value> {
     let target = receiver(it, this)?;
     let key = it.key_of(&arg(a, 0));
-    let list = listeners_list(it, &target, &key);
+    let list = listeners_list(it, &target, &key)?;
     let wanted = arg(a, 1);
     let n = if matches!(wanted, Value::Undefined | Value::Null) {
         list.len()

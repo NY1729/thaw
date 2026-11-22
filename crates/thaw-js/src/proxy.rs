@@ -107,7 +107,7 @@ impl Interp {
         if let Some(valid) = crate::typed::typed_own_key(o, key) {
             return Ok(valid);
         }
-        let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || array_index(key).is_some_and(|i| array_elem(o, items, i).is_some()));
+        let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || array_index(key).is_some_and(|i| array_has_index(o, items, i)));
         if matches!(&*o.kind.borrow(), Kind::Global) {
             // a context's global: the sandbox's chain answers first (its vars, its names, Object.prototype)
             if let Some(sb) = crate::vm::sandbox_of(o) {
@@ -354,6 +354,13 @@ impl Interp {
             ))
         });
         self.global.declare("__thaw_is_proxy", is_proxy, true);
+        // a sparse tail (length past the dense slots): the copying prelude methods refuse it, as stage 1 does
+        let has_tail = self.native(|_, _, args| {
+            Ok(Value::Bool(
+                matches!(arg(args, 0), Value::Object(o) if crate::array_has_sparse_tail(&o)),
+            ))
+        });
+        self.global.declare("__thaw_array_has_tail", has_tail, true);
     }
 
     fn make_proxy(&mut self, target: &Value, handler: &Value) -> R<Value> {
