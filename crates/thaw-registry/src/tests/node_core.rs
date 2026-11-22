@@ -3016,70 +3016,10 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-mod qjs_pending_node_core_root_hooks {
-    use super::*;
-    use ::thaw_quickjs;
-
-#[test]
-fn node_test_root_hooks_finalize_without_run_and_replay_once() {
-    use std::ffi::{CStr, CString};
-
-    let dir = temp_registry("builtin_test_root_hooks");
-    fs::write(
-        dir.join("index.js"),
-        r#"var test = require('node:test');
-module.exports = async function () {
-  var effects = [], first = test('first', function() { effects.push('first'); });
-  test.before(function() { effects.push('before'); });
-  test.after(function() { effects.push('after'); });
-  await first;
-  await new Promise(function(resolve) { setTimeout(resolve, 20); });
-  await test('second', function() { effects.push('second'); });
-  globalThis.inspectRootHooks = async function() {
-    var firstHistory = [], secondHistory = [];
-    for await (var event of test.run()) firstHistory.push(event.name + ':' + event.status);
-    for await (var event of test.run()) secondHistory.push(event.name + ':' + event.status);
-    var lateTest = false, lateHook = false;
-    try { test('late', function() {}); } catch (error) { lateTest = true; }
-    try { test.after(function() {}); } catch (error) { lateHook = true; }
-    return [effects, firstHistory, secondHistory, lateTest, lateHook];
-  };
-  return 'registered';
-};"#,
-    ).unwrap();
-    let empty_node_modules = temp_registry("builtin_test_root_hooks_modules");
-    let (bundle, _, file_count, _) =
-        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert!(file_count >= 4);
-    let script = format!(
-        "globalThis.module = {{ exports: {{}} }};\n\
-         globalThis.exports = globalThis.module.exports;\n\
-         globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
-         {bundle}\n\
-         globalThis.exerciseRootHooks = module.exports;\n"
-    );
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let func = CString::new("exerciseRootHooks").unwrap();
-    let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy(), "\"registered\"");
-    assert_eq!(thaw_quickjs::thaw_js_run_event_loop(), 0);
-    let inspect = CString::new("inspectRootHooks").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(inspect.as_ptr(), args.as_ptr());
-    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    // Node 22 (measured 3 runs): root `after` fires once the first root test settles (before `second`), and late
-    // test()/test.after() calls do not throw (old pin: [before,first,second,after] with both late calls throwing)
-    assert_eq!(result, r#"[["before","first","after","second"],["first:passed","second:passed"],["first:passed","second:passed"],false,false]"#);
-    let _ = fs::remove_dir_all(&dir);
-    let _ = fs::remove_dir_all(&empty_node_modules);
-}
-}
-
 #[test]
 fn node_test_root_hooks_follow_node_effects_order() {
     // Node 22 (measured 3 runs): root `after` fires once `first` settles, before `second` is registered;
-    // late test() and test.after() calls do not throw.
+    // late test() and test.after() calls do not throw; test.run() after the root queue finished runs no tests (measured 3 runs).
     let dir = temp_registry("builtin_test_root_hooks_node_order");
     fs::write(
         dir.join("index.js"),
@@ -3091,10 +3031,17 @@ module.exports = async function () {
   await first;
   await new Promise(function(resolve) { setTimeout(resolve, 20); });
   await test('second', function() { effects.push('second'); });
+  var firstHistory = [], secondHistory = [];
+  for await (var event of test.run()) {
+    if (event.type === 'test:pass' || event.type === 'test:fail') firstHistory.push(event.type + ':' + event.data.name);
+  }
+  for await (var event of test.run()) {
+    if (event.type === 'test:pass' || event.type === 'test:fail') secondHistory.push(event.type + ':' + event.data.name);
+  }
   var lateTest = false, lateHook = false;
   try { test('late', function() {}); } catch (error) { lateTest = true; }
   try { test.after(function() {}); } catch (error) { lateHook = true; }
-  return [effects, lateTest, lateHook];
+  return [effects, firstHistory, secondHistory, lateTest, lateHook];
 };"#,
     )
     .unwrap();
@@ -3104,7 +3051,7 @@ module.exports = async function () {
     let result = run_js_json(&bundle);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
-    assert_eq!(result, r#"[["before","first","after","second"],false,false]"#);
+    assert_eq!(result, r#"[["before","first","after","second"],[],[],false,false]"#);
 }
 
 #[test]
@@ -3138,8 +3085,8 @@ module.exports = async function () {
 #[test]
 fn child_process_startup_failure_follows_node_async_once() {
     // Node 22 (measured 3 runs): ENOENT arrives asynchronously, once per call, with empty stdout/stderr
-    // (callback and promisified). Not covered: execFile with {uid: 0} throws EPERM synchronously in Node
-    // as non-root, but thaw-js ignores the uid option (no synchronous throw).
+    // (callback and promisified). Refused credentials (uid/gid 0) throw EPERM synchronously, like Node;
+    // see child_process_refused_or_invalid_credentials_fail_synchronously_like_node.
     let dir = temp_registry("builtin_child_process_startup_failure_node_once");
     fs::write(
         dir.join("index.js"),
@@ -3515,71 +3462,4 @@ module.exports = function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
-}
-
-mod qjs_pending_node_core_child_startup {
-    use super::*;
-    use ::thaw_quickjs;
-
-#[test]
-fn child_process_credentials_async_startup_failure_completes_callback_and_promise_once() {
-    use std::ffi::{CStr, CString};
-
-    let dir = temp_registry("builtin_child_process_credentials_async_error");
-    fs::write(
-        dir.join("index.js"),
-        r#"var childProcess = require('node:child_process'), util = require('node:util');
-module.exports = async function () {
-  var host = globalThis, nextHandle = 50, pending = [];
-  var previous = {
-    spawn: host.__thaw_child_process_spawn,
-    stdin: host.__thaw_child_process_stdin,
-    poll: host.__thaw_child_process_poll,
-    active: host.__thaw_child_process_active
-  };
-  try {
-    host.__thaw_child_process_spawn = function() { var handle = nextHandle++; pending.push(handle); return handle; };
-    host.__thaw_child_process_stdin = function() {};
-    host.__thaw_child_process_active = function() { return pending.length !== 0; };
-    host.__thaw_child_process_poll = function() {
-      var handle = pending.shift();
-      return handle === undefined ? '[]' : JSON.stringify([
-        { handle: handle, type: 'error', message: 'credential denied', code: 'EPERM' },
-        { handle: handle, type: 'exit', code: null, signal: null }
-      ]);
-    };
-    var callbackCount = 0;
-    await new Promise(function(resolve, reject) {
-      childProcess.execFile('cmd', { uid: 0 }, function(error, stdout, stderr) {
-        callbackCount++;
-        if (!error || error.code !== 'EPERM' || stdout !== '' || stderr !== '') { reject(new Error('execFile startup error')); return; }
-        resolve();
-      });
-    });
-    if (callbackCount !== 1) throw new Error('callback completion count');
-    var promiseError;
-    try { await util.promisify(childProcess.execFile)('cmd', { gid: 0 }); }
-    catch (error) { promiseError = error; }
-    if (!promiseError || promiseError.code !== 'EPERM' || promiseError.stdout !== '' || promiseError.stderr !== '') throw new Error('promisified startup error');
-    if (pending.length !== 0) throw new Error('startup event handles were not consumed');
-    return true;
-  } finally {
-    host.__thaw_child_process_spawn = previous.spawn;
-    host.__thaw_child_process_stdin = previous.stdin;
-    host.__thaw_child_process_poll = previous.poll;
-    host.__thaw_child_process_active = previous.active;
-  }
-};"#,
-    ).unwrap();
-    let empty_node_modules = temp_registry("builtin_child_process_credentials_async_error_modules");
-    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessCredentialStartupFailure = module.exports;");
-    let source = CString::new(script).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"exerciseChildProcessCredentialStartupFailure".as_ptr(), c"[]".as_ptr());
-    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
-    let _ = fs::remove_dir_all(&dir);
-    let _ = fs::remove_dir_all(&empty_node_modules);
-    assert_eq!(result, "true");
-}
 }
