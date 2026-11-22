@@ -7473,6 +7473,51 @@ pub(crate) fn other_packages_have_work() -> bool {
     })
 }
 
+/// One turn of every loaded realm that is not on the stack (a nested `await_settled` runs inside one realm, while
+/// the I/O its promise waits on may belong to another, e.g. hono awaiting a body that `@hono/node-server`'s socket
+/// delivers). The realm doing the waiting is skipped. Returns
+/// whether any such realm still has work, so the caller keeps waiting instead of declaring the promise unsettled.
+pub(crate) fn drive_other_realms_once(me: *const Interp) -> bool {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    let mut any_work = false;
+    for handle in 0..count {
+        // a loaded realm, or one up-stack through `RUNNING` (its callback called into this nested wait: the
+        // same nested-loop re-entry a realm's own `await_settled` already performs)
+        let idle = PACKAGES.with(|ps| match ps.borrow().get(handle) {
+            Some(Some(p)) => std::ptr::eq(&*p.interp, me) || !p.interp.work_pending(),
+            Some(None) => RUNNING.with(|r| match r.borrow().get(&handle) {
+                // SAFETY: a running package's pointer is a live stack local of its `with_package` frame.
+                Some(pk) => {
+                    let it = unsafe { &*(**pk).interp };
+                    std::ptr::eq(it, me) || !it.work_pending()
+                }
+                None => true,
+            }),
+            None => true,
+        });
+        if idle {
+            continue;
+        }
+        any_work = true;
+        let _ = with_package(handle, |p| {
+            match p.interp.drive_once() {
+                Ok(()) => {}
+                Err(Ctl::Exit(c)) => {
+                    p.interp.set_exit_code(Some(c as f64));
+                    terminate_process(&mut p.interp, c);
+                }
+                Err(e) => {
+                    // an uncaught error in a callback ends the program, as in the terminal loop
+                    let _ = p.interp.report_nested_fatal(e);
+                    terminate_process(&mut p.interp, 1);
+                }
+            }
+            Ok(())
+        });
+    }
+    any_work
+}
+
 /// Terminal event loop for a routed build that holds no QuickJS context: runs every loaded
 /// package's timers/immediates/jobs until idle. Returns 1 if a package ended with an uncaught
 /// error. (The codegen renames `thaw_js_run_event_loop` to this symbol for such builds.)

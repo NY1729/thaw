@@ -2351,6 +2351,36 @@ var __thaw_bundle_entry_key = "pend/index.js";
     assert_eq!(typed_call("\u{4}pend::now", "[]"), Ok("1".into()));
 }
 
+/// A nested await in one realm waits on a promise that only another realm's timer resolves (hono awaiting a body
+/// that `@hono/node-server`'s socket delivers): the wait must drive the other realm, not report "never settled".
+#[test]
+fn nested_await_drives_the_timer_of_another_realm() {
+    use crate::host::thaw_tjs_register;
+    use std::ffi::CString;
+    let bundle = |name: &str, body: &str| {
+        format!(
+            r#"module.exports = (function(require){{
+var __thaw_bundle_factories = {{ "{name}/index.js": function(module, exports, require) {{ {body} }}, }};
+var __thaw_bundle_require_maps = {{ "{name}/index.js": {{}}, }};
+var __thaw_bundle_entry_key = "{name}/index.js";
+}})(globalThis.require);"#
+        )
+    };
+    let a = bundle(
+        "wa",
+        "exports.f = async function () { return await new Promise(function (r) { globalThis.nestedWaiters = [r]; }); };",
+    );
+    let b = bundle(
+        "wb",
+        "var t = setInterval(function () { var w = globalThis.nestedWaiters; if (w && w.length) { clearInterval(t); w.shift()(5); } }, 5);",
+    );
+    for (n, src) in [("wa", a), ("wb", b)] {
+        let (name, source) = (CString::new(n).unwrap(), CString::new(src).unwrap());
+        assert_eq!(thaw_tjs_register(name.as_ptr(), source.as_ptr()), 1);
+    }
+    assert_eq!(typed_call("wa::f", "[]"), Ok("5".into()));
+}
+
 #[test]
 fn pending_promise_settles_in_the_event_loop_without_a_later_call() {
     use crate::host::{thaw_tjs_register, thaw_tjs_run_event_loop, thaw_tjs_watch_promise};
