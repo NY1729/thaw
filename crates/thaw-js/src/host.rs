@@ -75,6 +75,8 @@ struct Loader {
     /// The thrown value of each module whose factory threw synchronously: its cache entry stays, so a later
     /// `import()` rejects with the same error instead of resolving the partial exports (Node caches the failure).
     failed: RefCell<HashMap<String, Value>>,
+    /// ES-module keys whose static graph `link_check` found fully resolvable.
+    linked: RefCell<HashSet<String>>,
     /// The keys whose factory is running right now (a synchronous evaluation in progress). A `require` that
     /// re-enters one across the CommonJS/ES boundary is a cycle Node refuses (`cycle_refused`).
     loading: RefCell<HashSet<String>>,
@@ -516,12 +518,73 @@ fn peer_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
         .map_err(|e| js_error(it, &e.to_string()))
 }
 
+/// Whether `peer_exports(spec)` would find a package (no load happens).
+fn peer_known(spec: &str) -> bool {
+    BOOTING.with(|b| b.borrow().iter().any(|(name, _)| name == spec))
+        || BY_NAME.with(|m| m.borrow().contains_key(spec))
+        || PEER_SOURCES.with(|s| s.borrow().contains_key(spec))
+}
+
 /// The module key of a node builtin the bundle serves for a spec the map does not name (`fs`, `node:fs`):
 /// the QuickJS lane's global `require(spec)` fallback. Builtins are the `node:<name>` factories.
 fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
     let name = spec.strip_prefix("node:").unwrap_or(spec);
     let key = format!("node:{name}");
     (loader.factories.contains_key(&key) || key == "node:crypto").then_some(key)
+}
+
+/// Node's link phase for a native ES-module graph: every static specifier of every module reachable from `root` must
+/// resolve before ANY module body runs. A failure is `ERR_MODULE_NOT_FOUND` (as `import()` of an unmapped spec), cached
+/// for the importing module and the modules above it on the walk (the same Error object each time, and it
+/// stays cached when the file appears later); unrelated modules are untouched and load normally.
+// ponytail: named-export existence (`does not provide an export named`) is not checked here, only resolution.
+fn link_check(loader: &Rc<Loader>, it: &mut Interp, root: &str) -> R<()> {
+    fn walk(loader: &Rc<Loader>, it: &mut Interp, key: &str, seen: &mut HashSet<String>) -> R<()> {
+        let specs = loader
+            .parts
+            .esm_specs
+            .get(base_of(loader, key))
+            .cloned()
+            .unwrap_or_default();
+        for spec in specs {
+            if spec == "bindings" || spec == "node-gyp-build" || spec.ends_with(".node") {
+                continue;
+            }
+            match module_key(loader, key, &spec, false) {
+                Some(next) => {
+                    if is_esm(loader, &next)
+                        && !loader.linked.borrow().contains(&next)
+                        && !loader.cache.borrow().contains_key(&next)
+                        && seen.insert(next.clone())
+                    {
+                        if let Err(Ctl::Throw(reason)) = walk(loader, it, &next, seen) {
+                            loader
+                                .failed
+                                .borrow_mut()
+                                .insert(key.to_string(), reason.clone());
+                            return Err(Ctl::Throw(reason));
+                        }
+                    }
+                }
+                None if peer_known(&spec) => {}
+                None => {
+                    let err = import_not_found(it, key, &spec);
+                    if let Ctl::Throw(reason) = &err {
+                        loader
+                            .failed
+                            .borrow_mut()
+                            .insert(key.to_string(), reason.clone());
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut seen = HashSet::from([root.to_string()]);
+    walk(loader, it, root, &mut seen)?;
+    loader.linked.borrow_mut().extend(seen);
+    Ok(())
 }
 
 fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
@@ -540,6 +603,16 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
     } else {
         loader.cache.borrow().get(key).cloned()
     };
+    if cached.is_none() && !commonjs && is_esm(loader, key) {
+        // a failed link is cached (there is no cache entry to hold it), and a graph links before any body runs
+        let failed = loader.failed.borrow().get(key).cloned();
+        if let Some(reason) = failed {
+            return Err(Ctl::Throw(reason));
+        }
+        if !loader.linked.borrow().contains(key) {
+            link_check(loader, it, key)?;
+        }
+    }
     if let Some(m) = cached {
         // a failed ES module stays failed: every later require rethrows its evaluation error (Node caches it)
         let failed = loader.failed.borrow().get(key).cloned();
@@ -944,6 +1017,7 @@ fn make_loader(
         namespaces: RefCell::new(HashMap::new()),
         ready: RefCell::new(HashMap::new()),
         failed: RefCell::new(HashMap::new()),
+        linked: RefCell::new(HashSet::new()),
         loading: RefCell::new(HashSet::new()),
         promise_of,
         cjs_namespace,
@@ -998,13 +1072,14 @@ fn install_native_registrar(it: &mut Interp) {
 /// promise (also when a module re-enters it while evaluating); `evaluate.readNative(id, name)` reads an export
 /// of a source of THIS bundle that has been linked (reached by evaluation), nothing else.
 fn register_native_bundle(it: &mut Interp, json: &str) -> R<Value> {
-    let (text, problems, _, esm_keys) =
+    let (text, problems, _, esm_keys, esm_specs) =
         crate::esm::native_json_to_factories(json, "", true).map_err(|e| js_error(it, &e))?;
     if let Some(problem) = problems.iter().next() {
         return Err(js_error(it, &format!("unsupported: {problem}")));
     }
     let mut parts = parse_bundle(&text).map_err(|e| js_error(it, &e))?;
     parts.esm_keys = esm_keys.into_iter().collect();
+    parts.esm_specs = esm_specs;
     let main = parts.entry.clone();
     let run_id = it.run_id;
     let loader = make_loader(it, parts, &text, "");
@@ -1226,11 +1301,14 @@ impl Package {
             return (self.exports.clone(), path);
         };
         let (name, body) = rest.split_once('\u{0}').unwrap_or((rest, ""));
-        let root = self
-            .roots
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| self.exports.clone());
+        let root = if name.is_empty() {
+            Value::Object(self.interp.global_object.clone())
+        } else {
+            self.roots
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| self.exports.clone())
+        };
         (root, body)
     }
 
@@ -6800,13 +6878,18 @@ pub(crate) fn with_package<T>(
             let running = RUNNING.with(|r| r.borrow().get(&handle).copied());
             return match running {
                 // SAFETY: the pointer is a live stack local of an enclosing `with_package`.
-                Some(ptr) => f(unsafe { &mut *ptr }),
+                Some(ptr) => {
+                    let package = unsafe { &mut *ptr };
+                    refresh_handle_refs(&mut package.interp);
+                    f(package)
+                }
                 None => Err(HostError::Bundle("thaw-js package is unloaded".into())),
             };
         }
         None => return Err(HostError::Bundle("bad handle".into())),
     };
     LAST_PACKAGE.with(|l| l.set(handle));
+    refresh_handle_refs(&mut package.interp);
     RUNNING.with(|r| r.borrow_mut().insert(handle, &mut package as *mut Package));
     let result = f(&mut package);
     RUNNING.with(|r| r.borrow_mut().remove(&handle));
@@ -7612,6 +7695,9 @@ fn register_bundle(name: String, src: &str) -> Result<(), HostError> {
 pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
     let Some(source) = cstr(source) else { return 0 };
     let source = crate::napi_eval::unpack_script(source);
+    if source.contains("__thaw_value_handle_refs") {
+        TRACK_HANDLE_REFS.with(|t| t.set(true));
+    }
     let owner = default_realm();
     let result = with_package(owner, |p| {
         // Bridge bundles call prelude helpers (`__thaw_bind_preserving_statics`) while loading.
@@ -7627,6 +7713,36 @@ pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
             0
         }
     }
+}
+
+thread_local! {
+    /// Set once a loaded script names `__thaw_value_handle_refs`; until then no realm pays for the mirror.
+    static TRACK_HANDLE_REFS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Mirror the outstanding handle reference counts (index = id - 1) into the realm's
+/// `__thaw_value_handle_refs` global on entry, the array QuickJS exposes for lease-accounting scripts.
+fn refresh_handle_refs(it: &mut Interp) {
+    if !TRACK_HANDLE_REFS.with(Cell::get) {
+        return;
+    }
+    let refs: Vec<Value> = HANDLE_REFS.with(|r| {
+        r.borrow()
+            .iter()
+            .map(|n| Value::Number(f64::from(*n)))
+            .collect()
+    });
+    let array = it.array(refs);
+    if let Some(binding) = it
+        .global
+        .vars
+        .borrow_mut()
+        .get_mut("__thaw_value_handle_refs")
+    {
+        binding.value = array;
+        return;
+    }
+    it.global.declare("__thaw_value_handle_refs", array, true);
 }
 
 /// The main thread's stack limit (`RLIMIT_STACK`), capped at 1 GiB (256 MiB when unlimited); 0 when unknown.
@@ -7791,13 +7907,18 @@ pub extern "C" fn thaw_tjs_call_typed_result(
         if std::env::var_os("THAW_JS_TRACE_WIRE").is_some() {
             eprintln!("thaw-js call: {symbol} {args}");
         }
-        let (package, export) = symbol.split_once("::").ok_or("malformed thaw-js symbol")?;
         LAST_THROWN.with(|t| t.borrow_mut().take());
         LAST_THROWN_HANDLE.with(|h| h.set(0));
-        // the outermost entry of this typed call; the `with_package` inside is nested and not counted
-        let _profile = crate::profile::enter(|| crate::profile::typed_key(package, export));
-        let (handle, export) =
-            resolve_export(package, export).ok_or_else(|| not_loaded(package))?;
+        // `<package>::<export>` names a package export; a bare name is a global of the default realm
+        // (a function a `loadScript` defined), read through the empty-named root.
+        let (handle, export) = match symbol.split_once("::") {
+            Some((package, export)) => {
+                // the outermost entry of this typed call; the `with_package` inside is nested and not counted
+                let _profile = crate::profile::enter(|| crate::profile::typed_key(package, export));
+                resolve_export(package, export).ok_or_else(|| not_loaded(package))?
+            }
+            None => (default_realm(), format!("\u{0}\u{0}{symbol}")),
+        };
         let Native::Array(args) = Native::from_json(&args).map_err(|e| e.to_string())? else {
             return Err("arguments must be a JSON array".into());
         };

@@ -143,11 +143,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source] = args else {
             return Err("loadScript expects exactly one argument".to_string());
         };
-        // Only the class values the program defines itself (`class_value_js_script`) run on
-        // thaw-js; any other script (a package bundle) needs the QuickJS host.
-        let class_value = matches!(source, HirExpr::Lit(HirLit::Str(text))
-            if text.starts_with("globalThis[\"__thaw_class_value_"));
-        let on_thaw_js = class_value && self.js_engine() == JsEngine::ThawJs;
+        // A routed build runs every script on thaw-js; only the legacy QuickJS lane uses `thaw_js_load`.
+        let on_thaw_js = self.js_engine() == JsEngine::ThawJs;
         if on_thaw_js {
             self.js_mark_handles_used();
         } else {

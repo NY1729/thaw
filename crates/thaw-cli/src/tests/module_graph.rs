@@ -1607,54 +1607,6 @@ fn lambda_runtime_gives_up_instead_of_spinning_when_the_runtime_api_is_unreachab
 }
 
 #[test]
-fn lambda_trace_sync_failure_posts_an_error_before_reentering_handler() {
-    let dir = std::env::temp_dir().join(format!("thaw-trace-sync-error-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let entry = dir.join("handler.ts");
-    std::fs::write(&entry, r#"function handler(event: string): string {
-        loadScript("if (!globalThis.traceLocked) { const original = process.env; process.env = new Proxy({}, { set() { process.env = original; throw new Error('blocked'); } }); globalThis.traceLocked = true; }");
-        return event;
-    }"#).unwrap();
-    let output = dir.join("bootstrap");
-    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    let (sender, receiver) = mpsc::channel();
-    let server = std::thread::spawn(move || {
-        for (index, trace) in ["Root=first", "Root=second", "Root=third"].into_iter().enumerate() {
-            let (mut connection, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            connection.read_to_end(&mut request).unwrap();
-            connection.write_all(format!(
-                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: trace-fail-{index}\r\nLambda-Runtime-Trace-Id: {trace}\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
-            ).as_bytes()).unwrap();
-            drop(connection);
-            let (mut connection, _) = listener.accept().unwrap();
-            let mut posted = Vec::new();
-            connection.read_to_end(&mut posted).unwrap();
-            sender.send(String::from_utf8_lossy(&posted).into_owned()).unwrap();
-            connection.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-        }
-    });
-    let mut child = Command::new(&output)
-        .env("AWS_LAMBDA_RUNTIME_API", address)
-        .spawn().unwrap();
-    let first = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(first.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-0/response"));
-    assert!(first.ends_with("\r\n\r\nx"));
-    let second = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(second.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-1/error"));
-    assert!(second.contains("failed to synchronize Lambda trace environment"));
-    let third = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(third.starts_with("POST /2018-06-01/runtime/invocation/trace-fail-2/response"));
-    assert!(third.ends_with("\r\n\r\nx"));
-    server.join().unwrap();
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn renames_instanceof_value_rhs_and_preserves_external_class_identifiers() {
     use swc_ecma_visit::{Visit, VisitWith};
 

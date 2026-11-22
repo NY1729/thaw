@@ -329,6 +329,14 @@ fn compile_and_run_raw_lane_opt(
     codegen_opt: inkwell::OptimizationLevel,
     lane: Lane,
 ) -> std::process::Output {
+    // A routed build's shim declares typed calls into script globals as `__thaw_typed_tjs_*`.
+    let retargeted;
+    let source = if lane == Lane::ThawJs {
+        retargeted = source.replace("__thaw_typed_js_", "__thaw_typed_tjs_");
+        retargeted.as_str()
+    } else {
+        source
+    };
     // The shared source map keeps the spans resolvable, so `Error.stack` frames get `file:line:col`.
     let (module, _) = thaw_parser::parse_typescript_with_shared_source_map_named(
         source,
