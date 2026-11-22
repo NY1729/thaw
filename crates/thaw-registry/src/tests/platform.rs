@@ -2496,3 +2496,297 @@ fn zlib_zstd_stream_classes_are_absent_without_the_native() {
     );
     assert_eq!(result, r#"["undefined","undefined","undefined","undefined"]"#);
 }
+
+// Compress keys must be integers in 0..=402 and decompress keys in 0..=100 (Node rejects others with ERR_ZSTD_INVALID_PARAM); in-range keys libzstd does not know fail with 'Setting parameter failed'.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_param_keys_follow_node_ranges() {
+    let result = zstd_run(
+        "zstd_param_keys",
+        r#"
+var shape = function (fn) { try { fn(); return 'ok'; } catch (e) { return [e.name, e.code, e.message]; } };
+var frame = zlib.zstdCompressSync(s);
+return [
+  shape(function () { zlib.zstdCompressSync(s, { params: { '-1': 1 } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { 403: 1 } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { '1.5': 1 } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { 1: 1 } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { '0x64': 1 } }); }),
+  shape(function () { zlib.zstdDecompressSync(frame, { params: { 101: 5 } }); }),
+  shape(function () { zlib.zstdDecompressSync(frame, { params: { 0: 5 } }); })
+];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"[["RangeError","ERR_ZSTD_INVALID_PARAM","-1 is not a valid zstd parameter"],["RangeError","ERR_ZSTD_INVALID_PARAM","403 is not a valid zstd parameter"],["RangeError","ERR_ZSTD_INVALID_PARAM","1.5 is not a valid zstd parameter"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],"ok",["RangeError","ERR_ZSTD_INVALID_PARAM","101 is not a valid zstd parameter"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"]]"#
+    );
+}
+
+// Boolean and non-finite values are coerced like ToInt32; null/undefined/objects are ERR_INVALID_ARG_TYPE; libzstd bounds fail; a non-object params is ignored.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_param_values_are_coerced_and_checked_like_node() {
+    let result = zstd_run(
+        "zstd_param_values",
+        r#"
+var shape = function (fn) { try { fn(); return 'ok'; } catch (e) { return [e.name, e.code, e.message]; } };
+var frame = zlib.zstdCompressSync(s);
+return [
+  shape(function () { zlib.zstdCompressSync(s, { params: { 201: true } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { 100: NaN } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { 100: null } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { 100: undefined } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { 100: {} } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { 101: 1e10 } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: { 107: 10 } }); }),
+  shape(function () { zlib.zstdDecompressSync(frame, { params: { 100: 32 } }); }),
+  shape(function () { zlib.zstdDecompressSync(frame, { params: { 100: 10 } }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: 5 }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: null }); }),
+  shape(function () { zlib.zstdCompressSync(s, { params: [] }); })
+];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"["ok","ok",["TypeError","ERR_INVALID_ARG_TYPE","The \"options.params[key]\" property must be of type number. Received null"],["TypeError","ERR_INVALID_ARG_TYPE","The \"options.params[key]\" property must be of type number. Received undefined"],["TypeError","ERR_INVALID_ARG_TYPE","The \"options.params[key]\" property must be of type number. Received an instance of Object"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],"ok","ok","ok","ok"]"#
+    );
+}
+
+// flush and finishFlush are 0..=2 for zstd; chunkSize >= 64; maxOutputLength must be a number.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_option_ranges_and_types_match_node() {
+    let result = zstd_run(
+        "zstd_option_ranges",
+        r#"
+var shape = function (fn) { try { fn(); return 'ok'; } catch (e) { return [e.name, e.code, e.message]; } };
+return [
+  shape(function () { zlib.zstdCompressSync(s, { flush: 9 }); }),
+  shape(function () { zlib.zstdCompressSync(s, { flush: '1' }); }),
+  shape(function () { zlib.zstdCompressSync(s, { finishFlush: 9 }); }),
+  shape(function () { zlib.zstdCompressSync(s, { finishFlush: -1 }); }),
+  shape(function () { zlib.zstdCompressSync(s, { chunkSize: 10 }); }),
+  shape(function () { zlib.zstdDecompressSync(zlib.zstdCompressSync(s), { maxOutputLength: 0 }); }),
+  shape(function () { zlib.zstdDecompressSync(zlib.zstdCompressSync(s), { maxOutputLength: 'x' }); }),
+  shape(function () { zlib.createZstdCompress({ finishFlush: 9 }); }),
+  shape(function () { zlib.createZstdCompress({ chunkSize: 10 }); })
+];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"[["RangeError","ERR_OUT_OF_RANGE","The value of \"options.flush\" is out of range. It must be >= 0 and <= 2. Received 9"],["TypeError","ERR_INVALID_ARG_TYPE","The \"options.flush\" property must be of type number. Received type string ('1')"],["RangeError","ERR_OUT_OF_RANGE","The value of \"options.finishFlush\" is out of range. It must be >= 0 and <= 2. Received 9"],["RangeError","ERR_OUT_OF_RANGE","The value of \"options.finishFlush\" is out of range. It must be >= 0 and <= 2. Received -1"],["RangeError","ERR_OUT_OF_RANGE","The value of \"options.chunkSize\" is out of range. It must be >= 64. Received 10"],["RangeError","ERR_OUT_OF_RANGE","The value of \"options.maxOutputLength\" is out of range. It must be >= 1 and <= 9007199254740991. Received 0"],["TypeError","ERR_INVALID_ARG_TYPE","The \"options.maxOutputLength\" property must be of type number. Received type string ('x')"],["RangeError","ERR_OUT_OF_RANGE","The value of \"options.finishFlush\" is out of range. It must be >= 0 and <= 2. Received 9"],["RangeError","ERR_OUT_OF_RANGE","The value of \"options.chunkSize\" is out of range. It must be >= 64. Received 10"]]"#
+    );
+}
+
+// Sync and callback pledges: sync ignores a wrong size, negative throws; a stream with a wrong pledge emits ZSTD_error_srcSize_wrong.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_pledged_src_size_sync_ignored_stream_enforced() {
+    let result = zstd_run(
+        "zstd_pledge",
+        r#"
+var shape = function (fn) { try { fn(); return 'ok'; } catch (e) { return [e.name, e.code, e.message]; } };
+var sync1 = zlib.zstdCompressSync(s, { pledgedSrcSize: 1 }).toString('hex');
+var neg = shape(function () { zlib.zstdCompressSync(s, { pledgedSrcSize: -1 }); });
+var streamNeg = shape(function () { zlib.createZstdCompress({ pledgedSrcSize: -1 }); });
+var c28 = zlib.createZstdCompress({ pledgedSrcSize: 28 }), parts = [];
+c28.on('data', function (x) { parts.push(x); });
+var ended28 = new Promise(function (r) { c28.on('end', r); });
+c28.end(s);
+await ended28;
+var c1 = zlib.createZstdCompress({ pledgedSrcSize: 1 }), events = [];
+c1.on('error', function (e) { events.push([e.name, e.code, e.errno, e.message]); });
+c1.on('data', function () {});
+var closed1 = new Promise(function (r) { c1.on('close', r); });
+c1.end(s);
+await closed1;
+var cb = await new Promise(function (resolve) {
+  zlib.zstdCompress(s, { pledgedSrcSize: 1 }, function (e) { resolve(e ? [e.name, e.code, e.errno, e.message] : 'ok'); });
+});
+return [sync1, neg, streamNeg, Buffer.concat(parts).toString('hex'), events, cb];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"["28b52ffd201c8500005068656c6c6f207a7374640100f14a11",["TypeError","ERR_INVALID_ARG_VALUE","pledgedSrcSize may not be negative"],["TypeError","ERR_INVALID_ARG_VALUE","pledgedSrcSize may not be negative"],"28b52ffd201c8500005068656c6c6f207a7374640100f14a11",[["Error","ZSTD_error_srcSize_wrong",72,"Src size is incorrect"]],["Error","ZSTD_error_srcSize_wrong",72,"Src size is incorrect"]]"#
+    );
+}
+
+// Dictionaries apply for ArrayBufferView only (strings and raw ArrayBuffers are ignored); a missing dictionary is ZSTD_error_corruption_detected.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_dictionary_round_trips_sync_stream_and_callback() {
+    let result = zstd_run(
+        "zstd_dictionary",
+        r#"
+var shape = function (fn) { try { fn(); return 'ok'; } catch (e) { return [e.name, e.code, e.message]; } };
+var d = Buffer.from('hello hello hello');
+var frame = zlib.zstdCompressSync(s, { dictionary: d });
+var c = zlib.createZstdCompress({ dictionary: d }), chunks = [];
+c.on('data', function (x) { chunks.push(x); });
+var cEnd = new Promise(function (r) { c.on('end', r); });
+c.end(s);
+await cEnd;
+var streamFrame = Buffer.concat(chunks);
+var dd = zlib.createZstdDecompress({ dictionary: d }), out = [];
+dd.on('data', function (x) { out.push(x); });
+var ddEnd = new Promise(function (r) { dd.on('end', r); });
+dd.end(streamFrame);
+await ddEnd;
+var missing = shape(function () { zlib.zstdDecompressSync(frame); });
+var u8 = zlib.zstdCompressSync(s, { dictionary: new Uint8Array(d) }).toString('hex');
+var arrayBufferIgnored = zlib.zstdCompressSync(s, { dictionary: d.buffer.slice(d.byteOffset, d.byteOffset + d.length) }).toString('hex');
+var cb = await new Promise(function (resolve) {
+  zlib.zstdDecompress(frame, { dictionary: d }, function (e, r) { resolve(e ? [e.code, e.errno] : r.toString()); });
+});
+return [frame.toString('hex'), zlib.zstdDecompressSync(frame, { dictionary: d }).toString(), streamFrame.toString('hex'), Buffer.concat(out).toString(), missing, u8, arrayBufferIgnored, cb];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"["28b52ffd201c6d000028207a73746402003a39d82840","hello hello hello hello zstd","28b52ffd00586d000028207a73746402003a39d82840","hello hello hello hello zstd",["Error","ZSTD_error_corruption_detected","Data corruption detected"],"28b52ffd201c6d000028207a73746402003a39d82840","28b52ffd201c8500005068656c6c6f207a7374640100f14a11","hello hello hello hello zstd"]"#
+    );
+}
+
+// info:true returns {buffer, engine} for sync and callback APIs; streams ignore it.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_info_option_returns_buffer_and_engine() {
+    let result = zstd_run(
+        "zstd_info",
+        r#"
+var r = zlib.zstdCompressSync(s, { info: true });
+var dec = zlib.zstdDecompressSync(r.buffer, { info: true });
+var plain = zlib.zstdCompressSync(s, { info: false });
+var cbInfo = await new Promise(function (resolve) {
+  zlib.zstdCompress(s, { info: true }, function (e, res) { resolve([e, Object.keys(res).join(','), res.engine.constructor.name, res.buffer.toString('hex')]); });
+});
+var c = zlib.createZstdCompress({ info: true }), chunks = [];
+c.on('data', function (x) { chunks.push(x); });
+var end = new Promise(function (r2) { c.on('end', r2); });
+c.end(s);
+await end;
+return [r.buffer.toString('hex'), Object.keys(r).join(','), r.engine.constructor.name, dec.buffer.toString(), dec.engine.constructor.name, Buffer.isBuffer(plain), cbInfo, Buffer.isBuffer(chunks[0])];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"["28b52ffd201c8500005068656c6c6f207a7374640100f14a11","buffer,engine","ZstdCompress","hello hello hello hello zstd","ZstdDecompress",true,[null,"buffer,engine","ZstdCompress","28b52ffd00588500005068656c6c6f207a7374640100f14a11"],true]"#
+    );
+}
+
+// ZSTD_d_windowLogMax below the frame window is ZSTD_error_frameParameter_windowTooLarge in every API.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_window_log_max_errors_for_sync_stream_and_callback() {
+    let result = zstd_run(
+        "zstd_window_log_max",
+        r#"
+var big = zlib.zstdCompressSync(Buffer.alloc(100000, 'a'), { params: { 101: 20 } });
+var sync = (function () { try { zlib.zstdDecompressSync(big, { params: { 100: 10 } }); return 'ok'; } catch (e) { return [e.name, e.code, e.errno, e.message]; } })();
+var ok21 = zlib.zstdDecompressSync(big, { params: { 100: 21 } }).length;
+var d = zlib.createZstdDecompress({ params: { 100: 10 } }), events = [];
+d.on('error', function (e) { events.push([e.name, e.code, e.errno, e.message]); });
+d.on('data', function () {});
+var closed = new Promise(function (r) { d.on('close', r); });
+d.end(big);
+await closed;
+var cb = await new Promise(function (resolve) {
+  zlib.zstdDecompress(big, { params: { 100: 10 } }, function (e) { resolve(e ? [e.name, e.code, e.errno, e.message] : 'ok'); });
+});
+return [sync, ok21, events, cb];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"[["Error","ZSTD_error_frameParameter_windowTooLarge",16,"Frame requires too much memory for decoding"],100000,[["Error","ZSTD_error_frameParameter_windowTooLarge",16,"Frame requires too much memory for decoding"]],["Error","ZSTD_error_frameParameter_windowTooLarge",16,"Frame requires too much memory for decoding"]]"#
+    );
+}
+
+// maxOutputLength is enforced for sync and callback decompression; Node 22 ignores it on streams.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_max_output_length_applies_to_sync_and_callback_only() {
+    let result = zstd_run(
+        "zstd_max_output",
+        r#"
+var big = zlib.zstdCompressSync(Buffer.alloc(1000, 'a'));
+var sync = (function () { try { zlib.zstdDecompressSync(big, { maxOutputLength: 100 }); return 'ok'; } catch (e) { return [e.name, e.code, e.message]; } })();
+var exact = zlib.zstdDecompressSync(zlib.zstdCompressSync(Buffer.alloc(100, 'a')), { maxOutputLength: 100 }).length;
+var d = zlib.createZstdDecompress({ maxOutputLength: 100 }), out = [];
+d.on('data', function (x) { out.push(x); });
+var end = new Promise(function (r) { d.on('end', r); });
+d.end(big);
+await end;
+var cb = await new Promise(function (resolve) {
+  zlib.zstdDecompress(big, { maxOutputLength: 100 }, function (e) { resolve(e ? [e.name, e.code, e.message] : 'ok'); });
+});
+return [sync, exact, Buffer.concat(out).length, cb];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"[["RangeError","ERR_BUFFER_TOO_LARGE","Cannot create a Buffer larger than 100 bytes"],100,1000,["RangeError","ERR_BUFFER_TOO_LARGE","Cannot create a Buffer larger than 100 bytes"]]"#
+    );
+}
+
+// finishFlush 0 emits nothing; 1 emits the streamed (no content size) frame; 2 is the sync one-shot frame.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_finish_flush_sync_stream_and_callback() {
+    let result = zstd_run(
+        "zstd_finish_flush",
+        r#"
+var c0 = zlib.zstdCompressSync(s, { finishFlush: 0 }).toString('hex');
+var c1 = zlib.zstdCompressSync(s, { finishFlush: 1 }).toString('hex');
+var c2 = zlib.zstdCompressSync(s, { finishFlush: 2 }).toString('hex');
+var run = async function (opts) {
+  var c = zlib.createZstdCompress(opts), chunks = [];
+  c.on('data', function (x) { chunks.push(x); });
+  var end = new Promise(function (r) { c.on('end', r); });
+  c.end(s);
+  await end;
+  return Buffer.concat(chunks).toString('hex');
+};
+var s0 = await run({ finishFlush: 0 });
+var s1 = await run({ finishFlush: 1 });
+var cb0 = await new Promise(function (resolve) {
+  zlib.zstdCompress(s, { finishFlush: 0 }, function (e, r) { resolve(r.toString('hex')); });
+});
+return [c0, c1, c2, s0, s1, cb0];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"["","28b52ffd00588400005068656c6c6f207a7374640100f14a11","28b52ffd201c8500005068656c6c6f207a7374640100f14a11","","28b52ffd00588400005068656c6c6f207a7374640100f14a11",""]"#
+    );
+}
+
+// Stream constructors and callback calls validate params at call time and throw; they do not emit an error event.
+#[cfg(feature = "zstd")]
+#[test]
+fn zlib_zstd_construction_and_callback_param_errors_throw_synchronously() {
+    let result = zstd_run(
+        "zstd_construction",
+        r#"
+var shape = function (fn) { try { fn(); return 'ok'; } catch (e) { return [e.name, e.code, e.message]; } };
+var cbSync = shape(function () { zlib.zstdCompress(s, { params: { 101: 5 } }, function () {}); });
+var cbDec = shape(function () { zlib.zstdDecompress(zlib.zstdCompressSync(s), { params: { 100: 5 } }, function () {}); });
+return [
+  shape(function () { zlib.createZstdCompress({ params: { 999: 1 } }); }),
+  shape(function () { zlib.createZstdCompress({ params: { 101: 5 } }); }),
+  shape(function () { zlib.createZstdDecompress({ params: { 101: 5 } }); }),
+  shape(function () { zlib.createZstdDecompress({ params: { 100: 5 } }); }),
+  cbSync,
+  cbDec
+];
+"#,
+    );
+    assert_eq!(
+        result,
+        r#"[["RangeError","ERR_ZSTD_INVALID_PARAM","999 is not a valid zstd parameter"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],["RangeError","ERR_ZSTD_INVALID_PARAM","101 is not a valid zstd parameter"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"],["Error","ERR_ZLIB_INITIALIZATION_FAILED","Setting parameter failed"]]"#
+    );
+}
