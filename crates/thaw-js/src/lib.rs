@@ -48,6 +48,7 @@ mod costack;
 mod date;
 mod dns;
 mod esm;
+pub mod esm_live;
 mod eventloop;
 mod extras;
 mod gc;

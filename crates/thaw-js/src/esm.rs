@@ -4,8 +4,9 @@
 //!
 //! Imports become `require` calls whose results are bound once the dependency has finished
 //! evaluating; exports become getters on `exports`. Constructs whose semantics that rewrite would
-//! change are reported as scan blockers instead of being approximated: a mutable export (`export
-//! let` / `export var`: a live binding), an import cycle, `import.meta`, top-level `await`.
+//! change are reported as scan blockers instead of being approximated: an import cycle,
+//! `import.meta`, top-level `await`. Every reference to an imported name is rewritten (esm_live.rs)
+//! into a read of the dependency's export, so imports are live bindings.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -179,38 +180,8 @@ struct Converted {
     body: String,
     specs: Vec<String>,
     problems: Vec<&'static str>,
-    // mutable exports (`export let x`, reassigned here) and remote names of this module's named imports
-    live: Vec<String>,
-    imported: Vec<String>,
-    // specifiers of `export * from`: each copies every name of its source, so any live export may be copied
-    stars: Vec<String>,
     // the module awaits outside every function (its factory must be async)
     tla: bool,
-}
-
-/// Names assigned or updated anywhere in the module (`x = ..`, `x += ..`, `x++`).
-// ponytail: destructuring-assignment targets are not tracked; add when a package needs it.
-fn reassigned_names(module: &a::Module) -> BTreeSet<String> {
-    use swc_ecma_visit::{Visit, VisitWith};
-    #[derive(Default)]
-    struct Assigned(BTreeSet<String>);
-    impl Visit for Assigned {
-        fn visit_assign_expr(&mut self, n: &a::AssignExpr) {
-            if let a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(i)) = &n.left {
-                self.0.insert(i.id.sym.to_string());
-            }
-            n.visit_children_with(self);
-        }
-        fn visit_update_expr(&mut self, n: &a::UpdateExpr) {
-            if let a::Expr::Ident(i) = &*n.arg {
-                self.0.insert(i.sym.to_string());
-            }
-            n.visit_children_with(self);
-        }
-    }
-    let mut v = Assigned::default();
-    module.visit_with(&mut v);
-    v.0
 }
 
 /// `indirect`: `(exported name, specifier, imported name)` re-exports that the registry removed from
@@ -231,14 +202,61 @@ fn convert_with(
     awaits: Option<&BTreeSet<String>>,
 ) -> Result<Converted, String> {
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source)?;
-    Ok(convert_module(
-        &module,
-        &cm,
-        public_specs,
-        indirect,
-        &BUNDLE_NAMES,
-        awaits,
-    ))
+    let (live, named) = live_import_bindings(&module);
+    // Imports are live reads: each reference becomes `__thaw_esm_mK["x"]`, so the module is re-parsed from the
+    // rewritten text. Only modules that import something pay for the second parse.
+    let rewritten = if live.is_empty() {
+        None
+    } else {
+        crate::esm_live::rewrite_import_references(source, &module, &cm, &live, &named, true)
+    };
+    let Some(rewritten) = rewritten else {
+        return Ok(convert_module(&module, &cm, public_specs, indirect, &BUNDLE_NAMES, awaits, &live));
+    };
+    let (module, cm) = thaw_parser::parse_javascript_with_source_map(&rewritten)?;
+    Ok(convert_module(&module, &cm, public_specs, indirect, &BUNDLE_NAMES, awaits, &live))
+}
+
+/// `local -> read expression` of every default and named import of `module` (the names `convert_module` no longer
+/// copies into a `var`), plus the named ones (a call through them is detached). The `__thaw_esm_mK` numbering
+/// follows `convert_module`'s: one per import, `export .. from` and `export *`, in source order.
+fn live_import_bindings(module: &a::Module) -> (BTreeMap<String, String>, BTreeSet<String>) {
+    let (mut live, mut named) = (BTreeMap::new(), BTreeSet::new());
+    let mut counter = 0usize;
+    for item in &module.body {
+        let a::ModuleItem::ModuleDecl(decl) = item else { continue };
+        match decl {
+            a::ModuleDecl::Import(i) if !i.src.value.to_string_lossy().starts_with(ORIGIN_SPEC) => {
+                counter += 1;
+                let m = format!("__thaw_esm_m{counter}");
+                for sp in &i.specifiers {
+                    match sp {
+                        a::ImportSpecifier::Default(d) => {
+                            live.insert(d.local.sym.to_string(), format!("__thaw_esm_default({m})"));
+                        }
+                        a::ImportSpecifier::Named(n) => {
+                            let local = n.local.sym.to_string();
+                            let imported = n.imported.as_ref().map(export_name).unwrap_or_else(|| local.clone());
+                            let read = if imported == "default" {
+                                format!("__thaw_esm_default({m})")
+                            } else {
+                                let mut qi = String::new();
+                                json_quote(&imported, &mut qi);
+                                format!("{m}[{qi}]")
+                            };
+                            named.insert(local.clone());
+                            live.insert(local, read);
+                        }
+                        a::ImportSpecifier::Namespace(_) => {}
+                    }
+                }
+            }
+            a::ModuleDecl::ExportNamed(e) if e.src.is_some() => counter += 1,
+            a::ModuleDecl::ExportAll(_) => counter += 1,
+            _ => {}
+        }
+    }
+    (live, named)
 }
 
 /// The request line of an import: an awaited dependency is requested with `requireAsync` (awaited in the body's prologue).
@@ -255,6 +273,7 @@ fn convert_module(
     indirect: &[(String, String, String)],
     names: &Names,
     awaits: Option<&BTreeSet<String>>,
+    live: &BTreeMap<String, String>,
 ) -> Converted {
     let (rq, ex) = (names.require, names.exports);
     let snippet = |span| cm.span_to_snippet(span).unwrap_or_default();
@@ -274,13 +293,9 @@ fn convert_module(
     // names this source re-exports itself (`export { X } from`); the export graph repeats them as indirect entries
     let mut reexported: BTreeSet<String> = BTreeSet::new();
     let mut problems: Vec<&'static str> = Vec::new();
-    let mut live: Vec<String> = Vec::new();
-    // remote names this module reads from another module (imports, re-exports, indirect entries)
-    let mut pulled: Vec<String> = Vec::new();
-    let mut stars: Vec<String> = Vec::new();
+    let mut has_star = false;
     let mut counter = 0usize;
     let mut uses_origin = false;
-    let reassigned = reassigned_names(module);
     fn tmp(counter: &mut usize) -> String {
         *counter += 1;
         format!("__thaw_esm_m{counter}")
@@ -329,10 +344,13 @@ fn convert_module(
                     }
                     for sp in &i.specifiers {
                         match sp {
-                            a::ImportSpecifier::Default(d) => body.push_str(&format!(
+                            // a name in `live` is read through `m` at each use, not copied
+                            a::ImportSpecifier::Default(d) if !live.contains_key(d.local.sym.as_str()) => body.push_str(&format!(
                                 "var {} = __thaw_esm_default({m});\n",
                                 d.local.sym
                             )),
+                            a::ImportSpecifier::Default(_) => {}
+                            a::ImportSpecifier::Named(n) if live.contains_key(n.local.sym.as_str()) => {}
                             a::ImportSpecifier::Namespace(n) => body
                                 .push_str(&format!("var {} = __thaw_esm_ns({m});\n", n.local.sym)),
                             a::ImportSpecifier::Named(n) => {
@@ -347,7 +365,6 @@ fn convert_module(
                                         n.local.sym
                                     ));
                                 } else {
-                                    pulled.push(imported.clone());
                                     let mut qi = String::new();
                                     json_quote(&imported, &mut qi);
                                     body.push_str(&format!("var {} = {m}[{qi}];\n", n.local.sym));
@@ -364,12 +381,6 @@ fn convert_module(
                         a::Decl::Var(v) => {
                             for d in &v.decls {
                                 binding_names(&d.name, &mut names);
-                            }
-                            // a mutable export is a live getter; it only goes stale in an importer that copies it
-                            if !matches!(v.kind, a::VarDeclKind::Const) {
-                                live.extend(
-                                    names.iter().filter(|n| reassigned.contains(*n)).cloned(),
-                                );
                             }
                         }
                         _ => problems.push("esm-declaration"),
@@ -426,9 +437,6 @@ fn convert_module(
                         match sp {
                             a::ExportSpecifier::Named(n) => {
                                 let local = export_name(&n.orig);
-                                if from.is_some() {
-                                    pulled.push(local.clone());
-                                }
                                 let exported = n
                                     .exported
                                     .as_ref()
@@ -444,7 +452,8 @@ fn convert_module(
                                             format!("{m}[{q}]")
                                         }
                                     }
-                                    None => local,
+                                    // an imported name is read through its dependency (it has no local binding)
+                                    None => live.get(&local).cloned().unwrap_or(local),
                                 };
                                 if from.is_some() {
                                     reexported.insert(exported.clone());
@@ -469,11 +478,11 @@ fn convert_module(
                     let mut q = String::new();
                     json_quote(&spec, &mut q);
                     let awaited = awaits.is_some_and(|set| set.contains(&spec));
-                    specs.push(spec.clone());
-                    if stars.is_empty() {
+                    specs.push(spec);
+                    if !has_star {
                         head.push_str(STAR_HELPER);
+                        has_star = true;
                     }
-                    stars.push(spec);
                     let m = tmp(&mut counter);
                     if awaited {
                         // the star copies the names once the awaited module is ready
@@ -491,7 +500,6 @@ fn convert_module(
     }
     // Indirect getters go in the head so an `export *` in the body skips their names.
     for (name, spec, remote) in indirect {
-        pulled.push(remote.clone());
         if reexported.contains(name) {
             continue;
         }
@@ -518,9 +526,6 @@ fn convert_module(
         body: format!("{head}{prologue}{late}{body}"),
         specs,
         problems,
-        live,
-        imported: pulled,
-        stars,
         tla: has_top_level_await(module),
     }
 }
@@ -608,8 +613,6 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
     let mut staged: Vec<Staged> = Vec::new();
     let mut problems: BTreeSet<&'static str> = BTreeSet::new();
     let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let (mut live_exports, mut imported_names) = (BTreeSet::new(), BTreeSet::new());
-    let mut any_star = false;
     let indirects = indirect_exports(source);
     for m in modules {
         let Native::Object(fields) = m else { continue };
@@ -618,17 +621,12 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
             .to_string();
         let src = text(field(fields, "source")).ok_or("native module without source")?;
         let mut imports: Vec<(String, String)> = Vec::new();
-        let mut opaque_specs = BTreeSet::new();
         if let Some(Native::Object(map)) = field(fields, "imports") {
             for (spec, target) in map {
                 if let Native::Str(t) = target {
                     if spec.starts_with(ORIGIN_SPEC) || t.starts_with("__thaw_private_origin_key/")
                     {
                         continue;
-                    }
-                    // a star of an opaque CJS module is not a live-binding copy (its names are runtime reads)
-                    if opaque.contains_key(t) {
-                        opaque_specs.insert(spec.clone());
                     }
                     let t = opaque.get(t).unwrap_or(t);
                     imports.push((spec.clone(), t.clone()));
@@ -639,9 +637,6 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
         let indirect = indirects.get(&key).map(Vec::as_slice).unwrap_or(&[]);
         let converted = convert(src, &public, indirect)?;
         problems.extend(converted.problems);
-        live_exports.extend(converted.live);
-        imported_names.extend(converted.imported);
-        any_star |= converted.stars.iter().any(|s| !opaque_specs.contains(s));
         graph.insert(
             key.clone(),
             imports
@@ -717,14 +712,6 @@ pub(crate) fn native_bundle_to_factories(source: &str) -> Result<Option<NativeBu
             .collect();
         maps.push_str(&format!("{qk}: {{ {} }},\n", entries.join(", ")));
         esm_keys.insert(s.key);
-    }
-    // a mutable export goes stale when a module copies it. Matched by name over every pulled name
-    // (imports, re-exports, indirect entries); an `export *` may copy any name, so it blocks too.
-    // ponytail: name match over-blocks same-named unrelated bindings; add per-module export tracking when it bites.
-    if live_exports.intersection(&imported_names).next().is_some()
-        || (any_star && !live_exports.is_empty())
-    {
-        problems.insert("esm-live-binding");
     }
     // an import cycle would observe half-initialised bindings under the snapshot rewrite
     fn cyclic(
@@ -936,11 +923,26 @@ export { replaceOption } from './e.js';\n";
 #[cfg(test)]
 mod live_binding_tests {
     use crate::builtins::json_quote;
-    use crate::host::{HostError, Native, Package};
+    use crate::host::{Native, Package};
 
     // A mixed bundle: the native `modules` (`key`, `source`, `imports`) with main `main`, and the CommonJS
-    // entry `m/index.js` whose body is `index` (same shape as export_getter_tests::load_entry).
+    // entry `m/index.js` whose body is `index`; every module `m/x.mjs` is requirable as `./x.mjs`.
     fn bundle(main: &str, modules: serde_json::Value, index: &str) -> String {
+        let keys: Vec<String> = modules
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["key"].as_str().unwrap().to_string())
+            .collect();
+        let stubs: String = keys
+            .iter()
+            .map(|k| format!("\"{k}\": function() {{ throw new TypeError('Native ESM must be loaded by its registered entry'); }},\n"))
+            .collect();
+        let map: String = keys
+            .iter()
+            .map(|k| format!("\"./{}\": \"{k}\", ", k.trim_start_matches("m/")))
+            .collect();
+        let empties: String = keys.iter().map(|k| format!("\"{k}\": {{}}, ")).collect();
         let payload =
             serde_json::json!({ "main": main, "modules": modules, "opaqueEdges": [] }).to_string();
         let mut literal = String::new();
@@ -949,9 +951,8 @@ mod live_binding_tests {
             r#"module.exports = (function(require) {{
 var __thaw_bundle_factories = {{
 "m/index.js": function(module, exports, require) {{ {index} }},
-"m/e.mjs": function() {{ throw new TypeError('Native ESM must be loaded by its registered entry'); }},
-}};
-var __thaw_bundle_require_maps = {{ "m/index.js": {{"./e.mjs": "m/e.mjs"}}, "m/e.mjs": {{}}, }};
+{stubs}}};
+var __thaw_bundle_require_maps = {{ "m/index.js": {{{map}}}, {empties}}};
 var __thaw_bundle_entry_key = "m/index.js";
 var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal});
 }})(globalThis.require);"#
@@ -971,48 +972,72 @@ var __thaw_native_registered = globalThis.__thaw_register_native_bundle({literal
         assert_eq!(p.call("run", &[]).unwrap(), Native::Number(2.0));
     }
 
-    // (b) an in-bundle importer copies `value` (`var value = m["value"]`): the blocker stays.
+    const E: &str = "export let value = 0;\nexport function bump() { value++; }\n";
+
+    // Loads `modules` (main m/e.mjs) and runs `index`'s `exports.run`, returning its result.
+    fn run(modules: serde_json::Value, index: &str) -> Native {
+        let mut p = Package::load(&bundle("m/e.mjs", modules, index)).expect("loads");
+        p.call("run", &[]).unwrap()
+    }
+
+    // (b) an in-bundle importer reads `value` live: bump() in the exporter is visible through the import.
     #[test]
-    fn mutable_export_copied_by_in_bundle_importer_still_blocks() {
+    fn mutable_export_copied_by_in_bundle_importer_is_live() {
         let modules = serde_json::json!([
-            { "key": "m/e.mjs", "source": "export let value = 0;\nexport function bump() { value++; }\n", "imports": {} },
-            { "key": "m/i.mjs", "source": "import { value } from \"./e.mjs\";\nexport const seen = value;\n",
+            { "key": "m/e.mjs", "source": E, "imports": {} },
+            { "key": "m/i.mjs", "source": "import { value } from \"./e.mjs\";\nexport function seen() { return value; }\n",
               "imports": { "./e.mjs": "m/e.mjs" } }
         ]);
-        let err = Package::load(&bundle("m/e.mjs", modules, "")).err();
-        assert!(
-            matches!(&err, Some(HostError::Unsupported(f)) if f == "esm-live-binding"),
-            "{err:?}"
-        );
+        let index = r#"var e = require("./e.mjs"), i = require("./i.mjs"); exports.run = function () { e.bump(); e.bump(); return i.seen(); };"#;
+        assert_eq!(run(modules, index), Native::Number(2.0));
     }
 
-    fn assert_blocked(src: &str) {
-        let err = Package::load(src).err();
-        assert!(
-            matches!(&err, Some(HostError::Unsupported(f)) if f == "esm-live-binding"),
-            "{err:?}"
-        );
-    }
-
-    // (c) renamed re-export chain: B re-exports the mutable `value` as `v`, C copies it (`var v = B["v"]`).
+    // (c) renamed re-export chain: B re-exports the mutable `value` as `v`, C reads it.
     #[test]
-    fn mutable_export_renamed_through_reexport_chain_still_blocks() {
+    fn mutable_export_renamed_through_reexport_chain_is_live() {
         let modules = serde_json::json!([
-            { "key": "m/e.mjs", "source": "export let value = 0;\nexport function bump() { value++; }\n", "imports": {} },
+            { "key": "m/e.mjs", "source": E, "imports": {} },
             { "key": "m/b.mjs", "source": "export { value as v } from \"./e.mjs\";\n", "imports": { "./e.mjs": "m/e.mjs" } },
-            { "key": "m/c.mjs", "source": "import { v } from \"./b.mjs\";\nexport const seen = v;\n", "imports": { "./b.mjs": "m/b.mjs" } }
+            { "key": "m/c.mjs", "source": "import { v } from \"./b.mjs\";\nexport function seen() { return v; }\n", "imports": { "./b.mjs": "m/b.mjs" } }
         ]);
-        assert_blocked(&bundle("m/e.mjs", modules, ""));
+        let index = r#"var e = require("./e.mjs"), c = require("./c.mjs"); exports.run = function () { e.bump(); e.bump(); e.bump(); return c.seen(); };"#;
+        assert_eq!(run(modules, index), Native::Number(3.0));
     }
 
-    // (d) `export *` of a module with a mutable live export: the star re-export copies its names, so it blocks.
+    // (d) `export *` of a module with a mutable export: a reader behind the star sees bump().
     #[test]
-    fn mutable_export_through_export_star_still_blocks() {
+    fn mutable_export_through_export_star_is_live() {
         let modules = serde_json::json!([
-            { "key": "m/e.mjs", "source": "export let value = 0;\nexport function bump() { value++; }\n", "imports": {} },
-            { "key": "m/s.mjs", "source": "export * from \"./e.mjs\";\n", "imports": { "./e.mjs": "m/e.mjs" } }
+            { "key": "m/e.mjs", "source": E, "imports": {} },
+            { "key": "m/s.mjs", "source": "export * from \"./e.mjs\";\n", "imports": { "./e.mjs": "m/e.mjs" } },
+            { "key": "m/c.mjs", "source": "import { value } from \"./s.mjs\";\nexport function seen() { return value; }\n", "imports": { "./s.mjs": "m/s.mjs" } }
         ]);
-        assert_blocked(&bundle("m/e.mjs", modules, ""));
+        let index = r#"var e = require("./e.mjs"), c = require("./c.mjs"); exports.run = function () { e.bump(); e.bump(); return c.seen(); };"#;
+        assert_eq!(run(modules, index), Native::Number(2.0));
+    }
+
+    // Import reads are scope-safe live member reads: shadowing, shorthand, typeof, call this-value,
+    // `export { x }` of an import, default import, and assignment to an import throwing a TypeError.
+    // Node 22 expectation of the same sources: "2,p,shadow,2,2,number,undefined,4,2,7,TypeError,TypeError,2" (real `node` 22.23.1)
+    #[test]
+    fn native_import_reads_are_live_scope_safe() {
+        let modules = serde_json::json!([
+            { "key": "m/e.mjs",
+              "source": "export let x = 0;\nexport function bump() { x++; }\nexport function who() { return this === undefined ? 'undefined' : 'obj'; }\nexport default function dflt() { return x; }\nlet d = 1;\nexport function setd(v) { d = v; }\nexport { d };\n",
+              "imports": {} },
+            { "key": "m/i.mjs",
+              "source": "import { x, who, d } from \"./e.mjs\";\nimport dflt, * as ns from \"./e.mjs\";\nexport { x as rx, d as rd };\nexport function plain() { return x; }\nexport function param(x) { return x; }\nexport function local() { var x = 'shadow'; return x; }\nexport function block() { { let x = 'inner'; } return x; }\nexport function short() { return { x }; }\nexport function type() { return typeof x; }\nexport function thisval() { return who(); }\nexport function viaDefault() { return dflt() + ns.x; }\nexport function assign() { try { x = 5; } catch (e) { return e.name; } return 'no throw'; }\nexport function update() { try { x++; } catch (e) { return e.name; } return 'no throw'; }\n",
+              "imports": { "./e.mjs": "m/e.mjs" } }
+        ]);
+        let index = r#"var e = require("./e.mjs"), i = require("./i.mjs");
+exports.run = function () {
+  e.bump(); e.bump(); e.setd(7);
+  return [i.plain(), i.param('p'), i.local(), i.block(), i.short().x, i.type(), i.thisval(), i.viaDefault(), i.rx, i.rd, i.assign(), i.update(), e.x].join(',');
+};"#;
+        assert_eq!(
+            run(modules, index),
+            Native::Str("2,p,shadow,2,2,number,undefined,4,2,7,TypeError,TypeError,2".into())
+        );
     }
 }
 
@@ -1036,9 +1061,8 @@ mod convert_pin_tests {
             "if (!Object.prototype.hasOwnProperty.call(exports, \"b\")) Object.defineProperty(exports, \"b\", { enumerable: true, get: function () { return b; } });\n",
             "if (!Object.prototype.hasOwnProperty.call(exports, \"c\")) Object.defineProperty(exports, \"c\", { enumerable: true, get: function () { return require(\"./y.js\")[\"c\"]; } });\n",
             "var __thaw_esm_m1 = require(\"./x.js\");\n",
-            "var a = __thaw_esm_m1[\"a\"];\n",
-            "const b = a + 1;;\n",
-            "exports.default = (a);\n",
+            "const b = __thaw_esm_m1[\"a\"] + 1;;\n",
+            "exports.default = (__thaw_esm_m1[\"a\"]);\n",
         );
         assert_eq!(converted.body, expected);
         assert_eq!(converted.specs, vec!["./x.js".to_string()]);
@@ -1072,7 +1096,7 @@ pub(crate) fn convert_entry(source: &str) -> Result<EntryModule, String> {
             f.message, f.line, f.col
         )
     })?;
-    let converted = convert_module(&module, &cm, &[], &[], &ENTRY_NAMES, None);
+    let converted = convert_module(&module, &cm, &[], &[], &ENTRY_NAMES, None, &BTreeMap::new());
     if let Some(problem) = converted.problems.first() {
         return Err(format!("unsupported module syntax: {problem}"));
     }
