@@ -28,4 +28,3 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 libc = "0.2"
 # tests only: the node:wasi preview1 natives (the registry tests run node:wasi through thaw-js); a normal-dependency feature would also change the thaw-js that thaw-cli ships
 thaw-js = { path = "../thaw-js", features = ["wasi"] }
-thaw-quickjs = { path = "../thaw-quickjs" }

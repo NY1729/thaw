@@ -802,7 +802,7 @@ fn inspector_sessions_evaluate_through_callback_and_promise_protocols() {
     let result = run_js(&bundle);
     assert_eq!(
         result,
-        r#"[null,"ws://localhost:9333/thaw",null,{"type":"number","value":42},"boom","thaw-quickjs-main",["Runtime","Debugger","Profiler","HeapProfiler","Network","Schema"],null,"ERR_INSPECTOR_NOT_CONNECTED",{"answer":42},true]"#
+        r#"[null,"ws://localhost:9333/thaw",null,{"type":"number","value":42},"boom","thaw-js-main",["Runtime","Debugger","Profiler","HeapProfiler","Network","Schema"],null,"ERR_INSPECTOR_NOT_CONNECTED",{"answer":42},true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

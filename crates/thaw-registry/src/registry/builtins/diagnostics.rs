@@ -39,7 +39,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
 "#,
         ),
         "inspector" => Some(concat!(
-            r#"var EventEmitter = require('node:events'), opened = false, inspectorUrl, isolateId = 'thaw-quickjs-main';
+            r#"var EventEmitter = require('node:events'), opened = false, inspectorUrl, isolateId = 'thaw-js-main';
              function remoteObject(value, returnByValue) { var type = value === null ? 'object' : typeof value, result = { type: type }; if (value === null) result.subtype = 'null'; else if (type === 'undefined') result.description = 'undefined'; else if (type === 'number' && !Number.isFinite(value)) { result.unserializableValue = String(value); result.description = String(value); } else if (type === 'bigint') { result.unserializableValue = String(value) + 'n'; result.description = String(value) + 'n'; } else if (type === 'symbol' || type === 'function') result.description = String(value); else if (type === 'object' && !returnByValue) { result.className = value.constructor && value.constructor.name || 'Object'; result.description = result.className; } else result.value = value; return result; }
              function Session() { if (!(this instanceof Session)) return new Session(); EventEmitter.call(this); this._connected = false; }
              Session.prototype = Object.create(EventEmitter.prototype); Session.prototype.constructor = Session;
