@@ -543,7 +543,9 @@ impl<'a> FnLowerer<'a> {
         generic: bool,
     ) -> Result<Option<HirExpr>, String> {
         let HirExpr::Var(name) = value else { return Ok(None) };
-        if self.fresh_object_bindings.contains(name) || !(generic || Self::type_holds_any(declared)) {
+        if self.fresh_object_bindings.contains(name)
+            || !(generic || Self::type_holds_any(declared) || Self::is_class_instance_type(declared))
+        {
             return Ok(None);
         }
         let actual = self.infer_expr_type(value)?;
@@ -596,6 +598,13 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         }
         Ok(Some(inner.clone()))
+    }
+
+    /// A declared class-instance slot (`value: Item`): the package gets the live instance, whose methods it calls.
+    pub(in crate::lower) fn is_class_instance_type(declared: &HirType) -> bool {
+        matches!(declared, HirType::Object(fields) if fields.first().is_some_and(|(marker, _)| {
+            marker.starts_with("__thaw_class_identity_\u{1e}") && marker != "__thaw_class_identity_\u{1e}Date"
+        }))
     }
 
     /// Whether a declared slot stores `any` values (directly or as an element).

@@ -4340,3 +4340,17 @@ fn bound_static_class_method_preserves_rest_prefix_after_optional_fixed_paramete
         "11\n20\n14\n6\n"
     );
 }
+
+#[test]
+fn class_instances_keep_their_methods_across_typed_js_calls() {
+    let source = r#"
+        class Item { value: number = 1; bump(): number { this.value += 1; return this.value; } }
+        declare function __thaw_typed_js_70726f6265(value: Item): boolean;
+        function main(): void {
+            loadScript("globalThis.probe = (value) => { if (!globalThis.keptItem) globalThis.keptItem = value; const same = globalThis.keptItem === value; const result = value.bump(); return same && result === value.value; };");
+            const item = new Item();
+            console.log(__thaw_typed_js_70726f6265(item), __thaw_typed_js_70726f6265(item), item.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_instance_bridge_methods"), "true true 3\n");
+}
