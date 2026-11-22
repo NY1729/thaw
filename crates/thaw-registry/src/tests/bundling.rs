@@ -1726,6 +1726,40 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
 }
 
 #[test]
+fn native_esm_self_import_during_evaluation_runs_once() {
+    // Node 22.23.1 prints [1,7,true,"function"] (g2b-probes/self): a module that import()s itself while evaluating runs
+    // its body once, and two import() calls are two different promises. The QuickJS-private pin (re-entering the bound
+    // evaluator returns the SAME ready promise) has no Node analogue and stays in its pending test.
+    let root = temp_registry("native-esm-self-import");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-self-import-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "globalThis.nativeRuns = (globalThis.nativeRuns || 0) + 1; const p1 = import('./index.mjs'); const p2 = import('./index.mjs'); export const ps = [p1, p2]; export const value = 7;").unwrap();
+    let (bundle, _, count, _) = bundle_commonjs_package(&modules, "native-self-import-pkg", &package, "index.mjs").unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(run_js_probe(&bundle, "[globalThis.nativeRuns, exports.value, exports.ps[0] !== exports.ps[1], typeof exports.ps[0].then]"), "[1,7,true,\"function\"]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn native_esm_cycle_peer_reads_hoisted_not_tdz_and_unused_modules_stay_unlinked() {
+    // Node 22.23.1 prints [7,true,9,false] (g2b-probes/linked): the cycle peer reads the hoisted export and gets TDZ
+    // for the const; a module reachable only through a dynamic import() has not run. (Node also keeps it unrun right
+    // after calling import(); thaw-js loads a non-async module synchronously inside import(), so that moment is not pinned.)
+    let root = temp_registry("native-esm-linked-read");
+    let modules = root.join("node_modules");
+    let package = modules.join("native-linked-read-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.mjs"), "import './lazy_b.mjs'; export function available() { return 7; } export const late = 9; export function loadUnused() { return import('./unused.mjs'); }").unwrap();
+    fs::write(package.join("lazy_b.mjs"), "import * as A from './index.mjs'; import { available } from './index.mjs'; globalThis.hoisted = available(); try { A.late; } catch (e) { globalThis.tdz = e instanceof ReferenceError; } export const peer = 3;").unwrap();
+    fs::write(package.join("unused.mjs"), "globalThis.unusedRan = true; export const hidden = 4;").unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "native-linked-read-pkg", &package, "index.mjs").unwrap();
+    assert!(bundle.contains("__thaw_register_native_bundle"));
+    assert_eq!(run_js_probe(&bundle, "[globalThis.hoisted, globalThis.tdz, exports.late, !!globalThis.unusedRan]"), "[7,true,9,false]");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn native_esm_route_preserves_mixed_mjs_and_cjs_evaluation_order() {
     let root = temp_registry("native-esm-mixed-fallback");
     let modules = root.join("node_modules");
