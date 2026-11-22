@@ -12700,3 +12700,18 @@ fn load_script_sees_the_live_handle_reference_counts() {
         1
     );
 }
+
+#[test]
+fn typed_call_without_a_package_prefix_calls_a_default_realm_global() {
+    use crate::host::thaw_tjs_load_script;
+    use std::ffi::CString;
+    let src =
+        CString::new("globalThis.addTwo = (a, b) => a + b; globalThis.ns = { inc: (a) => a + 1 };")
+            .unwrap();
+    assert_eq!(thaw_tjs_load_script(src.as_ptr()), 1);
+    assert_eq!(typed_call("addTwo", "[1,2]").unwrap(), "3");
+    assert_eq!(typed_call("ns.inc", "[4]").unwrap(), "5");
+    assert!(typed_call("missingFn", "[]")
+        .unwrap_err()
+        .contains("missingFn"));
+}
