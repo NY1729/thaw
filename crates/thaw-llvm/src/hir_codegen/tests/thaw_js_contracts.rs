@@ -34,6 +34,14 @@ fn typed_thaw_js_call_with_a_non_plain_type_throws_instead_of_failing_the_build(
 }
 
 #[test]
+fn thaw_js_constructor_option_object_accepts_a_rest_callback_field() {
+    use thaw_hir::{HirOptionalMask, HirType::*};
+    let rest = CallableFunction(vec![], HirOptionalMask::Inline(0), Some(Box::new(Str)), Box::new(Void));
+    let options = Object(vec![("verbose".into(), Optional(Box::new(rest)))]);
+    assert!(thaw_js_object_with_callbacks_type(&options));
+}
+
+#[test]
 fn typed_thaw_js_plain_types_are_numbers_strings_booleans_json_and_their_shapes() {
     use thaw_hir::HirType::*;
     assert!(thaw_js_plain_type(&F64) && thaw_js_plain_type(&Str) && thaw_js_plain_type(&Bool));
