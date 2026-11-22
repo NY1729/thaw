@@ -379,11 +379,11 @@ fn function_modules_do_not_replace_globals_with_their_named_methods() {
     let js_source = "module.exports = function lodash() {}; module.exports.isNaN = function() { return false; };";
     let wrapped = wrap_as_commonjs_module(js_source, &["isNaN".to_string()], &[], &[], "");
     let source = CString::new(wrapped).unwrap();
-    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    assert_eq!(thaw_js_shim::thaw_js_load(source.as_ptr()), 1);
 
     let name = CString::new("isNaN").unwrap();
     let args = CString::new("[1]").unwrap();
-    let result = thaw_quickjs::thaw_js_call(name.as_ptr(), args.as_ptr());
+    let result = thaw_js_shim::thaw_js_call(name.as_ptr(), args.as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "false");
 }
 
@@ -525,14 +525,14 @@ fn binds_esm_default_export_under_the_fallback_name() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("escapeIt").unwrap();
     let args = CString::new("[\"hi\"]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -557,14 +557,14 @@ fn binds_a_bare_default_only_object_under_the_fallback_name() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("isValid").unwrap();
     let args = CString::new("[\"x\"]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -670,8 +670,8 @@ fn bare_global_function_bundle_is_unaffected_by_commonjs_wrapping() {
     // second package loads, while the declared fallback remains public.
     assert!(wrapped.contains("(function(module, exports, require, __filename, __dirname)"));
     assert!(wrapped.contains("globalThis.greet = greet"));
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(wrapped).unwrap().as_ptr()), 1);
-    assert_eq!(thaw_quickjs::eval_json("greet('Ada')"), Ok(Some("\"hi, Ada\"".into())));
+    assert_eq!(thaw_js_shim::thaw_js_load(CString::new(wrapped).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_js_shim::eval_json("greet('Ada')"), Ok(Some("\"hi, Ada\"".into())));
 }
 
 /// The exact pattern found in a real npm package (`@hapi/hoek`):
@@ -695,14 +695,14 @@ fn guarded_buffer_reference_does_not_throw() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("checkBuffer").unwrap();
     let args = CString::new("[1]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -731,7 +731,7 @@ fn unguarded_url_prototype_access_does_not_throw() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
@@ -764,14 +764,14 @@ fn unguarded_process_global_reference_does_not_throw() {
 
     let source = CString::new(wrapped).unwrap();
     assert_eq!(
-        thaw_quickjs::thaw_js_load(source.as_ptr()),
+        thaw_js_shim::thaw_js_load(source.as_ptr()),
         1,
         "failed to load"
     );
 
     let func = CString::new("readIt").unwrap();
     let args = CString::new("[]").unwrap();
-    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result_ptr = thaw_js_shim::thaw_js_call(func.as_ptr(), args.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
