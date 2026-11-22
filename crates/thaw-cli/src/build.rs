@@ -792,7 +792,6 @@ fn build_with_native_mode_routed(
             &forced_jit_fallbacks,
             &forced_runtime_only,
             &fetch_transport_bundles,
-            true,
             &served_peers,
         )?;
         let external_resolutions =
@@ -1036,6 +1035,12 @@ fn build_with_native_mode_routed(
             manifest,
         );
     };
+    // The last shim pass judged every package: one thaw-js refused has no bundle in the shim, so the build fails here.
+    let refusals = take_thaw_js_refusals();
+    if !refusals.is_empty() {
+        let why = refusals.iter().map(|(package, why)| format!("package `{package}` stays on QuickJS: {why}")).collect::<Vec<_>>().join("; ");
+        return Err(format!("unsupported on thaw-js: {why}"));
+    }
     thaw_hir::set_thaw_js_routed(true);
     // `SHARE_ENV` shares the environment table with a worker: `process.env.NAME` must read that table
     thaw_hir::set_shared_env_program(user_source.contains("SHARE_ENV"));
@@ -1101,17 +1106,10 @@ fn build_with_native_mode_routed(
             return Err(format!("{THAW_JS_MIXED}: {blockers}"));
         }
     }
-    // A build that still links QuickJS (a package thaw-js refused, with no thaw-js code in the program to trigger
-    // the mixed-build error above) is refused. A refused package alone is not enough: built-ins such as node:crypto
-    // are refused per function and still end up on thaw-js, so only the link decides.
+    // A build that still links QuickJS (user `loadScript` and the like, with no thaw-js code in the program to
+    // trigger the mixed-build error above) is refused.
     if uses_quickjs {
-        let refusals = take_thaw_js_refusals();
-        let why = if refusals.is_empty() {
-            "the program links QuickJS".to_string()
-        } else {
-            refusals.iter().map(|(package, why)| format!("package `{package}` stays on QuickJS: {why}")).collect::<Vec<_>>().join("; ")
-        };
-        return Err(format!("unsupported on thaw-js: {why}"));
+        return Err("unsupported on thaw-js: the program links QuickJS".to_string());
     }
     if let Some(object) = manifest.as_object_mut() {
         // The flag must name the archive this build links. The pre-compile guess above misses
@@ -1176,15 +1174,6 @@ fn build_with_native_mode_routed(
             build_staticlib("thaw-jit")?,
         )),
     };
-    // A QuickJS-enabled `thaw-napi` staticlib already contains its Rust
-    // dependency objects. Linking a second standalone QuickJS archive would
-    // define every host symbol twice.
-    let quickjs_lib = (uses_quickjs && !uses_napi)
-        .then(|| {
-            let features = quickjs_runtime_features(&runtime_features);
-            build_staticlib_with_features("thaw-quickjs", &features)
-        })
-        .transpose()?;
     // thaw-js carries its own copy of thaw-intl (a leaf crate, `Intl` polyfill natives) when the program
     // references `Intl`; its `thaw_intl_*` exports then also serve the native locale calls, so the
     // standalone thaw-intl archive would define them twice.
@@ -1218,7 +1207,7 @@ fn build_with_native_mode_routed(
         .then(|| build_staticlib("thaw-intl"))
         .transpose()?;
     let napi_lib = uses_napi
-        .then(|| match napi_features(uses_quickjs, compiler.uses_thaw_js(), &runtime_features) {
+        .then(|| match napi_features(compiler.uses_thaw_js()) {
             None => build_staticlib_without_default_features("thaw-napi"),
             Some(features) => {
                 let features = features.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1228,7 +1217,7 @@ fn build_with_native_mode_routed(
         .transpose()?;
     // The thaw-js-engine `thaw-napi` reaches thaw-js through `extern "C"` `thaw_tjs_*` calls only,
     // so the thaw-js archive must follow it on the link line (see the trailing pass below).
-    let napi_uses_thaw_js = uses_napi && !uses_quickjs && compiler.uses_thaw_js();
+    let napi_uses_thaw_js = uses_napi && compiler.uses_thaw_js();
     if let Some(napi_lib) = &napi_lib {
         validate_native_addon_imports(&native_addons, napi_lib)?;
     }
@@ -1283,9 +1272,6 @@ fn build_with_native_mode_routed(
         if let Some((arena_lib, ..)) = &static_rt_libs {
             linker.arg(arena_lib);
         }
-    }
-    if let Some(quickjs_lib) = quickjs_lib {
-        linker.arg(quickjs_lib);
     }
     if let Some(napi_lib) = napi_lib {
         linker.arg(napi_lib);
@@ -1757,14 +1743,6 @@ fn native_addon_import_audit_rejects_missing_and_internal_symbols() {
 }
 
 #[test]
-fn quickjs_archive_never_gets_the_thaw_js_only_sqlite_feature() {
-    let features: std::collections::BTreeSet<&str> = ["intl", "sqlite", "tls", "zstd"].into_iter().collect();
-    assert_eq!(quickjs_runtime_features(&features), vec!["intl", "tls"]);
-    // the N-API QuickJS features follow the same rule (no `quickjs-sqlite` feature exists)
-    assert_eq!(napi_runtime_features(&features), vec!["quickjs", "quickjs-intl", "quickjs-tls"]);
-}
-
-#[test]
 fn zstd_marker_selects_the_zstd_feature_only_for_zstd_users() {
     assert!(thaw_bridge::required_runtime_features("zlib.zstdCompressSync(input)").contains("zstd"));
     assert!(thaw_bridge::required_runtime_features("require('node:zlib').createZstdDecompress()").contains("zstd"));
@@ -2040,37 +2018,10 @@ fn source_uses_intl(source: &str) -> bool {
     thaw_bridge::required_runtime_features(source).contains("intl")
 }
 
-/// The runtime features `thaw-quickjs` has as cargo features: `node:sqlite` is served by thaw-js only (the QuickJS lane
-/// never had it), so a program that merely mentions it (undici's cache store) must not ask for a `sqlite` feature there.
-fn quickjs_runtime_features<'a>(features: &std::collections::BTreeSet<&'a str>) -> Vec<&'a str> {
-    features.iter().copied().filter(|feature| !is_thaw_js_only_feature(feature)).collect()
-}
-
-/// Runtime features served by thaw-js alone (its cargo features `sqlite` and `zstd`): the QuickJS lane never had them.
-fn is_thaw_js_only_feature(feature: &str) -> bool {
-    matches!(feature, "sqlite" | "zstd")
-}
-
-fn napi_runtime_features(features: &std::collections::BTreeSet<&str>) -> Vec<String> {
-    std::iter::once("quickjs".to_string())
-        .chain(features.iter().filter(|feature| !is_thaw_js_only_feature(feature)).map(|feature| format!("quickjs-{feature}")))
-        .collect()
-}
-
-/// `thaw-napi` features for a N-API program: the QuickJS engine when the program needs QuickJS,
-/// otherwise the thaw-js engine. `None` builds `thaw-napi` with no engine at all.
-fn napi_features(
-    uses_quickjs: bool,
-    uses_thaw_js: bool,
-    features: &std::collections::BTreeSet<&str>,
-) -> Option<Vec<String>> {
-    if uses_quickjs {
-        Some(napi_runtime_features(features))
-    } else if uses_thaw_js {
-        Some(vec!["engine-thaw-js".to_string()])
-    } else {
-        None
-    }
+/// `thaw-napi` features for a N-API program: the thaw-js engine when the program needs one, else none
+/// (`None` builds `thaw-napi` with no engine at all).
+fn napi_features(uses_thaw_js: bool) -> Option<Vec<String>> {
+    uses_thaw_js.then(|| vec!["engine-thaw-js".to_string()])
 }
 
 #[test]
@@ -2080,30 +2031,12 @@ fn runtime_feature_selection_preserves_exact_requirements() {
         features.iter().copied().collect::<Vec<_>>(),
         ["brotli", "intl", "tls"]
     );
-    assert_eq!(
-        napi_runtime_features(&features),
-        ["quickjs", "quickjs-brotli", "quickjs-intl", "quickjs-tls"]
-    );
-    let features = ["icu4c", "intl"].into_iter().collect();
-    assert_eq!(
-        napi_runtime_features(&features),
-        ["quickjs", "quickjs-icu4c", "quickjs-intl"]
-    );
 }
 
 #[test]
-fn napi_features_select_thaw_js_engine_without_quickjs() {
-    let none: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    assert_eq!(
-        napi_features(false, true, &none),
-        Some(vec!["engine-thaw-js".to_string()])
-    );
-    let brotli: std::collections::BTreeSet<&str> = ["brotli"].into_iter().collect();
-    assert_eq!(
-        napi_features(true, false, &brotli),
-        Some(vec!["quickjs".to_string(), "quickjs-brotli".to_string()])
-    );
-    assert_eq!(napi_features(false, false, &none), None);
+fn napi_features_select_thaw_js_engine_only_when_needed() {
+    assert_eq!(napi_features(true), Some(vec!["engine-thaw-js".to_string()]));
+    assert_eq!(napi_features(false), None);
 }
 
 fn ensure_static_system_libraries() -> Result<(), String> {
@@ -2425,15 +2358,8 @@ fn run_prepare(args: &[String]) -> Result<(), String> {
     ] {
         store_prepared_staticlib(package, false, &[])?;
     }
-    store_prepared_staticlib("thaw-quickjs", true, &[])?;
     store_prepared_staticlib("thaw-napi", true, &[])?;
     store_prepared_staticlib("thaw-napi", true, &["engine-thaw-js"])?;
-    store_prepared_staticlib("thaw-napi", true, &["quickjs"])?;
-    store_prepared_staticlib(
-        "thaw-napi",
-        true,
-        &["quickjs", "quickjs-tls", "quickjs-wasm"],
-    )?;
     let root = prepared_staticlib_root()?;
     std::fs::write(root.join("compiler.fingerprint"), runtime_fingerprint())
         .map_err(|error| format!("failed to write prepared runtime fingerprint: {error}"))?;
@@ -2502,15 +2428,8 @@ fn prepared_runtime_is_current() -> bool {
         prepared_staticlib_path("thaw-std", false, &[]),
         prepared_staticlib_path("thaw-jit", false, &[]),
         prepared_staticlib_path("thaw-js", false, &[]),
-        prepared_staticlib_path("thaw-quickjs", true, &[]),
         prepared_staticlib_path("thaw-napi", true, &[]),
         prepared_staticlib_path("thaw-napi", true, &["engine-thaw-js"]),
-        prepared_staticlib_path("thaw-napi", true, &["quickjs"]),
-        prepared_staticlib_path(
-            "thaw-napi",
-            true,
-            &["quickjs", "quickjs-tls", "quickjs-wasm"],
-        ),
     ]
     .into_iter()
     .all(|path| path.is_ok_and(|path| path.is_file()))

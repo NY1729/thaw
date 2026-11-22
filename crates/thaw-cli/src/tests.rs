@@ -142,8 +142,8 @@ fn prepared_runtime_variants_have_stable_names() {
     assert_eq!(staticlib_variant(false, &[]), "default");
     assert_eq!(staticlib_variant(true, &[]), "minimal");
     assert_eq!(
-        staticlib_variant(true, &["quickjs", "quickjs-tls"]),
-        "quickjs-quickjs-tls"
+        staticlib_variant(true, &["engine-thaw-js", "tls"]),
+        "engine-thaw-js-tls"
     );
 }
 

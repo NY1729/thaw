@@ -301,10 +301,11 @@ fn peers_first_order(deps: &[Vec<usize>]) -> Vec<usize> {
 /// link, and any cross-package name-collision rewrites the caller must
 /// also apply to the user's own source (`rewrite_qualified_calls`).
 ///
-/// `generate_registry_shims_pass`, with experimental thaw-js routing: when `thaw_js_routing` is
-/// set, a first pass finds the packages thaw-js can serve and a second pass regenerates the
-/// shims with those packages' typed calls targeting `__thaw_typed_tjs_*` and their bundles loaded
-/// by `loadThawJs`. Off (the default) this is exactly the single QuickJS pass.
+/// `generate_registry_shims_pass` twice: the first pass is an eligibility oracle (it records the
+/// packages thaw-js refuses, `take_thaw_js_refusals`, and its text is final only when no package
+/// has a bundle); the second regenerates the shims with the eligible packages' typed calls
+/// targeting `__thaw_typed_tjs_*` and their bundles loaded by `loadThawJs`. A refused package
+/// emits no bundle; `build` turns the recorded refusals into `unsupported on thaw-js: ...`.
 #[allow(clippy::too_many_arguments)]
 fn generate_registry_shims(
     registry_dir: &Path,
@@ -320,7 +321,6 @@ fn generate_registry_shims(
     forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
     forced_runtime_only: &std::collections::HashSet<String>,
     fetch_transport_bundles: &std::collections::HashSet<String>,
-    thaw_js_routing: bool,
     peers: &std::collections::HashSet<String>,
 ) -> Result<RegistryShims, String> {
     let routed = ThawJsPackages::new();
@@ -344,12 +344,11 @@ fn generate_registry_shims(
             forced_jit_fallbacks,
             forced_runtime_only,
             fetch_transport_bundles,
-            thaw_js_routing,
             &routed,
             &served,
         )?;
         let next: ThawJsPackages = eligible.intersection(peers).cloned().collect();
-        if !thaw_js_routing || next == served {
+        if next == served {
             break (first, eligible);
         }
         served = next;
@@ -371,7 +370,6 @@ fn generate_registry_shims(
         forced_jit_fallbacks,
         forced_runtime_only,
         fetch_transport_bundles,
-        thaw_js_routing,
         &eligible,
         &served,
     )
@@ -393,24 +391,19 @@ fn generate_registry_shims_pass(
     forced_jit_fallbacks: &std::collections::HashSet<(String, String)>,
     forced_runtime_only: &std::collections::HashSet<String>,
     fetch_transport_bundles: &std::collections::HashSet<String>,
-    thaw_js_routing: bool,
     thaw_js_routed: &ThawJsPackages,
     thaw_js_served: &ThawJsPackages,
 ) -> Result<(RegistryShims, ThawJsPackages), String> {
     let mut thaw_js_eligible = ThawJsPackages::new();
     // the registry's packages as installed now (a require of one the bundle does not map blocks thaw-js routing)
-    let thaw_js_installed = if thaw_js_routing {
-        registry_installed_packages(registry_dir)
-    } else {
-        Default::default()
-    };
+    let thaw_js_installed = registry_installed_packages(registry_dir);
     // Every package thaw-js refuses in this pass (reported by `build` after the last pass).
     let mut thaw_js_refusals: Vec<(String, String)> = Vec::new();
     // Which package names/functions the program mentions is a property of the whole module graph: a function
     // only a non-entry module imports (the entry may import just types from the package) must not be pruned.
     // The call-arity scans below stay entry-only, as they parse the one source text.
     let graph_source = match user_source_name {
-        thaw_parser::common::FileName::Real(path) if thaw_js_routing => {
+        thaw_parser::common::FileName::Real(path) => {
             module_graph::graph_sources(path, user_source)
                 .map(|sources| sources.join("\n"))
                 .unwrap_or_else(|_| user_source.to_string())
@@ -636,7 +629,7 @@ fn generate_registry_shims_pass(
                 mention_source,
                 // a thaw-js build also compiles every shim it emits, so an unmentioned function's
                 // adapter (ejs `compile`'s callable result) must not be emitted at all
-                thaw_js_routing || std::env::var("THAW_PRUNE_SHIMS").as_deref() == Ok("1"),
+                true,
             );
             keep_nested_namespace_targets(
                 unpruned,
@@ -868,19 +861,9 @@ fn generate_registry_shims_pass(
         }
     }
 
-    /// `(package_name, js_source, fallback_function_names, qualified_aliases,
-    /// nested_namespace_aliases)` -- kept as owned data so the borrowed
-    /// `ModuleBundle`s built from it below can outlive the loop that
-    /// collects it.
-    type PendingBundle = (
-        String,
-        String,
-        Vec<String>,
-        Vec<String>,
-        Vec<(String, String)>,
-        Vec<(String, String)>,
-        Vec<(String, String, String, String)>,
-    );
+    /// `(package_name, thaw-js bundle form, value_exports)` -- kept as owned data so the borrowed
+    /// `ModuleBundle`s built from it below can outlive the loop that collects it.
+    type PendingBundle = (String, String, Vec<(String, String, String, String)>);
     type PendingNativeAddon = (String, Vec<u8>, Vec<Vec<u8>>, Option<String>);
     type PendingNativeAddonPath = (String, String, Vec<String>, Option<String>);
 
@@ -2224,22 +2207,6 @@ fn generate_registry_shims_pass(
                     _ => None,
                 })
                 .collect();
-            let mut qualified_aliases: Vec<(String, String)> = qualified
-                .iter()
-                .filter(|q| !q.name.contains('.'))
-                .map(|q| (q.name.clone(), q.qualified_key.clone()))
-                .collect();
-            for class in &pkg.classes {
-                if !pkg.type_only_value_names.contains(&class.name)
-                    && !class.name.contains('.')
-                    && !qualified_aliases
-                        .iter()
-                        .any(|(name, _)| name == &class.name)
-                {
-                    qualified_aliases
-                        .push((class.name.clone(), format!("{}::{}", pkg.name, class.name)));
-                }
-            }
             // A nested-namespace member (`z.coerce.number`, flattened to
             // its own synthetic top-level name `__thaw_ns_coerce_number`
             // by thaw-registry -- see `thaw_bridge::
@@ -2291,35 +2258,6 @@ fn generate_registry_shims_pass(
                         .push((class.name.clone(), format!("{}::{}", pkg.name, class.name)));
                 }
             }
-            // A package whose *only* export is a class (real example:
-            // hono, whose main export is the `Hono` class with no
-            // top-level functions at all) previously never got its
-            // bundle loaded at all: `fallback_names` only tracks
-            // top-level Fallback functions, never `pkg.classes`, so a
-            // class-only package's `!fallback_names.is_empty()` check
-            // was always false and its `loadScript` never ran --
-            // silently leaving every export (the class included)
-            // missing from `globalThis`, since that's set up by the
-            // generic `for (var k in module.exports)` copy loop this
-            // same `loadScript` call also carries (`generation.rs`'s
-            // `wrap_as_commonjs_module`), which never got a chance to
-            // run either.
-            // Every class this package declares (constructible or not --
-            // a static-only class's methods are called as
-            // `ClassName.method(...)`, which resolves `ClassName` the
-            // same `thaw_js_get_global` way a constructor does). See
-            // `ModuleBundle::class_names`'s own doc comment for why a
-            // *default*-exported class specifically needs this (a named
-            // one already gets bound by the generic `module.exports` ->
-            // `globalThis` copy loop below).
-            let class_names: Vec<String> = pkg
-                .classes
-                .iter()
-                .filter(|class| {
-                    !class.name.contains('.') && !pkg.type_only_value_names.contains(&class.name)
-                })
-                .map(|class| class.name.clone())
-                .collect();
             if runtime_package
                 && (forced_runtime_only.contains(&pkg.name)
                     || fetch_transport_bundles.contains(&pkg.name)
@@ -2333,105 +2271,73 @@ fn generate_registry_shims_pass(
                         .any(|class| !pkg.type_only_value_names.contains(&class.name))
                     || !value_exports.is_empty())
             {
-                if thaw_js_routing {
-                    if thaw_js_package_eligible_in(
-                        pkg,
-                        &thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js),
-                        mention_source,
-                        &typed_targets,
-                        &shim[segment_start..segment_end],
-                        &thaw_js_installed,
-                        thaw_js_served,
-                    ) {
-                        thaw_js_eligible.insert(pkg.name.clone());
-                    } else {
-                        thaw_js_refusals.push((pkg.name.clone(), thaw_js_package_refusal(&pkg.name)));
-                    }
+                let form = thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js);
+                if thaw_js_package_eligible_in(
+                    pkg,
+                    &form,
+                    mention_source,
+                    &typed_targets,
+                    &shim[segment_start..segment_end],
+                    &thaw_js_installed,
+                    thaw_js_served,
+                ) {
+                    thaw_js_eligible.insert(pkg.name.clone());
+                } else if !thaw_js_routed.contains(&pkg.name) {
+                    // The first pass is the oracle: a package it served is not refused by the second pass's re-judging
+                    // of its already retargeted declarations (node:crypto's `randomFillSync`).
+                    thaw_js_refusals.push((pkg.name.clone(), thaw_js_package_refusal(&pkg.name)));
                 }
-                bundles.push((
-                    pkg.name.clone(),
-                    if thaw_js_routed.contains(&pkg.name) {
-                        thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js).into_owned()
-                    } else {
-                        bundle_js.clone()
-                    },
-                    fallback_names,
-                    class_names,
-                    qualified_aliases,
-                    nested_namespace_aliases,
-                    value_exports,
-                ));
+                // Only a package thaw-js serves is emitted; a refused one fails the build (`build` reads the refusals).
+                if thaw_js_routed.contains(&pkg.name) {
+                    bundles.push((pkg.name.clone(), form.into_owned(), value_exports));
+                }
             }
         }
     }
     // judged by `build` after its last pass: an earlier pass can refuse what a forced-fallback pass accepts
     set_thaw_js_refusals(thaw_js_refusals);
     // a thaw-js package registers after the peers its bundle requires by name (the runtime resolves them when it loads)
-    if thaw_js_routing {
-        let deps: Vec<Vec<usize>> = {
-            let index: std::collections::HashMap<&str, usize> = bundles
-                .iter()
-                .enumerate()
-                .filter(|(_, bundle)| thaw_js_routed.contains(&bundle.0))
-                .map(|(i, bundle)| (bundle.0.as_str(), i))
-                .collect();
-            bundles
-                .iter()
-                .enumerate()
-                .map(|(i, bundle)| {
-                    if !thaw_js_routed.contains(&bundle.0) {
-                        return Vec::new();
-                    }
-                    thaw_registry::bundle_peer_requires(&bundle.1)
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|peer| index.get(peer.as_str()).copied())
-                        .filter(|&j| j != i)
-                        .collect()
-                })
-                .collect()
-        };
-        // a peer component of two or more packages shares one realm: its members carry the same group marker
-        let keys = {
-            let names: Vec<&str> = bundles.iter().map(|bundle| bundle.0.as_str()).collect();
-            thaw_js_peer_group_keys(&names, &deps)
-        };
-        for (bundle, key) in bundles.iter_mut().zip(keys) {
-            if let Some(key) = key {
-                bundle.1 = thaw_js_with_group_marker(&bundle.1, &key);
-            }
-        }
-        let mut slots: Vec<Option<_>> = std::mem::take(&mut bundles).into_iter().map(Some).collect();
-        bundles = peers_first_order(&deps)
-            .into_iter()
-            .map(|i| slots[i].take().expect("each bundle is ordered once"))
+    let deps: Vec<Vec<usize>> = {
+        let index: std::collections::HashMap<&str, usize> = bundles
+            .iter()
+            .enumerate()
+            .map(|(i, bundle)| (bundle.0.as_str(), i))
             .collect();
+        bundles
+            .iter()
+            .enumerate()
+            .map(|(i, bundle)| {
+                thaw_registry::bundle_peer_requires(&bundle.1)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|peer| index.get(peer.as_str()).copied())
+                    .filter(|&j| j != i)
+                    .collect()
+            })
+            .collect()
+    };
+    // a peer component of two or more packages shares one realm: its members carry the same group marker
+    let keys = {
+        let names: Vec<&str> = bundles.iter().map(|bundle| bundle.0.as_str()).collect();
+        thaw_js_peer_group_keys(&names, &deps)
+    };
+    for (bundle, key) in bundles.iter_mut().zip(keys) {
+        if let Some(key) = key {
+            bundle.1 = thaw_js_with_group_marker(&bundle.1, &key);
+        }
     }
+    let mut slots: Vec<Option<_>> = std::mem::take(&mut bundles).into_iter().map(Some).collect();
+    bundles = peers_first_order(&deps)
+        .into_iter()
+        .map(|i| slots[i].take().expect("each bundle is ordered once"))
+        .collect();
 
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()
-        .map(
-            |(
-                name,
-                js,
-                fallback_names,
-                class_names,
-                qualified_aliases,
-                nested_namespace_aliases,
-                value_exports,
-            )| {
-                thaw_bridge::ModuleBundle {
-                    thaw_js: thaw_js_routed.contains(name),
-                    package_name: name.as_str(),
-                    js_source: js.as_str(),
-                    fallback_names,
-                    class_names,
-                    qualified_aliases,
-                    nested_namespace_aliases,
-                    value_exports,
-                }
-            },
-        )
+        .map(|(name, js, _)| thaw_bridge::ModuleBundle {
+            package_name: name.as_str(),
+            js_source: js.as_str(),
+        })
         .collect();
     let runtime_features = module_bundles
         .iter()
@@ -2488,14 +2394,8 @@ fn generate_registry_shims_pass(
         .iter()
         .filter(|bundle| static_packages.contains(bundle.package_name))
         .map(|bundle| thaw_bridge::ModuleBundle {
-            thaw_js: bundle.thaw_js,
             package_name: bundle.package_name,
             js_source: bundle.js_source,
-            fallback_names: bundle.fallback_names,
-            class_names: bundle.class_names,
-            qualified_aliases: bundle.qualified_aliases,
-            nested_namespace_aliases: bundle.nested_namespace_aliases,
-            value_exports: bundle.value_exports,
         })
         .collect::<Vec<_>>();
     let mut eager_scripts = thaw_bridge::generate_module_init(&eager_bundles);
@@ -2532,14 +2432,8 @@ fn generate_registry_shims_pass(
             .iter()
             .filter(|bundle| bundle.package_name == package.name)
             .map(|bundle| thaw_bridge::ModuleBundle {
-                thaw_js: bundle.thaw_js,
                 package_name: bundle.package_name,
                 js_source: bundle.js_source,
-                fallback_names: bundle.fallback_names,
-                class_names: bundle.class_names,
-                qualified_aliases: bundle.qualified_aliases,
-                nested_namespace_aliases: bundle.nested_namespace_aliases,
-                value_exports: bundle.value_exports,
             })
             .collect::<Vec<_>>();
         if eager == 0 {
@@ -2587,8 +2481,8 @@ fn generate_registry_shims_pass(
                 "__thaw_module_init",
             )?);
         }
-        for loaded in &bundle {
-            for (_, _, local, getter) in loaded.value_exports {
+        for (_, _, value_exports) in bundles.iter().filter(|bundle| bundle.0 == package.name) {
+            for (_, _, local, getter) in value_exports {
                 shim.push_str(&format!("{local} = {getter}();\n"));
             }
         }
