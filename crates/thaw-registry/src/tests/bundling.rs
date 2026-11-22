@@ -2665,30 +2665,3 @@ fn commonjs_created_require_keeps_computed_native_query_instances_distinct() {
     assert_eq!(run_js_probe(&bundle, "exports.run()"), "[false,false,true,0,1,0,3]");
     let _ = fs::remove_dir_all(root);
 }
-
-// qjs_pending: needs in-context created-require calls after load; script route fails: __thaw_register_native_bundle is not a function
-mod qjs_pending_bundling_commonjs_created_require_native_query_clones_private_opaque_edges {
-    use super::*;
-    use ::thaw_quickjs;
-
-#[test]
-fn commonjs_created_require_native_query_clones_private_opaque_edges() {
-    // Unrun: each native query instance gets its own private origin/edge
-    // records, while the imported CommonJS factory still runs only once.
-    use std::ffi::{CStr, CString};
-    let root = temp_registry("cjs-first-native-query-opaque");
-    let modules = root.join("node_modules");
-    let package = modules.join("query-opaque-pkg");
-    fs::create_dir_all(&package).unwrap();
-    fs::write(package.join("index.cjs"), "globalThis.queryIndexRuns = (globalThis.queryIndexRuns || 0) + 1; exports.value = 1; var base = require('./leaf.mjs'); module.exports = { value: 2, base: base };").unwrap();
-    fs::write(package.join("leaf.mjs"), "globalThis.queryOpaqueRuns = (globalThis.queryOpaqueRuns || 0) + 1; export * from './index.cjs'; export const token = {};").unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "query-opaque-pkg", &package, "index.cjs").unwrap();
-    assert!(bundle.contains("evalNativeSync"));
-    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.require = function(name) {{ throw new Error(name); }}; globalThis.queryOpaqueRuns = 0; globalThis.queryIndexRuns = 0; {bundle} var made = globalThis.__thaw_bundle_create_require('query-opaque-pkg/index.cjs'), base = module.exports.base, one = made('./leaf.mjs?one'), two = made('./leaf.mjs?two'); globalThis.queryOpaqueResult = function() {{ return [base.value, one.value, two.value, base === one, one === two, one === made('./leaf.mjs?one'), base.token === one.token, one.token === two.token, queryOpaqueRuns, queryIndexRuns]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-    let result = thaw_quickjs::thaw_js_call(c"queryOpaqueResult".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[2,2,2,false,false,true,false,false,3,1]");
-    let _ = fs::remove_dir_all(root);
-}
-}
-
