@@ -11330,6 +11330,45 @@ fn json_parse_reviver_receives_the_source_text_of_primitives() {
     );
 }
 
+/// ES2025+ library additions absent from Node 22 (spec text, not a node comparison): `RegExp.escape`,
+/// `Iterator.concat` / `zip` / `zipKeyed`, `SuppressedError`, `DisposableStack`, `AsyncDisposableStack`.
+#[test]
+fn es_next_library_additions_follow_the_spec() {
+    assert_eq!(
+        one(
+            r#"console.log(RegExp.escape("foo.bar"), RegExp.escape("foo-bar"), RegExp.escape("(foo)"), RegExp.escape("a b\n\u00a0\u2028_1"))"#
+        ),
+        r#"\x66oo\.bar \x66oo\x2dbar \(foo\) \x61\x20b\n\xa0\u2028_1"#
+    );
+    assert_eq!(
+        one(
+            r#"console.log(Iterator.concat([1, 2], new Set([3])).toArray().join(), JSON.stringify(Iterator.zip([[1, 2], ["a", "b", "c"]]).toArray()), JSON.stringify(Iterator.zip([[1, 2], ["a", "b", "c"]], { mode: "longest", padding: ["x", "y"] }).toArray()), JSON.stringify(Iterator.zipKeyed({ a: [1, 2], b: [3, 4] }).toArray()))"#
+        ),
+        r#"1,2,3 [[1,"a"],[2,"b"]] [[1,"a"],[2,"b"],["x","c"]] [{"a":1,"b":3},{"a":2,"b":4}]"#
+    );
+    assert_eq!(
+        one(
+            r#"try { Iterator.zip([[1], [1, 2]], { mode: "strict" }).toArray(); } catch (e) { console.log(e.constructor.name); }"#
+        ),
+        "TypeError"
+    );
+    assert_eq!(
+        one(r#"const log = []; const s = new DisposableStack();
+          s.use({ [Symbol.dispose]() { log.push("r1"); throw new Error("e1"); } });
+          s.defer(() => { log.push("d"); throw new Error("e2"); });
+          s.adopt(5, v => log.push("adopt" + v));
+          try { s.dispose(); } catch (e) { console.log(e.constructor.name, e.error.message, e.suppressed.message, log.join(), s.disposed, Object.prototype.toString.call(s)); }"#),
+        "SuppressedError e1 e2 adopt5,d,r1 true [object DisposableStack]"
+    );
+    assert_eq!(
+        one(r#"(async () => { const a = new AsyncDisposableStack();
+          a.use({ async [Symbol.asyncDispose]() { console.log("async"); } });
+          a.use({ [Symbol.dispose]() { console.log("sync-fallback"); } });
+          await a.disposeAsync(); })()"#),
+        "sync-fallback|async"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {
