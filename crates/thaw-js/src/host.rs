@@ -876,16 +876,13 @@ fn install_fetch_transport(it: &mut Interp, loader: &Rc<Loader>) -> R<()> {
     Ok(())
 }
 
-/// Evaluates the factories of `parts` on `it` and returns module `key`'s exports, and for the package entry
-/// with top-level await its pending promise (`await_entry` settles it). The package entry
-/// ([`Package::load_named`]) and a worker realm's main module ([`run_bundle_main`]) both boot through here.
-fn boot_bundle(
+/// The [`Loader`] of the factories of `parts` (package `name`), nothing evaluated yet.
+fn make_loader(
     it: &mut Interp,
     mut parts: BundleParts,
     bundle_js: &str,
     name: &str,
-    key: &str,
-) -> R<(Value, Option<Value>)> {
+) -> R<Rc<Loader>> {
     // Evaluated before `run_id` is set and before any factory exists: a later eval perturbs the interpreter
     // state the factories rely on. Helpers are stored in `Loader`, so no eval runs mid-module.
     let promise_of = it.eval_function(PROMISE_OF)?;
@@ -957,6 +954,21 @@ fn boot_bundle(
     if loader.factories.contains_key("node:http") {
         install_fetch_transport(it, &loader)?;
     }
+    Ok(loader)
+}
+
+/// Evaluates the factories of `parts` on `it` and returns module `key`'s exports, and for the package entry
+/// with top-level await its pending promise (`await_entry` settles it). The package entry
+/// ([`Package::load_named`]) and a worker realm's main module ([`run_bundle_main`]) both boot through here.
+fn boot_bundle(
+    it: &mut Interp,
+    parts: BundleParts,
+    bundle_js: &str,
+    name: &str,
+    key: &str,
+) -> R<(Value, Option<Value>)> {
+    install_native_registrar(it);
+    let loader = make_loader(it, parts, bundle_js, name)?;
     let exports = load_module(&loader, it, key)?;
     let pending = if key == loader.parts.entry {
         loader.ready.borrow().get(key).cloned()
@@ -964,6 +976,115 @@ fn boot_bundle(
         None
     };
     Ok((exports, pending))
+}
+
+/// Declares the host-internal global `__thaw_register_native_bundle(json)` (once per realm; hidden from
+/// `Object.keys(globalThis)` like the other `__thaw_*` host globals). It registers a native ES module bundle at
+/// run time, the QuickJS-private evaluator contract: one [`Loader`] per registration, ids `thaw-bundle:N:key`
+/// (N counts registrations in this realm from 1), and a returned evaluator function.
+fn install_native_registrar(it: &mut Interp) {
+    const NAME: &str = "__thaw_register_native_bundle";
+    if it.lookup(&it.global.clone(), NAME).is_some() {
+        return;
+    }
+    let registrar = it.native(|it, _, args| {
+        let json = it.to_str(&crate::arg(args, 0)).to_string();
+        register_native_bundle(it, &json)
+    });
+    it.global.declare(NAME, registrar, false);
+}
+
+/// The evaluator of one registered bundle: `evaluate()` runs the entry once and always returns the same ready
+/// promise (also when a module re-enters it while evaluating); `evaluate.readNative(id, name)` reads an export
+/// of a source of THIS bundle that has been linked (reached by evaluation), nothing else.
+fn register_native_bundle(it: &mut Interp, json: &str) -> R<Value> {
+    let (text, problems, _, esm_keys) =
+        crate::esm::native_json_to_factories(json, "", true).map_err(|e| js_error(it, &e))?;
+    if let Some(problem) = problems.iter().next() {
+        return Err(js_error(it, &format!("unsupported: {problem}")));
+    }
+    let mut parts = parse_bundle(&text).map_err(|e| js_error(it, &e))?;
+    parts.esm_keys = esm_keys.into_iter().collect();
+    let main = parts.entry.clone();
+    let run_id = it.run_id;
+    let loader = make_loader(it, parts, &text, "");
+    it.run_id = run_id;
+    let loader = loader?;
+    it.native_bundles += 1;
+    let sequence = it.native_bundles;
+    let ready: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+    let (l, key) = (loader.clone(), main);
+    let evaluate = it.native(move |it, _, _| {
+        if let Some(promise) = ready.borrow().clone() {
+            return Ok(promise);
+        }
+        let promise = it.new_promise();
+        *ready.borrow_mut() = Some(Value::Object(promise.clone()));
+        match load_module(&l, it, &key) {
+            Ok(exports) => {
+                let pending = l.ready.borrow().get(&key).cloned();
+                let (l2, k2) = (l.clone(), key.clone());
+                let namespace = it.native(move |it, _, _| {
+                    let exports = load_module(&l2, it, &k2)?;
+                    module_namespace(&l2, it, &k2, exports)
+                });
+                match pending {
+                    Some(then) if is_async(&l, &key) => {
+                        let (ok, bad) = (promise.clone(), promise.clone());
+                        let on_ok = it.native(move |it, _, _| {
+                            match it.call(&namespace, &Value::Undefined, &[]) {
+                                Ok(ns) => it.resolve_promise(&ok, ns).map(|_| Value::Undefined),
+                                Err(Ctl::Throw(r)) => {
+                                    it.reject_promise(&ok, r);
+                                    Ok(Value::Undefined)
+                                }
+                                Err(other) => Err(other),
+                            }
+                        });
+                        let on_bad = it.native(move |it, _, args| {
+                            it.reject_promise(&bad, crate::arg(args, 0));
+                            Ok(Value::Undefined)
+                        });
+                        it.promise_then_native(&then, on_ok, on_bad);
+                    }
+                    _ => match module_namespace(&l, it, &key, exports) {
+                        Ok(ns) => it.resolve_promise(&promise, ns)?,
+                        Err(Ctl::Throw(r)) => it.reject_promise(&promise, r),
+                        Err(other) => return Err(other),
+                    },
+                }
+            }
+            Err(Ctl::Throw(reason)) => it.reject_promise(&promise, reason),
+            Err(other) => return Err(other),
+        }
+        Ok(Value::Object(promise))
+    });
+    let l = loader;
+    let reader = it.native(move |it, _, args| {
+        let id = it.to_str(&crate::arg(args, 0)).to_string();
+        let prefix = format!("thaw-bundle:{sequence}:");
+        // a bare key names a source of this bundle; a minted id must carry this bundle's own sequence
+        let key = match id.strip_prefix("thaw-bundle:") {
+            Some(_) => id.strip_prefix(&prefix),
+            None => Some(id.as_str()),
+        };
+        let module = key.and_then(|k| l.cache.borrow().get(k).cloned().map(|m| (k.to_string(), m)));
+        let Some((key, module)) = module else {
+            return Err(js_error(it, "unlinked or foreign native source"));
+        };
+        let exports = it.get(&module, "exports")?;
+        match crate::arg(args, 1) {
+            Value::Undefined => module_namespace(&l, it, &key, exports),
+            name => {
+                let name = it.to_str(&name).to_string();
+                it.get(&exports, &name)
+            }
+        }
+    });
+    if let Value::Object(f) = &evaluate {
+        crate::put_with(f, "readNative", reader, false, false, false);
+    }
+    Ok(evaluate)
 }
 
 /// Settles the package entry booted by [`boot_bundle`] when its factory is async: runs the event loop until its

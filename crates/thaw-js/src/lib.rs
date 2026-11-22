@@ -1434,6 +1434,8 @@ pub struct Interp {
     names: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<FxHasher>>,
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
+    /// Native bundles registered in this realm (`__thaw_register_native_bundle`); the next id is this + 1.
+    pub(crate) native_bundles: u64,
     /// Read-hint slots, one per annotated identifier (`hints.rs`). Slot 0 is never used.
     ident_hints: Vec<hints::HintSlot>,
     /// Hint counters (`THAW_JS_HINT_STATS=1`).
@@ -1625,6 +1627,7 @@ impl Interp {
             loop_captures: FxMap::default(),
             names: Default::default(),
             run_id: 0,
+            native_bundles: 0,
             ident_hints: vec![hints::HintSlot::default()],
             share_preludes: !host,
             share_globals: false,
@@ -6453,6 +6456,8 @@ mod direct_eval_tests;
 mod dynamic_helper_contract_tests;
 #[cfg(test)]
 mod errors_stack_tests;
+#[cfg(test)]
+mod esm_private_tests;
 #[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]

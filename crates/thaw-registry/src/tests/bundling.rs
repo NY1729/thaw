@@ -2432,46 +2432,45 @@ fn native_esm_rebundle_with_new_source_yields_new_value() {
     let _ = fs::remove_dir_all(root);
 }
 
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private entry reentry); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_private_entry_reentry_and_intrinsic_then {
+/// A hand-written bundle whose entry is the CommonJS script `script` (it registers native bundles itself
+/// through the host-internal `__thaw_register_native_bundle(json)` global and may define globals to probe).
+fn private_bundle_script_bundle(script: &str) -> String {
+    format!(
+        "module.exports = (function(require) {{\nvar __thaw_bundle_factories = {{ \"s.js\": function (module, exports, require) {{\n{script}\n}} }};\n\
+         var __thaw_bundle_require_maps = {{ \"s.js\": {{}} }};\nvar __thaw_bundle_entry_key = \"s.js\";\n}})(globalThis.require);"
+    )
+}
 
+// Ported from the QuickJS-private test: the entry evaluator is bound to its bundle; the module reenters it while
+// evaluating and receives the same ready Promise. Dropped: the `Promise.prototype.then` mutation (Node throws
+// there; the thaw-only pin is `mutated_promise_then_does_not_break_the_evaluator` in thaw-js).
 #[test]
 fn native_esm_private_entry_reentry_and_intrinsic_then() {
-    // Unrun: a bound evaluator, not a public token, owns this entry. The
-    // module reenters it while evaluating and receives the same ready Promise.
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
+    let bundle = private_bundle_script_bundle(
+        r#"
           globalThis.nativeRuns = 0;
           globalThis.nativeSelfEval = __thaw_register_native_bundle(JSON.stringify({
             main: 'self/index.mjs', modules: [{ key: 'self/index.mjs', imports: {},
               source: 'globalThis.nativeRuns++; globalThis.nativeSelfReady = globalThis.nativeSelfEval(); export const value = 7;'
             }]
           }));
-          Promise.prototype.then = function() { throw Error('mutated then'); };
-          globalThis.__thaw_module_ready = globalThis.nativeSelfEval();
-          globalThis.privateEntryResult = function() {
+          globalThis.nativeReady = globalThis.nativeSelfEval();
+          globalThis.privateEntryResult = async function() {
+            await globalThis.nativeReady;
             return [globalThis.nativeRuns, globalThis.nativeSelfReady === globalThis.nativeSelfEval(),
               typeof globalThis.__thaw_eval_native_entry, typeof globalThis.__thaw_native_esm_sources];
           };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"privateEntryResult".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[1,true,\"undefined\",\"undefined\"]");
-    }).join().unwrap();
-}
+        "#,
+    );
+    assert_eq!(run_js_probe(&bundle, "privateEntryResult()"), "[1,true,\"undefined\",\"undefined\"]");
 }
 
-// qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (private linked read); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
-mod qjs_pending_bundling_native_esm_private_linked_read_is_owner_scoped_and_live {
-
+// Ported from the QuickJS-private test: owner-scoped readNative, foreign-bundle isolation, descriptor flags,
+// same ready promise. `__thaw_module_ready` (a QuickJS host protocol) is replaced by awaiting the ready promises.
 #[test]
 fn native_esm_private_linked_read_is_owner_scoped_and_live() {
-    // Unrun: each source's first private marker runs after linking, before
-    // that source body. A cyclic peer can read hoisted exports but not TDZ.
-    std::thread::spawn(|| {
-        use std::ffi::{CStr, CString};
-        let script = r#"
+    let bundle = private_bundle_script_bundle(
+        r#"
           globalThis.entryA = __thaw_register_native_bundle(JSON.stringify({
             main: 'a', modules: [
               { key: 'a', imports: { './b': 'b', './unused': 'unused' }, source:
@@ -2494,8 +2493,8 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
           }));
           globalThis.readyA = entryA();
           globalThis.readyB = entryB();
-          globalThis.__thaw_module_ready = Promise.all([readyA, readyB]);
-          globalThis.privateLinkedResult = function() {
+          globalThis.privateLinkedResult = async function() {
+            await Promise.all([readyA, readyB]);
             let unused, unusedNamespace, foreign, foreignNamespace;
             try { entryA.readNative('thaw-bundle:1:unused', 'hidden'); unused = false; }
             catch (_) { unused = true; }
@@ -2513,12 +2512,12 @@ fn native_esm_private_linked_read_is_owner_scoped_and_live() {
               descriptor.enumerable === false && descriptor.writable === false,
               entryA() === readyA];
           };
-        "#;
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
-        let result = thaw_quickjs::thaw_js_call(c"privateLinkedResult".as_ptr(), c"[]".as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,true,7,true,9,3,true,true,true,true,true,true,true,true]");
-    }).join().unwrap();
-}
+        "#,
+    );
+    assert_eq!(
+        run_js_probe(&bundle, "privateLinkedResult()"),
+        "[true,true,7,true,9,3,true,true,true,true,true,true,true,true]"
+    );
 }
 
 // qjs_pending: not on thaw-js (no `use super::*`, so it still calls the QuickJS crate and passes there); on thaw-js it needs JS global calls after load (failedEntry.readNative); script route fails: ReferenceError: __thaw_register_native_bundle is not defined
