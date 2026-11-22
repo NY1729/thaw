@@ -1521,7 +1521,12 @@ impl Interp {
             }
             // a compiled native server in this process answers through the same poll and drain as the terminal loop
             let served = crate::host::drain_native_continuations(self);
-            if !self.loop_alive() && !crate::host::native_servers_live() {
+            // another realm's loop (a socket or timer it owns) may be what settles this promise
+            let others = crate::host::drive_other_realms_once(self as *const Interp);
+            if self.promise_state(v).is_some() {
+                continue;
+            }
+            if !self.loop_alive() && !crate::host::native_servers_live() && !others {
                 return Ok(None);
             }
             self.rt.first_turn = false;
@@ -1557,6 +1562,25 @@ impl Interp {
                 loop_idle_sleep(Duration::from_millis(2));
             }
         }
+    }
+
+    /// One non-blocking turn of this realm's loop (jobs, platform events, due timers, immediates), for a realm
+    /// driven from another realm's nested wait (`host::drive_other_realms_once`).
+    pub(crate) fn drive_once(&mut self) -> R<()> {
+        self.run_jobs()?;
+        self.rt.first_turn = false;
+        self.rt.now = clock_ms();
+        self.poll_platform_events()?;
+        self.run_timers()?;
+        if !self.rt.immediates.is_empty() {
+            self.run_immediates()?;
+        }
+        self.run_jobs()
+    }
+
+    /// An uncaught error from a callback run by `drive_once`: exit code 1 and `exit`, as `fatal` does.
+    pub(crate) fn report_nested_fatal(&mut self, e: Ctl) -> R<i32> {
+        self.fatal(e)
     }
 
     /// Referenced timers/immediates or queued jobs remain.

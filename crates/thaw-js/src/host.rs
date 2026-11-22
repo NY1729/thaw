@@ -48,6 +48,11 @@ impl std::fmt::Display for HostError {
     }
 }
 
+/// First characters of the line the registry prepends to a bundle to give environment variables defaults
+/// (thaw-registry `runtime_env_prelude`); a loader runs that line before the package's modules.
+pub const RUNTIME_ENV_PRELUDE_HEAD: &str =
+    "(function(defaults) { var env = globalThis.process.env,";
+
 struct Loader {
     parts: BundleParts,
     factories: HashMap<String, Value>,
@@ -165,6 +170,23 @@ fn addon_of(loader: &Rc<Loader>, it: &mut Interp) -> R<Value> {
     )?;
     *loader.addon.borrow_mut() = Some(addon.clone());
     Ok(addon)
+}
+
+/// Lets `process.dlopen` hand out this package's addon (process_members.rs `dlopen`).
+fn register_dlopen_addon(it: &mut Interp, loader: &Rc<Loader>) -> R<()> {
+    let global = it.global.clone();
+    let table = match it.lookup(&global, crate::process_members::DLOPEN_ADDONS) {
+        Some(t) => t,
+        None => {
+            let t = Value::Object(it.plain());
+            it.global
+                .declare(crate::process_members::DLOPEN_ADDONS, t.clone(), true);
+            t
+        }
+    };
+    let l = loader.clone();
+    let thunk = it.native(move |it, _, _| addon_of(&l, it));
+    it.set(&table, &loader.package, thunk)
 }
 
 fn require_in(loader: &Rc<Loader>, it: &mut Interp, from: &str, spec: &str) -> R<Value> {
@@ -1115,6 +1137,18 @@ fn make_loader(
         promise_of,
         cjs_namespace,
     });
+    if crate::napi_bridge::registered() {
+        register_dlopen_addon(it, &loader)?;
+    }
+    // the registry's runtime-env defaults ride on the bundle as a first line (`RUNTIME_ENV_PRELUDE_HEAD`)
+    if let Some(line) = bundle_js
+        .lines()
+        .next()
+        .filter(|l| l.starts_with(RUNTIME_ENV_PRELUDE_HEAD))
+    {
+        let run = it.eval_function(&format!("function () {{ {line} }}"))?;
+        it.call(&run, &Value::Undefined, &[])?;
+    }
     if loader.parts.entry == "node:module" || loader.factories.contains_key("node:module") {
         install_module_loader(it, &loader, bundle_js)?;
     }
@@ -7437,6 +7471,51 @@ pub(crate) fn other_packages_have_work() -> bool {
             .flatten()
             .any(|p| p.interp.work_pending())
     })
+}
+
+/// One turn of every loaded realm that is not on the stack (a nested `await_settled` runs inside one realm, while
+/// the I/O its promise waits on may belong to another, e.g. hono awaiting a body that `@hono/node-server`'s socket
+/// delivers). The realm doing the waiting is skipped. Returns
+/// whether any such realm still has work, so the caller keeps waiting instead of declaring the promise unsettled.
+pub(crate) fn drive_other_realms_once(me: *const Interp) -> bool {
+    let count = PACKAGES.with(|ps| ps.borrow().len());
+    let mut any_work = false;
+    for handle in 0..count {
+        // a loaded realm, or one up-stack through `RUNNING` (its callback called into this nested wait: the
+        // same nested-loop re-entry a realm's own `await_settled` already performs)
+        let idle = PACKAGES.with(|ps| match ps.borrow().get(handle) {
+            Some(Some(p)) => std::ptr::eq(&*p.interp, me) || !p.interp.work_pending(),
+            Some(None) => RUNNING.with(|r| match r.borrow().get(&handle) {
+                // SAFETY: a running package's pointer is a live stack local of its `with_package` frame.
+                Some(pk) => {
+                    let it = unsafe { &*(**pk).interp };
+                    std::ptr::eq(it, me) || !it.work_pending()
+                }
+                None => true,
+            }),
+            None => true,
+        });
+        if idle {
+            continue;
+        }
+        any_work = true;
+        let _ = with_package(handle, |p| {
+            match p.interp.drive_once() {
+                Ok(()) => {}
+                Err(Ctl::Exit(c)) => {
+                    p.interp.set_exit_code(Some(c as f64));
+                    terminate_process(&mut p.interp, c);
+                }
+                Err(e) => {
+                    // an uncaught error in a callback ends the program, as in the terminal loop
+                    let _ = p.interp.report_nested_fatal(e);
+                    terminate_process(&mut p.interp, 1);
+                }
+            }
+            Ok(())
+        });
+    }
+    any_work
 }
 
 /// Terminal event loop for a routed build that holds no QuickJS context: runs every loaded
