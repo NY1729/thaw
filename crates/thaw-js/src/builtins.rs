@@ -1515,9 +1515,9 @@ impl Interp {
         macro_rules! math1 {
             ($name:literal, $f:expr) => {
                 self.set_native(&math, $name, |it, _, args| {
-                    Ok(Value::Number($f(
-                        it.num(args.first().unwrap_or(&Value::Undefined))
-                    )))
+                    Ok(Value::Number($f(it.tonum_numeric(
+                        args.first().unwrap_or(&Value::Undefined),
+                    )?)))
                 });
             };
         }
@@ -2945,7 +2945,7 @@ impl Interp {
             Ok(Value::Number(if args.is_empty() {
                 0.0
             } else {
-                it.num(&args[0])
+                it.tonum_numeric(&args[0])?
             }))
         });
         if let Value::Object(o) = &number {

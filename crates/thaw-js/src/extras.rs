@@ -446,7 +446,7 @@ impl crate::Interp {
                 Hint::String => "string",
             };
             let r = self.call(&f, v, &[Value::str(h)])?;
-            if !matches!(r, Value::Object(_)) {
+            if !matches!(r, Value::Object(_)) || crate::is_symbol_object(&r) {
                 return Ok(r);
             }
             return self.throw_error("TypeError", "Cannot convert object to primitive value");
@@ -466,7 +466,9 @@ impl crate::Interp {
             let f = self.get(v, name)?;
             if f.is_callable() {
                 match self.call(&f, v, &[]) {
-                    Ok(r) if !matches!(r, Value::Object(_)) => return Ok(r),
+                    Ok(r) if !matches!(r, Value::Object(_)) || crate::is_symbol_object(&r) => {
+                        return Ok(r)
+                    }
                     Ok(_) => {}
                     Err(e @ Ctl::Throw(_)) => return Err(e),
                     Err(e) => return Err(e),

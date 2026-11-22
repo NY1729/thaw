@@ -1,14 +1,24 @@
-//! `node:zlib` zstd one-shot (de)compression over C libzstd 1.5.7 (zstd-safe), the library version Node 22 links,
-//! so the frames match Node byte for byte. Built only with the `zstd` cargo feature (the JS side feature-detects it).
+//! `node:zlib` zstd over C libzstd 1.5.7 (zstd-safe), the library version Node 22 links, so the frames match Node byte
+//! for byte. Built only with the `zstd` cargo feature (the JS side feature-detects it).
+//!
+//! The JS side validates the option shapes and key ranges (Node's `ERR_ZSTD_INVALID_PARAM` and friends) and hands over
+//! integers (`ToInt32` of each value). Keys in range that libzstd does not know, and values it rejects, fail here with
+//! `ERR_ZLIB_INITIALIZATION_FAILED`, as Node does.
 
 use std::io;
 
 use zstd_safe::zstd_sys::ZSTD_EndDirective;
 use zstd_safe::{CCtx, CParameter, DCtx, DParameter, InBuffer, OutBuffer, Strategy};
 
-use super::zlib_error;
+use super::{zlib_error, ZlibOptions};
 
-/// Maps a `ZSTD_c_*` key to the zstd-safe parameter; `None` for keys libzstd's compressor does not have.
+/// Node's `Z_DEFAULT_CHUNK`: the decoder's output chunk. With a larger buffer libzstd skips the `windowLogMax` check
+/// for single-segment frames (verified against Node: a 100000-byte frame with `windowLogMax` 10 is refused only with
+/// this chunk size).
+const DECODE_CHUNK: usize = 16 * 1024;
+
+/// Maps a `ZSTD_c_*` key to the zstd-safe parameter; `None` for keys libzstd's compressor does not have (or values it
+/// does not take).
 fn compress_param(key: u32, value: i32) -> Option<CParameter> {
     let flag = value != 0;
     let unsigned = value as u32;
@@ -60,20 +70,17 @@ fn libzstd_error(code: usize) -> io::Error {
     )
 }
 
-fn invalid_param(key: u32) -> io::Error {
-    zlib_error(
-        "ERR_ZSTD_INVALID_PARAM",
-        &format!("{key} is not a valid zstd parameter"),
-    )
-}
-
 fn setting_failed() -> io::Error {
     zlib_error("ERR_ZLIB_INITIALIZATION_FAILED", "Setting parameter failed")
 }
 
 fn set_compress_params(cctx: &mut CCtx<'_>, params: &[(u32, i32)]) -> io::Result<()> {
     for &(key, value) in params {
-        let param = compress_param(key, value).ok_or_else(|| invalid_param(key))?;
+        // strategy 0 is libzstd's "default" and is accepted as a no-op
+        if key == 107 && value == 0 {
+            continue;
+        }
+        let param = compress_param(key, value).ok_or_else(setting_failed)?;
         cctx.set_parameter(param).map_err(|_| setting_failed())?;
     }
     Ok(())
@@ -94,23 +101,41 @@ pub(super) fn directive(value: u32) -> io::Result<ZSTD_EndDirective> {
     })
 }
 
-/// Compresses `input` in one call (`ZSTD_compress2`, so the frame header carries the content size, as Node's sync
-/// API does). `streamed` takes the streaming path that Node's callback API uses instead: the header then has no
-/// content size.
-pub(super) fn compress(input: &[u8], params: &[(u32, i32)], streamed: bool) -> io::Result<Vec<u8>> {
-    if streamed {
-        // Node's streaming API writes the input with `ZSTD_e_continue` and ends the frame with `ZSTD_e_end`; libzstd
-        // leaves the content size out of the header on that path only.
-        let mut compressor = Compressor::new(params)?;
-        let mut output = compressor.write(input, ZSTD_EndDirective::ZSTD_e_continue)?;
-        output.extend(compressor.write(&[], ZSTD_EndDirective::ZSTD_e_end)?);
+/// Compresses `input` with the options' parameters, dictionary and pledged size.
+///
+/// The sync API (`streamed` false, `finishFlush` absent or 2) is one `ZSTD_compress2` call, so the frame header carries
+/// the content size. Otherwise the input goes through the streaming path (the callback API's, or a `finishFlush` other
+/// than `ZSTD_e_end`): the header then has no content size, as in Node.
+pub(super) fn compress(input: &[u8], options: &ZlibOptions, streamed: bool) -> io::Result<Vec<u8>> {
+    let finish = options.finish_flush.unwrap_or(2);
+    if !streamed && finish == 2 {
+        let mut cctx = CCtx::create();
+        set_compress_params(&mut cctx, &options.params)?;
+        if !options.dictionary.is_empty() {
+            cctx.load_dictionary(&options.dictionary)
+                .map_err(libzstd_error)?;
+        }
+        let mut output = Vec::with_capacity(zstd_safe::compress_bound(input.len()));
+        cctx.compress2(&mut output, input).map_err(libzstd_error)?;
         return Ok(output);
     }
-    let mut cctx = CCtx::create();
-    set_compress_params(&mut cctx, params)?;
-    let mut output = Vec::with_capacity(zstd_safe::compress_bound(input.len()));
-    cctx.compress2(&mut output, input).map_err(libzstd_error)?;
+    // Node writes the whole input with ZSTD_e_continue and then runs the finishing directive on an empty input.
+    let mut compressor = Compressor::new(options)?;
+    let mut output = compressor.write(input, ZSTD_EndDirective::ZSTD_e_continue)?;
+    if finish != 0 {
+        output.extend(compressor.write(&[], directive(finish)?)?);
+    }
     Ok(output)
+}
+
+/// Runs the parameter and dictionary setup of both directions without doing any work, so an invalid option throws at
+/// call time (the callback API starts its job on another thread, which would report it late).
+pub(super) fn check(operation: &str, options: &ZlibOptions) -> io::Result<()> {
+    if operation == "compress" {
+        Compressor::new(options).map(|_| ())
+    } else {
+        Decompressor::new(options).map(|_| ())
+    }
 }
 
 /// A compressor kept across writes (`node:zlib` ZstdCompress). Every write runs `ZSTD_compressStream2` to completion
@@ -121,9 +146,17 @@ pub(super) struct Compressor {
 }
 
 impl Compressor {
-    pub(super) fn new(params: &[(u32, i32)]) -> io::Result<Self> {
+    pub(super) fn new(options: &ZlibOptions) -> io::Result<Self> {
         let mut cctx = CCtx::create();
-        set_compress_params(&mut cctx, params)?;
+        set_compress_params(&mut cctx, &options.params)?;
+        if !options.dictionary.is_empty() {
+            cctx.load_dictionary(&options.dictionary)
+                .map_err(libzstd_error)?;
+        }
+        if let Some(size) = options.pledged_src_size {
+            cctx.set_pledged_src_size(Some(size))
+                .map_err(libzstd_error)?;
+        }
         Ok(Self {
             cctx,
             scratch: vec![0u8; CCtx::out_size()],
@@ -160,12 +193,8 @@ impl Compressor {
 /// Decompresses every frame of `input` (`ZSTD_decompressStream`, which moves on to the next frame by itself).
 /// Like Node: truncated or empty input is not an error, and once a frame has decoded, whatever follows it is ignored
 /// (trailing garbage, a corrupt or truncated next frame); only an error before the first frame ends is reported.
-pub(super) fn decompress(
-    input: &[u8],
-    params: &[(u32, i32)],
-    max_output: Option<usize>,
-) -> io::Result<Vec<u8>> {
-    let mut decoder = Decompressor::new(params)?;
+pub(super) fn decompress(input: &[u8], options: &ZlibOptions) -> io::Result<Vec<u8>> {
+    let mut decoder = Decompressor::new(options)?;
     let mut output = Vec::new();
     let mut source = InBuffer::around(input);
     let mut frame_done = false;
@@ -183,7 +212,7 @@ pub(super) fn decompress(
         }
         frame_done |= result == Ok(0);
         output.extend_from_slice(&decoder.scratch[..produced]);
-        if let Some(max) = max_output {
+        if let Some(max) = options.max_output {
             if output.len() > max {
                 return Err(zlib_error(
                     "ERR_BUFFER_TOO_LARGE",
@@ -204,18 +233,23 @@ pub(super) struct Decompressor {
 }
 
 impl Decompressor {
-    pub(super) fn new(params: &[(u32, i32)]) -> io::Result<Self> {
+    pub(super) fn new(options: &ZlibOptions) -> io::Result<Self> {
         let mut dctx = DCtx::create();
-        for &(key, value) in params {
+        for &(key, value) in &options.params {
+            // the JS side only lets key 100 (`ZSTD_d_windowLogMax`) through; other in-range keys are unknown here
             if key != 100 {
-                return Err(invalid_param(key));
+                return Err(setting_failed());
             }
             dctx.set_parameter(DParameter::WindowLogMax(value as u32))
                 .map_err(|_| setting_failed())?;
         }
+        if !options.dictionary.is_empty() {
+            dctx.load_dictionary(&options.dictionary)
+                .map_err(libzstd_error)?;
+        }
         Ok(Self {
             dctx,
-            scratch: vec![0u8; DCtx::out_size()],
+            scratch: vec![0u8; DECODE_CHUNK],
         })
     }
 

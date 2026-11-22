@@ -1159,8 +1159,8 @@ impl Visit for Walker {
 /// - `process.type|browser|__nwjs|allowedNodeEnvironmentFlags`: absent on Node (read as `undefined`) -- `debug` probes them to pick its browser entry;
 /// - `debug`'s browser entry is never selected by that probe; its `supports-color` require is try/catch-optional;
 /// - `node:assert` inspects with `require(['node','util'].join(':'))` inside a try/catch;
-/// - axios: `AxiosHeaders` accessors are installed from a name list (`getContentType`, ...), `zlib.createZstdDecompress`
-///   is feature-tested, `postMessage`/`send` sit behind `typeof` / XHR-only paths, `isDeepStrictEqual` is http2 session
+/// - axios: `AxiosHeaders` accessors are installed from a name list (`getContentType`, ...), `postMessage`/`send` sit
+///   behind `typeof` / XHR-only paths, `isDeepStrictEqual` is http2 session
 ///   reuse (http2 needs TLS, which thaw-js does not link), `onSocket` is `agent-base`'s `typeof` check.
 ///
 /// Node-parity (R2/R4/R5): a member or global Node 22 lacks is no finding at all, so the `process.type|browser|__nwjs`
@@ -1172,7 +1172,6 @@ fn tolerated(feature: &str, key: &str) -> bool {
         "method:hasContentLength",
         "method:setContentType",
         "method:setContentLength",
-        "method:createZstdDecompress",
         "method:postMessage",
         "method:send",
         "method:isDeepStrictEqual",

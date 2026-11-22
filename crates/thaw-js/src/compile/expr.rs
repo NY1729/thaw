@@ -462,15 +462,15 @@ fn unary_value(it: &mut Interp, op: a::UnaryOp, v: &Value) -> R<Value> {
         U::Bang => Value::Bool(!v.truthy()),
         U::Minus => match v {
             Value::BigInt(b) => bigint::big(-(**b).clone()),
-            _ => Value::Number(-it.num(v)),
+            _ => Value::Number(-it.tonum_numeric(v)?),
         },
         U::Plus if matches!(v, Value::BigInt(_)) => {
             return it.throw_error("TypeError", "Cannot convert a BigInt value to a number")
         }
-        U::Plus => Value::Number(it.num(v)),
+        U::Plus => Value::Number(it.tonum_numeric(v)?),
         U::Tilde => match v {
             Value::BigInt(b) => bigint::big(-(**b).clone() - 1),
-            _ => Value::Number(!to_int32(it.num(v)) as f64),
+            _ => Value::Number(!to_int32(it.tonum_numeric(v)?) as f64),
         },
         // `void`: the only other operator `unary` lets through
         _ => Value::Undefined,
