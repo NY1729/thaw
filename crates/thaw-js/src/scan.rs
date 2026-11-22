@@ -1492,11 +1492,12 @@ fn scan_bundle_with(source: &str, addon: bool, ctx: &ScanContext) -> Result<Repo
             };
             // Node-parity (R4): a member Node 22 lacks is undefined on Node too. A root the Node data does not
             // model (`Math`, `Array`, ...) keeps the old flag: the data cannot tell that Node lacks the member.
-            // Carve-out: a `__`-prefixed member (`globalThis.__thaw_*`) is host-internal, so it stays a blocker.
+            // Carve-out: a `__thaw`-prefixed member (`globalThis.__thaw_*`) is host-internal, so it stays a blocker;
+            // any other `__x` slot is the packages' own cross-bundle channel (Node reads it as undefined too).
             if interp.is_builtin_global(g)
                 && !w.declared.contains(g0)
                 && !interp.builtin_member_exists(g, p)
-                && (!node_global_covered(g) || node_global_has(g, p) || is_host_internal(p))
+                && (!node_global_covered(g) || node_global_has(g, p) || p.starts_with("__thaw"))
                 // the package creates its own `globalThis.x` slot (`globalThis.x ??= {}`)
                 && !(g == "globalThis" && (defined.contains(p) || w.probed_members.contains(p)))
                 && !(module_loader && g == "globalThis" && p == "__thaw_bundle_create_require")

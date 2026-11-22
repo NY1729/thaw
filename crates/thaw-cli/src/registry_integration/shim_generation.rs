@@ -406,6 +406,18 @@ fn generate_registry_shims_pass(
     };
     // `THAW_JS_FALLBACK=warn|error`: every package thaw-js refuses in this pass (reported by `build` after the last pass).
     let mut thaw_js_refusals: Vec<(String, String)> = Vec::new();
+    // Which package names/functions the program mentions is a property of the whole module graph: a function
+    // only a non-entry module imports (the entry may import just types from the package) must not be pruned.
+    // The call-arity scans below stay entry-only, as they parse the one source text.
+    let graph_source = match user_source_name {
+        thaw_parser::common::FileName::Real(path) if thaw_js_routing => {
+            module_graph::graph_sources(path, user_source)
+                .map(|sources| sources.join("\n"))
+                .unwrap_or_else(|_| user_source.to_string())
+        }
+        _ => user_source.to_string(),
+    };
+    let mention_source = graph_source.as_str();
     let observed_arities = observed_member_call_arities_named(user_source, user_source_name)?;
     let observed_constructor_arities =
         observed_constructor_arities_named(user_source, user_source_name)?;
@@ -609,7 +621,7 @@ fn generate_registry_shims_pass(
             prune_unused_functions(
                 &mut functions,
                 name,
-                user_source,
+                mention_source,
                 // a thaw-js build also compiles every shim it emits, so an unmentioned function's
                 // adapter (ejs `compile`'s callable result) must not be emitted at all
                 thaw_js_routing || std::env::var("THAW_PRUNE_SHIMS").as_deref() == Ok("1"),
@@ -618,7 +630,7 @@ fn generate_registry_shims_pass(
                 unpruned,
                 &mut functions,
                 &nested_namespaces,
-                user_source,
+                mention_source,
             );
         }
         restrict_type_only_class_values(&mut classes, &type_only_value_names);
@@ -1176,7 +1188,7 @@ fn generate_registry_shims_pass(
             for class in pkg
                 .classes
                 .iter()
-                .filter(|class| !thaw_js_package || thaw_js_mentions(user_source, &class.name))
+                .filter(|class| !thaw_js_package || thaw_js_mentions(mention_source, &class.name))
             {
                 let mut runtime_class = class.clone();
                 runtime_class.name = format!("{}::{}", pkg.name, class.name);
@@ -2040,7 +2052,7 @@ fn generate_registry_shims_pass(
             // The `.d.ts` declares no such value for most builtins.
             let bare_namespace_value = if thaw_js_package
                 && !pkg.values.iter().any(|value| value.name == thaw_js::host::NAMESPACE_VALUE)
-                && !thaw_js_bare_namespace_locals(pkg, user_source).is_empty()
+                && !thaw_js_bare_namespace_locals(pkg, mention_source).is_empty()
             {
                 vec![thaw_bridge::DtsValue {
                     name: thaw_js::host::NAMESPACE_VALUE.to_string(),
@@ -2107,7 +2119,7 @@ fn generate_registry_shims_pass(
                 )
                 .chain(nested_values.iter().map(|(path, value)| (path.clone(), value)))
                 // A thaw-js package serves only the value exports the program names, as handles.
-                .filter(|(export_name, _)| !thaw_js_package || thaw_js_value_export_needs_handle(pkg, user_source, export_name))
+                .filter(|(export_name, _)| !thaw_js_package || thaw_js_value_export_needs_handle(pkg, mention_source, export_name))
                 .filter_map(|(export_name, value)| {
                     let dynamic;
                     let ty = match &value.ty {
@@ -2295,7 +2307,7 @@ fn generate_registry_shims_pass(
                     if thaw_js_package_eligible_in(
                         pkg,
                         &thaw_js_bundle_form(&thaw_js_bundles, &pkg.name, bundle_js),
-                        user_source,
+                        mention_source,
                         &typed_targets,
                         &shim[segment_start..segment_end],
                         &thaw_js_installed,
@@ -2684,7 +2696,7 @@ fn generate_registry_shims_pass(
         // they see only real exports.
         if thaw_js_routed.contains(&pkg.name) {
             if let Some(target) = value_targets.get(&(pkg.name.clone(), thaw_js::host::NAMESPACE_VALUE.to_string())) {
-                if !thaw_js_bare_namespace_locals(pkg, user_source).is_empty() {
+                if !thaw_js_bare_namespace_locals(pkg, mention_source).is_empty() {
                     package_exports.insert(
                         crate::module_graph::BARE_NAMESPACE_EXPORT.to_string(),
                         target.clone(),

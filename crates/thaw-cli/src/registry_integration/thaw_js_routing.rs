@@ -1118,24 +1118,6 @@ fn thaw_js_with_group_marker(js: &str, key: &str) -> String {
     format!("{}\nvar __thaw_bundle_group = \"{key}\";{}", &js[..at], &js[at..])
 }
 
-/// A `createHook` program that uses promise forms whose hook trace is not yet Node-identical on thaw-js
-/// (`finally` trigger ids, Promise combinators): the module stays on QuickJS for those. `then`, `new Promise`
-/// and resolve/reject are served by thaw-js, and so is AsyncLocalStorage (reaction contexts reach native awaits).
-/// A plain `createHook` keeps `node:async_hooks` on thaw-js.
-fn thaw_js_async_hooks_blocker(pkg_name: &str, user_source: &str) -> Option<&'static str> {
-    const UNVALIDATED_NAMES: &[&str] = &["finally"];
-    const UNVALIDATED_PREFIXES: &[&str] = &["Promise.all", "Promise.race", "Promise.any"];
-    (pkg_name == "node:async_hooks"
-        && thaw_js_mentions(user_source, "createHook")
-        && (UNVALIDATED_NAMES
-            .iter()
-            .any(|name| thaw_js_mentions(user_source, name))
-            || UNVALIDATED_PREFIXES
-                .iter()
-                .any(|prefix| user_source.contains(prefix))))
-    .then_some("createHook with finally or Promise combinators is not supported on thaw-js yet")
-}
-
 /// The packages installed in the registry at `registry_dir`: each package directory holding a `package.d.ts`
 /// (what `thaw_registry::resolve` loads), by name; a scoped package is `@scope/name` under its scope directory.
 pub(crate) fn registry_installed_packages(registry_dir: &std::path::Path) -> std::collections::HashSet<String> {
@@ -1253,9 +1235,6 @@ fn thaw_js_package_eligible_in(
     if pkg.name.starts_with("node:") && !THAW_JS_BUILTIN_MODULES.contains(&pkg.name.as_str()) {
         return reject("builtin module not validated on thaw-js".into());
     }
-    if let Some(why) = thaw_js_async_hooks_blocker(&pkg.name, user_source) {
-        return reject(why.into());
-    }
     // A class the program names is served through thaw-js handles (`new`, instance and static
     // methods); every operation the shim declares for it must be plain data or an instance handle.
     // Anything else the program does with an instance that the typed operations do not cover needs
@@ -1316,7 +1295,8 @@ fn thaw_js_package_eligible_in(
                 return reject(format!("`{}` has no typed target", function.name));
             };
             // A class-instance result is a Json value carrying a thaw-js handle (adopted at the call).
-            if target.starts_with("__thaw_typed_jit_") {
+            // A `__thaw_jit_wrapper_*` is the residual JIT's own compiled function: no engine call at all.
+            if target.starts_with("__thaw_typed_jit_") || target.starts_with("__thaw_jit_wrapper_") {
                 return true;
             }
             let lines = segment
@@ -1440,33 +1420,6 @@ fn realm_fetch_transport_bundles_load_even_when_the_program_imports_node_http() 
     force_realm_fetch_bundles(&mut runtime, &mut resolved, &mut forced);
     assert!(!forced.contains("node:http"));
     assert!(fetch.contains("node:http"));
-}
-
-#[cfg(test)]
-#[test]
-fn thaw_js_async_hooks_create_hook_with_promises_keeps_the_module_on_quickjs() {
-    let timers = "import { createHook } from 'node:async_hooks';\nsetTimeout(() => {}, 1);";
-    let resource =
-        "import { createHook, AsyncResource } from 'node:async_hooks';\nnew AsyncResource('x');";
-    let promises = "import { createHook } from 'node:async_hooks';\nawait Promise.resolve();";
-    let finally = "import { createHook } from 'node:async_hooks';\nnew Promise((r) => r(1)).finally(() => {});";
-    let then = "import { createHook } from 'node:async_hooks';\nnew Promise((r) => r(1)).then((v) => v);";
-    let all = "import { createHook } from 'node:async_hooks';\nPromise.all([1]);";
-    let als = "import { createHook, AsyncLocalStorage } from 'node:async_hooks';\nnew AsyncLocalStorage();";
-    let hooks = "import { createHook } from 'node:async_hooks';\ncreateHook({ init() {} }).enable();";
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", timers).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", resource).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", promises).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", finally).is_some());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", then).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", all).is_some());
-    // AsyncLocalStorage is served by thaw-js now (its stores reach native awaits): not a blocker any more.
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", als).is_none());
-    let als_import_only = "import { createHook, AsyncLocalStorage } from 'node:async_hooks';\ncreateHook({ init() {} }).enable();";
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", als_import_only).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", hooks).is_none());
-    assert!(thaw_js_async_hooks_blocker("node:async_hooks", "new AsyncLocalStorage();").is_none());
-    assert!(thaw_js_async_hooks_blocker("node:path", promises).is_none());
 }
 
 #[cfg(test)]

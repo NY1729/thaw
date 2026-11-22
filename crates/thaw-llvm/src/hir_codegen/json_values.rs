@@ -105,7 +105,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// pending channel. The capture helper owns the input when requested;
     /// this fresh JSON Box is then independently arena-rooted for catch,
     /// async-frame, and Promise handoff.
-    fn compile_throw_original_quickjs_exception_handle(
+    pub(super) fn compile_throw_original_quickjs_exception_handle(
         &mut self,
         handle: BasicValueEnum<'ctx>,
         consume_handle: bool,
