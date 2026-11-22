@@ -11306,6 +11306,17 @@ fn iterator_from_a_projected_native_generator_forwards_resume_values() {
     );
 }
 
+/// `JSON.parse` keeps a lone surrogate escape as that code unit (checked with node 22).
+#[test]
+fn json_parse_keeps_lone_surrogates() {
+    assert_eq!(
+        one(
+            r#"console.log(JSON.stringify(JSON.parse('"\\ud800"')), JSON.parse('"a\\udc00b"').length, JSON.parse('"\\ud83d\\ude00"').length, JSON.stringify(JSON.parse('{"\\ud800":1}')))"#
+        ),
+        r#""\ud800" 3 2 {"\ud800":1}"#
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {

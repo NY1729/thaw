@@ -420,8 +420,13 @@ impl Parser<'_> {
                                     self.i += 6;
                                 }
                             }
-                            // ponytail: lone surrogates become U+FFFD
-                            let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
+                            // a lone surrogate unit is the private-use char the engine's strings keep it as
+                            let ch = if (0xD800..0xE000).contains(&code) {
+                                char::from_u32(crate::builtins::LONE + code - 0xD800)
+                            } else {
+                                char::from_u32(code)
+                            }
+                            .unwrap_or('\u{FFFD}');
                             let mut buf = [0u8; 4];
                             out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
                         }
