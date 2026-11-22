@@ -2413,6 +2413,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        // a fresh event key (`Symbol(..)` as a `JsValue` argument) is released once the array has encoded it
+        self.begin_fresh_event_key_argument_scope();
         for (index, (arg, ty)) in rest.iter().zip(signature.params.iter().skip(usize::from(is_method))).enumerate() {
             let reads_receiver = self.callback_expr_reads_receiver(arg) || self.closure_returns_promise(arg);
             let live_listener = self.live_json_listener(arg, ty);
@@ -2481,6 +2483,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_typed_dynamic_argument(array, value, ty)
                 .map_err(|error| format!("thaw-js class argument {} ({ty:?}): {error}", index + 1))?;
         }
+        let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
         let name = self.intern_string(symbol, "thaw_js_class_symbol")
             .map_err(|error| error.to_string())?;
         // bit 0: the result is a handle id; bit 1: await a returned Promise (see `class_call`);
@@ -2497,7 +2500,7 @@ impl<'ctx> HirCompiler<'ctx> {
             array,
             "thaw_tjs_class_call",
             &[receiver.into(), want_handle.into()],
-            &[],
+            &fresh_handles,
         )?;
         if ret_handle || promise_handle {
             self.uses_thaw_js_handles = true;
