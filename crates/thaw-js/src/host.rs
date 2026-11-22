@@ -6689,11 +6689,14 @@ pub(crate) fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)
             }
         }
     }
-    let text = it.to_str(v);
-    let display = if text.starts_with(&name) {
-        text.to_string()
+    // `name: message` as the built-in `Error.prototype.toString` writes it: the thrown object's own
+    // `toString` is user code a host error report must not run
+    let display = if message.is_empty() {
+        name
+    } else if name.is_empty() {
+        message.to_string()
     } else {
-        format!("{name}: {text}")
+        format!("{name}: {message}")
     };
     Some((display, framed))
 }

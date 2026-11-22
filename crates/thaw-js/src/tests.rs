@@ -2795,6 +2795,21 @@ fn thrown_errors_are_framed_with_name_message_code_and_properties() {
 }
 
 #[test]
+fn a_thrown_errors_own_to_string_is_not_run_when_the_host_reports_it() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.fail = function () { globalThis.__toStringCalls = 0; var e = new Error('m'); e.toString = function () { globalThis.__toStringCalls++; return 'wrong'; }; throw e; };\nexports.calls = function () { return globalThis.__toStringCalls; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    match p.call("fail", &[]) {
+        Err(HostError::Thrown(display)) => assert_eq!(display, "Error: m"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(p.call("calls", &[]), Ok(crate::host::Native::Number(n)) if n == 0.0));
+}
+
+#[test]
 fn vm_sub_realm_errors_are_framed_as_foreign() {
     use crate::host::{HostError, Package};
     let bundle = MINI.replace(
