@@ -8059,6 +8059,25 @@ pub extern "C" fn thaw_json_as_string_value(value: *mut Value) -> *const c_char 
     thaw_json_as_string(value)
 }
 
+thread_local! {
+    /// Native strings that were copied out of a JS/Json *string* and merely look like a framed Error
+    /// (`\u{1}Name\u{1}...`): they must reach JS as that string, not be rebuilt as an Error.
+    static PLAIN_FRAMED_STRINGS: std::cell::RefCell<std::collections::HashSet<usize>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn reset_plain_framed_strings(_: bool) {
+    PLAIN_FRAMED_STRINGS.with(|set| set.borrow_mut().clear());
+}
+
+/// Records `copy` (a string copied from a non-Error value) when its text looks like a framed Error.
+fn note_plain_framed_string(copy: *const c_char) {
+    if !copy.is_null() && unsafe { *copy } == 1 {
+        thaw_arena::register_reset_hook(reset_plain_framed_strings);
+        PLAIN_FRAMED_STRINGS.with(|set| set.borrow_mut().insert(copy as usize));
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
@@ -8085,6 +8104,8 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
                 thaw_arena::register_reset_hook(reset_native_error_text_identity);
                 NATIVE_ERROR_TEXT_IDENTITY
                     .with(|table| table.borrow_mut().insert(copy as usize, id));
+            } else {
+                note_plain_framed_string(copy);
             }
             return copy;
         }
@@ -8117,6 +8138,11 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
         Value::Host(lease) => {
             let encoded = host_query(lease, 3).unwrap_or_else(|| "\"\"".into());
             match JsonParser::new(encoded.as_bytes()).parse() {
+                Some(Value::String(text)) if text.starts_with('\u{1}') => {
+                    let copy = thaw_arena::owned_string(text);
+                    note_plain_framed_string(copy);
+                    return copy;
+                }
                 Some(Value::String(text)) => text,
                 Some(Value::Wtf8(bytes)) => return thaw_arena::owned_string(bytes),
                 _ => String::new(),
@@ -9306,6 +9332,18 @@ pub unsafe extern "C" fn thaw_json_is_host_arraybuffer(value: *const Value) -> u
     u8::from(host_query(lease, 31).is_some_and(|bytes| bytes != "null"))
 }
 
+/// `message` of a caught live Error for `console.log(error)`: with thaw-js, the text read when the error was
+/// reported (host query 35, once), so the console never runs the getter a second time.
+#[no_mangle]
+pub extern "C" fn thaw_json_caught_error_message(value: *mut Value) -> *mut Value {
+    if engine_is_thaw_js() {
+        if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+            return leak(host_query(lease, 35).map_or(Value::Null, Value::String));
+        }
+    }
+    thaw_json_get(value, c"message".as_ptr())
+}
+
 #[no_mangle]
 /// Returns whether a live Host value is an actual JavaScript Error-family instance.
 /// Plain Json values and non-Host values are not authenticated as Errors.
@@ -10405,6 +10443,14 @@ pub extern "C" fn thaw_json_receiver_string(value: *const c_char) -> *mut Value 
     // A framed error string widened to `any` must keep its Error properties and identity.
     if !value.is_null() {
         let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
+        // thaw-js: a framed-looking copy of a JS string stays a string, behind a token the engine decodes
+        if engine_is_thaw_js()
+            && PLAIN_FRAMED_STRINGS.with(|set| set.borrow().contains(&(value as usize)))
+        {
+            let mut fields = indexmap::IndexMap::new();
+            fields.insert(b"__thaw_tjs_str__".to_vec(), utf8_or_wtf8(bytes.to_vec()));
+            return leak(Value::shared_object(fields));
+        }
         if is_error_frame_text(bytes) || bytes.starts_with(b"\x1eE1:") {
             if let Some(error) = error_value_from_text(value, bytes) {
                 return leak(error);
@@ -12892,6 +12938,34 @@ mod tests {
             thaw_json_destroy(value);
             thaw_arena::destroy_string(text);
         }
+    }
+
+    #[test]
+    fn a_framed_looking_copy_of_a_json_string_reaches_thaw_js_as_a_string_token() {
+        std::thread::spawn(|| {
+            thaw_json_set_js_engine(1);
+            let source = Value::String("\u{1}Error\u{1}boom".to_string());
+            let copy = thaw_json_as_string(&source as *const Value as *mut Value);
+            let value = thaw_json_receiver_string(copy);
+            let Value::Object(fields) = (unsafe { &*value }) else {
+                panic!("a plain framed-looking string must cross behind a token");
+            };
+            assert_eq!(
+                shared_object_ref(fields)
+                    .get(b"__thaw_tjs_str__".as_slice())
+                    .and_then(Value::as_str),
+                Some("\u{1}Error\u{1}boom")
+            );
+            // a string no JS string produced is still the native Error it is taken for
+            let native = thaw_arena::owned_string(b"\x01TypeError\x01native failure");
+            let value = thaw_json_receiver_string(native);
+            let Value::Object(fields) = (unsafe { &*value }) else {
+                panic!("native framed Error expected");
+            };
+            assert!(shared_object_ref(fields).contains_key(b"name".as_slice()));
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crate::*;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -137,22 +138,31 @@ const ALL: [Ty; 12] = [
 /// The memory of a SharedArrayBuffer. Every store over it (`sab_store`) and every in-flight wire that names it
 /// (worker.rs) holds an `Arc`, so the memory lives while any of them does.
 ///
-/// SAFETY invariants (the unsafe code is `new_sab_block`, `sab_store`, `Store::drop` and `SabBlock::drop`):
-/// 1. A SAB store's `cell` is a `Vec<u8>` aliasing `[ptr, ptr + len)` with capacity `len`. That Vec is never
+/// SAFETY invariants (the unsafe code is `new_sab_block`, `sab_store`, `Store::deref`, `Store::drop` and
+/// `SabBlock::drop`):
+/// 1. A SAB store's `cell` is a `Vec<u8>` aliasing `[ptr, ptr + len)` with capacity `cap`. That Vec is never
 ///    dropped, reallocated, resized, shrunk or replaced: `Store::drop` forgets it, `detach_bytes` leaves a shared
 ///    store alone, and no code calls a length-changing method on a store's Vec (test
-///    `grep_guard_no_length_change_on_a_sab_backed_vec`).
+///    `grep_guard_no_length_change_on_a_sab_backed_vec`). The one exception is `Store::deref`, which moves a
+///    growable block's alias length up to the block's current length with `set_len` (never past `cap`).
 /// 2. The allocation is freed only by `SabBlock::drop`, when the last `Arc` goes.
 /// 3. `ptr` comes from a `u64` allocation, so it is 8-byte aligned; element offsets that are multiples of the
 ///    element size are aligned for atomic access.
-/// 4. The length is fixed for the block's lifetime (SharedArrayBuffer growth is not supported).
+/// 4. All `cap` bytes are reserved and zeroed when the block is created, and `cap` never changes. The length is
+///    fixed unless the block is growable (`max` is Some): `grow` then raises the shared `len` (never lowers it,
+///    never past `cap == max`), which every store picks up the next time it is dereferenced.
 /// 5. Two threads may touch the bytes at once through their own stores, so racing plain accesses are a data race in
 ///    Rust's model. ponytail: accepted because JS permits racy SAB access and the hot path has no atomic branch;
 ///    upgrade path: relaxed atomic bytes in `TypedArr::{get,set}` when `store.sab` is set.
 pub(crate) struct SabBlock {
     ptr: *mut u64,
     words: usize,
-    len: usize,
+    /// Reserved bytes (`maxByteLength` of a growable block, else the length).
+    cap: usize,
+    /// The current byte length, shared by every holder.
+    len: AtomicUsize,
+    /// `maxByteLength` of a growable SharedArrayBuffer; None when fixed.
+    max: Option<usize>,
 }
 
 // SAFETY: raw memory that every holder reaches only through its store, under the invariants above.
@@ -167,33 +177,58 @@ impl Drop for SabBlock {
     }
 }
 
-/// A zeroed block of `len` bytes.
+impl SabBlock {
+    fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+}
+
+/// A zeroed fixed-length block of `len` bytes.
+#[cfg(test)]
 pub(crate) fn new_sab_block(len: usize) -> Arc<SabBlock> {
-    let words = len.div_ceil(8);
+    new_sab_block_max(len, None)
+}
+
+/// A zeroed block of `len` bytes; growable up to `max` bytes (all reserved now) when given.
+pub(crate) fn new_sab_block_max(len: usize, max: Option<usize>) -> Arc<SabBlock> {
+    let cap = max.unwrap_or(len);
+    let words = cap.div_ceil(8);
     let ptr = Box::into_raw(vec![0u64; words].into_boxed_slice()) as *mut u64;
-    Arc::new(SabBlock { ptr, words, len })
+    Arc::new(SabBlock {
+        ptr,
+        words,
+        cap,
+        len: AtomicUsize::new(len),
+        max,
+    })
 }
 
 /// A zeroed SharedArrayBuffer storage of `len` bytes.
 pub(crate) fn new_sab_bytes(len: usize) -> Bytes {
+    new_sab_bytes_max(len, None)
+}
+
+/// `new_sab_bytes`, growable up to `max` bytes when given.
+pub(crate) fn new_sab_bytes_max(len: usize, max: Option<usize>) -> Bytes {
     // counted once, on the creating thread: an importing store (`sab_store` alone) charges nothing
-    let bytes = sab_store(new_sab_block(len));
+    let bytes = sab_store(new_sab_block_max(len, max));
     bytes.charged.set(heap_limit::charge(len));
     bytes
 }
 
 /// An attached storage over `block`: the same bytes as every other store of the block.
 pub(crate) fn sab_store(block: Arc<SabBlock>) -> Bytes {
-    // SAFETY: the Vec aliases the block's allocation (`words * 8 >= len` bytes, so `len` bytes are live). It is
-    // never dropped (invariant 1), which is why its allocation layout (align 8) never has to match a `Vec<u8>`'s.
-    let alias = unsafe { Vec::from_raw_parts(block.ptr.cast::<u8>(), block.len, block.len) };
+    // SAFETY: the Vec aliases the block's allocation (`words * 8 >= cap >= len` bytes, so `len` bytes are live). It
+    // is never dropped (invariant 1), which is why its allocation layout (align 8) never has to match a `Vec<u8>`'s.
+    let alias = unsafe { Vec::from_raw_parts(block.ptr.cast::<u8>(), block.len(), block.cap) };
+    let max = block.max;
     Rc::new(Store {
         cell: RefCell::new(alias),
         shared: None,
         detached: Cell::new(false),
         sab: Some(block),
         charged: Cell::new(0),
-        max: None,
+        max,
     })
 }
 
@@ -229,7 +264,21 @@ impl std::ops::Deref for Store {
     fn deref(&self) -> &RefCell<Vec<u8>> {
         match &self.shared {
             Some(shared) => shared,
-            None => &self.cell,
+            None => {
+                // a growable SharedArrayBuffer another store (maybe another thread's) grew: follow its length
+                if let Some(block) = self.sab.as_ref().filter(|b| b.max.is_some()) {
+                    let len = block.len();
+                    // SAFETY: `len <= cap` (grow checks), the bytes below `cap` are reserved and zeroed, and
+                    // this thread is the only writer of this store's Vec header (invariant 1).
+                    unsafe {
+                        let alias = &mut *self.cell.as_ptr();
+                        if alias.len() != len {
+                            alias.set_len(len);
+                        }
+                    }
+                }
+                &self.cell
+            }
         }
     }
 }
@@ -275,6 +324,36 @@ pub(crate) fn resize_bytes(b: &Bytes, n: usize) -> bool {
         b.charged.set(b.charged.get() - credit);
     }
     v.resize(n, 0);
+    true
+}
+
+/// `SharedArrayBuffer.prototype.grow`: raises the shared length to `n`; false when `n` is below the current length
+/// or above the maximum (or the block is fixed). Atomic, so concurrent growers cannot lower the length.
+pub(crate) fn grow_sab(b: &Bytes, n: usize) -> bool {
+    let Some(block) = b.sab.as_ref() else {
+        return false;
+    };
+    let Some(max) = block.max else {
+        return false;
+    };
+    if n > max {
+        return false;
+    }
+    let mut cur = block.len.load(Ordering::Acquire);
+    loop {
+        if n < cur {
+            return false;
+        }
+        match block
+            .len
+            .compare_exchange(cur, n, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => break,
+            Err(actual) => cur = actual,
+        }
+    }
+    b.charged.set(b.charged.get() + heap_limit::charge(n - cur));
+    drop(b.borrow());
     true
 }
 
@@ -729,10 +808,14 @@ impl Interp {
         if !(0.0..=2f64.powi(32)).contains(&n) {
             return self.throw_error("RangeError", "Array buffer allocation failed");
         }
+        let max = self.ab_max_option(&arg(args, 1), n as usize)?;
         let obj = if shared {
-            self.new_shared_buffer(new_sab_bytes(n as usize))
+            // a growable block reserves its whole maximum now
+            if max.is_some_and(|m| m as f64 > 2f64.powi(32)) {
+                return self.throw_error("RangeError", "Array buffer allocation failed");
+            }
+            self.new_shared_buffer(new_sab_bytes_max(n as usize, max))
         } else {
-            let max = self.ab_max_option(&arg(args, 1), n as usize)?;
             self.new_array_buffer(new_bytes_max(vec![0; n as usize], max))
         };
         // the bytes are charged above: stop here if that tripped the worker's heap limit
@@ -1007,6 +1090,61 @@ impl Interp {
             let copy = new_sab_bytes(out.len());
             copy.borrow_mut().copy_from_slice(&out);
             Ok(Value::Object(it.new_shared_buffer(copy)))
+        });
+        // a SharedArrayBuffer receiver's storage, or V8's TypeError (a plain ArrayBuffer is not one)
+        fn sab_receiver(it: &mut Interp, this: &Value, method: &str) -> R<Bytes> {
+            let shared = match this {
+                Value::Object(o) => match (&*o.proto.borrow(), &it.rt.sharedarraybuffer_proto) {
+                    (Some(op), Some(sp)) => Rc::ptr_eq(op, sp),
+                    _ => false,
+                },
+                _ => false,
+            };
+            match Interp::bytes_of_buffer(this) {
+                Some(b) if shared && b.sab.is_some() => Ok(b),
+                _ => {
+                    let desc = if matches!(this, Value::Object(_)) {
+                        "#<Object>"
+                    } else {
+                        "undefined"
+                    };
+                    it.throw_error(
+                        "TypeError",
+                        &format!("Method {method} called on incompatible receiver {desc}"),
+                    )
+                }
+            }
+        }
+        let growable_get = self.native(|it, this, _| {
+            let data = sab_receiver(it, this, "get SharedArrayBuffer.prototype.growable")?;
+            Ok(Value::Bool(data.max.is_some()))
+        });
+        define_accessor(&sab_proto, "growable", Some(growable_get), None, false);
+        let sab_max_get = self.native(|it, this, _| {
+            let data = sab_receiver(it, this, "get SharedArrayBuffer.prototype.maxByteLength")?;
+            let n = data.max.unwrap_or_else(|| data.borrow().len());
+            Ok(Value::Number(n as f64))
+        });
+        define_accessor(&sab_proto, "maxByteLength", Some(sab_max_get), None, false);
+        // spec order: receiver (growable), ToIndex, then the range against the current length and the maximum
+        self.set_native(&sab_proto, "grow", |it, this, a| {
+            let data = sab_receiver(it, this, "SharedArrayBuffer.prototype.grow")?;
+            if data.max.is_none() {
+                return it.throw_error(
+                    "TypeError",
+                    "Method SharedArrayBuffer.prototype.grow called on incompatible receiver #<SharedArrayBuffer>",
+                );
+            }
+            let n = it.num(&arg(a, 0));
+            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+            if !(0.0..=9007199254740991.0).contains(&n) || !grow_sab(&data, n as usize) {
+                return it.throw_error(
+                    "RangeError",
+                    "SharedArrayBuffer.prototype.grow: Invalid length parameter",
+                );
+            }
+            it.check_interrupt()?;
+            Ok(Value::Undefined)
         });
         g.declare("SharedArrayBuffer", sab, true);
         // length-tracking and out-of-bounds views (the prelude's brand checks and DataView / structuredClone use them)
@@ -1320,11 +1458,6 @@ const TYPED_PRELUDE: &str = r#"
   // `__thaw_ta_oob`) buffer clamp to length 0 and the methods below throw V8's messages (recorded from Node 22).
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
   function gone(t) { return isTA(t) && (detGet.call(t.buffer) || __thaw_ta_oob(t)); }
-  acc(SharedArrayBuffer.prototype, 'growable', function () { return false; });
-  acc(SharedArrayBuffer.prototype, 'maxByteLength', function () {
-    if (!(this instanceof SharedArrayBuffer)) throw new TypeError('Receiver is not a SharedArrayBuffer');
-    return this.byteLength;
-  });
   Object.defineProperty(SharedArrayBuffer.prototype, TAG, { value: 'SharedArrayBuffer', configurable: true });
   ['forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex', 'reduce', 'reduceRight', 'fill', 'at', 'toString', 'keys', 'values', 'entries'].forEach(function (n) {
     if (AP[n]) def(TP, n, AP[n]);

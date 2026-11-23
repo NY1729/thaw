@@ -2810,6 +2810,39 @@ fn a_thrown_errors_own_to_string_is_not_run_when_the_host_reports_it() {
 }
 
 #[test]
+fn reporting_a_thrown_error_reads_its_message_once_and_keeps_a_getter_failure() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.ok = function () { globalThis.__reads = 0; var e = new Error('x'); Object.defineProperty(e, 'message', { get() { globalThis.__reads++; return 'm'; } }); throw e; };\nexports.bad = function () { globalThis.__reads = 0; var e = new Error('x'); Object.defineProperty(e, 'message', { get() { globalThis.__reads++; throw new RangeError('getter failed'); } }); throw e; };\nexports.trap = function () { throw new Proxy(new Error('hidden'), { getPrototypeOf() { throw new TypeError('trap failed'); } }); };\nexports.reads = function () { return globalThis.__reads; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    assert!(matches!(p.call("ok", &[]), Err(HostError::Thrown(d)) if d == "Error: m"));
+    assert!(matches!(p.call("reads", &[]), Ok(crate::host::Native::Number(n)) if n == 1.0));
+    // a failing getter is not read again for the display text; the report says so without running it
+    assert!(matches!(p.call("bad", &[]), Err(HostError::Thrown(d)) if d == "Error"));
+    assert!(matches!(p.call("reads", &[]), Ok(crate::host::Native::Number(n)) if n == 1.0));
+    assert!(matches!(p.call("trap", &[]), Err(HostError::Thrown(d)) if d == "Error"));
+}
+
+#[test]
+fn a_proxy_array_nested_in_a_result_is_read_through_its_traps() {
+    use crate::host::{HostError, Native, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.plain = function () { return { data: new Proxy([1, 2], {}) }; };\nexports.bad = function () { return { data: new Proxy([1, 2], { get(t, k, r) { if (k === 'length') throw new Error('length failed'); return Reflect.get(t, k, r); } }) }; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    match p.call("plain", &[]) {
+        Ok(Native::Object(fields)) => {
+            assert!(matches!(&fields[0].1, Native::Array(items) if items.len() == 2));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(p.call("bad", &[]), Err(HostError::Thrown(d)) if d == "Error: length failed"));
+}
+
+#[test]
 fn a_later_string_throw_does_not_pick_up_the_previous_errors_frame() {
     use crate::host::{HostError, Package};
     let bundle = MINI.replace(
@@ -5895,6 +5928,19 @@ fn registering_the_same_closure_identity_twice_returns_one_callback_id() {
         first,
         thaw_tjs_register_callback(sum_adapter as *const _, 0x30 as *const _, 3)
     );
+}
+
+#[test]
+fn a_plain_string_token_stays_a_string_where_a_bare_framed_string_becomes_an_error() {
+    use crate::host::Native;
+    let mut it = crate::Interp::new();
+    let frame = "\u{1}Error\u{1}boom";
+    let token = Native::Object(vec![("__thaw_tjs_str__".into(), Native::Str(frame.into()))]);
+    assert!(matches!(crate::host::to_value(&mut it, &token), Value::Str(s) if &*s == frame));
+    assert!(matches!(
+        crate::host::to_value(&mut it, &Native::Str(frame.into())),
+        Value::Object(_)
+    ));
 }
 
 #[test]
@@ -12630,7 +12676,7 @@ fn an_os_signal_from_outside_reaches_a_process_listener() {
     let pid = std::process::id() as i32;
     std::thread::spawn(move || {
         // wait for the loop to hook the signal, then deliver it from outside
-        while crate::eventloop::HOOKED_SIGNALS.load(std::sync::atomic::Ordering::Relaxed)
+        while crate::eventloop::HOOKED_SIGNALS.load(std::sync::atomic::Ordering::Acquire)
             & (1 << libc::SIGUSR2)
             == 0
         {
@@ -13392,5 +13438,14 @@ console.log([keys(o), Object.keys(o), Object.getPrototypeOf(o) === null, '__prot
 "####
         ),
         expected
+    );
+}
+
+#[test]
+fn a_json_stringify_property_list_reads_a_proxy_through_its_get_trap() {
+    // node 22: {"a":1} {"a":1,"z":0}
+    assert_eq!(
+        one("console.log(JSON.stringify(new Proxy({}, { get: (t, k) => k === 'a' ? 1 : undefined }), ['a', 'b']), JSON.stringify(new Proxy({ z: 0 }, { get: (t, k) => k === 'a' ? 1 : t[k] }), ['a', 'z']))"),
+        "{\"a\":1} {\"a\":1,\"z\":0}"
     );
 }

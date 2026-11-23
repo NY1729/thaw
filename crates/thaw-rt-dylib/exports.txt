@@ -280,6 +280,7 @@ thaw_json_callback_error_tuple
 thaw_json_callback_origin_acquire
 thaw_json_callback_origin_handle
 thaw_json_capture_stack_trace
+thaw_json_caught_error_message
 thaw_json_clone
 thaw_json_console_string
 thaw_json_date_set_timestamp

@@ -688,3 +688,57 @@ fn receive_message_on_port_pump_leaves_other_worker_events_for_the_loop() {
     );
     assert_eq!(lines, ["ok", r#"{"message":"m"}"#, "online", "exit 0"]);
 }
+
+#[test]
+fn a_growable_shared_buffer_grows_and_length_tracking_views_follow_it() {
+    // expected text is node 22's output for the same program
+    let src = "const s = new SharedArrayBuffer(8, { maxByteLength: 16 });
+      console.log(s.growable, s.maxByteLength, s.byteLength);
+      const u = new Uint8Array(s); const t = new Uint8Array(s, 4); const f = new Uint8Array(s, 0, 4);
+      s.grow(12);
+      console.log(s.byteLength, u.length, t.length, f.length, new Int32Array(s).length);
+      for (const n of [4, 17]) { try { s.grow(n); } catch (e) { console.log(e.name + ': ' + e.message); } }
+      const fixed = new SharedArrayBuffer(8);
+      console.log(fixed.growable, fixed.maxByteLength);
+      try { fixed.grow(9); } catch (e) { console.log(e.name + ': ' + e.message); }
+      try { new SharedArrayBuffer(8, { maxByteLength: 4 }); } catch (e) { console.log(e.name + ': ' + e.message); }
+      const sl = s.slice(2, 6); console.log(sl.byteLength, sl.growable);
+      u[11] = 5; console.log(new Uint8Array(s)[11]);
+      s.grow(16); console.log(u.length, t.length);";
+    assert_eq!(
+        lines(src, None),
+        [
+            "true 16 8",
+            "12 12 8 4 3",
+            "RangeError: SharedArrayBuffer.prototype.grow: Invalid length parameter",
+            "RangeError: SharedArrayBuffer.prototype.grow: Invalid length parameter",
+            "false 8",
+            "TypeError: Method SharedArrayBuffer.prototype.grow called on incompatible receiver #<SharedArrayBuffer>",
+            "RangeError: Invalid array buffer max length",
+            "4 false",
+            "5",
+            "16 12"
+        ]
+    );
+}
+
+#[test]
+fn a_growth_through_one_store_is_seen_by_the_other_stores_of_the_block() {
+    // the block arrives as a wire node; a structured clone is a second store over it (as another thread's is)
+    let wire = in_thread(|| {
+        lines(
+            "const s = new SharedArrayBuffer(4, { maxByteLength: 8 });
+             console.log(__thaw_worker_encode(s));",
+            None,
+        )
+        .remove(0)
+    });
+    let src = "const g = __thaw_worker_decode(__wire_in); const v = new Uint8Array(g);
+      console.log(g.byteLength, g.growable, g.maxByteLength, v.length);
+      const c = structuredClone(g); const cv = new Uint8Array(c); g.grow(8);
+      console.log(g.byteLength, v.length, c === g, c.byteLength, cv.length);";
+    assert_eq!(
+        lines(src, Some(wire.as_str())),
+        ["4 true 8 4", "8 8 false 8 8"]
+    );
+}

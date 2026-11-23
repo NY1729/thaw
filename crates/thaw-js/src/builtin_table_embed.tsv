@@ -2328,9 +2328,12 @@ SharedArrayBuffer	prototype	data	---	object	-	-	-	-	-
 SharedArrayBuffer.prototype	@@toStringTag	data	--c	string	-	-	-	-	SharedArrayBuffer
 SharedArrayBuffer.prototype	byteLength	accessor	--c	-	-	get byteLength|-	-	-	-
 SharedArrayBuffer.prototype	constructor	data	w-c	function	1	SharedArrayBuffer	1	124	-
+SharedArrayBuffer.prototype	grow	data	w-c	function	1	grow	0	-	-
 SharedArrayBuffer.prototype	growable	accessor	--c	-	-	get growable|-	-	-	-
 SharedArrayBuffer.prototype	maxByteLength	accessor	--c	-	-	get maxByteLength|-	-	-	-
 SharedArrayBuffer.prototype	slice	data	w-c	function	2	slice	0	-	-
+SharedArrayBuffer.prototype.grow	length	data	--c	number	1	-	-	-	-
+SharedArrayBuffer.prototype.grow	name	data	--c	string	-	grow	-	-	-
 SharedArrayBuffer.prototype.slice	length	data	--c	number	2	-	-	-	-
 SharedArrayBuffer.prototype.slice	name	data	--c	string	-	slice	-	-	-
 String	fromCharCode	data	w-c	function	1	fromCharCode	0	-	-

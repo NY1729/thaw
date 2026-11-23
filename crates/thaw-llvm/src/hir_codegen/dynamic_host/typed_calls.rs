@@ -2165,7 +2165,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_native_date_from_timestamp(fields, ms);
             }
         }
-        if *awaited == HirType::Json {
+        // A numeric array or byte result that is a live object (a Proxy) also comes back as a marker: its
+        // decode must read it through the lease so a throwing `length`/index getter reaches the native catch.
+        let numeric_result = matches!(awaited, HirType::Bytes)
+            || matches!(awaited, HirType::Array(inner) if **inner == HirType::F64);
+        if *awaited == HirType::Json || numeric_result {
             // A class instance or function result comes back as a handle marker: adopt it as a host lease.
             self.uses_thaw_js_handles = true;
             json = self

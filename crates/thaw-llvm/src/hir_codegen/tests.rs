@@ -347,6 +347,10 @@ fn compile_and_run_raw_lane_opt(
     let thaw_js = lane == Lane::ThawJs;
     thaw_hir::set_thaw_js_routed(thaw_js);
     let program = thaw_hir::lower_module(&module).unwrap();
+    // THAW_TEST_HIR=<file> writes the lowered HIR (debug aid next to THAW_TEST_IR)
+    if let Some(path) = std::env::var_os("THAW_TEST_HIR") {
+        std::fs::write(path, format!("{program:#?}")).unwrap();
+    }
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, test_name);

@@ -315,3 +315,15 @@ fn dynamic_bind_preserving_statics_keeps_own_properties() {
     "#;
     assert_eq!(run_realm(src), vec!["5 7 9 bound f 3"]);
 }
+
+/// Compiled-method wrappers run strict, as the QuickJS lane's did: an extracted method called with no receiver
+/// sees `undefined` as its `this` (a sloppy wrapper would hand it `globalThis`). Node 22 prints `undefined undefined`.
+#[test]
+fn object_literal_method_and_accessor_wrappers_see_an_undefined_receiver() {
+    let lines = run_realm(
+        "const o = __thaw_object_from_operations(['method', 'getter'], '[\"m\",\"g\"]', [false, false], [undefined, undefined], function (self) { return self; }, function (self) { return self; });
+         const m = o.m; const get = Object.getOwnPropertyDescriptor(o, 'g').get;
+         console.log(String(m()), String(get()));",
+    );
+    assert_eq!(lines, ["undefined undefined"]);
+}

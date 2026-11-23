@@ -1365,6 +1365,16 @@ impl<'ctx> HirCompiler<'ctx> {
         value: PointerValue<'ctx>,
         ledger: NativeHandleLedger<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        let handle = self.compile_live_symbol_handle(value, ledger)?;
+        self.compile_dynamic_value_placeholder_unchecked(handle.into())
+    }
+
+    /// The engine handle of a live Symbol made from a native one's description (recorded in `ledger`).
+    fn compile_live_symbol_handle(
+        &mut self,
+        value: PointerValue<'ctx>,
+        ledger: NativeHandleLedger<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
         let nonnull = self.builder.build_is_not_null(value, "native_symbol_projection_string_present")
             .map_err(|error| error.to_string())?;
         let valid = self.context.append_basic_block(self.current_function(), "native_symbol_projection_string_valid");
@@ -1415,7 +1425,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.branch_on_pending_exception()?;
 
         self.append_live_native_symbol_handle(handle, ledger)?;
-        self.compile_dynamic_value_placeholder_unchecked(handle.into())
+        Ok(handle)
     }
 
     fn compile_json_object_set_native(

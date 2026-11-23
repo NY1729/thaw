@@ -357,9 +357,6 @@ Request.prototype.@@nodejs.util.inspect.custom	name
 Response.prototype	@@nodejs.util.inspect.custom
 Response.prototype.@@nodejs.util.inspect.custom	length
 Response.prototype.@@nodejs.util.inspect.custom	name
-SharedArrayBuffer.prototype	grow
-SharedArrayBuffer.prototype.grow	length
-SharedArrayBuffer.prototype.grow	name
 TextDecoder.prototype	@@nodejs.util.inspect.custom
 TextDecoder.prototype.@@nodejs.util.inspect.custom	length
 TextDecoder.prototype.@@nodejs.util.inspect.custom	name

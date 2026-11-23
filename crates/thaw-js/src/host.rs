@@ -1577,6 +1577,22 @@ pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
     // the framed form belongs to the error classified last: a later throw of anything else (a string whose text
     // equals that error's display) must not pick it up
     LAST_FRAME.with(|f| *f.borrow_mut() = None);
+    LAST_MESSAGE.with(|m| *m.borrow_mut() = None);
+    // Reading the thrown object (its `message` and `name`, a Proxy's prototype trap) runs user code exactly
+    // once, here. What that read threw is kept with the error instead of being swallowed, and host query 35
+    // throws it when compiled code asks for the message (the console of a caught error).
+    let framed = match &c {
+        Ctl::Throw(v) => match frame_error(it, v) {
+            Ok(framed) => framed,
+            Err(Ctl::Throw(inner)) => {
+                LAST_MESSAGE.with(|m| *m.borrow_mut() = Some(Err(inner)));
+                None
+            }
+            Err(_) => None,
+        },
+        _ => None,
+    };
+    let unreadable = LAST_MESSAGE.with(|m| matches!(&*m.borrow(), Some(Err(_))));
     let packet = match &c {
         Ctl::Throw(v) => carrier_packet(it, v),
         _ => None,
@@ -1599,9 +1615,13 @@ pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
     match c {
         Ctl::Unsupported(f) => HostError::Unsupported(f),
         Ctl::Throw(v) => {
-            if let Some((display, framed)) = frame_error(it, &v) {
+            if let Some((display, framed, message)) = framed {
                 LAST_FRAME.with(|f| *f.borrow_mut() = Some((display.clone(), framed)));
+                LAST_MESSAGE.with(|m| *m.borrow_mut() = Some(Ok(message)));
                 return HostError::Thrown(display);
+            }
+            if unreadable {
+                return HostError::Thrown("Error".into());
             }
             let text = it.to_str(&v);
             let name = it.get(&v, "name").ok().map(|n| it.to_str(&n).to_string());
@@ -1632,6 +1652,8 @@ const BIGINT_KEY: &str = "__thaw_tjs_bigint__";
 const NUM_KEY: &str = "__thaw_tjs_num__";
 /// `{"__thaw_tjs_hole__": 1}` as an array element: a hole of a compiled sparse array.
 const HOLE_KEY: &str = "__thaw_tjs_hole__";
+/// Wraps a string shaped like a framed native Error that is not one (a thrown JS string): it stays a string.
+const PLAIN_STR_KEY: &str = "__thaw_tjs_str__";
 /// `{"__thaw_tjs_bytes__": {"k": "Buffer" | "Uint8Array" | "ArrayBuffer" | "DataView", "b64": "..."}}`:
 /// compiled `Bytes` crossing as base64 text. `k` selects the JS kind; a missing or unknown `k` is a Buffer.
 /// ArrayBuffer and DataView cross by copy (a DataView over a fresh ArrayBuffer of exactly its window).
@@ -1811,6 +1833,7 @@ pub extern "C" fn thaw_tjs_release_handle(handle: i64) -> u8 {
     match last {
         Some(true) => {
             trace_h("release", handle);
+            let _ = MESSAGE_SNAPSHOTS.try_with(|m| m.borrow_mut().remove(&(handle as u64)));
             if trace_wire() {
                 eprintln!(
                     "release->0 id={handle}\n{}",
@@ -3433,6 +3456,15 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
                 .unwrap_or_else(|_| "null".into()),
             // the text a user-facing `JSON.stringify` writes for a live value (no handle marker)
             34 => crate::napi_eval::json_stringify(it, &v)?.unwrap_or_else(|| "null".into()),
+            // 35: the `message` read when this thrown Error was reported (once), else a live read
+            35 => match MESSAGE_SNAPSHOTS.with(|m| m.borrow_mut().remove(&handle)) {
+                Some(Ok(message)) => message,
+                Some(Err(thrown)) => return Err(classify(it, Ctl::Throw(thrown))),
+                None => match it.get(&v, "message").map_err(|c| classify(it, c))? {
+                    Value::Str(message) => message.to_string(),
+                    other => it.to_str(&other).to_string(),
+                },
+            },
             9 => flag(is_object),
             10 => number(it, &v),
             14 => flag(v.is_callable()),
@@ -3599,24 +3631,11 @@ pub(crate) fn json_key(key_json: *const c_char) -> Result<String, String> {
     }
 }
 
-/// Host-side `target[key] = value` under strict mode (compiled code is strict): a write to a frozen object
-/// or a new key on a non-extensible one throws, where `Interp::set` silently ignores it.
+/// Host-side `target[key] = value` under strict mode (compiled code is strict): a refused write (a frozen or
+/// non-writable property, a getter-only accessor, a new key on a non-extensible object, a Proxy trap answering
+/// false) throws, where `Interp::set` silently ignores it.
 fn strict_host_set(it: &mut Interp, target: &Value, key: &str, value: Value) -> R<()> {
-    if let Value::Object(o) = target {
-        if o.frozen.get() {
-            return it.throw_error(
-                "TypeError",
-                &format!("Cannot assign to read only property '{key}' of object"),
-            );
-        }
-        if o.ext.get() != 0 && crate::find_in_chain(o, key).is_none() {
-            return it.throw_error(
-                "TypeError",
-                &format!("Cannot add property {key}, object is not extensible"),
-            );
-        }
-    }
-    it.set(target, key, value)
+    it.set_impl(target, key, value, true)
 }
 
 /// `handle[key] = value` with the key as JSON text and the value a graph wire; the result value is 1.
@@ -5930,7 +5949,7 @@ fn callback_arg_token(
     if error {
         if let Value::Object(o) = item {
             if crate::builtins::is_error_instance(o) {
-                if let Some((_, framed)) = frame_error(it, item) {
+                if let Some((_, framed, _)) = frame_error(it, item).map_err(|c| classify(it, c))? {
                     let mut q = String::new();
                     crate::builtins::json_quote(&framed, &mut q);
                     return Ok(format!("{{\"v\":{q}}}"));
@@ -6517,6 +6536,11 @@ thread_local! {
     /// `(display, framed)` of the last `Error` object a package call threw: compiled code asks for the
     /// framed form of an error string (`thaw_tjs_frame_error`) when it raises it as a TypeScript error.
     static LAST_FRAME: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+    /// The `message` `classify` read from the error it framed (see `MESSAGE_SNAPSHOTS`).
+    static LAST_MESSAGE: RefCell<Option<Result<String, Value>>> = const { RefCell::new(None) };
+    /// handle -> the `message` read when that thrown Error was reported. The compiled console prints a caught
+    /// engine Error's message from it (host query 35) instead of reading the getter again; one use, then live.
+    static MESSAGE_SNAPSHOTS: RefCell<HashMap<u64, Result<String, Value>>> = RefCell::new(HashMap::new());
     /// The native packet of the last carrier `classify` saw; `error_string` binds it to the error text.
     static LAST_PACKET: RefCell<Option<Rc<thaw_arena::exception::ExceptionPacket>>> = const { RefCell::new(None) };
     /// The thrown primitive `classify` saw last, as plain data; `error_string` turns it into a packet.
@@ -6643,14 +6667,26 @@ pub unsafe extern "C" fn thaw_tjs_frame_error(error: *mut c_char) -> *mut c_char
 
 /// The wire framing of a thrown `Error`-like object (`message` is a string): `\u{1}name\u{1}message`,
 /// then `\u{3}code` and `\u{5}{own properties as JSON}` like the QuickJS bridge.
-pub(crate) fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)> {
-    if !matches!(v, Value::Object(_)) || v.is_callable() {
-        return None;
-    }
-    let Value::Str(message) = it.get(v, "message").ok()? else {
-        return None;
+///
+/// A throwing `getPrototypeOf` trap / `message` / `name` getter is returned as `Err`; the third element is
+/// the message read, kept as the snapshot the compiled console prints (host query 35).
+pub(crate) fn frame_error(
+    it: &mut Interp,
+    v: &Value,
+) -> Result<Option<(String, String, String)>, Ctl> {
+    let Value::Object(object) = v else {
+        return Ok(None);
     };
-    let name = match it.get(v, "name").ok()? {
+    if v.is_callable() {
+        return Ok(None);
+    }
+    if matches!(&*object.kind.borrow(), Kind::Proxy(_)) {
+        it.proxy_get_prototype_of(object)?;
+    }
+    let Value::Str(message) = it.get(v, "message")? else {
+        return Ok(None);
+    };
+    let name = match it.get(v, "name")? {
         Value::Str(n) => n.to_string(),
         _ => "Error".to_string(),
     };
@@ -6701,7 +6737,7 @@ pub(crate) fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)
     } else {
         format!("{name}: {message}")
     };
-    Some((display, framed))
+    Ok(Some((display, framed, message.to_string())))
 }
 
 thread_local! {
@@ -6810,6 +6846,14 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         }
         // `{"__thaw_tjs_date__": ms[, "__thaw_tjs_id__": n]}`: a compiled `Date` (`null` for an Invalid Date).
         Native::Object(fields) if is_date_node(fields) => date_node(it, fields),
+        // `{"__thaw_tjs_str__": text}`: a string that looks like a framed native Error and must stay a string.
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Str(_))] if k == PLAIN_STR_KEY) =>
+        {
+            let Native::Str(text) = &fields[0].1 else {
+                unreachable!()
+            };
+            Value::str(text)
+        }
         // `{"__thaw_tjs_bigint__": "<decimal>"}`: a compiled BigInt.
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Str(_))] if k == BIGINT_KEY) =>
         {
@@ -6941,6 +6985,27 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
             if matches!(&*o.kind.borrow(), Kind::RegExp(_)) {
                 return Err(HostError::NotPlainData("RegExp".into()));
             }
+            // a Proxy over an array (nested in a result) is an array read through its traps: a throwing
+            // `length` or element getter is the error of the call, not an empty or object-shaped copy
+            if matches!(&*o.kind.borrow(), Kind::Proxy(_))
+                && matches!(
+                    it.proxy_unwrap(v, "isArray").unwrap_or(Value::Undefined),
+                    Value::Object(ref target) if matches!(&*target.kind.borrow(), Kind::Array(_))
+                )
+            {
+                let length = it.get(v, "length").map_err(|c| classify(it, c))?;
+                let length = it.num(&length);
+                let mut items = Vec::new();
+                for index in 0..(length.max(0.0) as usize).min(1 << 24) {
+                    let item = it.get(v, &index.to_string()).map_err(|c| classify(it, c))?;
+                    items.push(if item.is_callable() {
+                        Native::Null
+                    } else {
+                        from_value(it, &item, depth + 1)?
+                    });
+                }
+                return Ok(Native::Array(items));
+            }
             if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                 if crate::array_snapshot_unsafe(o) {
                     return Err(HostError::NotPlainData(
@@ -6964,7 +7029,7 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
             // an Error object crosses as its framed string, the form a compiled Error takes, so compiled
             // code revives it as an Error again (a plain object with a `message` stays an object)
             if matches!(&*o.kind.borrow(), Kind::Plain) && crate::builtins::is_error_instance(o) {
-                if let Some((_, framed)) = frame_error(it, v) {
+                if let Some((_, framed, _)) = frame_error(it, v).map_err(|c| classify(it, c))? {
                     return Ok(Native::Str(framed));
                 }
             }
@@ -8231,8 +8296,8 @@ fn pump_watches() -> usize {
                 Ok(v) => from_value(&mut p.interp, &v, 0)
                     .map(|n| n.to_json_keeping_undefined())
                     .map_err(|e| e.to_string()),
-                Err(e) => Err(match frame_error(&mut p.interp, &e) {
-                    Some((_, framed)) => framed,
+                Err(e) => Err(match frame_error(&mut p.interp, &e).ok().flatten() {
+                    Some((_, framed, _)) => framed,
                     None => from_value(&mut p.interp, &e, 0)
                         .map(|n| n.to_json())
                         .unwrap_or_default(),
@@ -8329,7 +8394,11 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             if let (HostError::Thrown(_), Some(thrown)) =
                 (&e, LAST_THROWN.with(|t| t.borrow_mut().take()))
             {
-                LAST_THROWN_HANDLE.with(|h| h.set(store_handle(handle, thrown)));
+                let id = store_handle(handle, thrown);
+                LAST_THROWN_HANDLE.with(|h| h.set(id));
+                if let Some(message) = LAST_MESSAGE.with(|m| m.borrow_mut().take()) {
+                    MESSAGE_SNAPSHOTS.with(|m| m.borrow_mut().insert(id as u64, message));
+                }
             }
             e.to_string()
         });
@@ -9405,6 +9474,23 @@ mod strict_host_set_tests {
         let obj = it.run("Object.freeze({value: 1})").unwrap();
         assert!(strict_host_set(&mut it, &obj, "value", Value::Number(99.0)).is_err());
         assert!(matches!(it.get(&obj, "value"), Ok(Value::Number(n)) if n == 1.0));
+    }
+
+    #[test]
+    fn host_set_throws_for_a_non_writable_property_and_a_getter_only_accessor() {
+        let mut it = Interp::new();
+        let obj = it
+            .run("var o = { w: 1 }; Object.defineProperty(o, 'ro', { value: 1, writable: false, enumerable: true }); Object.defineProperty(o, 'g', { get() { return 3; } }); o")
+            .unwrap();
+        for key in ["ro", "g"] {
+            assert!(
+                strict_host_set(&mut it, &obj, key, Value::Number(9.0)).is_err(),
+                "{key}"
+            );
+        }
+        assert!(matches!(it.get(&obj, "ro"), Ok(Value::Number(n)) if n == 1.0));
+        strict_host_set(&mut it, &obj, "w", Value::Number(2.0)).unwrap();
+        assert!(matches!(it.get(&obj, "w"), Ok(Value::Number(n)) if n == 2.0));
     }
 
     #[test]
