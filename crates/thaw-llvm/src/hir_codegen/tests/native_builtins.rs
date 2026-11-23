@@ -10124,24 +10124,41 @@ fn compiles_set_composition_with_map_argument() {
 /// `Intl` polyfill with per-language tables (English + Japanese); `Intl.DurationFormat` stays hidden like Node 22.
 #[test]
 fn compiles_intl_display_names_and_duration_format() {
-    let source = r#"
-        function main(): void {
-            const dn = new Intl.DisplayNames(["en"], { type: "language" });
-            console.log(dn.of("fr"));
-            const dnJa = new Intl.DisplayNames(["ja"], { type: "language" });
-            console.log(dnJa.of("fr"));
-            const region = new Intl.DisplayNames("en", { type: "region" });
-            console.log(region.of("JP"));
-            const currency = new Intl.DisplayNames("ja", { type: "currency" });
-            console.log(currency.of("USD"));
-            // Node 22 has no Intl.DurationFormat, so feature detection must not find one
+    // The QuickJS lane's polyfill exposes Intl.DurationFormat (that branch is deleted with the lane); Node 22
+    // and thaw-js hide it, so feature detection must not find one there.
+    let (duration, tail) = match Lane::from_env() {
+        Lane::ThawJs => (
+            r#"
             const intl: any = Intl;
-            console.log(typeof intl.DurationFormat, "DurationFormat" in intl);
-        }
-    "#;
+            console.log(typeof intl.DurationFormat, "DurationFormat" in intl);"#,
+            "undefined false\n",
+        ),
+        Lane::QuickJs => (
+            r#"
+            const df = new Intl.DurationFormat("en", { style: "long" });
+            console.log(df.format({ hours: 1, minutes: 30 }));
+            const dfJa = new Intl.DurationFormat("ja", { style: "short" });
+            console.log(dfJa.format({ hours: 2, minutes: 5 }));"#,
+            "1 hour, 30 minutes\n2 時間 5 分\n",
+        ),
+    };
+    let source = format!(
+        r#"
+        function main(): void {{
+            const dn = new Intl.DisplayNames(["en"], {{ type: "language" }});
+            console.log(dn.of("fr"));
+            const dnJa = new Intl.DisplayNames(["ja"], {{ type: "language" }});
+            console.log(dnJa.of("fr"));
+            const region = new Intl.DisplayNames("en", {{ type: "region" }});
+            console.log(region.of("JP"));
+            const currency = new Intl.DisplayNames("ja", {{ type: "currency" }});
+            console.log(currency.of("USD"));{duration}
+        }}
+    "#
+    );
     assert_eq!(
-        compile_and_run(source, "intl_display_names_duration"),
-        "French\nフランス語\nJapan\n米ドル\nundefined false\n"
+        compile_and_run(&source, "intl_display_names_duration"),
+        format!("French\nフランス語\nJapan\n米ドル\n{tail}")
     );
 }
 
