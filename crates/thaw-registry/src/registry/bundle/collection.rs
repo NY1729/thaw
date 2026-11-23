@@ -853,7 +853,7 @@ fn bundle_commonjs_package_cached(
         });
     // Classify async dependencies while the original ESM sources are still
     // available. Only opaque factories are rewritten; registered native
-    // modules must retain the source that QuickJS links.
+    // modules must retain the source that retired-engine links.
     let mixed = if native_esm {
         None
     } else {

@@ -228,7 +228,7 @@ impl Rt {
     }
 }
 
-/// Node's `process.kill` signal names with their Linux numbers (the QuickJS runtime.js table).
+/// Node's `process.kill` signal names with their Linux numbers (the Node `process.kill` signal table).
 const PROCESS_SIGNALS: [(&str, i32); 15] = [
     ("SIGHUP", libc::SIGHUP),
     ("SIGINT", libc::SIGINT),
@@ -1698,7 +1698,7 @@ impl Interp {
             if crate::gc_registry::due() {
                 self.gc_safe_point();
             }
-            // Reclaim per-turn garbage, as the QuickJS loop does at its turn boundary. Only the outermost loop does:
+            // Reclaim per-turn garbage, as the retired-engine loop does at its turn boundary. Only the outermost loop does:
             // a nested loop runs inside a native callback whose frame may hold arena pointers no root covers.
             if depth.outermost {
                 thaw_arena::thaw_arena_reset_if_grown();
@@ -2898,7 +2898,7 @@ mod cli_argv_tests {
     }
 
     #[test]
-    fn cli_eval_and_script_split_matches_quickjs_rules() {
+    fn cli_eval_and_script_split_matches_cli_rules() {
         let (argv, exec) = node_argv_split(&args(&["app", "-e", "src", "tail"]));
         assert_eq!(argv, args(&["app", "tail"]));
         assert_eq!(exec, args(&["-e", "src"]));

@@ -1,4 +1,4 @@
-//! Unit tests for the N-API graph encoder in `napi_graph.rs` (PR 6a-3). Goldens are the QuickJS
+//! Unit tests for the N-API graph encoder in `napi_graph.rs` (PR 6a-3). Goldens are the retired-engine
 //! `thawGraphEncode` bytes (thaw-quickjs api.rs `forced_root_guard_preserves_other_graph_modes`); the
 //! round trip goes through `decode_napi_wire`.
 
@@ -47,7 +47,7 @@ fn leases_of(wire: &str) -> Vec<u64> {
 }
 
 #[test]
-fn napi_graph_encode_ordinary_object_matches_quickjs_bytes() {
+fn napi_graph_encode_ordinary_object_matches_golden_bytes() {
     let source = "globalThis.ordinary = {x:1};";
     let golden =
         r#"{"root":{"r":0},"nodes":[{"o":[["x",{"v":1},7]]}],"leases":[],"napiLeases":[]}"#;

@@ -1476,7 +1476,7 @@ fn function_sent_to_native_stays_pinned_by_its_callback_global() {
     );
 }
 
-// ---- thaw-js twins of the QuickJS-form wrapper tests removed from the bridge. ----
+// ---- thaw-js twins of the retired-engine-form wrapper tests removed from the bridge. ----
 
 #[test]
 fn native_callback_arguments_become_proxies_only_at_the_listed_handle_paths() {

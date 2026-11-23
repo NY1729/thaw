@@ -293,7 +293,7 @@ fn scrypt_matches_the_rfc7914_vectors() {
 }
 
 #[test]
-fn scrypt_rejects_bad_cost_and_params_with_the_quickjs_messages() {
+fn scrypt_rejects_bad_cost_and_params_with_the_expected_messages() {
     assert_eq!(
         scrypt_bytes(b"", b"", 64, 3, 8, 1).unwrap_err(),
         "Error converting from js 'scrypt cost' into type 'power of two greater than one': 3"
@@ -346,7 +346,7 @@ fn kdfs_match_the_vectors_through_the_module() {
 }
 
 #[test]
-fn kdf_argument_errors_match_the_quickjs_messages() {
+fn kdf_argument_errors_match_the_expected_messages() {
     assert_eq!(
         run(r#"var m = globalThis.__thaw_crypto_module, t = function (f) { try { f(); return 'ok'; } catch (e) { return e.name + ':' + e.message; } };
              console.log(t(function () { m.pbkdf2Sync('p', 's', 0, 8, 'sha1'); }));

@@ -152,7 +152,7 @@ var cryptoModule = {
     return outputEncoding === 'buffer' ? value : value.toString(outputEncoding);
   }
 };
-// KDFs (lifted from buffer_crypto.js; same natives and messages as QuickJS).
+// KDFs (lifted from buffer_crypto.js; same natives and messages as retired-engine).
 function checkedPbkdf2Number(value, minimum, name) {
   var number = Number(value);
   if (!Number.isInteger(number) || number < minimum || number > 0xffffffff) throw new RangeError(name + ' out of range');
@@ -315,7 +315,7 @@ class Cipheriv {
 }
 function createCipheriv(algorithm, key, iv, options) { return new Cipheriv(algorithm, key, iv, false, options); }
 function createDecipheriv(algorithm, key, iv, options) { return new Cipheriv(algorithm, key, iv, true, options); }
-// timingSafeEqual: Node's messages and codes (the check is a plain XOR loop, as in QuickJS).
+// timingSafeEqual: Node's messages and codes (the check is a plain XOR loop, as in retired-engine).
 function timingSafeBytes(value, name) {
   // thaw-js's DataView is not an ArrayBuffer view (ArrayBuffer.isView is false for it), so test it explicitly.
   if (ArrayBuffer.isView(value) || (typeof DataView === 'function' && value instanceof DataView)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);

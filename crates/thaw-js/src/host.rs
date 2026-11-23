@@ -114,7 +114,7 @@ const CJS_NAMESPACE: &str = r#"function (exports, names) {
 }"#;
 
 /// Builds the addon object from the napi proxy layer globals: one function per export, routed to
-/// `construct` under `new` and to `call` otherwise (the QuickJS prelude's `__thaw_install_native` shape).
+/// `construct` under `new` and to `call` otherwise (the retired-engine prelude's `__thaw_install_native` shape).
 const ADDON_BUILDER: &str = r#"function (info, each, call, construct, pkg) {
   var addon = {};
   each(info, pkg + '::', pkg, function (name, bare) {
@@ -553,7 +553,7 @@ fn peer_known(spec: &str) -> bool {
 }
 
 /// The module key of a node builtin the bundle serves for a spec the map does not name (`fs`, `node:fs`):
-/// the QuickJS lane's global `require(spec)` fallback. Builtins are the `node:<name>` factories.
+/// the retired-engine lane's global `require(spec)` fallback. Builtins are the `node:<name>` factories.
 fn builtin_key(loader: &Loader, spec: &str) -> Option<String> {
     let name = spec.strip_prefix("node:").unwrap_or(spec);
     let key = format!("node:{name}");
@@ -730,7 +730,7 @@ fn load_module(loader: &Rc<Loader>, it: &mut Interp, key: &str) -> R<Value> {
         it.set(&err, "code", Value::str("MODULE_NOT_FOUND"))?;
         return Err(Ctl::Throw(err));
     };
-    // The virtual file path and its directory mirror the QuickJS lane (`render.rs`, `__thaw_bundle_load`), so
+    // The virtual file path and its directory mirror the retired-engine lane (`render.rs`, `__thaw_bundle_load`), so
     // `import.meta.url` (`'file://' + __filename`) is an absolute `file:///thaw_modules/...` URL.
     // (from the base key: a `/` inside a `?query` is not a path separator)
     let base_file = format!("/thaw_modules/{}", base_of(loader, key));
@@ -1181,7 +1181,7 @@ fn boot_bundle(
 
 /// Declares the host-internal global `__thaw_register_native_bundle(json)` (once per realm; hidden from
 /// `Object.keys(globalThis)` like the other `__thaw_*` host globals). It registers a native ES module bundle at
-/// run time, the QuickJS-private evaluator contract: one [`Loader`] per registration, ids `thaw-bundle:N:key`
+/// run time, the retired-engine-private evaluator contract: one [`Loader`] per registration, ids `thaw-bundle:N:key`
 /// (N counts registrations in this realm from 1), and a returned evaluator function.
 fn install_native_registrar(it: &mut Interp) {
     const NAME: &str = "__thaw_register_native_bundle";
@@ -1347,7 +1347,7 @@ pub struct Package {
 }
 
 /// `bundle_js` with its worker-URL markers resolved against this bundle's own factory keys
-/// (`scan::worker_urls_to_keys`). Only a bundle that has a marker is parsed again; QuickJS never reaches this.
+/// (`scan::worker_urls_to_keys`). Only a bundle that has a marker is parsed again; retired-engine never reaches this.
 fn with_worker_urls_resolved(bundle_js: &str) -> std::borrow::Cow<'_, str> {
     if !bundle_js.contains(crate::scan::WORKER_URL_START) {
         return bundle_js.into();
@@ -1706,7 +1706,7 @@ thread_local! {
     /// A released handle keeps its slot (ids are never reused, so a stale id is `undefined`).
     pub(crate) static HANDLES: RefCell<Vec<(usize, Value)>> = const { RefCell::new(Vec::new()) };
     /// Outstanding references per handle id (index + 1): compiled code retains and releases handles
-    /// the way it does QuickJS ones.
+    /// the way it does retired-engine ones.
     static HANDLE_REFS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     /// Live handle ids by the object they hold (`Rc` address): a plain result that is such an object
     /// leases the existing handle, so compiled code sees the same identity it holds.
@@ -2170,7 +2170,7 @@ pub(crate) fn graph_token(
     };
     match (key.as_str(), payload) {
         // A well-known symbol crosses as its private `"\u{1f}@@name"` string: re-key it here so a
-        // dynamic `defineProperty`/`fromEntries` key is the real symbol (the QuickJS graph decoder did).
+        // dynamic `defineProperty`/`fromEntries` key is the real symbol (the retired-engine graph decoder did).
         ("v", Native::Str(s)) if s.starts_with("\u{1f}@@") => match dynamic_property_key(it, s) {
             Ok(key) => Ok(it.key_value(&key)),
             Err(_) => Ok(to_value(it, payload)),
@@ -2525,7 +2525,7 @@ pub(crate) fn live_packages() -> Vec<usize> {
 }
 
 /// `new Function(...args)` from the JSON array of the constructor's string arguments (the last is the
-/// body); the function is kept as a handle. The counterpart of QuickJS's `thaw_js_new_function`.
+/// body); the function is kept as a handle. The counterpart of retired-engine's `thaw_js_new_function`.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_new_function(args_json: *const c_char) -> HandleResult {
     handle_result((|| {
@@ -2548,7 +2548,7 @@ pub extern "C" fn thaw_tjs_new_function(args_json: *const c_char) -> HandleResul
 }
 
 /// Call the global function `name` (a dotted path, `eval`) with the graph-wire argument array; the
-/// result is a plain graph wire. The counterpart of QuickJS's `thaw_js_call_graph_result`.
+/// result is a plain graph wire. The counterpart of retired-engine's `thaw_js_call_graph_result`.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_call_graph_result(
     name: *const c_char,
@@ -2619,13 +2619,13 @@ pub(crate) fn decode_wire(wire: &str) -> Result<(usize, Value), String> {
 
 thread_local! {
     /// Origin serial of each graph-decoded array/object, keyed by its address. The `Weak` keeps the
-    /// allocation alive, so an address is never reused while its entry exists (QuickJS's `thawOriginSerials`).
+    /// allocation alive, so an address is never reused while its entry exists (retired-engine's `thawOriginSerials`).
     static ORIGIN_SERIALS: RefCell<HashMap<usize, (u64, Weak<crate::ObjData>)>> =
         RefCell::new(HashMap::new());
 }
 
 /// Records the `origins` of a graph wire (one native serial per node, 0 for none) against the decoded
-/// container of each array/object node, as QuickJS's `graph.origins` does.
+/// container of each array/object node, as retired-engine's `graph.origins` does.
 fn record_origin_serials(top: &[(String, Native)], nodes: &[Native], memo: &[Option<Value>]) {
     let Some(Native::Array(origins)) = graph_field(top, "origins") else {
         return;
@@ -2697,7 +2697,7 @@ pub(crate) fn handle_result(result: Result<i64, String>) -> HandleResult {
 }
 
 /// Retain the value a graph wire (`thaw_json_graph_encode`) describes as a thaw-js handle. The
-/// counterpart of QuickJS's `thaw_js_retain_graph_result`.
+/// counterpart of retired-engine's `thaw_js_retain_graph_result`.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_retain_graph_result(wire: *const c_char) -> HandleResult {
     handle_result((|| {
@@ -2803,7 +2803,7 @@ pub(crate) fn on_handle_strict<T>(
 
 /// A host-supplied property name as the key the interpreter stores it under: Symbol wire text
 /// (`\u{1f}@@name`, `\u{3}<id>`, `__thaw_symbol_<name>`) goes through the prelude's
-/// `__thaw_property_key`, the same decoder the QuickJS host used (`dynamic_property_key`).
+/// `__thaw_property_key`, the same decoder the retired-engine host used (`dynamic_property_key`).
 pub(crate) fn dynamic_property_key(it: &mut Interp, name: &str) -> Result<String, HostError> {
     if !(name.starts_with('\u{1f}')
         || name.starts_with('\u{3}')
@@ -2935,7 +2935,7 @@ pub extern "C" fn thaw_tjs_exception_native_token(handle: u64) -> u64 {
 }
 
 /// Graph-wire builder for a result value. `plain` copies arrays and objects deeply (symbols become
-/// `undefined`, and functions too unless `live_functions`; `toJSON` is honored) like the QuickJS
+/// `undefined`, and functions too unless `live_functions`; `toJSON` is honored) like the retired-engine
 /// result lane; `receiver` is the value that stays a live handle wherever it recurs.
 pub(crate) struct WireOut {
     pub(crate) owner: usize,
@@ -2974,7 +2974,7 @@ impl WireOut {
         token
     }
 
-    /// A registered native Symbol: its native id and a handle to it (`{"nsy","hdl"}`, as the QuickJS wire).
+    /// A registered native Symbol: its native id and a handle to it (`{"nsy","hdl"}`, as the retired-engine wire).
     fn lease_symbol(&mut self, id: u64, native: u64) -> String {
         self.leases.push(id);
         self.nodes
@@ -3180,7 +3180,7 @@ pub extern "C" fn thaw_tjs_capture_handle_graph_result(handle: u64) -> ThawResul
 }
 
 /// Node's overloaded native `http.Server` methods: a dynamic call picks the field by method name and
-/// argument shape, as the compiler does for a typed receiver (QuickJS: `native_server_overload`).
+/// argument shape, as the compiler does for a typed receiver (retired-engine: `native_server_overload`).
 fn native_server_overload(
     it: &mut Interp,
     this: &Value,
@@ -3289,7 +3289,7 @@ fn unsupported_text(what: &str) -> ThawResult {
 }
 
 // The Json host-operation table (`thaw_json_register_host_operations`) names these; the ones a thaw-js
-// package has not needed yet report an error instead of linking the QuickJS runtime.
+// package has not needed yet report an error instead of linking the retired-engine runtime.
 /// A Buffer: a Uint8Array with `__isBuffer` in its prototype chain (what op 11 and op 29 test).
 fn is_buffer_value(v: &Value) -> bool {
     matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Typed(t) if matches!(t.ty, crate::typed::Ty::U8))
@@ -3298,7 +3298,7 @@ fn is_buffer_value(v: &Value) -> bool {
 
 /// Operation 27: a host typed array other than a Buffer, as `{"n":name,"v":[text,..]}` (the probe
 /// thaw-std's `typed_probe_node` reads for console inspection); `""` for anything else. A BigInt item
-/// carries an `n` suffix and `-0` keeps its sign, as in QuickJS.
+/// carries an `n` suffix and `-0` keeps its sign, as in retired-engine.
 fn typed_probe_text(it: &mut Interp, v: &Value) -> String {
     let Value::Object(o) = v else {
         return String::new();
@@ -3394,7 +3394,7 @@ fn array_buffer_bytes_json(v: &Value) -> String {
     }
 }
 
-/// Introspection of the value behind `handle` for the Json host bridge (the numbering is the QuickJS
+/// Introspection of the value behind `handle` for the Json host bridge (the numbering is the retired-engine
 /// `__thaw_json_host_query`'s). Kinds thaw-js has no value for (Date, Buffer, Map, Set, native
 /// wrappers) answer "no" to the copy queries; operation 29 says whether the value must stay a live handle,
 /// and operation 30 whether a plain object or array must (a call argument keeps its identity).
@@ -3538,7 +3538,7 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
     }))
 }
 
-/// The residual JIT's `dynamic_object_query` host ABI (the thaw-js twin of QuickJS `thaw_js_dynamic_object_query`):
+/// The residual JIT's `dynamic_object_query` host ABI (the thaw-js twin of retired-engine `thaw_js_dynamic_object_query`):
 /// operation `0` snapshots a Set-like value's keys into a JSON object (validating the `size`/`has`/`keys`
 /// protocol in this realm) and returns it as a live thaw-std `Json` value, its bits in the `f64`. On failure the
 /// result is 0 and `*error` holds a malloc-owned message.
@@ -3822,7 +3822,7 @@ pub extern "C" fn thaw_tjs_resolve_handle_handle_result(handle: u64) -> HandleRe
 
 /// Emit a native uncaught exception or rejection on the first loaded realm whose `process` listens to one of
 /// `events`. The result is the emit's handled flag, or the listener's thrown text; no listener is `0`.
-// ponytail: first realm with a matching listener, not the realm the report came from (QuickJS has one `process`).
+// ponytail: first realm with a matching listener, not the realm the report came from (retired-engine has one `process`).
 fn native_process_report(
     events: &[&str],
     emit: impl FnOnce(&mut Interp) -> R<bool>,
@@ -3960,7 +3960,7 @@ thread_local! {
     static NATIVE_OWNERS: RefCell<HashMap<usize, Vec<(usize, String)>>> =
         RefCell::new(HashMap::new());
     /// Native pointer -> the layouts it has canonical wrappers for, in interning order. A lookup
-    /// that misses the exact `(pointer, layout)` key falls back to these, as QuickJS's
+    /// that misses the exact `(pointer, layout)` key falls back to these, as retired-engine's
     /// `layoutContains` does.
     static NATIVE_LAYOUTS: RefCell<HashMap<usize, Vec<String>>> =
         RefCell::new(HashMap::new());
@@ -4024,7 +4024,7 @@ fn segment_matches(have: &str, want: &str) -> bool {
 
 /// Whether an object interned with layout `actual` satisfies a request for layout `expected`: every
 /// wanted field matches a distinct actual field. The empty `expected` matches any well-formed layout.
-/// Port of QuickJS's `layoutContains`.
+/// Port of retired-engine's `layoutContains`.
 fn layout_contains(actual: &str, expected: &str) -> bool {
     if actual == expected {
         return true;
@@ -4128,7 +4128,7 @@ pub extern "C" fn thaw_tjs_intern_native_object(
 }
 
 /// Host query 21: the native owner pointer (lowercase hex) of an interned native wrapper, under any
-/// layout, or "" for anything else. The counterpart of QuickJS's `object_pointer` bridge with an empty layout.
+/// layout, or "" for anything else. The counterpart of retired-engine's `object_pointer` bridge with an empty layout.
 fn native_owner_pointer_hex(v: &Value) -> String {
     let Value::Object(obj) = v else {
         return String::new();
@@ -4373,7 +4373,7 @@ fn call_handle_graph(handle: u64, args_json: *const c_char, with_this: bool) -> 
     })())
 }
 
-/// A native string (or `null`) as a thaw-js handle: the counterpart of QuickJS's
+/// A native string (or `null`) as a thaw-js handle: the counterpart of retired-engine's
 /// `thaw_js_event_key_handle_result`. `value_json` is a one-element JSON array; `is_symbol` marks a
 /// native Symbol token: its string is a wire key text, resolved by `napi_symbols::key_text_symbol`.
 #[no_mangle]
@@ -4737,7 +4737,7 @@ pub extern "C" fn thaw_tjs_set_property_json_graph_result(
     })())
 }
 
-/// `GetIterator` / `GetAsyncIterator` as JS (the QuickJS bootstrap helpers `__thaw_to_iterator` /
+/// `GetIterator` / `GetAsyncIterator` as JS (the retired-engine bootstrap helpers `__thaw_to_iterator` /
 /// `__thaw_to_async_iterator`): a sync result is wrapped so `next`/`return`/`throw` are plain calls.
 const ITERATOR_HELPERS: &str = r#"({
   sync: (value) => {
@@ -4934,7 +4934,7 @@ pub extern "C" fn thaw_tjs_iterator_step_exact_result(
 #[no_mangle]
 pub extern "C" fn thaw_tjs_resolve_handle_graph_result(handle: u64) -> ThawResult {
     graph_result(on_handle(handle, |p, owner, v| {
-        // a Promise is awaited first, like QuickJS's resolve
+        // a Promise is awaited first, like retired-engine's resolve
         let v = adopt_thenable(&mut p.interp, v)?;
         let v = match p
             .interp
@@ -5326,7 +5326,7 @@ fn register_callback(
     callbacks.len() as i64 - 1
 }
 
-/// Register a compiled graph-wire callback (the counterpart of QuickJS's
+/// Register a compiled graph-wire callback (the counterpart of retired-engine's
 /// `thaw_js_register_native_callback_graph`; the void flag is not needed) and return it as a JS function
 /// kept by handle. `jsvalue_param_mask` says which arguments cross as handles (see `CompiledCallback`).
 #[no_mangle]
@@ -5449,7 +5449,7 @@ fn callback_value(it: &mut Interp, id: usize) -> Value {
     if let (Value::Object(o), Some(n)) = (&function, arity) {
         crate::put_hidden(o, "length", Value::Number(n as f64));
     }
-    // the compiled `"<kind><name>"` label, as the QuickJS wrapper sets it: `name` and `__thaw_label__`
+    // the compiled `"<kind><name>"` label, as the retired-engine wrapper sets it: `name` and `__thaw_label__`
     let identity = CALLBACKS.lock().unwrap().get(id).map_or(0, |c| c.identity);
     if let (Value::Object(o), Some(label)) = (&function, function_label(identity)) {
         crate::put_hidden(
@@ -5824,7 +5824,7 @@ pub(crate) fn handle_value(id: u64) -> Option<Value> {
 /// `native_text == 0`, because async-callback rejections publish a display text in `pending` and
 /// `native_text` while the object stays in `object`; the tracked-root lookup is what authenticates
 /// the object. An id of 0 (untracked, or not a live handle) keeps the framed-Error path. The
-/// QuickJS side (`thaw-quickjs` `reconstitute_exception_packet`) is unchanged.
+/// retired-engine side (`thaw-quickjs` `reconstitute_exception_packet`) is unchanged.
 pub(crate) fn original_js_exception_with(
     packet: &thaw_arena::exception::ExceptionPacket,
     lookup: impl FnOnce(usize) -> u64,
@@ -5877,7 +5877,7 @@ fn primitive_reason(packet: &thaw_arena::exception::ExceptionPacket) -> Option<V
 }
 
 /// The exact value of a thrown primitive of a callback result: `primitive_reason`, plus tag 4 (a string
-/// throw: the result text itself, unless it is a framed native Error), as the QuickJS host rebuilt it.
+/// throw: the result text itself, unless it is a framed native Error), as the retired-engine host rebuilt it.
 fn thrown_primitive(
     packet: Option<&thaw_arena::exception::ExceptionPacket>,
     text: &str,
@@ -5938,7 +5938,7 @@ pub(crate) fn take_callback_result(
 
 /// One argument of a graph callback's wire. A JsValue position (`jsvalue`) keeps the value behind a
 /// handle lease, which the compiled side decodes; a `Str` position (`error`) holding an `Error` crosses
-/// as its framed text, the way QuickJS's `__thaw_error_to_tagged` does.
+/// as its framed text, the way retired-engine's `__thaw_error_to_tagged` does.
 fn callback_arg_token(
     it: &mut Interp,
     out: &mut WireOut,
@@ -6416,7 +6416,7 @@ fn register_js_job_hooks() {}
 
 #[cfg(unix)]
 fn native_promise_state(promise: usize) -> u8 {
-    // SAFETY: both symbols are the compiled runtime's, looked up like the QuickJS host does.
+    // SAFETY: both symbols are the compiled runtime's, looked up like the retired-engine host does.
     unsafe {
         let poll = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_poll_one".as_ptr());
         let state = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_promise_state".as_ptr());
@@ -6585,7 +6585,7 @@ fn primitive_throw(v: &Value, it: &mut Interp) -> Option<PrimitiveThrow> {
 }
 
 impl PrimitiveThrow {
-    /// The packet that carries the exact primitive to the native `catch` (the QuickJS host's
+    /// The packet that carries the exact primitive to the native `catch` (the retired-engine host's
     /// `primitive_exception_packet`).
     fn into_packet(self) -> Option<Rc<thaw_arena::exception::ExceptionPacket>> {
         let mut bytes = self.text.as_bytes().to_vec();
@@ -6666,7 +6666,7 @@ pub unsafe extern "C" fn thaw_tjs_frame_error(error: *mut c_char) -> *mut c_char
 }
 
 /// The wire framing of a thrown `Error`-like object (`message` is a string): `\u{1}name\u{1}message`,
-/// then `\u{3}code` and `\u{5}{own properties as JSON}` like the QuickJS bridge.
+/// then `\u{3}code` and `\u{5}{own properties as JSON}` like the retired-engine bridge.
 ///
 /// A throwing `getPrototypeOf` trap / `message` / `name` getter is returned as `Err`; the third element is
 /// the message read, kept as the snapshot the compiled console prints (host query 35).
@@ -6717,7 +6717,7 @@ pub(crate) fn frame_error(
         framed.push('\u{3}');
         framed.push_str(&code);
     }
-    // The QuickJS bridge's property bag: strings, numbers, booleans, null and objects of the error (own and
+    // The retired-engine bridge's property bag: strings, numbers, booleans, null and objects of the error (own and
     // inherited enumerable), serialized with the realm's JSON.stringify so nested objects (axios `response`) survive.
     let g = Value::Object(it.global_object.clone());
     if let Ok(helper) = it.get(&g, "__thaw_error_properties_json") {
@@ -7502,7 +7502,7 @@ fn terminate_process(it: &mut Interp, code: i32) {
     }
     crate::profile::flush();
     // SAFETY: `_exit` takes no pointers. Used instead of `std::process::exit` so TLS destructors do not tear down
-    // the packages while up-stack frames still hold them (as the QuickJS bridge does).
+    // the packages while up-stack frames still hold them (as the retired-engine bridge does).
     unsafe { libc::_exit(status) }
 }
 
@@ -7729,7 +7729,7 @@ pub(crate) fn drive_other_realms_once(me: *const Interp) -> bool {
     any_work
 }
 
-/// Terminal event loop for a routed build that holds no QuickJS context: runs every loaded
+/// Terminal event loop for a routed build that holds no retired-engine context: runs every loaded
 /// package's timers/immediates/jobs until idle. Returns 1 if a package ended with an uncaught
 /// error. (The codegen renames `thaw_js_run_event_loop` to this symbol for such builds.)
 #[no_mangle]
@@ -7812,7 +7812,7 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
             break;
         }
         if servers_live && !ran_any && !yielded_any && settled == 0 && !drained {
-            // ponytail: 1 ms poll like QuickJS api.rs:1821; upgrade = block in the runtime fd poll
+            // ponytail: 1 ms poll like retired-engine api.rs:1821; upgrade = block in the runtime fd poll
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let watching = WATCHES.with(|w| !w.borrow().is_empty());
@@ -7826,7 +7826,7 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
         abort_native_pending_work();
         thaw_tjs_fatal_exit();
         // the runtime's own exit-1 path runs only after this loop and the native server runner return, and a live
-        // server never returns: end the process here, as QuickJS's `fail_process` does
+        // server never returns: end the process here, as retired-engine's `fail_process` does
         #[cfg(not(test))]
         end_process_after_fatal();
         return 1;
@@ -7901,7 +7901,7 @@ pub extern "C" fn thaw_tjs_drain_next_ticks() {
 }
 
 /// Fatal uncaught exception in a routed build with no handler: every realm drops its queued work and emits
-/// `exit` with code 1 (the thaw-js half of the QuickJS `thaw_js_fatal_exit`).
+/// `exit` with code 1 (the thaw-js half of the retired-engine `thaw_js_fatal_exit`).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_fatal_exit() {
     let count = PACKAGES.with(|ps| ps.borrow().len());
@@ -8126,7 +8126,7 @@ fn register_bundle(name: String, src: &str) -> Result<(), HostError> {
 }
 
 /// Run a script (sloppy, global scope) in the default realm; 1 on success. The counterpart of
-/// QuickJS's `thaw_js_load` for the class values compiled code defines.
+/// retired-engine's `thaw_js_load` for the class values compiled code defines.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_load_script(source: *const c_char) -> u8 {
     let Some(source) = cstr(source) else { return 0 };
@@ -8157,7 +8157,7 @@ thread_local! {
 }
 
 /// Mirror the outstanding handle reference counts (index = id - 1) into the realm's
-/// `__thaw_value_handle_refs` global on entry, the array QuickJS exposes for lease-accounting scripts.
+/// `__thaw_value_handle_refs` global on entry, the array retired-engine exposes for lease-accounting scripts.
 fn refresh_handle_refs(it: &mut Interp) {
     if !TRACK_HANDLE_REFS.with(Cell::get) {
         return;
@@ -8545,7 +8545,7 @@ mod native_owner_tests {
     }
 
     #[test]
-    fn layout_contains_matches_quickjs_rules() {
+    fn layout_contains_matches_ported_rules() {
         let a = field("a");
         let b = field("b");
         assert!(layout_contains(&a, &a));
@@ -10382,7 +10382,7 @@ mod module_path_tests {
 
     /// A factory reads its file names the way a package does: `import.meta.url` is `'file://' + __filename`,
     /// and `__dirname` is the directory of `__filename`, under the same virtual `/thaw_modules/` root as the
-    /// QuickJS lane (`render.rs`).
+    /// retired-engine lane (`render.rs`).
     const PATH_BUNDLE: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
 "pkg/index.js": function(module, exports, require, requireAsync, __filename, __dirname, __thaw_require) {
@@ -10715,7 +10715,7 @@ var __thaw_bundle_commonjs_contexts = JSON.parse("{\"p/index.js\":true,\"p/c.js\
     }
 }
 
-/// thaw-js twins of the QuickJS-form module-wrapper behaviour tests that were removed from the bridge: how a
+/// thaw-js twins of the retired-engine-form module-wrapper behaviour tests that were removed from the bridge: how a
 /// registry bundle's exports are reached through [`Package::call_export`] (the production path), with the
 /// results Node 22 gives for the same source.
 #[cfg(test)]
@@ -10863,7 +10863,7 @@ var __thaw_bundle_entry_key = "p/index.js";
         assert_eq!(qs.call_export("stringify", &[s("b")]).unwrap(), s("qs:b"));
     }
 
-    /// A hand-authored bundle with no factory (a bare global function, the QuickJS lane's old `loadScript` shape)
+    /// A hand-authored bundle with no factory (a bare global function, the retired-engine lane's old `loadScript` shape)
     /// is not a thaw-js bundle: the registry always emits the factory form, and the loader refuses anything else.
     #[test]
     fn a_source_that_is_not_a_registry_bundle_is_refused() {

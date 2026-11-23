@@ -1,5 +1,5 @@
 //! `WebAssembly`. Without the `wasm` feature: a typeof-safe stub (no wasm engine; the scan keeps
-//! real uses on QuickJS). With it: the real namespace (web/webassembly.js) over the `__thaw_wasm_*`
+//! real uses on retired-engine). With it: the real namespace (web/webassembly.js) over the `__thaw_wasm_*`
 //! natives, which are installed first.
 
 use crate::Interp;

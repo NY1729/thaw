@@ -13,8 +13,8 @@ use crate::zlib::{hex_decode, hex_encode};
 use crate::*;
 
 /// Process-wide tables behind a mutex. Compiled async continuations can run on a different thread than the one that
-/// started an operation, so thread-locals (the QuickJS host's choice, one JS thread) would lose sockets and jobs.
-/// `with` keeps the QuickJS host's `Table.with(|t| t.borrow_mut()...)` shape.
+/// started an operation, so thread-locals (the retired-engine host's choice, one JS thread) would lose sockets and jobs.
+/// `with` keeps the retired-engine host's `Table.with(|t| t.borrow_mut()...)` shape.
 pub(crate) struct Slot<'a, T>(&'a Mutex<T>);
 
 impl<T> Slot<'_, T> {

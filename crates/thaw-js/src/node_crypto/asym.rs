@@ -1,7 +1,7 @@
 //! Asymmetric keys and signatures for `node:crypto`: PEM/DER/encrypted PKCS8/legacy PEM import
 //! (`crypto_import_key_json`), RSA PKCS1v15/PSS, ECDSA P-256/P-384/P-521 and Ed25519/Ed448
 //! sign/verify, RSA encrypt/decrypt, key generation, DH/ECDH. Copied from thaw-quickjs
-//! (quickjs/asymmetric_crypto.rs, which stays the oracle until QuickJS is removed).
+//! (quickjs/asymmetric_crypto.rs, which stays the oracle until retired-engine is removed).
 
 use crate::zlib::{hex_decode, hex_encode};
 use base64::Engine;

@@ -1,6 +1,6 @@
 //! Host functions behind the registry's `node:os`, `node:tty` and raw `process` stream shims:
 //! `__thaw_os_*`, `__thaw_tty_write`, `__thaw_process_write_bytes`, `__thaw_process_is_tty`.
-//! Plain std/libc (no dependency on the Thaw runtime crates); the JSON shapes match the QuickJS host.
+//! Plain std/libc (no dependency on the Thaw runtime crates); the JSON shapes match the retired-engine host.
 
 use std::io::Write;
 
@@ -317,10 +317,10 @@ fn compiled_bytes(c: &crate::compile::CompiledFn) -> usize {
             .map_or(0, |ex| std::mem::size_of_val(&**ex))
 }
 
-/// The compiler's dynamic-value helpers (`getDynamicValue("__thaw_...")`) the QuickJS realm defines in its
+/// The compiler's dynamic-value helpers (`getDynamicValue("__thaw_...")`) the retired-engine realm defines in its
 /// runtime prelude; only the ones that are plain JavaScript.
 // ponytail: graph-origin identity (`__thaw_strict_equal_dynamic` on shadow containers) and native-callback
-// comparison are QuickJS-only; add when a thaw-js program compares such values.
+// comparison are retired-engine-only; add when a thaw-js program compares such values.
 const DYNAMIC_HELPERS: &str = r#"
 (function () {
   function put(name, fn) { Object.defineProperty(globalThis, name, { value: fn, writable: false, configurable: false, enumerable: false }); }
@@ -575,7 +575,7 @@ impl Interp {
 }
 
 // ----- `globalThis.__thaw_fs(operation, path, value, recursive)` -----
-// The synchronous subset of the QuickJS host's filesystem bridge that the registry's `node:fs`
+// The synchronous subset of the retired-engine host's filesystem bridge that the registry's `node:fs`
 // shim needs for whole-file reads/writes, directory listing and stat. Descriptor operations
 // (string- and numeric-flag `fd_open`, read/write/stat/sync/truncate/tell/chmod/utimes/statfs/chown) answer
 // ENOSYS where not ported.
@@ -933,7 +933,7 @@ fn stat_json(m: &std::fs::Metadata) -> String {
 }
 
 /// A listed entry that changed under the listing: removed (ENOENT), or replaced by a file/directory
-/// of the other kind (ENOTDIR). Such entries are skipped, not errors (same rule as the QuickJS host).
+/// of the other kind (ENOTDIR). Such entries are skipped, not errors (same rule as the retired-engine host).
 #[cfg(unix)]
 fn readdir_is_vanished(error: &std::io::Error) -> bool {
     matches!(
@@ -951,7 +951,7 @@ fn readdir_json(dir: &std::path::Path, typed: bool, recursive: bool) -> std::io:
         recursive: bool,
         out: &mut Vec<String>,
     ) -> std::io::Result<()> {
-        // Sorted per directory by name bytes, like the QuickJS host (libuv scandir order).
+        // Sorted per directory by name bytes, like the retired-engine host (libuv scandir order).
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             match entry {
@@ -1486,7 +1486,7 @@ fn fs_mkdtemp(prefix: &std::path::Path) -> std::io::Result<String> {
     Err(std::io::Error::from_raw_os_error(libc::EEXIST))
 }
 
-// ---- cp / copy_guard / copy_excl (ported from the QuickJS host) ----
+// ---- cp / copy_guard / copy_excl (ported from the retired-engine host) ----
 #[cfg(unix)]
 fn fs_same_metadata(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;

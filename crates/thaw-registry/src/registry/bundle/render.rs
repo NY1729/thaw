@@ -1,5 +1,5 @@
 // Register original source under the same canonical package-instance keys as
-// the old bundle. QuickJS links the full graph before evaluating any module.
+// the old bundle. retired-engine links the full graph before evaluating any module.
 fn render_native_esm_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     let mut out = String::from("module.exports = (function() {\n");
     let records = modules.iter().map(|module| {
@@ -426,7 +426,7 @@ function __thaw_bundle_facade_for(key) {
 /// Everything except the final `module.exports = ` assignment is inside
 /// an IIFE, deliberately never touching global scope: multiple
 /// `--use`'d packages all get `loadScript`'d into the *same* shared
-/// QuickJS-NG global context (thaw-bridge's `wrap_as_commonjs_module`,
+/// retired-engine-NG global context (thaw-bridge's `wrap_as_commonjs_module`,
 /// called once per package), so if these helpers were plain globals, a
 /// second package's bundle would stomp the first's `__thaw_bundle_cache`/
 /// `__thaw_bundle_require`/etc. the moment it loaded. That's invisible

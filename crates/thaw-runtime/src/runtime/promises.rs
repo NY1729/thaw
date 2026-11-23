@@ -2246,7 +2246,7 @@ pub type PromiseUnhandledFn = extern "C" fn(*const u8) -> u8;
 pub type PromiseRejectionHandledFn = extern "C" fn();
 
 /// Same C layout as thaw-quickjs::ThawHandleResult; keep runtime independent
-/// of the QuickJS crate. `error` is an owned C string, null on success.
+/// of the retired-engine crate. `error` is an owned C string, null on success.
 #[repr(C)]
 pub struct PromiseReportResult {
     pub value: u64,
@@ -2380,7 +2380,7 @@ pub extern "C" fn thaw_promise_drain_unhandled_result(
     u8::from(failed)
 }
 
-/// Compiler-private text adapter for QuickJS process events. This keeps the
+/// Compiler-private text adapter for retired-engine process events. This keeps the
 /// public Result reporter's opaque-pointer ABI unchanged.
 #[no_mangle]
 pub extern "C" fn thaw_promise_drain_unhandled_text_result(

@@ -1123,7 +1123,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   });
   Object.defineProperty(Atomics, Symbol.toStringTag, { value: 'Atomics', configurable: true });
   def(globalThis, 'Atomics', Atomics);
-  // ----- ES2025+ library additions (absent from Node 22, present in the QuickJS lane this engine replaces):
+  // ----- ES2025+ library additions (absent from Node 22, present in the retired-engine lane this engine replaces):
   // RegExp.escape, SuppressedError, DisposableStack, AsyncDisposableStack, Iterator.concat / zip / zipKeyed. -----
   (function () {
     var isObject = function (v) { return v !== null && (typeof v === 'object' || typeof v === 'function'); };

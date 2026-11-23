@@ -455,7 +455,7 @@ fn fd_open_numeric_invalid_bits_are_einval() {
     assert_eq!(call("fd_open", &path, "#3,438")["code"], "EINVAL");
 }
 
-/// One entry flips directory<->file with no pause (the QuickJS host has the same churn test):
+/// One entry flips directory<->file with no pause (the retired-engine host has the same churn test):
 /// a directory that becomes a file (ENOTDIR) or loses a child (ENOENT) mid-recursion is skipped.
 #[cfg(unix)]
 #[test]

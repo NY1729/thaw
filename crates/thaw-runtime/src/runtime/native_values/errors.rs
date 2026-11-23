@@ -5,7 +5,7 @@
 /// string literal tagged with this marker followed by the class name and a
 /// second marker before the message (see
 /// `thaw_hir::lower::expressions::lowering`); a plain `throw "text"`, or a
-/// failure string produced by the QuickJS dynamic-call bridge, carries no
+/// failure string produced by the retired-engine dynamic-call bridge, carries no
 /// tag and is treated as an untagged `Error` with the whole string as its
 /// message -- matching real JavaScript's own default `Error.prototype.name`.
 ///
@@ -113,7 +113,7 @@ unsafe extern "C" fn thaw_error_frame_at(
     error
 }
 
-/// Ensures a literal framed error uses an arena-owned pointer so the optional QuickJS
+/// Ensures a literal framed error uses an arena-owned pointer so the optional retired-engine
 /// Error bridge can preserve identity across repeated projections. Unframed strings and
 /// already-owned frames keep their original pointer. The copy of a runtime-synthesised error
 /// (`TypeError: Cannot read properties...`, thrown as a literal) also records the throwing call
@@ -641,7 +641,7 @@ pub unsafe extern "C" fn thaw_error_is_instance(
 
 /// `Error.isError(value)` for a caught/tagged error string: true when the
 /// value carries the leading error tag that a `new Error(...)`-family
-/// construction (or a QuickJS-thrown error) produces. An untagged string
+/// construction (or a retired-engine-thrown error) produces. An untagged string
 /// is a plain value, not an `Error`.
 ///
 /// # Safety
@@ -1113,7 +1113,7 @@ pub unsafe extern "C" fn thaw_error_entries_json(error: *const c_char) -> *const
 }
 
 /// The error's text with its side-table state baked into the legacy `\u{5}` property bag, so a
-/// copy of the text (a Json string, a QuickJS bridge value) carries the props, and the `message`
+/// copy of the text (a Json string, a retired-engine bridge value) carries the props, and the `message`
 /// and `stack` overrides, without needing the pointer identity. Returns `error` itself when there is
 /// nothing to add.
 ///

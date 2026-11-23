@@ -1,5 +1,5 @@
 // `Performance`, `performance` and the user-timing classes (Node 22 shape). Algorithms follow the
-// QuickJS port (thaw-quickjs platform_globals/performance.js); the shape is Node's: prototype accessors,
+// retired-engine port (thaw-quickjs platform_globals/performance.js); the shape is Node's: prototype accessors,
 // Symbol.toStringTag, illegal constructors, private state in WeakMaps (so Object.keys(performance) is []).
 // Known gaps: resource timing never produces entries (no fetch timing), timerify entries carry no detail,
 // observer inspect shows no buffered records, Performance itself has no custom inspect output.

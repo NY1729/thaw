@@ -141,7 +141,7 @@ fn json_stringify_helpers_match_node_and_drop_symbol_keys() {
 }
 
 #[test]
-fn json_stringify_drops_symbol_wire_keys_like_quickjs() {
+fn json_stringify_drops_symbol_wire_keys_like_node() {
     // A `\u0003<id>:desc` key is symbol wire text, never data: every stringify variant drops it.
     let out = run_realm(
         r#"
@@ -303,7 +303,7 @@ fn dynamic_projection_own_checks_do_not_invoke_inherited_accessor() {
 /// The bridge's module wrapper binds each exported function with `__thaw_bind_preserving_statics`; it must
 /// exist in the default realm (a missing helper is swallowed by the wrapper's try/catch, silently leaving
 /// named exports unbound) and keep own statics of the bound function. Node-irrelevant host helper; the
-/// expected values are those of the QuickJS runtime.js version.
+/// expected values are those of the retired-engine runtime.js version.
 #[test]
 fn dynamic_bind_preserving_statics_keeps_own_properties() {
     let src = r#"
@@ -316,7 +316,7 @@ fn dynamic_bind_preserving_statics_keeps_own_properties() {
     assert_eq!(run_realm(src), vec!["5 7 9 bound f 3"]);
 }
 
-/// Compiled-method wrappers run strict, as the QuickJS lane's did: an extracted method called with no receiver
+/// Compiled-method wrappers run strict, as the retired-engine lane's did: an extracted method called with no receiver
 /// sees `undefined` as its `this` (a sloppy wrapper would hand it `globalThis`). Node 22 prints `undefined undefined`.
 #[test]
 fn object_literal_method_and_accessor_wrappers_see_an_undefined_receiver() {

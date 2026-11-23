@@ -169,7 +169,7 @@ pub fn worker_urls_to_keys<'a>(
 }
 
 /// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
-/// (`web/worker_threads.js`). Package bundles embed the QuickJS form of that builtin (natives that exist
+/// (`web/worker_threads.js`). Package bundles embed the retired-engine form of that builtin (natives that exist
 /// only in thaw-quickjs), so [`parse_bundle`] substitutes this one for every such embedded factory.
 /// A worker realm defines `__thaw_worker_side_exports` (`web/worker_bootstrap.js`) and gets that; the main
 /// realm has it undefined and gets the main-thread module.
@@ -191,7 +191,7 @@ pub fn parse_bundle(source: &str) -> Result<BundleParts, String> {
 /// Replace the factory `key` of a bundle (a builtin embedded in a package bundle) with the thaw-js form `body`.
 /// `key` must be a plain name (it is written between double quotes). Same technique as [`stub_cheerio_undici`]:
 /// the stub is appended and the bundle re-parsed so spans index the kept text; the older duplicate is dropped
-/// (keep-last); the builtin's own requires are cleared, so the modules only its QuickJS form pulled in are not reached.
+/// (keep-last); the builtin's own requires are cleared, so the modules only its retired-engine form pulled in are not reached.
 fn substitute_builtin_factory(
     parts: &mut BundleParts,
     key: &str,

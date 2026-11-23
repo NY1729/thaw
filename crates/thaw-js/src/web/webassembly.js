@@ -239,7 +239,7 @@
     }
   };
   // node:wasi passes its normalized options as `wasi_snapshot_preview1.__thawWasiOptions` (JSON). Such an
-  // instance gets a native WASI context (as in the QuickJS lane), and its preview1 imports are left to it.
+  // instance gets a native WASI context (as in the retired-engine lane), and its preview1 imports are left to it.
   const wasiOptionsOf = (importObject) => {
     const ns = isObject(importObject) ? importObject.wasi_snapshot_preview1 : undefined;
     const json = isObject(ns) ? ns.__thawWasiOptions : undefined;

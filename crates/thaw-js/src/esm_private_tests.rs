@@ -1,4 +1,4 @@
-//! The script-level `__thaw_register_native_bundle(json)` global: the QuickJS-private native-bundle
+//! The script-level `__thaw_register_native_bundle(json)` global: the retired-engine-private native-bundle
 //! evaluator re-implemented on thaw-js. One Loader per registered bundle (ids `thaw-bundle:N:key`), an
 //! evaluator whose `readNative(id, name)` is owner-scoped, foreign-bundle isolation, locked descriptor
 //! flags, and the same ready promise on re-entry.

@@ -1469,7 +1469,7 @@ pub fn extract_clones(src: &str, cfg: Config, prefix: &str) -> Result<Vec<AotClo
             continue;
         }
         // cost: a clone that sorts runs a comparator closure per comparison inside the typed code, which
-        // measured 0.2x of the QuickJS call (simple-statistics `numericSort`): keep the dynamic call
+        // measured 0.2x of the retired-engine call (simple-statistics `numericSort`): keep the dynamic call
         let slow = std::iter::once(c.fid)
             .chain(b.helpers.iter().copied())
             .any(|h| {

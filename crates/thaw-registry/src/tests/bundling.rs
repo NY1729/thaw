@@ -239,7 +239,7 @@ fn unresolvable_relative_require_does_not_abort_bundling() {
 }
 
 /// The bundle isn't just plausible-looking text -- it must actually
-/// run correctly through the real QuickJS-NG engine, including a
+/// run correctly through the real retired-engine-NG engine, including a
 /// same-package relative require resolving to a sibling module *and*
 /// a bare-specifier require resolving to a real dependency package
 /// under `node_modules` (the actual new capability: `qs`'s own
@@ -252,10 +252,10 @@ fn unresolvable_relative_require_does_not_abort_bundling() {
 /// (already covered by this session's end-to-end verification); this
 /// test is specifically about what *does* resolve.
 #[test]
-fn bundle_actually_runs_through_quickjs() {
+fn bundle_actually_runs_through_thaw_js() {
     use std::ffi::{CStr, CString};
 
-    let dir = temp_registry("bundle_runs_through_quickjs");
+    let dir = temp_registry("bundle_runs_through_thaw_js");
     fs::create_dir_all(dir.join("lib")).unwrap();
     fs::write(
         dir.join("lib/index.js"),
@@ -271,7 +271,7 @@ fn bundle_actually_runs_through_quickjs() {
     )
     .unwrap();
 
-    let node_modules_dir = temp_registry("bundle_runs_through_quickjs_node_modules");
+    let node_modules_dir = temp_registry("bundle_runs_through_thaw_js_node_modules");
     fs::create_dir_all(node_modules_dir.join("triple-dep")).unwrap();
     fs::write(
         node_modules_dir.join("triple-dep/package.json"),
@@ -353,7 +353,7 @@ fn bare_parent_directory_require_stays_inside_its_package() {
 }
 
 /// Real `--use pkg-a --use pkg-b` loads each package's bundle into the
-/// *same* shared thread-local QuickJS-NG context, one `loadScript`
+/// *same* shared thread-local retired-engine-NG context, one `loadScript`
 /// call per package (`wrap_as_commonjs_module`, called once per
 /// package). Before wrapping each bundle's module-system helpers in
 /// an IIFE, they were plain globals (`__thaw_bundle_cache` etc.), so
@@ -1039,7 +1039,7 @@ fn worker_url_sites_carry_thaw_js_markers_with_their_bundle_keys() {
         assert!(bundle.contains(&format!("/*thaw-worker-url:{key}*/")), "missing marker for {key}");
     }
     assert_eq!(bundle.matches("/*thaw-worker-url-end*/").count(), 3);
-    // The classic payload stays: QuickJS evaluates the marked expression unchanged.
+    // The classic payload stays: retired-engine evaluates the marked expression unchanged.
     assert!(bundle.contains("data:text/javascript;thaw-bundle,"));
     let _ = fs::remove_dir_all(root);
 }
@@ -1728,7 +1728,7 @@ fn native_esm_cycle_links_original_mjs_before_evaluation() {
 #[test]
 fn native_esm_self_import_during_evaluation_runs_once() {
     // Node 22.23.1 prints [1,7,true,"function"] (g2b-probes/self): a module that import()s itself while evaluating runs
-    // its body once, and two import() calls are two different promises. The QuickJS-private pin (re-entering the bound
+    // its body once, and two import() calls are two different promises. The retired-engine-private pin (re-entering the bound
     // evaluator returns the SAME ready promise) has no Node analogue and stays in its pending test.
     let root = temp_registry("native-esm-self-import");
     let modules = root.join("node_modules");
@@ -2023,7 +2023,7 @@ fn native_export_star_of_function_and_primitive_cjs_exports() {
 
 #[test]
 fn commonjs_created_require_native_query_clones_private_opaque_edges_star() {
-    // Port of the pending QuickJS test below to a star re-export. The cycle is not
+    // Port of the pending retired-engine test below to a star re-export. The cycle is not
     // required at load (Node 22 rejects a cyclic require(esm)); `require` runs inside `run`.
     // Expectations recorded from real Node 22.
     let root = temp_registry("cjs-first-native-query-opaque-star");
@@ -2435,7 +2435,7 @@ fn private_bundle_script_bundle(script: &str) -> String {
     )
 }
 
-// Ported from the QuickJS-private test: the entry evaluator is bound to its bundle; the module reenters it while
+// Ported from the retired-engine-private test: the entry evaluator is bound to its bundle; the module reenters it while
 // evaluating and receives the same ready Promise. Dropped: the `Promise.prototype.then` mutation (Node throws
 // there; the thaw-only pin is `mutated_promise_then_does_not_break_the_evaluator` in thaw-js).
 #[test]
@@ -2459,8 +2459,8 @@ fn native_esm_private_entry_reentry_and_intrinsic_then() {
     assert_eq!(run_js_probe(&bundle, "privateEntryResult()"), "[1,true,\"undefined\",\"undefined\"]");
 }
 
-// Ported from the QuickJS-private test: owner-scoped readNative, foreign-bundle isolation, descriptor flags,
-// same ready promise. `__thaw_module_ready` (a QuickJS host protocol) is replaced by awaiting the ready promises.
+// Ported from the retired-engine-private test: owner-scoped readNative, foreign-bundle isolation, descriptor flags,
+// same ready promise. `__thaw_module_ready` (a retired-engine host protocol) is replaced by awaiting the ready promises.
 #[test]
 fn native_esm_private_linked_read_is_owner_scoped_and_live() {
     let bundle = private_bundle_script_bundle(
@@ -2519,7 +2519,7 @@ fn native_esm_failed_link_never_marks_source_linked() {
     // Node 22.23.1: an entry that imports an unmapped specifier fails to link with ERR_MODULE_NOT_FOUND; no body ran
     // and the failure is cached (g2-probes/fl; the esm.rs host tests `failed_link_*` pin the code, the no-body and the
     // caching on the native route). The registry bundles an unmappable import through its own ESM transform, whose
-    // load error is MODULE_NOT_FOUND. The old pin (a QuickJS-private readNative of it throws) becomes: the load fails.
+    // load error is MODULE_NOT_FOUND. The old pin (a retired-engine-private readNative of it throws) becomes: the load fails.
     let root = temp_registry("native-esm-failed-link");
     let modules = root.join("node_modules");
     let package = modules.join("native-failed-link-pkg");

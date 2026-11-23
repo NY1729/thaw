@@ -1468,7 +1468,7 @@ fn gc_edges_match_rc_clones_control_kinds() {
     check_invariants().unwrap();
 }
 
-// ---- arena reclamation at event-loop turns: the thaw-js counterpart of the QuickJS turn reset ----
+// ---- arena reclamation at event-loop turns: the thaw-js counterpart of the retired-engine turn reset ----
 
 thread_local! {
     static TURN_PTR: Cell<usize> = const { Cell::new(0) };

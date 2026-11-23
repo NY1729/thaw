@@ -1085,7 +1085,7 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
     let worker_dir = dir.join("workers/nested");
     let worker_path = worker_dir.join("dynamic-worker.js");
     let path = serde_json::to_string(worker_path.to_str().unwrap()).unwrap();
-    // Worker message plus exit code, as the QuickJS version returned them (its typeof probes are dropped).
+    // Worker message plus exit code, as the retired-engine version returned them (its typeof probes are dropped).
     let result = run_worker_fixture(
         &dir,
         &format!(

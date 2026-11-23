@@ -424,7 +424,7 @@
   const nextReference = cap.reference;
   // A function stays in the strong maps (its `__thaw_napi_reference_<id>` global pins it until native releases it).
   // Any other object is weak: its id is flagged on the object natively, and its collection releases the id, which
-  // runs the native finalizers attached to its copy (the QuickJS lane's FinalizationRegistry).
+  // runs the native finalizers attached to its copy (the retired-engine lane's FinalizationRegistry).
   const refIdOf = value => (typeof value === 'function' ? referenceIds.get(value) : cap.weakId(value));
   const refValueOf = id => {
     const value = referenceValues.get(id);
@@ -700,7 +700,7 @@
   };
 
   // The function proxy of the native Function handle `handle`. Its target is a plain function without `prototype`
-  // (ponytail: thaw-js enforces no Proxy invariants, so the bound target of the QuickJS runtime is not needed).
+  // (ponytail: thaw-js enforces no Proxy invariants, so the bound target of the retired-engine runtime is not needed).
   // apply and construct send the captured graph to the native Function through the invoker.
   const functions = new Map();
 

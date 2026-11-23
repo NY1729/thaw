@@ -185,7 +185,7 @@ struct ReadyContinuation {
     subscription: PromiseSubscription,
     result: *const u8,
     _result_root: thaw_arena::ArenaRoot,
-    /// QuickJS job barrier (0 = none): QuickJS jobs queued before this
+    /// retired-engine job barrier (0 = none): retired-engine jobs queued before this
     /// continuation became ready must run before it resumes, as one FIFO
     /// microtask queue does in JavaScript.
     js_barrier: u64,
@@ -709,13 +709,13 @@ pub extern "C" fn thaw_runtime_adopt_ready() {
 }
 
 thread_local! {
-    /// QuickJS job barrier hooks, registered by `thaw-quickjs` on context
+    /// retired-engine job barrier hooks, registered by `thaw-quickjs` on context
     /// creation (see `thaw_runtime_set_js_job_hooks`).
     static JS_JOB_HOOKS: Cell<Option<(extern "C" fn() -> u64, extern "C" fn(u64))>> =
         const { Cell::new(None) };
 }
 
-/// Registers the QuickJS job barrier hooks for this thread: `queue` returns a
+/// Registers the retired-engine job barrier hooks for this thread: `queue` returns a
 /// barrier id for the jobs pending now (0 if none), `drain` runs jobs until
 /// that barrier ran. Called once by `thaw-quickjs` when its context is created.
 /// # Safety
@@ -763,7 +763,7 @@ extern "C" fn poll_registered_servers() -> u8 {
     SERVER_POLL_HOOK.with(Cell::get).map_or(0, |hook| hook())
 }
 
-/// Queues a QuickJS job marker behind the jobs pending now (0 if none pending
+/// Queues a retired-engine job marker behind the jobs pending now (0 if none pending
 /// or no JavaScript engine registered).
 fn js_queue_job_barrier() -> u64 {
     JS_JOB_HOOKS
@@ -771,7 +771,7 @@ fn js_queue_job_barrier() -> u64 {
         .map_or(0, |(queue, _)| queue())
 }
 
-/// Runs QuickJS jobs until the marker queued as `barrier` has run.
+/// Runs retired-engine jobs until the marker queued as `barrier` has run.
 fn js_drain_to_job_barrier(barrier: u64) {
     if let Some((_, drain)) = JS_JOB_HOOKS.with(|hooks| hooks.get()) {
         drain(barrier);
@@ -817,7 +817,7 @@ fn next_timer_delay() -> Option<Duration> {
 }
 
 /// Runs one ready continuation or dispatches ready I/O and returns 1. Returns
-/// 0 when neither source is ready. I/O and QuickJS integrations can alternate
+/// 0 when neither source is ready. I/O and retired-engine integrations can alternate
 /// their own polling with this function without a multi-threaded executor.
 #[no_mangle]
 pub extern "C" fn thaw_runtime_poll_one() -> u8 {

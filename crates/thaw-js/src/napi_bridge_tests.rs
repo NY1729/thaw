@@ -219,7 +219,7 @@ fn registering_again_replaces_the_callbacks() {
 }
 
 /// The graph helpers are hidden and read-only; the `__thaw_napi_bridge_*` entry points are hidden but assignable
-/// (as on QuickJS), so a host or test can substitute a bridge.
+/// (as on retired-engine), so a host or test can substitute a bridge.
 #[test]
 fn realm_globals_are_hidden_and_bridge_entry_points_assignable() {
     let _guard = setup();

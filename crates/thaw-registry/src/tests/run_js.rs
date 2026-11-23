@@ -1,12 +1,12 @@
 /// Runs the entry export of a registry `bundle` (`bundle_commonjs_package` output) on thaw-js with no
-/// arguments and returns the result as the string the QuickJS tests compared against: a string result
+/// arguments and returns the result as the string the retired-engine tests compared against: a string result
 /// verbatim, anything else as its plain-data JSON. Errors come back as `ERROR: {error}`.
-/// The 256 MB stack matches the QuickJS tests' native stack budget.
+/// The 256 MB stack matches the retired-engine tests' native stack budget.
 fn run_js(bundle: &str) -> String {
     run_js_with_args(bundle, Vec::new())
 }
 
-/// `run_js` with `args` passed to the entry export, for tests whose QuickJS version passed a JSON argument array.
+/// `run_js` with `args` passed to the entry export, for tests whose retired-engine version passed a JSON argument array.
 fn run_js_with_args(bundle: &str, args: Vec<thaw_js::host::Native>) -> String {
     run_js_export(bundle, "", args)
 }
@@ -21,7 +21,7 @@ fn run_js_export(bundle: &str, export: &str, args: Vec<thaw_js::host::Native>) -
 }
 
 /// `run_js` that always returns the JSON of the result, so a string result stays JSON-quoted (`"\"symbol\""`),
-/// as the QuickJS helper returned it. Errors come back as `ERROR: {error}`.
+/// as the retired-engine helper returned it. Errors come back as `ERROR: {error}`.
 fn run_js_json(bundle: &str) -> String {
     match run_js_outcome(bundle, "", Vec::new()) {
         Ok(result) => result.to_json(),

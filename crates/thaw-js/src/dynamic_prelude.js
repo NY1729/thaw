@@ -1,6 +1,6 @@
 // Helper globals the compiler's dynamic-value paths look up by name (`getDynamicValue("__thaw_...")`),
 // installed once per realm that serves compiled code. The blocks below are verbatim ports of the
-// QuickJS bootstrap helpers (thaw-quickjs `platform_globals/runtime.js`), run against thaw-js with the
+// retired-engine bootstrap helpers (thaw-quickjs `platform_globals/runtime.js`), run against thaw-js with the
 // captured intrinsics re-bound here.
 (function () {
   'use strict';
@@ -58,7 +58,7 @@
   const thawSetIteratorPrototype = thawGraphGetPrototypeOf(new Set().values());
   const thawMapIteratorNext = thawMapIteratorPrototype.next;
   const thawSetIteratorNext = thawSetIteratorPrototype.next;
-  // Verbatim port of QuickJS dates.js `thawPropertyKey`: unique/registered Symbol wire text maps to one
+  // Verbatim port of retired-engine dates.js `thawPropertyKey`: unique/registered Symbol wire text maps to one
   // cached Symbol per text, well-known `\u001f@@name` / `__thaw_symbol_name` text to the intrinsic Symbol.
   const thawSymbols = new Map();
   const nativeSymbol = Symbol;
@@ -80,8 +80,8 @@
   thawGraphDefineProperty(globalThis, '__thaw_property_key', {
     value: thawPropertyKey, writable: false, configurable: false, enumerable: true,
   });
-  // Verbatim ports of the QuickJS bootstrap helpers (runtime.js ~2662-2735, ~268, ~39, ~649-656).
-  // Symbol-keyed wire properties are dropped from every stringify, as QuickJS does.
+  // Verbatim ports of the retired-engine bootstrap helpers (runtime.js ~2662-2735, ~268, ~39, ~649-656).
+  // Symbol-keyed wire properties are dropped from every stringify, as retired-engine does.
   const thawSymbolKeyWire = (key) => /^\u0003R?\d+(:|$)/.test(key);
   const thawGraphStringify = JSON.stringify;
   const thawStringifyWithoutSymbolKeys = (value, replacer, space) => {
@@ -627,7 +627,7 @@
       }
       const fn = callbacks[callback++];
       if (kind === 'method') {
-        // Name the wrapper after its key (verbatim from QuickJS runtime.js; the descriptor would name it `value`).
+        // Name the wrapper after its key (verbatim from retired-engine runtime.js; the descriptor would name it `value`).
         const method = function (...args) { return fn(this, ...args); };
         thawGraphDefineProperty(method, 'name', { value: typeof key === 'symbol' ? '[' + (key.description || '') + ']' : thawGraphString(key), configurable: true });
         Object.defineProperty(object, key, {
