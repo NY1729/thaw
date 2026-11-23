@@ -21,8 +21,7 @@ TSV_COLUMNS = [
     "program", "variant", "build_ok", "build_ms", "stdout_ok", "profile_stdout_ok", "wall_ms",
     "interp_ms", "profile_wall_ms", "interp_share", "entry_rows", "typed_rows", "entry_calls",
     "typed_calls", "top_key", "top_calls", "top_ms", "top_share", "jit_exports", "jit_calls",
-    "clones", "clones_direct", "clones_guarded", "clones_rejected", "quickjs_reasons",
-    "fallback_reasons",
+    "clones", "clones_direct", "clones_guarded", "clones_rejected",
 ]
 
 JIT_DECL = re.compile(r"__thaw_typed_jit_[0-9a-f]+")
@@ -67,9 +66,8 @@ def parse_profile(text):
 
 
 def parse_inspect(text):
-    """Counts from `thaw inspect` output: js-infer-aot lines (clones), quickjs-reason lines (fallbacks)."""
-    counts = {"clones": 0, "clones_direct": 0, "clones_guarded": 0, "clones_rejected": 0,
-              "quickjs_reasons": 0, "fallback_reasons": 0}
+    """Counts from `thaw inspect` output: js-infer-aot lines (clones)."""
+    counts = {"clones": 0, "clones_direct": 0, "clones_guarded": 0, "clones_rejected": 0}
     for line in text.splitlines():
         if line.startswith("js-infer-aot: "):
             counts["clones"] += 1
@@ -79,10 +77,6 @@ def parse_inspect(text):
             counts["clones_guarded"] += 1
         elif line.startswith("js-infer-aot-rejected: "):
             counts["clones_rejected"] += 1
-        elif line.startswith("quickjs-reason: "):
-            counts["quickjs_reasons"] += 1
-            if line.startswith("quickjs-reason: registry-fallback"):
-                counts["fallback_reasons"] += 1
     return counts
 
 

@@ -304,7 +304,7 @@ fn peers_first_order(deps: &[Vec<usize>]) -> Vec<usize> {
 /// `generate_registry_shims_pass` twice: the first pass is an eligibility oracle (it records the
 /// packages thaw-js refuses, `take_thaw_js_refusals`, and its text is final only when no package
 /// has a bundle); the second regenerates the shims with the eligible packages' typed calls
-/// targeting `__thaw_typed_tjs_*` and their bundles loaded by `loadThawJs`. A refused package
+/// flattening their declarations and their bundles loaded by `loadThawJs`. A refused package
 /// emits no bundle; `build` turns the recorded refusals into `unsupported on thaw-js: ...`.
 #[allow(clippy::too_many_arguments)]
 fn generate_registry_shims(
@@ -940,7 +940,7 @@ fn generate_registry_shims_pass(
 
     for pkg in &resolved {
         let thaw_js_package = thaw_js_routed.contains(&pkg.name);
-        // Name handed to the typed-declaration generators: the mark retargets them to thaw-js.
+        // Name handed to the typed-declaration generators: the mark selects thaw-js flattening.
         let declaration_package = if thaw_js_package {
             format!("{THAW_JS_PACKAGE_MARK}{}", pkg.name)
         } else {
@@ -1163,20 +1163,7 @@ fn generate_registry_shims_pass(
             // function, mime's `Mime` instance is a ready-made package
             // export), but hono's `Hono` -- constructed directly via
             // `new Hono()` -- does.
-            // A thaw-js package's classes are generated exactly like thaw-js ones, then retargeted at
-            // thaw-js below (instances stay `JsValue` handles into the thaw-js heap).
-            let class_marks = (
-                shim.len(),
-                class_rewrites.len(),
-                class_method_rewrites.len(),
-                callback_instance_rewrites.len(),
-                static_class_method_rewrites.len(),
-                class_setter_rewrites.len(),
-            );
-            let class_targets_before = class_targets
-                .keys()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>();
+            // Instances of a thaw-js package's classes stay `JsValue` handles into the thaw-js heap.
             // (Only the classes the program names: an unreferenced class's multi-arity constructor
             // dispatcher would pull thaw-js into every routed build.)
             for class in pkg.classes.iter() {
@@ -1301,7 +1288,7 @@ fn generate_registry_shims_pass(
                     ));
                 }
                 if thaw_js_package {
-                    // Declared straight under `__thaw_typed_tjs_` (not retargeted afterwards): getter, static
+                    // Declared under `__thaw_typed_tjs_`: getter, static
                     // accessor and property-setter ops for a thaw-js-routed class.
                     let accessors = generate_class_accessor_declarations(
                         &runtime_class.name,
@@ -1324,7 +1311,7 @@ fn generate_registry_shims_pass(
                             &property.name,
                             &property.ty,
                             false,
-                            "js",
+                            "tjs",
                             &mut shim,
                         ) {
                             class_setter_rewrites.push((
@@ -1333,24 +1320,6 @@ fn generate_registry_shims_pass(
                                 symbol,
                                 value_type,
                             ));
-                        }
-                    }
-                }
-            }
-            if thaw_js_package {
-                thaw_js_retarget_classes(
-                    class_marks,
-                    &mut shim,
-                    &mut class_rewrites,
-                    &mut class_method_rewrites,
-                    &mut callback_instance_rewrites,
-                    &mut static_class_method_rewrites,
-                    &mut class_setter_rewrites,
-                );
-                for key in class_targets.keys().cloned().collect::<Vec<_>>() {
-                    if !class_targets_before.contains(&key) {
-                        if let Some(target) = class_targets.get_mut(&key) {
-                            *target = target.replace("__thaw_typed_js_", "__thaw_typed_tjs_");
                         }
                     }
                 }
@@ -1415,7 +1384,7 @@ fn generate_registry_shims_pass(
         for function in &pkg.functions {
             // The bare-alias wrappers below forward to thaw-js's own declaration, so they must
             // see the same `Promise<Json>` return `typed_dynamic_declaration` gives it.
-            // A callable-union result is a `JsValue` handle on thaw-js: its aliases keep that type (no retarget).
+            // A callable-union result is a `JsValue` handle on thaw-js: its aliases keep that type.
             let alias_union_handle = thaw_js_package
                 && !thaw_js_keeps_js_value(&pkg.name)
                 && matches!(
@@ -1525,7 +1494,7 @@ fn generate_registry_shims_pass(
                             napi,
                             thaw_js_package && !pkg.name.starts_with("node:"),
                         ) {
-                            shim.push_str(&thaw_js_retarget_alias(
+                            shim.push_str(&thaw_js_flatten_alias(
                                 alias,
                                 thaw_js_package && !thaw_js_keeps_js_value(&pkg.name) && !alias_union_handle,
                             ));
@@ -1562,7 +1531,7 @@ fn generate_registry_shims_pass(
                             napi,
                             thaw_js_package && !pkg.name.starts_with("node:"),
                         ) {
-                            shim.push_str(&thaw_js_retarget_alias(
+                            shim.push_str(&thaw_js_flatten_alias(
                                 alias,
                                 thaw_js_package && !thaw_js_keeps_js_value(&pkg.name) && !alias_union_handle,
                             ));
@@ -1641,14 +1610,7 @@ fn generate_registry_shims_pass(
                         {
                             let direct = symbol
                                 .replace("__thaw_typed_wrapper_", "__thaw_typed_")
-                                .replace(
-                                    "__thaw_typed_js_",
-                                    if thaw_js_package {
-                                        "__thaw_typed_tjs_"
-                                    } else {
-                                        "__thaw_typed_js_"
-                                    },
-                                );
+                                .replace("__thaw_typed_js_", "__thaw_typed_tjs_");
                             let specialized = generic_rest_array_result(generic).is_some();
                             for &arity in arities {
                                 let mut params = scoring_param_hir_types(function, napi);
@@ -1741,14 +1703,7 @@ fn generate_registry_shims_pass(
                 {
                     let direct = symbol
                         .replace("__thaw_typed_wrapper_", "__thaw_typed_")
-                        .replace(
-                            "__thaw_typed_js_",
-                            if thaw_js_package {
-                                "__thaw_typed_tjs_"
-                            } else {
-                                "__thaw_typed_js_"
-                            },
-                        );
+                        .replace("__thaw_typed_js_", "__thaw_typed_tjs_");
                     let specialized = generic_rest_array_result(generic).is_some();
                     for &arity in call_arities {
                         let mut params = scoring_param_hir_types(function, napi);
@@ -2145,8 +2100,7 @@ fn generate_registry_shims_pass(
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>();
                     let typed_getter = format!(
-                        "__thaw_typed_{}_{encoded}",
-                        if thaw_js_package { "tjs" } else { "js" }
+                        "__thaw_typed_tjs_{encoded}"
                     );
                     shim.push_str(&format!(
                         "declare function {typed_getter}(): {rendered};\nlet {local}: {rendered} = {typed_getter}();\n"
@@ -2260,7 +2214,7 @@ fn generate_registry_shims_pass(
                     thaw_js_eligible.insert(pkg.name.clone());
                 } else if !thaw_js_routed.contains(&pkg.name) {
                     // The first pass is the oracle: a package it served is not refused by the second pass's re-judging
-                    // of its already retargeted declarations (node:crypto's `randomFillSync`).
+                    // of its already flattened declarations (node:crypto's `randomFillSync`).
                     thaw_js_refusals.push((pkg.name.clone(), thaw_js_package_refusal(&pkg.name)));
                 }
                 // Only a package thaw-js serves is emitted; a refused one fails the build (`build` reads the refusals).

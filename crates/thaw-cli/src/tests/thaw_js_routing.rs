@@ -3,23 +3,23 @@
 
 #[test]
 fn thaw_js_declaration_bytes_result_is_plain_for_any_program() {
-    let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
+    let bytes = "declare function __thaw_typed_tjs_6d73(path: string): Uint8Array;";
     assert!(thaw_js_declaration_plain_with(bytes, false));
     assert!(thaw_js_declaration_plain(bytes));
     // a Uint8Array result under a Promise is plain too
-    let async_bytes = "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;";
+    let async_bytes = "declare function __thaw_typed_tjs_6d73(path: string): Promise<Uint8Array>;";
     assert!(thaw_js_async_declaration_plain_with(async_bytes));
     // the relaxation only covers the bare bytes result, never a rejected parameter
-    let buffer_param = "declare function __thaw_typed_js_6d73(v: Buffer): Uint8Array;";
+    let buffer_param = "declare function __thaw_typed_tjs_6d73(v: Buffer): Uint8Array;";
     assert!(!thaw_js_declaration_plain_with(buffer_param, false));
 }
 
 #[test]
 fn thaw_js_tls_fs_https_bytes_result_is_plain_for_any_program() {
     // the r2c shape (node:tls + node:fs + node:child_process) and the ky shape (node:https) get the same line
-    let bytes = "declare function __thaw_typed_js_6d73(path: string): Uint8Array;";
+    let bytes = "declare function __thaw_typed_tjs_6d73(path: string): Uint8Array;";
     assert!(thaw_js_declaration_plain_with(bytes, false));
-    let async_bytes = "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;";
+    let async_bytes = "declare function __thaw_typed_tjs_6d73(path: string): Promise<Uint8Array>;";
     assert!(thaw_js_async_declaration_plain_with(async_bytes));
 }
 
@@ -27,42 +27,42 @@ fn thaw_js_tls_fs_https_bytes_result_is_plain_for_any_program() {
 fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
     let plain = |line: &str| thaw_js_declaration_plain(line);
     assert!(plain(
-        "declare function __thaw_typed_js_6d73(value: number, options: { long: boolean }): string;"
+        "declare function __thaw_typed_tjs_6d73(value: number, options: { long: boolean }): string;"
     ));
     assert!(plain(
-        "declare function __thaw_typed_js_6d73__arity_1(args: string[]): JsValue;"
+        "declare function __thaw_typed_tjs_6d73__arity_1(args: string[]): JsValue;"
     ));
     assert!(plain(
-        "declare function __thaw_typed_js_6d73(a: string | number, b?: Json): null | undefined;"
+        "declare function __thaw_typed_tjs_6d73(a: string | number, b?: Json): null | undefined;"
     ));
     // type parameters declared by the function itself are fine (inferred from plain arguments)
     assert!(plain(
-        "declare function __thaw_typed_js_6d73__generic_rest__arity_1<T>(array: T[]): T[];"
+        "declare function __thaw_typed_tjs_6d73__generic_rest__arity_1<T>(array: T[]): T[];"
     ));
-    assert!(plain("declare function __thaw_typed_js_6d73<TObject, TPath extends string>(data: TObject, path: TPath): JsValue;"));
+    assert!(plain("declare function __thaw_typed_tjs_6d73<TObject, TPath extends string>(data: TObject, path: TPath): JsValue;"));
     // callbacks, classes and other named types cannot cross the JSON boundary
     assert!(!plain(
-        "declare function __thaw_typed_js_6d73(f: (x: number) => number): number;"
+        "declare function __thaw_typed_tjs_6d73(f: (x: number) => number): number;"
     ));
     assert!(!plain(
-        "declare function __thaw_typed_js_6d73(v: Buffer): number;"
+        "declare function __thaw_typed_tjs_6d73(v: Buffer): number;"
     ));
     assert!(!plain(
-        "declare function __thaw_typed_js_6d73(v: SemVer): number;"
+        "declare function __thaw_typed_tjs_6d73(v: SemVer): number;"
     ));
     assert!(!plain(
-        "declare function __thaw_typed_js_6d73(): Promise<number>;"
+        "declare function __thaw_typed_tjs_6d73(): Promise<number>;"
     ));
     assert!(!plain("function __thaw_typed_wrapper_js_6d73(): number {"));
     // a bare `Uint8Array` result crosses as bytes; in params, unions and nested positions it stays out
     assert!(plain(
-        "declare function __thaw_typed_js_6d73(path: string): Uint8Array;"
+        "declare function __thaw_typed_tjs_6d73(path: string): Uint8Array;"
     ));
     assert!(!plain(
-        "declare function __thaw_typed_js_6d73(v: Uint8Array): number;"
+        "declare function __thaw_typed_tjs_6d73(v: Uint8Array): number;"
     ));
     assert!(!plain(
-        "declare function __thaw_typed_js_6d73(): Uint8Array | string;"
+        "declare function __thaw_typed_tjs_6d73(): Uint8Array | string;"
     ));
 }
 
@@ -70,41 +70,41 @@ fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
 fn thaw_js_declaration_callable_result_is_plain_and_callable_parameter_is_not() {
     // a callable RESULT is a live handle (ejs.compile, nanoid.customAlphabet): plain when its
     // parameters and return are plain, including a union of such callables (sync | Promise return)
-    let compile = "declare function __thaw_typed_js_6d73(template: string): ((arg0?: Json | undefined) => string) | ((arg0?: Json | undefined) => Promise<string>);";
+    let compile = "declare function __thaw_typed_tjs_6d73(template: string): ((arg0?: Json | undefined) => string) | ((arg0?: Json | undefined) => Promise<string>);";
     assert!(thaw_js_declaration_plain(compile));
-    let factory = "declare function __thaw_typed_js_6d73(prefix: string): (x: string) => string;";
+    let factory = "declare function __thaw_typed_tjs_6d73(prefix: string): (x: string) => string;";
     assert!(thaw_js_declaration_plain(factory));
     // a callable PARAMETER (shape S1) stays rejected, also next to a callable result
     assert!(!thaw_js_declaration_plain(
-        "declare function __thaw_typed_js_6d73(f: (x: number) => number): number;"
+        "declare function __thaw_typed_tjs_6d73(f: (x: number) => number): number;"
     ));
     assert!(!thaw_js_declaration_plain(
-        "declare function __thaw_typed_js_6d73(f: (x: number) => number): (y: string) => string;"
+        "declare function __thaw_typed_tjs_6d73(f: (x: number) => number): (y: string) => string;"
     ));
     // a callable result whose parameter or return is not plain data stays rejected
     assert!(!thaw_js_declaration_plain(
-        "declare function __thaw_typed_js_6d73(prefix: string): (x: string) => Buffer;"
+        "declare function __thaw_typed_tjs_6d73(prefix: string): (x: string) => Buffer;"
     ));
     assert!(!thaw_js_declaration_plain(
-        "declare function __thaw_typed_js_6d73(prefix: string): (x: Buffer) => string;"
+        "declare function __thaw_typed_tjs_6d73(prefix: string): (x: Buffer) => string;"
     ));
     assert!(!thaw_js_declaration_plain(
-        "declare function __thaw_typed_js_6d73(prefix: string): ((x: string) => string) | number;"
+        "declare function __thaw_typed_tjs_6d73(prefix: string): ((x: string) => string) | number;"
     ));
 }
 
 #[test]
 fn thaw_js_symbols_decode_to_their_package_function() {
-    let line = "declare function __thaw_typed_js_6d733a3a6d73__overload_0__arity_2(value: number): string;";
+    let line = "declare function __thaw_typed_tjs_6d733a3a6d73__overload_0__arity_2(value: number): string;";
     assert_eq!(thaw_js_declared_function(line, "ms").as_deref(), Some("ms"));
     assert_eq!(thaw_js_declared_function(line, "other"), None);
-    let generic = "declare function __thaw_typed_js_6c6f646173683a3a676574__generic_rest__arity_1<T>(a: T[]): T[];";
+    let generic = "declare function __thaw_typed_tjs_6c6f646173683a3a676574__generic_rest__arity_1<T>(a: T[]): T[];";
     assert_eq!(
         thaw_js_declared_function(generic, "lodash").as_deref(),
         Some("get")
     );
     assert_eq!(
-        thaw_js_declared_function("declare function __thaw_typed_js_zz(): number;", "ms"),
+        thaw_js_declared_function("declare function __thaw_typed_tjs_zz(): number;", "ms"),
         None
     );
     assert!(thaw_js_mentions("ms(1)", "ms") && !thaw_js_mentions("ms(1)", "semver"));
@@ -519,19 +519,19 @@ fn thaw_js_routing_serves_real_leaf_packages_like_node_when_enabled() {
 #[test]
 fn thaw_js_async_overload_is_plain_when_its_resolved_type_is() {
     assert!(thaw_js_async_declaration_plain(
-        "declare function __thaw_typed_js_6d73(t: string, d: Json): Promise<string>;"
+        "declare function __thaw_typed_tjs_6d73(t: string, d: Json): Promise<string>;"
     ));
     assert!(thaw_js_async_declaration_plain(
-        "declare function __thaw_typed_js_6d73(t: string): string | Promise<string>;"
+        "declare function __thaw_typed_tjs_6d73(t: string): string | Promise<string>;"
     ));
     assert!(!thaw_js_async_declaration_plain(
-        "declare function __thaw_typed_js_6d73(t: string): Promise<Buffer>;"
+        "declare function __thaw_typed_tjs_6d73(t: string): Promise<Buffer>;"
     ));
     assert!(!thaw_js_async_declaration_plain(
-        "declare function __thaw_typed_js_6d73(t: Promise<string>): string;"
+        "declare function __thaw_typed_tjs_6d73(t: Promise<string>): string;"
     ));
     assert!(thaw_js_async_declaration_plain(
-        "declare function __thaw_typed_js_6d73(path: string): Promise<Uint8Array>;"
+        "declare function __thaw_typed_tjs_6d73(path: string): Promise<Uint8Array>;"
     ));
 }
 

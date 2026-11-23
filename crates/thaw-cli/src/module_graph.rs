@@ -1579,7 +1579,7 @@ impl VisitMut for RenameReferences<'_> {
         // child pass below would rewrite `ns.sub` first and leave
         // `.member` dangling on a symbol that no longer names the
         // namespace -- producing e.g. "call to unknown function
-        // `__thaw_typed_js_....format.json`". The identical lookup is kept
+        // `__thaw_typed_tjs_....format.json`". The identical lookup is kept
         // after the child pass too, for a chain whose middle segment is
         // *only* a nested namespace (zod's `z.coerce.number`, where
         // `z.coerce` has no single-level target to begin with).

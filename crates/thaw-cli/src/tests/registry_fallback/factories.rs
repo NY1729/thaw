@@ -13,7 +13,7 @@
 /// Exercises the whole chain: `thaw_bridge::function_return_named_types`
 /// linking the factory to its class, `parse_dts_classes` now descending
 /// into `declare namespace` blocks to find the class at all, thaw-cli's
-/// shims.rs generating a thaw-js-backed (`__thaw_typed_js_`) instance
+/// shims.rs generating a thaw-js-backed (`__thaw_typed_tjs_`) instance
 /// method declaration via the same generator a native addon's class
 /// already used, `compile_typed_napi_method` (thaw-llvm) now dispatching
 /// that declaration's backend to `thaw_js_call_method_result` instead of
