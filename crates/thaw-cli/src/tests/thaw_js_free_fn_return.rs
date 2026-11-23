@@ -185,7 +185,7 @@ fn thaw_js_callable_union_result_is_a_handle_declared_once_for_every_wrapper() {
     assert!(symbol.starts_with("__thaw_typed_tjs_"), "{symbol}");
     assert!(declaration.contains("): JsValue"), "{declaration}");
     assert!(!declaration.contains("=>"), "{declaration}");
-    // the bare and qualified aliases agree on the handle type (no `JsValue` -> `Json` retarget)
+    // the bare and qualified aliases agree on the handle type (no `JsValue` -> `Json` flatten)
     let rewritten = thaw_js_callable_union_as_handle("tjs-ejs", &function);
     assert!(matches!(rewritten, std::borrow::Cow::Owned(_)));
     assert!(matches!(

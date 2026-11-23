@@ -176,7 +176,7 @@ fn generate_napi_class_constructors(
     if !class.constructible {
         return Vec::new();
     }
-    let prefix = if napi { "napi" } else { "js" };
+    let prefix = if napi { "napi" } else { "tjs" };
     let mut helpers = Vec::new();
     for (overload_index, constructor) in class.constructors.iter().enumerate() {
         // Checked per arity, not once for the whole constructor. Types the
@@ -573,7 +573,7 @@ fn generate_class_accessor_declarations(
     accessors
 }
 
-/// Generates one `declare function __thaw_typed_{napi,js}_<hex>(...)`
+/// Generates one `declare function __thaw_typed_{napi,tjs}_<hex>(...)`
 /// ambient declaration per callable overload/arity of `class`'s instance
 /// or static methods (matching `method.is_static == is_static`), and
 /// returns the `(method_name, symbol, argument_count, has_callback,
@@ -777,7 +777,7 @@ fn generate_napi_class_method_overloads_with_callback_instances(
                     .collect::<String>();
                 let symbol = format!(
                     "__thaw_typed_{}_{encoded}",
-                    if napi { "napi" } else { "js" }
+                    if napi { "napi" } else { "tjs" }
                 );
                 shim.push_str(&format!(
                     "declare function {symbol}({params}): {return_type};\n"
@@ -1361,46 +1361,4 @@ fn called_commonjs_namespace_properties_named(
     names.sort();
     names.dedup();
     Ok(names)
-}
-
-/// Points the class declarations and rewrites a thaw-js package just generated (see the class loop in
-/// `generate_registry_shims_pass`) at thaw-js: their `__thaw_typed_js_` symbols become
-/// `__thaw_typed_tjs_` ones; the declarations keep their `JsValue` receivers and instance results.
-/// `marks` are the lengths of the shim and the rewrite vectors before the classes were generated.
-#[allow(clippy::too_many_arguments)]
-fn thaw_js_retarget_classes(
-    marks: (usize, usize, usize, usize, usize, usize),
-    shim: &mut String,
-    class_rewrites: &mut [ClassConstructorRewrite],
-    class_method_rewrites: &mut [ClassMethodRewrite],
-    callback_instance_rewrites: &mut [ClassMethodContext],
-    static_class_method_rewrites: &mut [StaticClassMethodRewrite],
-    class_setter_rewrites: &mut [ClassSetterRewrite],
-) {
-    let retarget = |symbol: &mut String| *symbol = symbol.replace("__thaw_typed_js_", "__thaw_typed_tjs_");
-    let (shim_mark, constructors, methods, callbacks, statics, setters) = marks;
-    let generated = shim[shim_mark..].replace("__thaw_typed_js_", "__thaw_typed_tjs_");
-    shim.truncate(shim_mark);
-    shim.push_str(&generated);
-    for (_, _, helpers) in &mut class_rewrites[constructors..] {
-        for (_, symbol, _) in helpers {
-            retarget(symbol);
-        }
-    }
-    for rewrite in &mut class_method_rewrites[methods..] {
-        retarget(&mut rewrite.2);
-    }
-    for context in &mut callback_instance_rewrites[callbacks..] {
-        match context {
-            ClassMethodContext::CallbackInstance(symbol, ..) | ClassMethodContext::LiteralArgument(symbol, ..) => {
-                retarget(symbol)
-            }
-        }
-    }
-    for rewrite in &mut static_class_method_rewrites[statics..] {
-        retarget(&mut rewrite.3);
-    }
-    for rewrite in &mut class_setter_rewrites[setters..] {
-        retarget(&mut rewrite.2);
-    }
 }

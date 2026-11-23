@@ -1398,7 +1398,7 @@ fn typed_dynamic_declaration(
                 }
             };
             typed_dynamic_declaration_inner(
-                real, &function, napi, true, observed_call_arities, overload_suffix,
+                real, &function, napi, observed_call_arities, overload_suffix,
             )
             .map(|(symbol, declaration)| {
                 (
@@ -1412,18 +1412,15 @@ fn typed_dynamic_declaration(
             })
         }
         None => typed_dynamic_declaration_inner(
-            package, function, napi, false, observed_call_arities, overload_suffix,
+            package, function, napi, observed_call_arities, overload_suffix,
         ),
     }
 }
 
-/// `thaw_js` picks the `tjs` symbol spelling; the unrouted `js` spelling is only what the routing
-/// eligibility scan reads in the first shim pass.
 fn typed_dynamic_declaration_inner(
     package: &str,
     function: &thaw_bridge::DtsFunction,
     napi: bool,
-    thaw_js: bool,
     observed_call_arities: &std::collections::BTreeSet<usize>,
     overload_suffix: Option<usize>,
 ) -> Option<(String, String)> {
@@ -1456,10 +1453,8 @@ fn typed_dynamic_declaration_inner(
         "__thaw_typed_{}_{}",
         if napi {
             "napi"
-        } else if thaw_js {
-            "tjs"
         } else {
-            "js"
+            "tjs"
         },
         encoded
     );

@@ -351,7 +351,7 @@ fn thaw_js_class_needs_handle(pkg: &ResolvedPackage, user_source: &str, name: &s
 }
 
 /// A thaw-js package returns plain data, so a bare alias' opaque `JsValue` result becomes `Json`.
-fn thaw_js_retarget_alias(alias: String, thaw_js_package: bool) -> String {
+fn thaw_js_flatten_alias(alias: String, thaw_js_package: bool) -> String {
     if thaw_js_package {
         alias.replace("JsValue", "Json")
     } else {
@@ -365,10 +365,10 @@ fn thaw_js_keeps_js_value(package: &str) -> bool {
     package == "node:vm"
 }
 
-/// Whether a generated `declare function __thaw_typed_js_*` line only mentions types that cross the
+/// Whether a generated `declare function __thaw_typed_tjs_*` line only mentions types that cross the
 /// thaw-js JSON boundary: `number`, `string`, `boolean`, `Json`, `void`, `null`, `undefined`, its own
 /// type parameters, unions/array/object-literal shapes of those, and an opaque `JsValue` (a type the
-/// `.d.ts` classifier could not resolve), which the retargeted declaration turns into `Json`.
+/// `.d.ts` classifier could not resolve), which the flattened declaration turns into `Json`.
 /// Callbacks and every other type name (classes, `Buffer`, ...) are rejected, except a whole
 /// `Uint8Array` result.
 #[cfg(test)]
@@ -593,8 +593,7 @@ fn thaw_js_async_declaration_plain_with(line: &str) -> bool {
 /// `$staticmethod$`, ... keys carry `package::Class`).
 fn thaw_js_class_declaration(line: &str, package: &str, class: &str) -> bool {
     let Some(symbol) = line
-        .strip_prefix("declare function __thaw_typed_js_")
-        .or_else(|| line.strip_prefix("declare function __thaw_typed_tjs_"))
+        .strip_prefix("declare function __thaw_typed_tjs_")
         .and_then(|rest| rest.split(['(', '<']).next())
     else {
         return false;
@@ -613,12 +612,11 @@ fn thaw_js_class_declaration(line: &str, package: &str, class: &str) -> bool {
     key.starts_with('$') && key.split('$').nth(2) == Some(&format!("{package}::{class}"))
 }
 
-/// The decoded operation key of a `__thaw_typed_js_<hex>` / `__thaw_typed_tjs_<hex>` declaration line
+/// The decoded operation key of a `__thaw_typed_tjs_<hex>` declaration line
 /// (`$new$pkg::Class$arity0`, `$method$...`).
 fn thaw_js_declaration_key(line: &str) -> Option<String> {
     let symbol = line
-        .strip_prefix("declare function __thaw_typed_js_")
-        .or_else(|| line.strip_prefix("declare function __thaw_typed_tjs_"))?
+        .strip_prefix("declare function __thaw_typed_tjs_")?
         .split(['(', '<'])
         .next()?;
     let hex = symbol.split("__").next()?;
@@ -816,11 +814,10 @@ fn thaw_js_module_statement_end(source: &str, after_keyword: usize, keyword: &st
     Some(end)
 }
 
-/// The function name encoded in a `__thaw_typed_js_<hex>[__suffix...]` symbol.
+/// The function name encoded in a `__thaw_typed_tjs_<hex>[__suffix...]` symbol.
 fn thaw_js_declared_function(line: &str, package: &str) -> Option<String> {
     let symbol = line
-        .strip_prefix("declare function __thaw_typed_js_")
-        .or_else(|| line.strip_prefix("declare function __thaw_typed_tjs_"))?
+        .strip_prefix("declare function __thaw_typed_tjs_")?
         .split(['(', '<'])
         .next()?;
     let hex = symbol.split('_').next()?;
@@ -1316,18 +1313,18 @@ fn thaw_js_class_member_names_the_method_of_a_class_operation() {
     // "$method$p::C$argument$overload0$arity3"
     let key = "$method$p::C$argument$overload0$arity3";
     let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
-    let line = format!("declare function __thaw_typed_js_{hex}(receiver: JsValue): JsValue;");
+    let line = format!("declare function __thaw_typed_tjs_{hex}(receiver: JsValue): JsValue;");
     assert_eq!(thaw_js_class_member(&line).as_deref(), Some("argument"));
     let key = "$new$p::C$arity0";
     let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
-    let line = format!("declare function __thaw_typed_js_{hex}(): JsValue;");
+    let line = format!("declare function __thaw_typed_tjs_{hex}(): JsValue;");
     assert_eq!(thaw_js_class_member(&line), None);
 }
 
 #[cfg(test)]
 fn thaw_js_test_decl(key: &str, tail: &str) -> String {
     let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
-    format!("declare function __thaw_typed_js_{hex}{tail}")
+    format!("declare function __thaw_typed_tjs_{hex}{tail}")
 }
 
 #[cfg(test)]

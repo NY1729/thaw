@@ -1,5 +1,4 @@
 thaw-js: package=yup eligible=true
-quickjs-reason: registry-fallback package=yup operation=object reason=generic function specialization is not supported by the typed JIT
 js-infer: package=yup functions=412 typed=130 (concrete=101 nullable=7 union=22) any=282 closed=40 sound=101 guarded=3
 js-infer-aot: package=yup function=isAbsent clone=__thaw_aot_yup_isAbsent
 js-infer-aot-direct: package=yup function=isAbsent clone=__thaw_aot_yup_isAbsent

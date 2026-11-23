@@ -34,16 +34,14 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(profile["total"], (0.0, 12.5))
         self.assertEqual(profile["jit"], [("expr:a0,ld", 4)])
 
-    def test_inspect_counts_clones_and_fallbacks(self):
+    def test_inspect_counts_clones(self):
         counts = run.parse_inspect(read("yup.infer.inspect"))
-        self.assertEqual(counts, {"clones": 1, "clones_direct": 1, "clones_guarded": 1, "clones_rejected": 1,
-                                  "quickjs_reasons": 1, "fallback_reasons": 1})
+        self.assertEqual(counts, {"clones": 1, "clones_direct": 1, "clones_guarded": 1, "clones_rejected": 1})
         default = run.parse_inspect(read("yup.default.inspect"))
         self.assertEqual(default["clones"], 0)
-        self.assertEqual(default["fallback_reasons"], 2)
 
     def test_shim_counts_distinct_jit_symbols(self):
-        # two arities of one JIT export plus one typed-js declaration: 1 distinct JIT export
+        # two arities of one JIT export plus one typed-tjs declaration: 1 distinct JIT export
         self.assertEqual(run.parse_shim(read("yup.default.shim.ts")), 1)
 
     def test_meta_last_value_wins(self):

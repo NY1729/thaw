@@ -3,7 +3,7 @@
 // thaw-js keys and every other method keep their exact keys.
 
 fn union_promise_key(symbol: &str) -> String {
-    let hex = symbol.strip_prefix("__thaw_typed_js_").unwrap();
+    let hex = symbol.strip_prefix("__thaw_typed_tjs_").unwrap();
     let bytes = (0..hex.len())
         .step_by(2)
         .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
@@ -67,6 +67,6 @@ fn thaw_js_class_member_ignores_the_await_suffix() {
     let key = "$method$p::C$request$overload0$arity1$await";
     let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
     let line =
-        format!("declare function __thaw_typed_js_{hex}(receiver: JsValue, p: string): JsValue;");
+        format!("declare function __thaw_typed_tjs_{hex}(receiver: JsValue, p: string): JsValue;");
     assert_eq!(thaw_js_class_member(&line).as_deref(), Some("request"));
 }

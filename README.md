@@ -292,8 +292,7 @@ Some routed modules are still refused (the build fails) when the program uses sp
 
 The program's own `eval`/`new Function` is served on thaw-js. `THAW_JS_RUNTIME_DEBUG=1` names the
 compiled functions that still call into QuickJS in a refused build. `thaw inspect <executable>` prints
-`quickjs: true|false`, `quickjs-reason:` lines, a `thaw-js-routed:` list of packages served by
-thaw-js, and `thaw-js: package=... eligible=true|false blockers=...` lines.
+a `thaw-js-routed:` list of packages served by thaw-js, `thaw-js-blocker:` lines, and `thaw-js: package=... eligible=true|false blockers=...` lines.
 
 Known thaw-js limitations on current main:
 

@@ -116,7 +116,7 @@ mod js_infer_report_tests {
 
     #[test]
     fn wrappers_become_guarded_dispatchers_and_the_signature_match_retargets() {
-        let shim = "declare function __thaw_typed_js_706b673a3a7477696365(x: number): number;\n\
+        let shim = "declare function __thaw_typed_tjs_706b673a3a7477696365(x: number): number;\n\
                     // Fallback\n\
                     function twice(argsArray: Json): Json {\n    return callDynamic(\"twice\", argsArray);\n}\n\
                     function other(argsArray: Json): Json {\n    return callDynamic(\"other\", argsArray);\n}\n"
@@ -132,9 +132,9 @@ mod js_infer_report_tests {
         assert_eq!(out.matches("function __thaw_aot_pkg_0_twice(x: number)").count(), 1);
         // the typed declaration has the clone's signature: exports bound to it move
         assert_eq!(report.symbol_moves.len(), 1);
-        assert_eq!(report.symbol_moves[0].1, "__thaw_typed_js_706b673a3a7477696365");
+        assert_eq!(report.symbol_moves[0].1, "__thaw_typed_tjs_706b673a3a7477696365");
         // a different declared signature is not retargeted
-        let shim = "declare function __thaw_typed_js_706b673a3a7477696365(x: string): number;\n".to_string();
+        let shim = "declare function __thaw_typed_tjs_706b673a3a7477696365(x: string): number;\n".to_string();
         let mut report = JsInferAot::default();
         js_infer_apply(shim, &[("pkg".to_string(), sample_clone())], &mut report);
         assert!(report.symbol_moves.is_empty());
@@ -152,7 +152,7 @@ mod js_infer_report_tests {
     }
 
     fn array_shim() -> String {
-        "declare function __thaw_typed_js_706b673a3a746f74616c(xs: number[], k: number): number;\n".to_string()
+        "declare function __thaw_typed_tjs_706b673a3a746f74616c(xs: number[], k: number): number;\n".to_string()
     }
 
     #[test]
@@ -179,7 +179,7 @@ mod js_infer_report_tests {
         assert!(out.contains("function __thaw_aot_pkg_1_total__g_total(a0: Json, a1: Json): number {"), "{out}");
         assert!(out.contains("__thaw_aot_pkg_1_total_p0_ok(a0) && typeof a1 === \"number\""), "{out}");
         assert!(out.contains("return __thaw_aot_pkg_1_total(__thaw_aot_pkg_1_total_p0_cv(a0), a1);"), "{out}");
-        assert!(out.contains("return __thaw_typed_js_706b673a3a746f74616c(a0, a1);"), "{out}");
+        assert!(out.contains("return __thaw_typed_tjs_706b673a3a746f74616c(a0, a1);"), "{out}");
         assert!(out.contains("function __thaw_aot_pkg_1_total_p0_cv(v: Json): number[]"), "{out}");
         // the function used as a value, or several files: never proven
         for program in [
@@ -434,7 +434,7 @@ fn js_infer_apply(
     for (package, clone) in accepted {
         for export in &clone.exports {
             let key = format!("{package}::{export}");
-            let symbol = format!("__thaw_typed_js_{}", key.bytes().map(|b| format!("{b:02x}")).collect::<String>());
+            let symbol = format!("__thaw_typed_tjs_{}", key.bytes().map(|b| format!("{b:02x}")).collect::<String>());
             let prefix = format!("declare function {symbol}(");
             let Some(start) = shim.find(&prefix) else { continue };
             let end = shim[start..].find('\n').map_or(shim.len(), |e| start + e);
@@ -512,7 +512,7 @@ fn js_infer_split_top(text: &str) -> Vec<&str> {
 }
 
 /// Result types of the package's typed fallback declarations in the generated shim (export -> type):
-/// `declare function __thaw_typed_js_<hex(pkg::name)>(..): number;`.
+/// `declare function __thaw_typed_tjs_<hex(pkg::name)>(..): number;`.
 fn js_infer_typed_returns(
     shim: &str,
     package: &str,
@@ -520,7 +520,7 @@ fn js_infer_typed_returns(
     // arity / overload variants (`..__arity_2`) share a base name: the result type must agree
     let mut seen: std::collections::HashMap<String, Option<thaw_js_infer::dts::DT>> = Default::default();
     for line in shim.lines() {
-        let Some(rest) = line.strip_prefix("declare function __thaw_typed_js_") else { continue };
+        let Some(rest) = line.strip_prefix("declare function __thaw_typed_tjs_") else { continue };
         let Some((symbol, signature)) = rest.split_once('(') else { continue };
         let hex = symbol.split("__").next().unwrap_or(symbol);
         let bytes: Option<Vec<u8>> = (0..hex.len() / 2)

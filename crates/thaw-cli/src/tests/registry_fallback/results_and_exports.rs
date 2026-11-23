@@ -2069,7 +2069,7 @@ function main(): void {
 /// must resolve `marked.member` accesses through the package's own
 /// export table. Left as an ordinary member access on the renamed
 /// function symbol, the build failed outright ("call to unknown function
-/// `__thaw_typed_js_....parse`") -- and once resolved, `use` (an
+/// `__thaw_typed_tjs_....parse`") -- and once resolved, `use` (an
 /// unsupported-signature *rest* function) must also get a real typed
 /// declaration: falling back to the unpacked `(argsArray: Json)` shim
 /// made a normal call throw "args_json is not a valid JSON array"

@@ -201,7 +201,7 @@ jobs:
               slug=$(basename "$c")
               echo "- $slug: $(cat "$c/name.txt" 2>/dev/null) | build exit $(cat "$c/build.exit" 2>/dev/null || echo n/a) | run exit $(cat "$c/run.exit" 2>/dev/null || echo n/a)"
               echo "    quickjs symbols: $(cat "$c/quickjs-symbols.txt" 2>/dev/null || echo n/a)"
-              grep -E '^(quickjs|quickjs-reason|thaw-js-blocker)' "$c/inspect.txt" 2>/dev/null | cut -c1-300 | sed 's/^/    /'
+              grep -E '^thaw-js-blocker' "$c/inspect.txt" 2>/dev/null | cut -c1-300 | sed 's/^/    /'
             done
           } >> "$GITHUB_STEP_SUMMARY" || true
       - name: Upload per-case logs
@@ -417,7 +417,7 @@ jobs:
             for leg in a-ky b-https c-brotli; do
               l="$D/out/$leg"
               echo "- $leg: build exit $(cat "$l/build.exit" 2>/dev/null || echo n/a), run exit $(cat "$l/run.exit" 2>/dev/null || echo n/a) (124 = timeout)"
-              grep -E '^(quickjs|quickjs-reason|thaw-js-blocker)' "$l/inspect.txt" 2>/dev/null | cut -c1-300 | sed 's/^/    /'
+              grep -E '^thaw-js-blocker' "$l/inspect.txt" 2>/dev/null | cut -c1-300 | sed 's/^/    /'
             done
           } >> "$GITHUB_STEP_SUMMARY" || true
           cp "$D/serve.log" "$D/out/serve.log" 2>/dev/null || true
