@@ -1,5 +1,5 @@
 //! `engine-thaw-js` backend: the thaw-js archive's `thaw_tjs_*` natives behind the
-//! QuickJS-era `thaw_js_*` names and signatures that `crate::engine::` callers use, so the
+//! legacy `thaw_js_*` names and signatures that `crate::engine::` callers use, so the
 //! call sites stay unchanged. Lib code is `extern "C"` only; there is no Cargo edge to thaw-js
 //! (see the `[dev-dependencies]` comment in Cargo.toml).
 
@@ -222,7 +222,7 @@ pub fn eval_json(source: &str) -> Result<Option<String>, String> {
 }
 
 /// Registers the napi side's seven bridge callbacks, then enables the thaw-js proxy layer (it is
-/// opt-in; the QuickJS engine has no equivalent step).
+/// opt-in; no equivalent step).
 #[allow(clippy::too_many_arguments)]
 pub fn register_napi_bridge(
     exports: BridgeExports,
@@ -250,7 +250,7 @@ pub fn register_napi_shutdown_bridge(
     unsafe { thaw_tjs_register_napi_shutdown_bridge(begin, poll, take_error, finish) }
 }
 
-// Wrappers keep the QuickJS-era names and signatures used by `crate::engine::` callers.
+// Wrappers keep the legacy names and signatures used by `crate::engine::` callers.
 pub extern "C" fn thaw_js_abstract_to_string_units_result(
     handle: u64,
     array_element: u8,

@@ -167,10 +167,10 @@ pub enum DtsType {
 pub enum Classification {
     /// Every parameter and the return type mapped onto a native
     /// `HirType` -- compiles to a direct FFI call
-    /// (`thaw_hir::HirExpr::FfiCall`), no QuickJS-NG involved.
+    /// (`thaw_hir::HirExpr::FfiCall`), no thaw-js involved.
     FastPath(Box<FfiSignature>),
     /// At least one parameter or the return type didn't map -- needs the
-    /// QuickJS-NG fallback path.
+    /// thaw-js fallback path.
     Fallback { function: String, reason: String },
 }
 

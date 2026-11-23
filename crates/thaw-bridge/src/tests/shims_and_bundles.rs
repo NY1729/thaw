@@ -72,7 +72,7 @@ fn effective_classifications_leaves_fallback_alone_regardless_of_native_lib() {
 fn generates_call_dynamic_wrapper_for_fallback_function() {
     let funcs = parse_dts("export declare function identity<T>(x: T): T;").unwrap();
     let shim = generate_shim(&funcs, true, &[], &Default::default());
-    assert!(shim.contains("// Fallback (QuickJS-NG):"));
+    assert!(shim.contains("// Fallback (thaw-js):"));
     assert!(shim.contains("function identity(argsArray: Json): Json {"));
     assert!(shim.contains(r#"return callDynamic("identity", argsArray);"#));
 }
@@ -142,7 +142,7 @@ fn generate_shim_emits_exactly_one_declaration_for_an_overloaded_name() {
         1,
         "exactly one top-level declaration named `ms`, got:\n{shim}"
     );
-    assert!(shim.contains("// Fallback (QuickJS-NG):"));
+    assert!(shim.contains("// Fallback (thaw-js):"));
     assert!(shim.contains(r#"return callDynamic("ms", argsArray);"#));
 }
 
@@ -354,7 +354,7 @@ fn generated_module_init_round_trips_through_real_lowering() {
 
 
 #[test]
-fn thaw_js_bundles_are_loaded_by_load_thaw_js_not_quickjs() {
+fn thaw_js_bundles_are_loaded_by_load_thaw_js() {
     let init = generate_module_init(&[ModuleBundle {
         package_name: "ms",
         js_source: "module.exports = function ms() {};",

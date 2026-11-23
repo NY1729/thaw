@@ -41,7 +41,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     }
     #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
-        if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
+        if matches!(value_ref(object), Ok(Value::ThawJsHandle { object_like: false, .. })) {
             return record_status(env, NAPI_OBJECT_EXPECTED);
         }
         return qjs_property_names(env, handle, key_mode, key_filter, key_conversion, out);

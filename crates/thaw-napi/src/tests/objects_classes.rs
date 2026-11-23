@@ -2023,7 +2023,7 @@ fn scoped_accessor_js_roots_drop_only_after_owner_metadata_is_removed() {
         assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
         let owner = env.alloc(Value::Object(HashMap::new()));
         #[allow(clippy::arc_with_non_send_sync)]
-        let roots = Arc::new(QuickJsAccessorRoots {
+        let roots = Arc::new(ThawJsAccessorRoots {
             getter: 0, setter: 0,
             getter_native: ptr::null_mut(), setter_native: ptr::null_mut(),
         });

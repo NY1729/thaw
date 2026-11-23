@@ -64,7 +64,7 @@ thread_local! {
 }
 
 /// Test helper: an `Env` with a graph owner ID, registered with `HOST` so the
-/// QuickJS Symbol/graph owner lookups can find it. The Box stays owned by
+/// thaw-js Symbol/graph owner lookups can find it. The Box stays owned by
 /// `HOST.module_envs` (cleared when the test thread exits).
 #[cfg(test)]
 pub(crate) fn registered_test_env() -> &'static mut Env {
@@ -219,7 +219,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
         host.module_envs.push(env);
     });
     #[cfg(feature = "js-engine")]
-    ensure_quickjs_bridge();
+    ensure_thawjs_bridge();
     Ok(())
 }
 
@@ -227,7 +227,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>, package_name: Option<&s
 // installed when an addon loads and, lazily, when a loaded or caller-owned
 // environment first needs graph owner state.
 #[cfg(feature = "js-engine")]
-fn ensure_quickjs_bridge() {
+fn ensure_thawjs_bridge() {
     crate::engine::register_napi_bridge(
         thaw_napi_export_names,
         thaw_napi_call_typed_bridge,
@@ -258,8 +258,8 @@ unsafe extern "C" fn thaw_napi_call_typed_bridge(
     let input = NapiGraphInput::empty_dispatch();
     let result = text(name).and_then(|name| text(args).and_then(|args| {
         let value = call_value_impl(&name, &args, true, false, Some(&input))?;
-        quickjs_bridge_value(value).and_then(|wire| {
-            let mut result = quickjs_wire_result("value", wire);
+        thawjs_bridge_value(value).and_then(|wire| {
+            let mut result = thawjs_wire_result("value", wire);
             attach_released_js_references(&mut result);
             serde_json::to_string(&result).map_err(|error| error.to_string())
         })
@@ -420,8 +420,8 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         if operation == "release" {
             let reference = target
                 .parse::<u64>()
-                .map_err(|_| "invalid QuickJS reference")?;
-            release_quickjs_reference(reference);
+                .map_err(|_| "invalid thaw-js reference")?;
+            release_thawjs_reference(reference);
             return Ok(serde_json::json!({ "kind": "value", "value": true }));
         }
         if operation == "release_handle" {
@@ -513,25 +513,25 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         if operation == "sync_reference" {
             let reference = target
                 .parse::<u64>()
-                .map_err(|_| "invalid QuickJS reference")?;
+                .map_err(|_| "invalid thaw-js reference")?;
             let (env, value) = HOST.with(|host| {
                 let host = host.borrow();
                 let env = host.module_envs.iter()
-                    .find(|env| !env.finalized && env.quickjs_references.contains_key(&reference))
-                    .ok_or_else(|| "unknown QuickJS reference".to_string())?;
-                Ok::<_, String>((&**env as *const Env, env.quickjs_references[&reference]))
+                    .find(|env| !env.finalized && env.thawjs_references.contains_key(&reference))
+                    .ok_or_else(|| "unknown thaw-js reference".to_string())?;
+                Ok::<_, String>((&**env as *const Env, env.thawjs_references[&reference]))
             })?;
             dispatch_input.ensure_dispatch_scope(env as NapiEnv)?;
             // The outer dispatch guard pins the owner through this encode;
             // no HOST borrow survives a future accessor callback.
-            return Ok(quickjs_wire_result("value", quickjs_reference_wire(env as NapiEnv, value, true)?));
+            return Ok(thawjs_wire_result("value", thawjs_reference_wire(env as NapiEnv, value, true)?));
         }
         if operation == "sync_handle" {
             let handle = target.parse::<u64>().map_err(|_| "invalid native binary handle")?;
             let env = module_env_for_handle(handle)?;
             dispatch_input.ensure_dispatch_scope(env)?;
-            let wire = quickjs_reference_wire(env, handle as NapiValue, true)?;
-            return Ok(quickjs_wire_result("value", wire));
+            let wire = thawjs_reference_wire(env, handle as NapiValue, true)?;
+            return Ok(thawjs_wire_result("value", wire));
         }
         if operation == "promise_state" {
             let handle = target.parse::<u64>().map_err(|_| "invalid native Promise handle")?;
@@ -553,7 +553,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 }
             };
             return match settled {
-                Some((kind, value)) => Ok(quickjs_wire_result(kind, quickjs_bridge_value(value)?)),
+                Some((kind, value)) => Ok(thawjs_wire_result(kind, thawjs_bridge_value(value)?)),
                 None => Ok(serde_json::json!({ "kind": "pending" })),
             };
         }
@@ -591,7 +591,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             let env = module_env_for_handle(handle)?;
             let cached_before = if operation == "define_accessor_graph" {
                 env.as_ref().ok_or("invalid native addon environment")?
-                    .quickjs_live_values.keys().copied().collect::<HashSet<_>>()
+                    .thawjs_live_values.keys().copied().collect::<HashSet<_>>()
             } else { HashSet::new() };
             let values = parse_napi_arguments(env, &graph, true, true, Some(&input))?;
             let object = handle as NapiValue;
@@ -666,7 +666,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 let callback = |value: NapiValue| -> Result<(u64, NapiValue), String> {
                     match value_ref(value).map_err(|_| "invalid native accessor callback")? {
                         Value::Undefined => Ok((0, ptr::null_mut())),
-                        Value::QuickJsHandle { handle, .. } => Ok((*handle, ptr::null_mut())),
+                        Value::ThawJsHandle { handle, .. } => Ok((*handle, ptr::null_mut())),
                         Value::Function(_) => Ok((0, value)),
                         _ => Err("native graph accessor is not a JavaScript Function".into()),
                     }
@@ -688,11 +688,11 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 // fail and will then release every acquired root.
                 // The graph decoder returns a raw native Function only when
                 // it belongs to this Env. Foreign Functions arrive as
-                // retained QuickJsHandle values instead. A same-Env positive
+                // retained ThawJsHandle values instead. A same-Env positive
                 // Reference here would cycle with the descriptor table and
                 // prevent Env retirement.
                 #[allow(clippy::arc_with_non_send_sync)]
-                let mut roots = Arc::new(QuickJsAccessorRoots {
+                let mut roots = Arc::new(ThawJsAccessorRoots {
                     getter: 0, setter: 0, getter_native, setter_native,
                 });
                 for (index, handle) in [getter, setter].into_iter().enumerate() {
@@ -714,7 +714,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     [getter, setter].into_iter().filter(|id| *id != 0)
                         .filter(|id| !cached_before.contains(id))
                         .collect::<HashSet<_>>().into_iter().filter_map(|id| {
-                            let value = owner.quickjs_live_values.remove(&id)?;
+                            let value = owner.thawjs_live_values.remove(&id)?;
                             *value = Value::Undefined;
                             Some(id)
                         }).collect::<Vec<_>>()
@@ -872,7 +872,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 if matches!(value_ref(value), Ok(Value::Function(_))) {
                     Ok(serde_json::json!({ "kind": "method", "value": (value as u64).to_string() }))
                 } else {
-                    Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
+                    Ok(thawjs_wire_result("value", thawjs_bridge_value(value)?))
                 }
             }
             "has" | "has_symbol" => {
@@ -902,7 +902,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     return Err("native property names were not an array".into());
                 };
                 let keys = keys.iter().filter_map(|key| *key)
-                    .map(|value| quickjs_bridge_value(value).map(|wire| wire.value)).collect::<Result<Vec<_>, _>>()?;
+                    .map(|value| thawjs_bridge_value(value).map(|wire| wire.value)).collect::<Result<Vec<_>, _>>()?;
                 Ok(serde_json::json!({ "kind": "value", "value": keys }))
             }
             "descriptor" | "descriptor_symbol" => {
@@ -940,7 +940,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     new_target: ptr::null_mut(), data: function.data };
                 let value = callback_result(env, invoke_napi_callback(env, function.callback, &mut info));
                 take_env_exception(env)?;
-                Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
+                Ok(thawjs_wire_result("value", thawjs_bridge_value(value)?))
             }
             "call_captured_graph" => {
                 let graph = text(args)?;
@@ -951,7 +951,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                         return Err(error);
                     }
                 };
-                // The graph decoder consumes both QuickJS and NAPI transfer
+                // The graph decoder consumes both thaw-js and NAPI transfer
                 // leases before user callback code can reenter addon unload.
                 let graph_input = NapiGraphInput::parse(&graph);
                 let mut values = parse_napi_arguments(
@@ -1004,7 +1004,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             "call" => {
                 let name = CString::new(name).map_err(|_| "method contains NUL")?;
                 let value = call_method_value_impl(handle, name.as_ptr(), args, true, false, Some(&dispatch_input))?;
-                Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
+                Ok(thawjs_wire_result("value", thawjs_bridge_value(value)?))
             }
             "set_symbol" => {
                 let env = module_env_for_handle(handle)?;
@@ -1044,14 +1044,14 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
 }
 
 #[cfg(feature = "js-engine")]
-fn release_quickjs_reference(reference: u64) {
+fn release_thawjs_reference(reference: u64) {
     let released = HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.module_envs
             .iter_mut()
             .filter_map(|env| {
                 if env.finalized { return None; }
-                let value = env.quickjs_references.remove(&reference)?;
+                let value = env.thawjs_references.remove(&reference)?;
                 for candidate in &mut env.references {
                     if candidate.count == 0 && candidate.value == value {
                         candidate.value = ptr::null_mut();
@@ -1628,11 +1628,11 @@ fn value_from_json_with_undefined(
                 }
                 #[cfg(feature = "js-engine")]
                 {
-                if let Some(value) = env.quickjs_references.get(&reference) {
+                if let Some(value) = env.thawjs_references.get(&reference) {
                     return Ok(*value);
                 }
                 let bridge = Rc::new(ThawCallbackBridge {
-                    callback: ThawCallback::QuickJs(crate::engine::thaw_js_call_reference),
+                    callback: ThawCallback::ThawJs(crate::engine::thaw_js_call_reference),
                     context: reference as usize,
                     _context_root: None,
                 });
@@ -1642,7 +1642,7 @@ fn value_from_json_with_undefined(
                     properties: HashMap::new(),
                     _thaw_bridge: Some(bridge), _accessor_owner: None,
                 }));
-                env.quickjs_references.insert(reference, function);
+                env.thawjs_references.insert(reference, function);
                 crate::cancel_pending_js_reference_release(reference);
                 return Ok(function);
                 }
@@ -1653,12 +1653,12 @@ fn value_from_json_with_undefined(
             {
                 if let Some(bytes) = values.get("value").and_then(JsonValue::as_object).and_then(json_buffer_bytes) {
                     let buffer = env.alloc(Value::Buffer(bytes));
-                    env.quickjs_references.insert(reference, buffer);
+                    env.thawjs_references.insert(reference, buffer);
                     return Ok(buffer);
                 }
-                let object = env.quickjs_references.get(&reference).copied().unwrap_or_else(|| {
+                let object = env.thawjs_references.get(&reference).copied().unwrap_or_else(|| {
                     let object = env.alloc(Value::Object(HashMap::new()));
-                    env.quickjs_references.insert(reference, object);
+                    env.thawjs_references.insert(reference, object);
                     object
                 });
                 let properties = values
@@ -1689,9 +1689,9 @@ fn value_from_json_with_undefined(
                 .get("__thaw_napi_array__")
                 .and_then(JsonValue::as_u64)
             {
-                let array = env.quickjs_references.get(&reference).copied().unwrap_or_else(|| {
+                let array = env.thawjs_references.get(&reference).copied().unwrap_or_else(|| {
                     let array = env.alloc(Value::Array(Vec::new()));
-                    env.quickjs_references.insert(reference, array);
+                    env.thawjs_references.insert(reference, array);
                     array
                 });
                 let elements = values.get("value").and_then(JsonValue::as_array);
@@ -1715,7 +1715,7 @@ fn value_from_json_with_undefined(
                     .ok_or("native Buffer is missing its bytes")?;
                 let decoded: Vec<u8> = bytes.iter()
                     .map(|value| value.as_u64().unwrap_or(0) as u8).collect();
-                if let Some(buffer) = env.quickjs_references.get(&reference).copied() {
+                if let Some(buffer) = env.thawjs_references.get(&reference).copied() {
                     let Some(Value::Buffer(target)) = (unsafe { buffer.as_mut() }) else {
                         return Err("native Buffer reference changed its type".into());
                     };
@@ -1726,7 +1726,7 @@ fn value_from_json_with_undefined(
                     return Ok(buffer);
                 }
                 let buffer = env.alloc(Value::Buffer(decoded));
-                env.quickjs_references.insert(reference, buffer);
+                env.thawjs_references.insert(reference, buffer);
                 return Ok(buffer);
             }
             if let Some(reference) = values
@@ -1738,7 +1738,7 @@ fn value_from_json_with_undefined(
                 let shared = values.get("shared").and_then(JsonValue::as_bool).unwrap_or(false);
                 let decoded: Vec<u8> = bytes.iter()
                     .map(|byte| byte.as_u64().unwrap_or(0) as u8).collect();
-                if let Some(buffer) = env.quickjs_references.get(&reference).copied() {
+                if let Some(buffer) = env.thawjs_references.get(&reference).copied() {
                     let target = match unsafe { buffer.as_mut() } {
                         Some(Value::ArrayBuffer { bytes, detached: false }) if !shared => bytes,
                         Some(Value::SharedArrayBuffer(bytes)) if shared => bytes,
@@ -1755,7 +1755,7 @@ fn value_from_json_with_undefined(
                 } else {
                     Value::ArrayBuffer { bytes: decoded, detached: false }
                 });
-                env.quickjs_references.insert(reference, buffer);
+                env.thawjs_references.insert(reference, buffer);
                 return Ok(buffer);
             }
             if values.contains_key("__thaw_napi_view__") {
@@ -1782,7 +1782,7 @@ fn value_from_json_with_undefined(
                 if status != NAPI_OK {
                     return Err(format!("invalid native view metadata: N-API status {status}"));
                 }
-                if let Some(existing) = env.quickjs_references.get(&reference).copied() {
+                if let Some(existing) = env.thawjs_references.get(&reference).copied() {
                     // A repeated ID must describe the same view, including its backing store.
                     let same = match (unsafe { value_ref(existing) }, unsafe { value_ref(view) }) {
                         (Ok(Value::TypedArray { array_type: a, length: al, array_buffer: ab, byte_offset: ao }),
@@ -1803,11 +1803,11 @@ fn value_from_json_with_undefined(
                     }
                     return Ok(existing);
                 }
-                env.quickjs_references.insert(reference, view);
+                env.thawjs_references.insert(reference, view);
                 return Ok(view);
             }
             if let Some(reference) = values.get("__thaw_napi_ref__").and_then(JsonValue::as_u64) {
-                return Ok(env.quickjs_references.get(&reference).copied()
+                return Ok(env.thawjs_references.get(&reference).copied()
                     .unwrap_or_else(|| env.alloc(Value::Undefined)));
             }
             let values = values
@@ -1859,7 +1859,7 @@ fn napi_graph_utf16_units(value: &JsonValue) -> Result<Vec<u16>, String> {
 
 // A graph token's decimal native handle is untrusted until it resolves to a
 // live owner. In particular, never dereference a foreign Symbol key merely
-// because its paired QuickJS wrapper passed the independent JS-side check.
+// because its paired thaw-js wrapper passed the independent JS-side check.
 fn napi_graph_symbol_identity(handle: NapiValue) -> Result<u64, String> {
     let _owner = live_graph_owner_env(handle as u64)
         .ok_or("native graph Symbol owner is no longer live")?;
@@ -1870,7 +1870,7 @@ fn napi_graph_symbol_identity(handle: NapiValue) -> Result<u64, String> {
 }
 
 fn napi_graph_live_handle(env: &Env, handle: u64) -> Result<NapiValue, String> {
-    env.quickjs_live_values.get(&handle).copied()
+    env.thawjs_live_values.get(&handle).copied()
         .ok_or_else(|| "unretained JavaScript graph handle".to_string())
 }
 
@@ -1907,7 +1907,7 @@ fn napi_graph_token(env: &mut Env, token: &JsonValue, nodes: &[NapiValue]) -> Re
         }
         let source = fields.get("hdl").and_then(JsonValue::as_u64)
             .ok_or("foreign native Symbol has no JavaScript wrapper")?;
-        return env.quickjs_live_values.get(&source).copied()
+        return env.thawjs_live_values.get(&source).copied()
             .ok_or_else(|| "unretained native Symbol wrapper".to_string());
     }
     if let Some(decimal) = fields.get("bi").and_then(JsonValue::as_str) {
@@ -1957,11 +1957,11 @@ fn napi_graph_property_key(
     match unsafe { value_ref(symbol) }.map_err(|_| "invalid native graph Symbol key")? {
         Value::Symbol { id, .. } => Ok(PropertyKey::Symbol(*id)),
         #[cfg(feature = "js-engine")]
-        Value::QuickJsHandle { handle, .. } => Ok(PropertyKey::Symbol(
-            *env.quickjs_symbol_ids.get(handle)
+        Value::ThawJsHandle { handle, .. } => Ok(PropertyKey::Symbol(
+            *env.thawjs_symbol_ids.get(handle)
                 .ok_or("unverified JavaScript graph Symbol key")?)),
         #[cfg(not(feature = "js-engine"))]
-        Value::QuickJsHandle { .. } => Err("JavaScript graph Symbol keys require QuickJS".into()),
+        Value::ThawJsHandle { .. } => Err("JavaScript graph Symbol keys require thaw-js".into()),
         _ => Err("invalid native graph property name".into()),
     }
 }
@@ -2002,7 +2002,7 @@ fn napi_graph_value(env: &mut Env, graph: &JsonValue) -> Result<NapiValue, Strin
             } else {
                 let source = fields.get("hdl").and_then(JsonValue::as_u64)
                     .ok_or("foreign native Function has no JavaScript wrapper")?;
-                env.quickjs_live_values.get(&source).copied()
+                env.thawjs_live_values.get(&source).copied()
                     .ok_or("unretained native Function wrapper")?
             }
         } else if let Some(handle) = fields.get("hdl").and_then(JsonValue::as_u64) {
@@ -2143,7 +2143,7 @@ fn napi_graph_value(env: &mut Env, graph: &JsonValue) -> Result<NapiValue, Strin
     napi_graph_token(env, graph.get("root").ok_or("native argument graph has no root")?, &nodes)
 }
 
-// An argument graph transfers its QuickJS leases before any N-API export or
+// An argument graph transfers its thaw-js leases before any N-API export or
 // handle lookup. Keep the parsed wire and its leases together across those
 // fallible lookups; successful decode releases them before invoking the addon.
 struct GraphLeases {
@@ -2206,7 +2206,7 @@ fn ensure_graph_owner_id(env: NapiEnv) -> bool {
     let Some(owner) = (unsafe { env.as_mut() }) else { return false };
     if owner.graph_owner_id == 0 {
         #[cfg(feature = "js-engine")]
-        ensure_quickjs_bridge();
+        ensure_thawjs_bridge();
         let Ok(id) = next_graph_owner_id() else { return false };
         owner.graph_owner_id = id;
         let loaded = HOST.try_with(|host| host.try_borrow().map(|host|
@@ -2437,13 +2437,13 @@ impl NapiGraphInput {
         if self.malformed_lease {
             return Err("invalid native argument graph lease".into());
         }
-        // Preflight every hdl without holding an Env borrow across QuickJS.
+        // Preflight every hdl without holding an Env borrow across thaw-js.
         // The wire leases remain owned by this input until a decoded carrier
         // acquires its own independent registry retain.
         #[cfg(not(feature = "js-engine"))]
         if parsed.get("nodes").and_then(JsonValue::as_array).is_some_and(|nodes|
             nodes.iter().any(|node| node.get("hdl").is_some())) {
-            return Err("JavaScript graph handles require QuickJS".into());
+            return Err("JavaScript graph handles require thaw-js".into());
         }
         #[cfg(feature = "js-engine")]
         let mut wire_handles = Vec::new();
@@ -2464,7 +2464,7 @@ impl NapiGraphInput {
                 if !host_leases.contains(&handle) {
                     return Err("JavaScript graph handle has no transfer lease".into());
                 }
-                if !owner.quickjs_live_values.contains_key(&handle)
+                if !owner.thawjs_live_values.contains_key(&handle)
                     && !handles.contains(&handle) { handles.push(handle); }
             }
             handles
@@ -2533,7 +2533,7 @@ impl NapiGraphInput {
             });
         }
         // A Symbol's native recipient owns an ID and a weak JS cache entry,
-        // not an independently strong QuickJS handle. Keep the wire retain
+        // not an independently strong thaw-js handle. Keep the wire retain
         // only until decode finishes, and use a transient map for hdl tokens.
         #[cfg(feature = "js-engine")]
         let mut transient_symbols = Vec::new();
@@ -2552,7 +2552,7 @@ impl NapiGraphInput {
             new_handles.retain(|handle| !transient_symbols.iter().any(|(symbol, _)| symbol == handle));
         }
         // A graph key may refer to an hdl node. Verify its actual Symbol
-        // type before entering the mutable Env decoder; QuickJS may reenter
+        // type before entering the mutable Env decoder; thaw-js may reenter
         // addon code during a query, while the decoder's Env borrow may not.
         #[cfg(feature = "js-engine")]
         let mut symbol_key_handles = Vec::new();
@@ -2624,17 +2624,17 @@ impl NapiGraphInput {
             let mut inserted = Vec::new();
             #[cfg(feature = "js-engine")]
             for (handle, value) in &transient_symbols {
-                owner.quickjs_live_values.insert(*handle, *value);
+                owner.thawjs_live_values.insert(*handle, *value);
             }
             #[cfg(feature = "js-engine")]
             for handle in new_handles.drain(..) {
-                if owner.quickjs_live_values.contains_key(&handle) {
+                if owner.thawjs_live_values.contains_key(&handle) {
                     continue;
                 }
-                let value = owner.alloc(Value::QuickJsHandle {
+                let value = owner.alloc(Value::ThawJsHandle {
                     handle, object_like: object_likes[&handle],
                 });
-                owner.quickjs_live_values.insert(handle, value);
+                owner.thawjs_live_values.insert(handle, value);
                 inserted.push((handle, value));
             }
             #[cfg(feature = "js-engine")]
@@ -2643,13 +2643,13 @@ impl NapiGraphInput {
             let mut preparation_error = None;
             #[cfg(feature = "js-engine")]
             for (handle, stable_id) in symbol_key_handles {
-                if owner.quickjs_symbol_ids.contains_key(&handle) { continue; }
-                let Some(value) = owner.quickjs_live_values.get(&handle).copied() else {
+                if owner.thawjs_symbol_ids.contains_key(&handle) { continue; }
+                let Some(value) = owner.thawjs_live_values.get(&handle).copied() else {
                     preparation_error = Some("unretained JavaScript graph Symbol key".to_string());
                     break;
                 };
                 let id = stable_id.unwrap_or_else(|| NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed));
-                owner.quickjs_symbol_ids.insert(handle, id);
+                owner.thawjs_symbol_ids.insert(handle, id);
                 let inserted_owner = if let std::collections::hash_map::Entry::Vacant(e) = owner.symbols.entry(id) { e.insert(value); true } else { false };
                 new_symbol_ids.push((handle, id, inserted_owner));
             }
@@ -2670,17 +2670,17 @@ impl NapiGraphInput {
         {
             let owner = env_mut(env).map_err(|_| "invalid native addon environment")?;
             for (handle, value) in &transient_symbols {
-                if owner.quickjs_live_values.get(handle) == Some(value) {
-                    owner.quickjs_live_values.remove(handle);
+                if owner.thawjs_live_values.get(handle) == Some(value) {
+                    owner.thawjs_live_values.remove(handle);
                 }
             }
             if decoded.is_err() {
                 for (handle, id, inserted_owner) in &new_symbol_ids {
-                    owner.quickjs_symbol_ids.remove(handle);
+                    owner.thawjs_symbol_ids.remove(handle);
                     if *inserted_owner { owner.symbols.remove(id); }
                 }
                 for (handle, value) in &inserted {
-                    owner.quickjs_live_values.remove(handle);
+                    owner.thawjs_live_values.remove(handle);
                     **value = Value::Undefined;
                 }
             } else {
@@ -2693,7 +2693,7 @@ impl NapiGraphInput {
         // finalized while this wire was in flight. Move its positive native
         // reference into the enclosing dispatch guard, which outlives even
         // helper-local graph inputs and result encoding. The hdl leases may
-        // be released now: their decoded carriers own new QuickJS handles.
+        // be released now: their decoded carriers own new thaw-js handles.
         let leases = self.leases.borrow_mut().take();
         if let Some(mut leases) = leases {
             if decoded.is_ok() {
@@ -2804,11 +2804,11 @@ unsafe fn release_unconsumed_napi_callback_graph(text: &str) {
 }
 
 // The public N-API property/call adapters use this same live carrier. No
-// Env reference or HOST borrow may survive a call into the QuickJS engine.
+// Env reference or HOST borrow may survive a call into the thaw-js engine.
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_handle(value: NapiValue) -> Option<u64> {
     match value_ref(value).ok()? {
-        Value::QuickJsHandle { handle, .. } => Some(*handle),
+        Value::ThawJsHandle { handle, .. } => Some(*handle),
         _ => None,
     }
 }
@@ -2867,7 +2867,7 @@ unsafe fn qjs_adopt_symbol(env: NapiEnv, handle: u64) -> Result<Option<NapiValue
     let root = root_existing_value(env, symbol)
         .map_err(|_| "registered JavaScript Symbol is no longer live")?;
     // Establish the native-rooted JS pin before dropping the transferred
-    // QuickJS retain, including for a reused canonical Symbol ID.
+    // thaw-js retain, including for a reused canonical Symbol ID.
     sync_js_origin_symbol_pins(env);
     if !env.as_ref().is_some_and(|owner|
         adopted_symbol_root_proven(owner, id, symbol, generation))
@@ -2879,7 +2879,7 @@ unsafe fn qjs_adopt_symbol(env: NapiEnv, handle: u64) -> Result<Option<NapiValue
     Ok(Some(symbol))
 }
 
-// A handle-valued QuickJS API result already owns one registry reference.
+// A handle-valued thaw-js API result already owns one registry reference.
 // Adopt it for a new Env carrier or release it when the Env cache already has
 // the same JS identity. Release only after leaving the mutable Env borrow.
 #[cfg(feature = "js-engine")]
@@ -2930,13 +2930,13 @@ unsafe fn qjs_adopt_handle_result(
             crate::engine::thaw_js_release_handle(result.value);
             return NAPI_INVALID_ARG;
         };
-        if let Some(value) = owner.quickjs_live_values.get(&result.value).copied() {
+        if let Some(value) = owner.thawjs_live_values.get(&result.value).copied() {
             (value, true)
         } else {
-            let value = owner.alloc(Value::QuickJsHandle {
+            let value = owner.alloc(Value::ThawJsHandle {
                 handle: result.value, object_like,
             });
-            owner.quickjs_live_values.insert(result.value, value);
+            owner.thawjs_live_values.insert(result.value, value);
             (value, false)
         }
     };
@@ -2998,11 +2998,11 @@ unsafe fn qjs_adopt_thrown_handle(
             crate::engine::thaw_js_release_handle(handle);
             return NAPI_INVALID_ARG;
         };
-        let (value, duplicate) = if let Some(value) = owner.quickjs_live_values.get(&handle).copied() {
+        let (value, duplicate) = if let Some(value) = owner.thawjs_live_values.get(&handle).copied() {
             (value, true)
         } else {
-            let value = owner.alloc(Value::QuickJsHandle { handle, object_like });
-            owner.quickjs_live_values.insert(handle, value);
+            let value = owner.alloc(Value::ThawJsHandle { handle, object_like });
+            owner.thawjs_live_values.insert(handle, value);
             (value, false)
         };
         let generation = owner.value_generations.get(&(value as usize)).copied();
@@ -3080,7 +3080,7 @@ unsafe fn qjs_native_symbol_key_handle(
         Ok(Value::Symbol { .. }) => {},
         _ => return Err(record_status(env, NAPI_INVALID_ARG)),
     }
-    // The QuickJS helper requests owner-validated metadata for this exact
+    // The thaw-js helper requests owner-validated metadata for this exact
     // native handle. Callers cannot seed its identity cache with an arbitrary
     // id/description pair.
     let result = crate::engine::thaw_js_native_symbol_handle_result(symbol as u64);
@@ -3255,8 +3255,8 @@ unsafe fn qjs_define_callback_property(
         let setter_id = setter.map(create).transpose()?.unwrap_or(0);
         let method_id = method.map(create).transpose()?.unwrap_or(0);
         // A JS descriptor can outlive the addon call which installed it.
-        // Retain each native Function before handing its identity to QuickJS;
-        // the QuickJS closure owns these references after the FFI call.
+        // Retain each native Function before handing its identity to thaw-js;
+        // the thaw-js closure owns these references after the FFI call.
         let mut roots = [0; 3];
         for (slot, id) in roots.iter_mut().zip([getter_id, setter_id, method_id]) {
             if id == 0 { continue; }
@@ -3528,7 +3528,7 @@ unsafe fn qjs_call_function(
 // An accessor descriptor owns its callback handles independently of the
 // graph packet which installed it. `find_accessor` returns an Accessor clone,
 // keeping these roots alive through the entire invocation even if a getter
-// replaces or deletes its own descriptor. No Env borrow crosses QuickJS.
+// replaces or deletes its own descriptor. No Env borrow crosses thaw-js.
 #[cfg(feature = "js-engine")]
 unsafe extern "C" fn reflected_native_getter(
     env: NapiEnv, info: NapiCallbackInfo,
@@ -3611,11 +3611,11 @@ unsafe fn qjs_reflected_native_accessor_source(
 }
 
 #[cfg(feature = "js-engine")]
-unsafe extern "C" fn quickjs_accessor_getter(
+unsafe extern "C" fn thawjs_accessor_getter(
     env: NapiEnv, info: NapiCallbackInfo,
 ) -> NapiValue {
     let Some(info) = info.as_ref() else { return ptr::null_mut() };
-    let Some(roots) = (info.data as *const QuickJsAccessorRoots).as_ref() else {
+    let Some(roots) = (info.data as *const ThawJsAccessorRoots).as_ref() else {
         return ptr::null_mut();
     };
     if roots.getter == 0 && roots.getter_native.is_null() { return ptr::null_mut(); }
@@ -3634,18 +3634,18 @@ unsafe extern "C" fn quickjs_accessor_getter(
 }
 
 #[cfg(feature = "js-engine")]
-unsafe extern "C" fn quickjs_accessor_setter(
+unsafe extern "C" fn thawjs_accessor_setter(
     env: NapiEnv, info: NapiCallbackInfo,
 ) -> NapiValue {
     let Some(info) = info.as_ref() else { return ptr::null_mut() };
-    let Some(roots) = (info.data as *const QuickJsAccessorRoots).as_ref() else {
+    let Some(roots) = (info.data as *const ThawJsAccessorRoots).as_ref() else {
         return ptr::null_mut();
     };
     if (roots.setter == 0 && roots.setter_native.is_null()) || info.args.len() != 1 {
         return ptr::null_mut();
     }
     // A setter's returned value is discarded by property assignment. The
-    // QuickJS result handle is released rather than stored in Env's carrier
+    // thaw-js result handle is released rather than stored in Env's carrier
     // cache, while the callback error still becomes the pending exception.
     if roots.setter_native.is_null() {
         qjs_call_function(env, roots.setter, info.this_arg, &info.args, ptr::null_mut());
@@ -3656,13 +3656,13 @@ unsafe extern "C" fn quickjs_accessor_setter(
     ptr::null_mut()
 }
 
-// `roots` already owns independent retained QuickJS callback handles.
+// `roots` already owns independent retained thaw-js callback handles.
 // It owns them across every validation failure. Its final drop is deliberately
 // outside the Env mutation borrow, because releasing a handle may reenter JS.
 #[cfg(feature = "js-engine")]
 unsafe fn qjs_install_native_accessor(
     env: NapiEnv, object: NapiValue, key: PropertyKey,
-    mut roots: Arc<QuickJsAccessorRoots>,
+    mut roots: Arc<ThawJsAccessorRoots>,
     getter_present: bool, setter_present: bool,
     attributes: u32,
 ) -> NapiStatus {
@@ -3677,7 +3677,7 @@ unsafe fn qjs_install_native_accessor(
     }
     // A partial accessor descriptor preserves its existing opposite side.
     // Transfer a fresh registry retain into the new Arc if that side was a
-    // QuickJS callback; a native callback keeps its original data pointer.
+    // thaw-js callback; a native callback keeps its original data pointer.
     if !getter_present {
         if let Some(native) = previous.as_ref().and_then(|old| old.js_owner.as_ref())
             .map(|owner| owner.getter_native).filter(|native| !native.is_null()) {
@@ -3758,11 +3758,11 @@ unsafe fn qjs_install_native_accessor(
         let descriptor = Accessor {
             getter: if getter_present {
                 (roots.getter != 0 || !roots.getter_native.is_null())
-                    .then_some(quickjs_accessor_getter as NapiCallback)
+                    .then_some(thawjs_accessor_getter as NapiCallback)
             } else { previous.as_ref().and_then(|old| old.getter) },
             setter: if setter_present {
                 (roots.setter != 0 || !roots.setter_native.is_null())
-                    .then_some(quickjs_accessor_setter as NapiCallback)
+                    .then_some(thawjs_accessor_setter as NapiCallback)
             } else { previous.as_ref().and_then(|old| old.setter) },
             getter_data: if roots.getter != 0 || !roots.getter_native.is_null() {
                 Arc::as_ptr(&roots) as *mut c_void
@@ -3787,18 +3787,18 @@ unsafe fn qjs_install_native_accessor(
 
 // Define a native data descriptor without invoking a replaced setter. The
 // old accessor owns callback handles, so release it only after the mutable
-// Env scope ends; a QuickJS finalizer may reenter this addon.
+// Env scope ends; a thaw-js finalizer may reenter this addon.
 unsafe fn qjs_install_native_data_property(
     env: NapiEnv, object: NapiValue, key: PropertyKey,
     value: NapiValue, value_present: bool, attributes: u32,
 ) -> NapiStatus {
     #[cfg(feature = "js-engine")]
-    let is_quickjs_object = qjs_handle(object).is_some();
+    let is_thawjs_object = qjs_handle(object).is_some();
     #[cfg(not(feature = "js-engine"))]
-    let is_quickjs_object = false;
+    let is_thawjs_object = false;
     if !value_belongs_to_environment(env, object)
         || (value_present && !value_belongs_to_environment(env, value))
-        || is_quickjs_object
+        || is_thawjs_object
         || !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
@@ -4077,17 +4077,17 @@ unsafe fn parse_napi_arguments(
     }).collect()
 }
 
-struct QuickJsWireValue {
+struct ThawJsWireValue {
     value: JsonValue,
     // [path, kind, payload]. Paths contain only own string keys and array indices.
     origins: Vec<JsonValue>,
 }
 
-fn quickjs_wire_result(kind: &str, wire: QuickJsWireValue) -> JsonValue {
+fn thawjs_wire_result(kind: &str, wire: ThawJsWireValue) -> JsonValue {
     serde_json::json!({ "kind": kind, "value": wire.value, "origins": wire.origins })
 }
 
-fn quickjs_child_path(path: &[JsonValue], segment: JsonValue) -> Vec<JsonValue> {
+fn thawjs_child_path(path: &[JsonValue], segment: JsonValue) -> Vec<JsonValue> {
     let mut child = path.to_vec();
     child.push(segment);
     child
@@ -4151,7 +4151,7 @@ unsafe fn snapshot_own_keys(
                     snapshot.allocated.push(key);
                     snapshot.items.push((name.clone(), key));
                 }
-                Value::Symbol { .. } | Value::QuickJsHandle { .. } if include_symbols => {},
+                Value::Symbol { .. } | Value::ThawJsHandle { .. } if include_symbols => {},
                 _ => return Err("native property name was not a string or Symbol".into()),
             }
         }
@@ -4211,15 +4211,15 @@ unsafe fn snapshot_owner_env(preferred: NapiEnv, value: NapiValue) -> Result<Nap
     }
 }
 
-unsafe fn quickjs_reference_wire(env: NapiEnv, value: NapiValue, root: bool) -> Result<QuickJsWireValue, String> {
+unsafe fn thawjs_reference_wire(env: NapiEnv, value: NapiValue, root: bool) -> Result<ThawJsWireValue, String> {
     let _dispatch = ForeignCallbackGuard::new();
     let mut origins = Vec::new();
-    let value = quickjs_reference_json(env, value, root, &mut HashSet::new(), &[], &mut origins)?;
-    Ok(QuickJsWireValue { value, origins })
+    let value = thawjs_reference_json(env, value, root, &mut HashSet::new(), &[], &mut origins)?;
+    Ok(ThawJsWireValue { value, origins })
 }
 
 /// Snapshot one reference while keeping child identities on the existing wire ID.
-unsafe fn quickjs_reference_json(
+unsafe fn thawjs_reference_json(
     env: NapiEnv,
     value: NapiValue,
     root: bool,
@@ -4229,7 +4229,7 @@ unsafe fn quickjs_reference_json(
 ) -> Result<JsonValue, String> {
     let env = snapshot_owner_env(env, value)?;
     if !root {
-        if let Some(reference) = env.as_ref().and_then(|env| env.quickjs_references.iter()
+        if let Some(reference) = env.as_ref().and_then(|env| env.thawjs_references.iter()
             .find(|(_, item)| **item == value).map(|(reference, _)| *reference)) {
             return Ok(serde_json::json!({ "__thaw_napi_ref__": reference }));
         }
@@ -4249,11 +4249,11 @@ unsafe fn quickjs_reference_json(
             let child = snapshot_property(env, value, &key, key_value)?;
             let child_owner = snapshot_owner_env(env, child)?;
             let is_reference = child_owner.as_ref().is_some_and(|env|
-                env.quickjs_references.values().any(|item| *item == child));
+                env.thawjs_references.values().any(|item| *item == child));
             if !matches!(value_ref(child), Ok(Value::Symbol { .. }))
                 && (!matches!(value_ref(child), Ok(Value::Function(_))) || is_reference) {
-                let child_path = quickjs_child_path(path, JsonValue::String(key.clone()));
-                out.insert(key, quickjs_reference_json(env, child, false, seen, &child_path, origins)?);
+                let child_path = thawjs_child_path(path, JsonValue::String(key.clone()));
+                out.insert(key, thawjs_reference_json(env, child, false, seen, &child_path, origins)?);
             }
         }
         JsonValue::Object(out)
@@ -4261,8 +4261,8 @@ unsafe fn quickjs_reference_json(
         JsonValue::Array(children.into_iter().enumerate().map(|(index, child)| match child {
             Some(key) => {
                 let child = snapshot_property(env, value, &index.to_string(), key)?;
-                let child_path = quickjs_child_path(path, serde_json::json!(index));
-                quickjs_reference_json(env, child, false, seen, &child_path, origins)
+                let child_path = thawjs_child_path(path, serde_json::json!(index));
+                thawjs_reference_json(env, child, false, seen, &child_path, origins)
             }
             None => Ok(JsonValue::Null),
         }).collect::<Result<_, _>>()?)
@@ -4289,12 +4289,12 @@ unsafe fn quickjs_reference_json(
             serde_json::json!({ "__thaw_napi_binary__": (value as u64).to_string(),
                 "kind": "TypedArray", "array_type": array_type, "length": length,
                 "byte_offset": byte_offset,
-                "buffer": quickjs_reference_json(env, *array_buffer, false, seen, &quickjs_child_path(path, serde_json::json!("buffer")), origins)? })
+                "buffer": thawjs_reference_json(env, *array_buffer, false, seen, &thawjs_child_path(path, serde_json::json!("buffer")), origins)? })
         }
         Value::DataView { length, array_buffer, byte_offset } => {
             serde_json::json!({ "__thaw_napi_binary__": (value as u64).to_string(),
                 "kind": "DataView", "length": length, "byte_offset": byte_offset,
-                "buffer": quickjs_reference_json(env, *array_buffer, false, seen, &quickjs_child_path(path, serde_json::json!("buffer")), origins)? })
+                "buffer": thawjs_reference_json(env, *array_buffer, false, seen, &thawjs_child_path(path, serde_json::json!("buffer")), origins)? })
         }
         Value::Object(_) => serde_json::json!({ "__thaw_napi_handle__": (value as u64).to_string() }),
         Value::Promise(_) => serde_json::json!({ "__thaw_napi_promise__": (value as u64).to_string() }),
@@ -4314,9 +4314,9 @@ unsafe fn quickjs_reference_json(
     Ok(result)
 }
 
-unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, String> {
+unsafe fn thawjs_bridge_value(value: NapiValue) -> Result<ThawJsWireValue, String> {
     let _dispatch = ForeignCallbackGuard::new();
-    let marker = |value| Ok(QuickJsWireValue { value, origins: Vec::new() });
+    let marker = |value| Ok(ThawJsWireValue { value, origins: Vec::new() });
     let symbol_owner = owner_env_for_value(value)?;
     match value_ref(value) {
         Ok(Value::Promise(_)) => return marker(serde_json::json!({ "__thaw_napi_promise__": (value as u64).to_string() })),
@@ -4342,7 +4342,7 @@ unsafe fn quickjs_bridge_value(value: NapiValue) -> Result<QuickJsWireValue, Str
             .map(|env| &**env as *const Env)
             .ok_or_else(|| "native addon result belongs to an unknown environment".to_string())
     })?;
-    quickjs_reference_wire(env as NapiEnv, value, false)
+    thawjs_reference_wire(env as NapiEnv, value, false)
 }
 
 unsafe fn json_from_value_with_undefined(
@@ -4491,7 +4491,7 @@ unsafe fn json_from_value_with_undefined_for_env_mode_inner(
             return Err("cannot JSON-encode an ArrayBuffer view".into());
         }
         Value::Function(_) => return Err("cannot JSON-encode a function".into()),
-        Value::QuickJsHandle { .. } => return Err("live JavaScript value requires graph transport".into()),
+        Value::ThawJsHandle { .. } => return Err("live JavaScript value requires graph transport".into()),
         Value::External(_) => return Err("cannot JSON-encode an external value".into()),
         Value::BigInt { .. } => return Err("cannot JSON-encode a BigInt".into()),
         Value::Promise(state) => {
@@ -4598,7 +4598,7 @@ impl NapiResultGraph {
                 "nf": if number.is_nan() { "NaN" } else if *number > 0.0 { "Infinity" } else { "-Infinity" }
             })),
             Value::Number(number) => Ok(serde_json::json!({"v": number})),
-            Value::QuickJsHandle { .. } => {
+            Value::ThawJsHandle { .. } => {
                 let identity = value as usize;
                 let index = if let Some(index) = self.ids.get(&identity) { *index } else {
                     let index = self.pending.len();
@@ -4651,9 +4651,9 @@ impl NapiResultGraph {
                 .or_else(|| self.wrapper_kinds.get(&(value as usize)).copied());
             let array = matches!(value_ref(value), Ok(Value::Array(_)));
             let array = if array { Some(snapshot_array_keys(owner_env, value)?) } else { None };
-            let node = if let Ok(Value::QuickJsHandle { handle, .. }) = value_ref(value) {
+            let node = if let Ok(Value::ThawJsHandle { handle, .. }) = value_ref(value) {
                 #[cfg(not(feature = "js-engine"))]
-                return Err("JavaScript graph handles require QuickJS".into());
+                return Err("JavaScript graph handles require thaw-js".into());
                 #[cfg(feature = "js-engine")]
                 if crate::engine::thaw_js_retain_handle(*handle) == 0 {
                     return Err("released JavaScript graph handle".into());
@@ -4699,7 +4699,7 @@ impl NapiResultGraph {
                             .and_then(|owner| owner.utf16_strings.get(&(key_value as usize)))
                             .map(|units| serde_json::json!({"su": units}))
                             .unwrap_or_else(|| serde_json::json!(key)),
-                        Value::Symbol { .. } | Value::QuickJsHandle { .. } => self.token(key_value)?,
+                        Value::Symbol { .. } | Value::ThawJsHandle { .. } => self.token(key_value)?,
                         _ => return Err("invalid native array graph key type".into()),
                     };
                     let child = self.snapshot_child(owner_env, value, "array graph key", key_value)?;
@@ -4772,7 +4772,7 @@ impl NapiResultGraph {
                                 .and_then(|owner| owner.utf16_strings.get(&(key_value as usize)))
                                 .map(|units| serde_json::json!({"su": units}))
                                 .unwrap_or_else(|| serde_json::json!(key)),
-                            Value::Symbol { .. } | Value::QuickJsHandle { .. } => self.token(key_value)?,
+                            Value::Symbol { .. } | Value::ThawJsHandle { .. } => self.token(key_value)?,
                             _ => return Err("invalid native graph key type".into()),
                         };
                         let child = self.snapshot_child(owner_env, value, "graph key", key_value)?;
@@ -5490,7 +5490,7 @@ unsafe fn take_env_exception(env: NapiEnv) -> Result<(), String> {
     Err(describe_env_exception(env, exception)?)
 }
 
-// Graph bridge callers can return a thrown QuickJS value itself, retaining
+// Graph bridge callers can return a thrown thaw-js value itself, retaining
 // its lease until the receiving realm decodes it. Native-only exceptions keep
 // the established tagged-text fallback.
 unsafe fn take_env_exception_graph(env: NapiEnv) -> Result<Option<JsonValue>, String> {
@@ -5499,7 +5499,7 @@ unsafe fn take_env_exception_graph(env: NapiEnv) -> Result<Option<JsonValue>, St
         .exception.take()
     else { return Ok(None); };
     #[cfg(feature = "js-engine")]
-    if matches!(value_ref(exception), Ok(Value::QuickJsHandle { .. } | Value::Symbol { .. })) {
+    if matches!(value_ref(exception), Ok(Value::ThawJsHandle { .. } | Value::Symbol { .. })) {
         return match napi_result_graph_for_env(env, exception, true) {
             Ok(wire) => Ok(Some(serde_json::json!({ "__thaw_exception_graph__": wire }))),
             Err(_) => Err(describe_env_exception(env, exception)?),
@@ -5813,11 +5813,11 @@ impl Drop for CallbackGraphArguments {
     }
 }
 
-/// Calls a retained QuickJS function with arguments that need graph transport.
+/// Calls a retained thaw-js function with arguments that need graph transport.
 /// The wire is `[true, receiver, ...arguments]`, the receiver-carrying form the
 /// reference wrapper understands.
 #[cfg(feature = "js-engine")]
-unsafe fn call_quickjs_reference_graph(
+unsafe fn call_thawjs_reference_graph(
     env: NapiEnv, info: &CallbackInfo, context: usize,
 ) -> NapiValue {
     let (marker, receiver, arguments) = {
@@ -5860,11 +5860,11 @@ unsafe fn call_quickjs_reference_graph(
     };
     let result = crate::engine::thaw_js_call_reference_graph(context as *mut c_void, encoded.as_ptr());
     let Ok(result) = text(result) else {
-        return fail("invalid QuickJS callback response".into());
+        return fail("invalid thaw-js callback response".into());
     };
     if let Some(message) = result.strip_prefix('\u{2}') {
         let message = serde_json::from_str::<String>(message)
-            .unwrap_or_else(|_| "invalid QuickJS callback error response".into());
+            .unwrap_or_else(|_| "invalid thaw-js callback error response".into());
         let framed = thaw_arena::error_wire::parse_tagged(message.as_bytes())
             .and_then(|frame| {
                 let name = std::str::from_utf8(frame.chain).ok()?;
@@ -5900,10 +5900,10 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
         ThawCallback::Value(callback) => Some((callback, false, false)),
         ThawCallback::ValueGraph(callback) => Some((callback, false, true)),
         #[cfg(feature = "js-engine")]
-        ThawCallback::QuickJs(callback) => Some((callback, true, false)),
+        ThawCallback::ThawJs(callback) => Some((callback, true, false)),
         ThawCallback::Event(_) | ThawCallback::EventGraph(_) => None,
     };
-    if let Some((callback, _is_quickjs, graph_wire)) = callback {
+    if let Some((callback, _is_thawjs, graph_wire)) = callback {
         if graph_wire {
             let arguments = {
                 let env = env_mut(_env).unwrap();
@@ -5937,7 +5937,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
             .map(|value| json_from_value_with_undefined_for_env(_env, *value, true))
             .collect::<Result<Vec<_>, _>>();
         #[cfg(feature = "js-engine")]
-        let args = if _is_quickjs {
+        let args = if _is_thawjs {
             args.and_then(|mut args| {
                 let paths = callback_native_handle_paths(&info.args)?;
                 let mut meta = value_ref(info.this_arg)
@@ -5961,8 +5961,8 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
         // Live JavaScript values have no JSON form: escalate this call to
         // graph transport instead of failing it silently.
         #[cfg(feature = "js-engine")]
-        if _is_quickjs && args.as_ref().is_err_and(|message| message.contains("requires graph transport")) {
-            return call_quickjs_reference_graph(_env, info, bridge.context);
+        if _is_thawjs && args.as_ref().is_err_and(|message| message.contains("requires graph transport")) {
+            return call_thawjs_reference_graph(_env, info, bridge.context);
         }
         let args = args.and_then(|args| {
             serde_json::to_string(&args).map_err(|error| error.to_string())
@@ -5975,9 +5975,9 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
         let Ok(result) = text(result) else { return ptr::null_mut(); };
         if let Some(message) = result.strip_prefix('\u{2}') {
             let env = env_mut(_env).unwrap();
-            let error = if _is_quickjs {
+            let error = if _is_thawjs {
                 let message = serde_json::from_str::<String>(message)
-                    .unwrap_or_else(|_| "invalid QuickJS callback error response".into());
+                    .unwrap_or_else(|_| "invalid thaw-js callback error response".into());
                 let framed = thaw_arena::error_wire::parse_tagged(message.as_bytes())
                     .and_then(|frame| {
                         let name = std::str::from_utf8(frame.chain).ok()?;
@@ -6619,7 +6619,7 @@ mod typed_native_graph_value_tests {
         static FINALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    // Unrun: duplicate retained QuickJS objects are independently returned
+    // Unrun: duplicate retained thaw-js objects are independently returned
     // or thrown after their creator scope has closed. The recipient scope or
     // exception slot must be the owner before its transfer retain is dropped.
     #[test]
@@ -6663,7 +6663,7 @@ mod typed_native_graph_value_tests {
                 assert_eq!(napi_delete_property(env_ptr, parent, key, &mut deleted), NAPI_OK);
                 assert!(deleted);
                 sweep_pending_scope_values(env_ptr);
-                assert!(matches!(value_ref(first), Ok(Value::QuickJsHandle { .. })));
+                assert!(matches!(value_ref(first), Ok(Value::ThawJsHandle { .. })));
                 if thrown {
                     let mut cleared = ptr::null_mut();
                     assert_eq!(napi_get_and_clear_last_exception(env_ptr, &mut cleared), NAPI_OK);

@@ -11,15 +11,8 @@ crate-type = ["staticlib", "rlib"]
 default = ["engine-thaw-js"]
 # `js-engine` = "some engine backend is present"; all existing cfg(feature="js-engine") gates keep working.
 js-engine = []
-engine-quickjs = ["js-engine", "dep:thaw-quickjs"]
 # thaw-js is reached via extern "C" only (src/engine/tjs.rs), never a normal Cargo dep.
 engine-thaw-js = ["js-engine"]
-quickjs = ["engine-quickjs"]
-quickjs-brotli = ["engine-quickjs", "thaw-quickjs/brotli"]
-quickjs-tls = ["engine-quickjs", "thaw-quickjs/tls"]
-quickjs-wasm = ["engine-quickjs", "thaw-quickjs/wasm"]
-quickjs-intl = ["engine-quickjs", "thaw-quickjs/intl"]
-quickjs-icu4c = ["engine-quickjs", "thaw-quickjs/icu4c"]
 
 [dependencies]
 thaw-arena = { path = "../thaw-arena" }
@@ -28,7 +21,6 @@ flate2 = "1"
 libc = "0.2"
 serde_json = "1"
 tempfile = "3"
-thaw-quickjs = { path = "../thaw-quickjs", optional = true, default-features = false }
 
 [dev-dependencies]
 # Test-only, same device as thaw-std/thaw-runtime below: `use thaw_js as _;` in lib.rs (cfg test +
@@ -36,7 +28,7 @@ thaw-quickjs = { path = "../thaw-quickjs", optional = true, default-features = f
 # in src/engine/tjs.rs resolve. No normal dependency edge; the lib never calls thaw-js from Rust.
 thaw-js = { path = "../thaw-js" }
 # Test-only: with the `js-engine` feature (on by default), this crate
-# transitively needs thaw-quickjs's `thaw_js_dynamic_object_query`, which
+# transitively needs thaw-js's `thaw_tjs_dynamic_object_query`, which
 # calls thaw-std's `thaw_json_parse` as an `extern "C"` declaration
 # resolved at link time (no real Rust-level dependency between these
 # archives -- see thaw-runtime's own `Cargo.toml` comment) -- this

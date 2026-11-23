@@ -810,7 +810,7 @@ pub unsafe extern "C" fn napi_get_cb_info(
             }
         }
     }
-    // A later Symbol may synchronize a native pin through QuickJS and reenter
+    // A later Symbol may synchronize a native pin through thaw-js and reenter
     // this Env. Do not publish earlier callback arguments if that reentry
     // closed the receiving scope or retired an earlier value.
     let still_rooted = prepared_scoped_values_still_rooted(env, recipient_scope, &prepared);

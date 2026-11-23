@@ -1,5 +1,5 @@
 #[test]
-fn quickjs_reference_graph_preserves_cycles_arrays_and_buffer_bytes() {
+fn thawjs_reference_graph_preserves_cycles_arrays_and_buffer_bytes() {
     unsafe {
         let mut env = Env::new();
         let env_ptr: NapiEnv = &mut env;
@@ -20,17 +20,17 @@ fn quickjs_reference_graph_preserves_cycles_arrays_and_buffer_bytes() {
         let four = env.alloc(Value::Number(4.0));
         if let Some(Value::Array(items)) = array.as_mut() { items.push(Some(four)); }
         if let Some(Value::Buffer(bytes)) = buffer.as_mut() { bytes[0] = 9; }
-        let snapshot = quickjs_reference_wire(env_ptr, root, true).unwrap().value;
+        let snapshot = thawjs_reference_wire(env_ptr, root, true).unwrap().value;
         assert_eq!(snapshot["self"], serde_json::json!({ "__thaw_napi_ref__": 1 }));
-        assert_eq!(quickjs_reference_wire(env_ptr, array, true).unwrap().value,
+        assert_eq!(thawjs_reference_wire(env_ptr, array, true).unwrap().value,
             serde_json::json!([{ "__thaw_napi_ref__": 2 }, 4.0]));
-        assert_eq!(quickjs_reference_wire(env_ptr, buffer, true).unwrap().value,
+        assert_eq!(thawjs_reference_wire(env_ptr, buffer, true).unwrap().value,
             serde_json::json!([9, 2]));
     }
 }
 
 #[test]
-fn quickjs_typed_array_uses_the_original_arraybuffer_backing() {
+fn thawjs_typed_array_uses_the_original_arraybuffer_backing() {
     unsafe {
         let mut env = Env::new();
         let env_ptr: NapiEnv = &mut env;
@@ -41,13 +41,13 @@ fn quickjs_typed_array_uses_the_original_arraybuffer_backing() {
             "byte_offset": 0,
             "buffer": { "__thaw_napi_arraybuffer__": 11, "value": [1, 2, 3] }
         }), true).unwrap();
-        let backing = env.quickjs_references[&11];
+        let backing = env.thawjs_references[&11];
         let Value::TypedArray { array_buffer, .. } = value_ref(view).unwrap() else {
             panic!("typed array expected")
         };
         assert_eq!(*array_buffer, backing);
         if let Some(Value::ArrayBuffer { bytes, .. }) = backing.as_mut() { bytes[1] = 9; }
-        assert_eq!(quickjs_reference_wire(env_ptr, backing, true).unwrap().value,
+        assert_eq!(thawjs_reference_wire(env_ptr, backing, true).unwrap().value,
             serde_json::json!([1, 9, 3]));
         assert_eq!(value_from_json_with_undefined(&mut env,
             &serde_json::json!({ "__thaw_napi_ref__": 11 }), true).unwrap(), backing);
@@ -76,9 +76,9 @@ fn json_view_decoder_rejects_invalid_bounds_before_exposing_a_native_view() {
     for input in &cases {
         assert!(value_from_json(&mut env, input).is_err());
     }
-    assert!(!env.quickjs_references.contains_key(&21));
-    assert!(!env.quickjs_references.contains_key(&22));
-    assert!(!env.quickjs_references.contains_key(&23));
+    assert!(!env.thawjs_references.contains_key(&21));
+    assert!(!env.thawjs_references.contains_key(&22));
+    assert!(!env.thawjs_references.contains_key(&23));
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn repeated_binary_references_keep_native_data_pointers_stable() {
                     "value": [1, 2, 3]
                 }
             })).unwrap();
-            let backing = env.quickjs_references[&backing_id];
+            let backing = env.thawjs_references[&backing_id];
             let mut original_backing_data = ptr::null_mut();
             let mut original_view_data = ptr::null_mut();
             assert_eq!(napi_get_arraybuffer_info(env_ptr, backing, &mut original_backing_data, ptr::null_mut()), NAPI_OK);
@@ -158,7 +158,7 @@ fn native_symbol_key_keeps_its_identity_in_own_keys() {
         assert_eq!(keys.as_slice(), &[Some(symbol)]);
         // The wire encoder resolves the symbol's owner through the registered envs.
         HOST.with(|host| host.borrow_mut().module_envs.push(env));
-        let marker = quickjs_bridge_value(symbol).unwrap().value;
+        let marker = thawjs_bridge_value(symbol).unwrap().value;
         let Value::Symbol { id, .. } = value_ref(symbol).unwrap() else { panic!("symbol expected") };
         assert_eq!(marker["__thaw_napi_symbol__"], serde_json::json!(id.to_string()));
         HOST.with(|host| host.borrow_mut().module_envs.clear());
@@ -1251,48 +1251,6 @@ fn run_script_evaluates_values_and_reports_exceptions() {
     }
 }
 
-#[cfg(not(feature = "js-engine"))]
-#[test]
-fn run_script_without_quickjs_accepts_json_only() {
-    unsafe {
-        let mut env = Env::new();
-        let env_ptr: NapiEnv = &mut env;
-        let mut script = ptr::null_mut();
-        assert_eq!(
-            napi_create_string_utf8(
-                env_ptr,
-                c"{\"answer\":42}".as_ptr(),
-                NAPI_AUTO_LENGTH,
-                &mut script,
-            ),
-            NAPI_OK
-        );
-        let mut result = ptr::null_mut();
-        assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
-        assert_eq!(
-            json_from_value_with_undefined_for_env(env_ptr, result, false).unwrap(),
-            serde_json::json!({"answer": 42.0})
-        );
-
-        assert_eq!(
-            napi_create_string_utf8(env_ptr, c"1 + 1".as_ptr(), NAPI_AUTO_LENGTH, &mut script),
-            NAPI_OK
-        );
-        assert_eq!(
-            napi_run_script(env_ptr, script, &mut result),
-            NAPI_PENDING_EXCEPTION
-        );
-        let mut pending = false;
-        assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);
-        assert!(pending);
-        assert_eq!(
-            napi_get_and_clear_last_exception(env_ptr, &mut result),
-            NAPI_OK
-        );
-        assert!(matches!(value_ref(result), Ok(Value::Error(message)) if message.contains("QuickJS feature")));
-    }
-}
-
 // A JavaScript callback wrapper lives only while native code holds it. Once the
 // scope closes with no napi_ref, the wrapper is retired and JavaScript is told
 // (with the next bridge response) to drop the strong callback global.
@@ -1311,14 +1269,14 @@ fn unheld_javascript_callback_wrapper_is_retired_and_reported() {
         let mut reference = ptr::null_mut();
         assert_eq!(napi_create_reference(env_ptr, held, 1, &mut reference), NAPI_OK);
         assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
-        assert!(!env.quickjs_references.contains_key(&8101));
-        assert_eq!(env.quickjs_references.get(&8102), Some(&held));
+        assert!(!env.thawjs_references.contains_key(&8101));
+        assert_eq!(env.thawjs_references.get(&8102), Some(&held));
         assert_eq!(crate::take_pending_js_reference_releases(), vec![8101]);
 
         // Dropping the last napi_ref releases the second wrapper as well.
         assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
         sweep_pending_scope_values(env_ptr);
-        assert!(!env.quickjs_references.contains_key(&8102));
+        assert!(!env.thawjs_references.contains_key(&8102));
         assert_eq!(crate::take_pending_js_reference_releases(), vec![8102]);
     }
 }

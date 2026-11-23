@@ -135,7 +135,7 @@ unsafe fn property_key(env: NapiEnv, handle: NapiValue) -> Result<PropertyKey, N
             .unwrap_or_else(|| PropertyKey::String(value.clone()))),
         Ok(Value::Symbol { id, .. }) => Ok(PropertyKey::Symbol(*id)),
         #[cfg(feature = "js-engine")]
-        Ok(Value::QuickJsHandle { handle: source, .. }) => {
+        Ok(Value::ThawJsHandle { handle: source, .. }) => {
             // The engine owns the exact UTF-16 units and Symbol identity.
             // Probe before allocating native metadata, with the owner pinned
             // and without an Env borrow across the engine call.
@@ -160,16 +160,16 @@ unsafe fn property_key(env: NapiEnv, handle: NapiValue) -> Result<PropertyKey, N
             }
             // A property key owns the Symbol through the native object graph.
             // Register its exact JS identity in the per-owner weak cache; do
-            // not add an independent strong QuickJS registry retain merely
+            // not add an independent strong thaw-js registry retain merely
             // because the key was materialized through a live carrier.
             let owner_id = env.as_ref().map(|owner| owner.graph_owner_id)
                 .ok_or(NAPI_INVALID_ARG)?;
             if owner_id == 0 {
                 // A non-bridge test Env has no owner-specific JS weak cache.
                 let needs_retain = env.as_ref().is_some_and(|owner|
-                    !owner.quickjs_live_values.contains_key(&source));
+                    !owner.thawjs_live_values.contains_key(&source));
                 // A key may arrive from another live addon Env. Own a separate
-                // QuickJS registry retain before storing it in this Env's map.
+                // thaw-js registry retain before storing it in this Env's map.
                 if needs_retain && crate::engine::thaw_js_retain_handle(source) == 0 {
                     return Err(record_status(env, NAPI_INVALID_ARG));
                 }
@@ -178,15 +178,15 @@ unsafe fn property_key(env: NapiEnv, handle: NapiValue) -> Result<PropertyKey, N
                         if needs_retain { crate::engine::thaw_js_release_handle(source); }
                         return Err(record_status(env, NAPI_INVALID_ARG));
                     };
-                    let duplicate_retain = owner.quickjs_live_values.contains_key(&source) && needs_retain;
-                    let owned = if let Some(owned) = owner.quickjs_live_values.get(&source).copied() {
+                    let duplicate_retain = owner.thawjs_live_values.contains_key(&source) && needs_retain;
+                    let owned = if let Some(owned) = owner.thawjs_live_values.get(&source).copied() {
                         owned
                     } else {
-                        let owned = owner.alloc(Value::QuickJsHandle { handle: source, object_like: false });
-                        owner.quickjs_live_values.insert(source, owned);
+                        let owned = owner.alloc(Value::ThawJsHandle { handle: source, object_like: false });
+                        owner.thawjs_live_values.insert(source, owned);
                         owned
                     };
-                    let id = *owner.quickjs_symbol_ids.entry(source).or_insert_with(|| {
+                    let id = *owner.thawjs_symbol_ids.entry(source).or_insert_with(|| {
                         NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed)
                     });
                     owner.symbols.insert(id, owned);
