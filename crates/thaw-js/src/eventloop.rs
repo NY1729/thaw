@@ -277,8 +277,10 @@ impl Interp {
                 continue;
             }
             if HOOKED_SIGNALS.load(Relaxed) & (1 << sig) == 0 && self.has_process_listeners(name) {
-                HOOKED_SIGNALS.fetch_or(1 << sig, Relaxed);
+                // install the handler FIRST: a watcher (the test below) that sees the flag may send the signal at once,
+                // and a signal arriving before the handler is in place takes the default action and ends the process
                 unsafe { libc::signal(sig, record_signal as *const () as libc::sighandler_t) };
+                HOOKED_SIGNALS.fetch_or(1 << sig, std::sync::atomic::Ordering::Release);
             }
         }
         // A realm consumes only the signals it has a listener for: another realm on this thread (or a test's

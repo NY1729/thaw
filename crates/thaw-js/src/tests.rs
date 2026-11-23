@@ -12676,7 +12676,7 @@ fn an_os_signal_from_outside_reaches_a_process_listener() {
     let pid = std::process::id() as i32;
     std::thread::spawn(move || {
         // wait for the loop to hook the signal, then deliver it from outside
-        while crate::eventloop::HOOKED_SIGNALS.load(std::sync::atomic::Ordering::Relaxed)
+        while crate::eventloop::HOOKED_SIGNALS.load(std::sync::atomic::Ordering::Acquire)
             & (1 << libc::SIGUSR2)
             == 0
         {
