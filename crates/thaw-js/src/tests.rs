@@ -2810,6 +2810,25 @@ fn a_thrown_errors_own_to_string_is_not_run_when_the_host_reports_it() {
 }
 
 #[test]
+fn a_later_string_throw_does_not_pick_up_the_previous_errors_frame() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.failObject = function () { throw { name: 'Error', message: 'fake' }; };\nexports.failString = function () { throw 'Error: fake'; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    // the first error's frame is never taken (a typed call that keeps the original object skips `frame_error`)
+    match p.call("failObject", &[]) {
+        Err(HostError::Thrown(display)) => assert_eq!(display, "Error: fake"),
+        other => panic!("{other:?}"),
+    }
+    match p.call("failString", &[]) {
+        Err(HostError::Thrown(display)) => assert_eq!(frame_text(&display), "Error: fake"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn vm_sub_realm_errors_are_framed_as_foreign() {
     use crate::host::{HostError, Package};
     let bundle = MINI.replace(

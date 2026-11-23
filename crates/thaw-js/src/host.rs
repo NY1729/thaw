@@ -1574,6 +1574,9 @@ impl Package {
 }
 
 pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
+    // the framed form belongs to the error classified last: a later throw of anything else (a string whose text
+    // equals that error's display) must not pick it up
+    LAST_FRAME.with(|f| *f.borrow_mut() = None);
     let packet = match &c {
         Ctl::Throw(v) => carrier_packet(it, v),
         _ => None,
