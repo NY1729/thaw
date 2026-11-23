@@ -1,7 +1,7 @@
 name: parity-aot
 
 # Non-gating AOT-vs-Node probe harness (tools/parity-aot). Node 22 is the oracle. The release thaw CLI builds each
-# generated probe program and both engines (thaw-js, quickjs) run. Results go to the job summary and an artifact.
+# generated probe program and thaw-js runs. Results go to the job summary and an artifact.
 # Runs on demand (workflow_dispatch) or on a pull request when a label is added: `parity-aot` runs the ECMAScript
 # (builtin) suite, `parity-aot-modules` the node:* module suite. The dispatch input `suite` picks one or both; the
 # default `ecmascript` is the original behaviour.
@@ -237,7 +237,7 @@ jobs:
           path: ${{ github.workspace }}
       - name: Make the thaw binary executable
         run: chmod +x target/release/thaw
-      - name: Run AOT probes for thaw-js and quickjs, shard ${{ matrix.shard }} (non-gating)
+      - name: Run AOT probes for thaw-js, shard ${{ matrix.shard }} (non-gating)
         # run.sh exits 2 only on a harness error; gaps, rejects and crashes are findings in the summary.
         env:
           THAW: ${{ github.workspace }}/target/release/thaw

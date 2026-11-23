@@ -3,7 +3,7 @@
 
 Driven by run.sh (which runs gen_probes.py first). For each program in the manifest:
   1. Node runs <program>.mts once (the oracle; a Node failure or a missing header is a harness error, exit 2).
-  2. For each engine (THAW_JS_ENGINE value), thaw builds the program with `thaw build <file.ts> -o <bin>`.
+  2. For the engine (thaw-js, the only one), thaw builds the program with `thaw build <file.ts> -o <bin>`.
      - Compile diagnostic: every probe line named at an error site is dropped in one pass and the rest rebuilt
        (REJECT, the diagnostic text is the reason; REJECT-EXPECTED when Node also throws, see expected_reject).
        A diagnostic with no named site bisects the probe list by halves. At most EXTRA_CAP builds per program;
@@ -174,7 +174,7 @@ class Program:
         self.line_of = {p["name"]: p["line"] for p in prog["probes"]}
         self.work = os.path.join(cfg.out, engine, "work", safe(prog["name"]))
         self.cwd = self.work
-        self.env = dict(os.environ, THAW_JS_ENGINE=engine, TZ="UTC", LANG="C",
+        self.env = dict(os.environ, TZ="UTC", LANG="C",
                         PA_TMP=pa_tmp_dir(cfg, prog))
         os.makedirs(self.env["PA_TMP"], exist_ok=True)
         if prog.get("imports"):
@@ -384,7 +384,7 @@ def engine_stage(cfg, engine, manifest, node_blocks):
 
 def summarise(cfg, engines, out):
     lines = ["# tools/parity-aot results (non-gating)", ""]
-    summary = {"engines": {}, "delta": []}
+    summary = {"engines": {}}
     for engine, res in out.items():
         counts = {}
         per_corpus = {}
@@ -428,18 +428,6 @@ def summarise(cfg, engines, out):
             for n, c in findings[:40]:
                 lines.append(f"- {c['class']} `{n}`: {c['detail']}")
             lines.append("")
-    if len(engines) == 2:
-        a, b = engines
-        ca, cb = out[a]["classes"], out[b]["classes"]
-        for n in sorted(set(ca) | set(cb)):
-            ka = ca.get(n, {}).get("class", "-")
-            kb = cb.get(n, {}).get("class", "-")
-            if ka != kb:
-                summary["delta"].append({"probe": n, a: ka, b: kb})
-        lines += [f"## engine delta ({a} vs {b}): {len(summary['delta'])} probe(s) with a different class", ""]
-        for d in summary["delta"][:60]:
-            lines.append(f"- `{d['probe']}`: {a} {d[a]}, {b} {d[b]}")
-        lines.append("")
     with open(os.path.join(cfg.out, "summary.md"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     with open(os.path.join(cfg.out, "summary.json"), "w", encoding="utf-8") as fh:
@@ -466,7 +454,7 @@ def main(argv):
     ap.add_argument("--out", required=True)
     ap.add_argument("--thaw", default=os.path.join(REPO, "target", "release", "thaw"))
     ap.add_argument("--node", default="node")
-    ap.add_argument("--engines", default="thaw-js,quickjs")
+    ap.add_argument("--engines", default="thaw-js")
     ap.add_argument("--jobs", type=int, default=max(1, min(4, (os.cpu_count() or 2) // 2)))
     ap.add_argument("--only", default="", help="program name prefix (local debugging)")
     ap.add_argument("--node-only", action="store_true", help="run only the Node reference (selftest)")
@@ -485,8 +473,8 @@ def main(argv):
         if cfg.node_only:
             print(f"node reference ok: {len(node_blocks)} program(s)")
             return 0
-        if not engines or not all(e in ("thaw-js", "quickjs") for e in engines):
-            raise HarnessError("--engines takes thaw-js and/or quickjs")
+        if not engines or not all(e == "thaw-js" for e in engines):
+            raise HarnessError("--engines takes thaw-js only")
         if not os.path.exists(cfg.thaw) and shutil.which(cfg.thaw) is None:
             raise HarnessError(f"thaw binary not found: {cfg.thaw} (set THAW=...)")
         out = {}

@@ -88,16 +88,16 @@ markdown table (families by modes) appended to `summary.md`. `run.sh` runs it af
     THAW=/path/to/thaw tools/parity-aot/run.sh [OUT_DIR]
     tools/parity-aot/run.sh --write-baseline     # records current gaps into known-gaps.json (after a fix only)
 
-Build command per program and engine (`THAW_JS_ENGINE` is `thaw-js` or `quickjs`):
+Build command per program:
 
-    THAW_JS_ENGINE=<engine> thaw build <program>.ts -o <binary>      (cwd: the program's work dir)
+    thaw build <program>.ts -o <binary>      (cwd: the program's work dir)
 
 Env: `THAW` (default `<repo>/target/release/thaw`), `NODE`, `PARITY_AOT_ENGINES` (default `thaw-js`),
 `PARITY_AOT_JOBS`, `PARITY_AOT_BUILD_WRAP` (command prefix for each build, e.g. a systemd-run memory cap),
 `PARITY_AOT_FAMILIES` (comma list; generate only those families, skips the coverage ratchet), `PARITY_AOT_RUN_TIMEOUT` (20 s), `PARITY_AOT_BUILD_TIMEOUT` (900 s), `PARITY_AOT_SCRATCH` (default
 `/home/fedora/work/thaw-tmp/parity-aot-scratch`), `PARITY_AOT_OUT`.
 
-Output (OUT_DIR): `summary.md` / `summary.json` (counts per corpus and class, top findings, engine delta),
+Output (OUT_DIR): `summary.md` / `summary.json` (counts per corpus and class, top findings),
 `<engine>/gaps.json`, `<engine>/diff.txt`, `<engine>/classes.json`, `node/*.out`, `programs/`.
 
 Exit: 0 when the harness ran (gaps are reported only). 2 on a harness error (node failure, missing header,
@@ -109,7 +109,7 @@ missing thaw binary, diff.py harness error). `diff.py` exit 1 means gaps not in 
 the ECMAScript suite; label `parity-aot-modules` runs the module suite. The dispatch input `suite` is `ecmascript`
 (default, unchanged), `modules` or `all`. Job `build` builds the release thaw CLI, runs `selftest.sh`, writes the API
 coverage (full manifest, no thaw), uploads the binary as `thaw-release-bin`, and for the module suite dumps the module
-d.ts (`parity-aot-dts`). Job `shards` (matrix s1 to s4, split by family) runs both engines per shard, writing
+d.ts (`parity-aot-dts`). Job `shards` (matrix s1 to s4, split by family) runs thaw-js per shard, writing
 `parity-aot-results-<shard>`. Job `module-shards` (matrix m1 to m3, `modules-shards.txt`) runs thaw-js only and writes
 `parity-aot-modules-<shard>` (manifest, skips, classes, summary). Job `modules-report` merges them into `modules.md`
 (job summary and artifact `parity-aot-modules-report`, plus the merged manifest and coverage). All jobs are
@@ -149,7 +149,7 @@ a table row outside that list is NOT-EXPORT, a listed export without a table row
 
 Run (PR3): `run.sh` with `PARITY_AOT_SUITE=modules` runs gen_modules.py instead of gen_probes.py, then aot_run.py on
 the result (no coverage run; CI merges the shards). `PARITY_AOT_DTS_DIR` is the d.ts dump, `PARITY_AOT_MODULES` the
-module list (a shard's subset; default modules.txt). Engine: `PARITY_AOT_ENGINES=thaw-js` (QuickJS is being removed).
+module list (a shard's subset; default modules.txt). Engine: `PARITY_AOT_ENGINES=thaw-js`.
 aot_run.py renders each program's `imports` lines after the header (`render_program`), so the thaw build sees the same
 `import * as M from "node:x"` line as Node. Every run gets `PA_TMP=<out>/<side>/pa-tmp/<program>` for fixtures; diff.py
 masks that directory to `<tmp>`, and `pid`/`ppid` numbers to `<pid>`. Module programs run under TZ=UTC LANG=C on the

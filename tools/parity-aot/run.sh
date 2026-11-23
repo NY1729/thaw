@@ -27,7 +27,7 @@ JOBS=${PARITY_AOT_JOBS:-$(n=$(nproc 2>/dev/null || echo 2); n=$((n / 2)); [ "$n"
 
 mkdir -p "$OUT" || exit 2
 # Only the directories this harness writes are cleared; anything else under OUT is left alone.
-rm -rf "$OUT/programs" "$OUT/node" "$OUT/thaw-js" "$OUT/quickjs" "$OUT/coverage.json"
+rm -rf "$OUT/programs" "$OUT/node" "$OUT/thaw-js" "$OUT/coverage.json"
 SUITE=${PARITY_AOT_SUITE:-ecmascript}
 
 if [ "$SUITE" = modules ]; then

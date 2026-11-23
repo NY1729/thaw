@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-test for diff.py, threeway.py and the builtin table: synthetic outputs prove the gates fail on a missing member.
+# Self-test for diff.py and the builtin table: synthetic outputs prove the gates fail on a missing member.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 BASE=${PARITY_SCRATCH:-${RUNNER_TEMP:-${TMPDIR:-/home/fedora/work/thaw-tmp/parity-scratch}}}
@@ -68,19 +68,6 @@ printf 'THROW TypeError: multi\nline message\n' > "$W/node/t.txt"
 rm -f "$W/node/c.txt" "$W/thaw/c.txt"; printf '@@ t.x\nTHROW TypeError: a\nmore\n' > "$W/node/t.txt"; printf '@@ t.x\nTHROW TypeError: b\n' > "$W/thaw/t.txt"
 "${BDIFF[@]}" >/dev/null 2>&1 ; check "block THROW message text ignored" 0 $?
 rm -f "$W/node/t.txt" "$W/thaw/t.txt"
-
-# 8. threeway.py: one probe per class (and one node-missing), checked row by row in the table
-TW=(python3 "$HERE/threeway.py")
-mkdir -p "$W/tw"
-printf '@@ F3.a\n1\n@@ F3.b\n2\n@@ F5.c\n3\n@@ F6.d\n4\n@@ F5.e\n5\n' > "$W/tw/node.txt"
-printf '@@ F3.a\n1\n@@ F3.b\n2\n@@ F5.c\n0\n@@ F6.d\n9\n@@ F5.e\n7\n' > "$W/tw/qjs.txt"
-printf '@@ F3.a\n1\n@@ F3.b\n0\n@@ F5.c\n0\n@@ F6.d\n8\n@@ F5.e\n5\n@@ X.extra\n1\n' > "$W/tw/thaw.txt"
-"${TW[@]}" --node "$W/tw/node.txt" --qjs "$W/tw/qjs.txt" --thaw "$W/tw/thaw.txt" --out "$W/tw/table.txt" >"$W/tw/out" 2>&1 ; check "threeway exits 0" 0 $?
-for row in "F3.a | 1 | 1 | 1 | SAME-AS-NODE" "F3.b | 2 | 2 | 0 | THAWJS-REGRESSION" "F5.c | 3 | 0 | 0 | BOTH-DIFFER-SAME" \
-           "F6.d | 4 | 9 | 8 | BOTH-DIFFER" "F5.e | 5 | 7 | 5 | QJS-ONLY-BAD" "X.extra | <no line> | <no line> | 1 | NODE-MISSING"; do
-  grep -qxF "$row" "$W/tw/table.txt"; check "threeway row: $row" 0 $?
-done
-"${TW[@]}" --node "$W/tw/node.txt" --qjs "$W/tw/qjs.txt" --thaw "$W/tw/missing.txt" >/dev/null 2>&1 ; check "threeway missing input is harness error" 2 $?
 
 # 9. builtin table: generator is deterministic; the staleness check passes on the checked-in table and fails on a mutated copy
 GEN="$HERE/gen_builtin_table.js"; CHK="$HERE/check_builtin_table.sh"
