@@ -856,7 +856,7 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
                 throw "fresh JSON constructor lookup cleanup failed";
             }}
             const borrowed: Json = JSON.parse('{{"marker":"borrowed"}}');
-            // JSON.parse adds one intentionally live QuickJS host handle.
+            // JSON.parse adds one intentionally live JS engine host handle.
             callDynamicValue(mark, __thaw_json_argument_array());
             let borrowedCaught = 0;
             for (let index = 0; index < 3; index++) {{
@@ -940,7 +940,7 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
     let std = build_staticlib("thaw-std");
     let runtime = build_staticlib("thaw-runtime");
     let napi = build_staticlib("thaw-napi");
-    // Match the mixed runtime link order: QuickJS/N-API refer back to std and runtime.
+    // Match the mixed runtime link order: JS engine/N-API refer back to std and runtime.
     assert!(cc_command().arg(&obj).arg(&arena).arg(&std).arg(&runtime)
         .arg(&std).arg(&runtime).arg(&napi).args(thaw_js_link_args(&std, &runtime, false))
         .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"]).arg(&exe)

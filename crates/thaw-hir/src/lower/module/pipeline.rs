@@ -87,7 +87,7 @@ fn class_names_referenced_as_values(
         /// the module actually calls `Object.getPrototypeOf`/
         /// `Reflect.getPrototypeOf`, so a program that never asks for a
         /// prototype doesn't pay to materialize a class token (and pull in
-        /// QuickJS) for every class it instantiates.
+        /// JS engine) for every class it instantiates.
         constructed: HashSet<Symbol>,
         reads_prototype: bool,
     }
@@ -373,7 +373,7 @@ const NEW_TARGET_CONSTRUCT_SUFFIX: &str = "__thaw_construct";
 /// fixed parameters and no hidden construct flag, so such a function gets a second declaration
 /// (`F__thaw_construct`) in which `new.target` is `F`; the original body sees `undefined`, and
 /// every direct `new F(...)` is routed to the construct body. Functions that never mention
-/// `new.target` are untouched. A construct reaching `F` from QuickJS still runs the call body.
+/// `new.target` are untouched. A construct reaching `F` from JS engine still runs the call body.
 fn specialize_new_target_functions(module: &Module) -> Module {
     use swc_ecma_ast::{Ident, MetaPropKind};
     struct Replace {
@@ -1348,15 +1348,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .map(|p| p.ty)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let quickjs_function_value = is_extern
-                    && ordinary_quickjs_typed_symbol(&name).is_some()
+                let js_function_value = is_extern
+                    && ordinary_js_typed_symbol(&name).is_some()
                     && func.type_params.as_ref().is_none_or(|params| params.params.is_empty())
                     && func.this_param.is_none()
                     && func.params.iter().all(|parameter| {
                         !matches!(parameter.pat, Pat::Rest(_))
                             && !matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
                     });
-                if quickjs_function_value {
+                if js_function_value {
                     for (parameter, ty) in func.params.iter().take(fixed_param_count).zip(&params) {
                         remember_storage_source(storage_key(parameter.pat.span()), ty);
                     }
@@ -1431,7 +1431,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         None,
                     )?
                 };
-                if quickjs_function_value {
+                if js_function_value {
                     remember_storage_source((func.span.lo.0, 0), &ret);
                 }
                 let ret = if is_extern { ret } else { storage_return_type(func.span, ret) };

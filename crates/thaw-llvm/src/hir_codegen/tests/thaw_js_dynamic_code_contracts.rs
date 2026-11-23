@@ -1,5 +1,5 @@
-// thaw-js: user `new Function(...)` and `eval(...)` resolve to `thaw_tjs_*` and link no QuickJS in a
-// routed build; the unrouted build keeps the QuickJS symbols.
+// thaw-js: user `new Function(...)` and `eval(...)` resolve to `thaw_tjs_*` and link no JS engine in a
+// routed build; the unrouted build keeps the JS engine symbols.
 
 const THAW_JS_DYNAMIC_PROGRAM: &str = "function main(): void {
        const f: any = new Function('a', 'return a + 1');

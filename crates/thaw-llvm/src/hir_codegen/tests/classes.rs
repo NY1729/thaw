@@ -4176,7 +4176,7 @@ fn caught_type_error_any_projection_preserves_rethrow_identity() {
 }
 
 #[test]
-fn native_error_identity_survives_quickjs_callback_roundtrip() {
+fn native_error_identity_survives_js_callback_roundtrip() {
     let source = r#"
         declare function __thaw_typed_js_696e766f6b65(callback: () => void): void;
         declare function __thaw_typed_js_73616d654572726f72(error: any): boolean;

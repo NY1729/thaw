@@ -193,11 +193,11 @@ struct FnLowerer<'a> {
     /// `new Proxy(target, handler)`'s own `target` variable, when it was
     /// a simple identifier declared `Object`/`Dictionary`-shaped in this
     /// same function: maps the original variable's own symbol to (the
-    /// symbol of a live QuickJS handle holding an independent, retained
+    /// symbol of a live JS engine handle holding an independent, retained
     /// copy of it, the variable's own original declared type). A read of
     /// the *original* identifier is redirected through this handle
     /// instead (see the `Expr::Ident` lowering arm) so a `set` trap's
-    /// mutation -- which only ever reaches the QuickJS-side object, not
+    /// mutation -- which only ever reaches the JS-engine-side object, not
     /// this Thaw-side variable's own native storage -- is observable by
     /// reading the identifier directly, not just through the proxy
     /// itself. Scoped to the current function only, same precision as

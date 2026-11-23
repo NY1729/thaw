@@ -2535,7 +2535,7 @@ fn compiles_array_from_first_boundary_undefined_acquisition_throw() {
 
 /// `Array.fromAsync(anAsyncGenerator())` -- the `async function*`
 /// sibling of `compiles_array_from_a_generator` above. `Array.fromAsync`
-/// otherwise delegates entirely to the embedded QuickJS realm's own
+/// otherwise delegates entirely to the embedded JS engine realm's own
 /// native implementation (see its own doc comment,
 /// `invocations/static_builtins.rs`), but a real, statically typed
 /// async generator producer has no JS-visible shape that delegation
@@ -2626,7 +2626,7 @@ fn awaits_a_union_of_a_promise_and_a_plain_value() {
 }
 
 /// `Array.fromAsync` over a source array mixing `Promise<T>` and plain
-/// `T` elements -- the general QuickJS-delegating path this dispatch
+/// `T` elements -- the general engine-delegating path this dispatch
 /// otherwise falls back to hands the whole argument off as a JSON value,
 /// and a live `Promise` has no JSON representation at all ("cannot
 /// serialize collection element Promise(T) to JSON"). Covers all three
@@ -4185,7 +4185,7 @@ fn for_of_over_a_sparse_array_is_unaffected_by_the_while_loop_eager_promotion_pa
 
 #[test]
 fn compiles_date_stringify_and_console_log_crossing_an_any_boundary() {
-    // A `Date` stored in `any` already round-trips through QuickJS
+    // A `Date` stored in `any` already round-trips through JS engine
     // correctly for property/method access and `instanceof` (native
     // `Date` methods and `instanceof Date` on a `Json`-typed value
     // dispatch via `thaw_json_is_date_shape`'s `{"timestamp": N}`
@@ -4330,7 +4330,7 @@ fn compiles_instanceof_and_size_for_native_collections() {
 /// reads, since it's already a plain JSON array underneath (a Map's
 /// entries are already `[key, value]` pairs, matching its own default
 /// iterator; a Set's values need no transformation at all). No live
-/// QuickJS round-trip needed for any of these -- all pure reads over
+/// JS engine round-trip needed for any of these -- all pure reads over
 /// that one array. `.set()`/`.delete()`/`.clear()`/`.add()`/`.keys()`/
 /// `.values()`/`.entries()`/`.forEach()` remain unimplemented (the
 /// former four need a write-back mechanism to persist a mutation into
@@ -4695,7 +4695,7 @@ fn compiles_instanceof_against_an_arbitrary_named_global() {
     // per native class (the approach every earlier fix in this thread
     // took), a live `JsValue` receiver's `instanceof` check against
     // *any* class name now dispatches generically by passing the name
-    // itself across the QuickJS boundary (`dynamic_value_check_by_name`,
+    // itself across the JS engine boundary (`dynamic_value_check_by_name`,
     // thaw-hir's `expressions/coercions.rs`) -- fixes `ArrayBuffer`/
     // `DataView`/`TextDecoder`/`AbortController`/every other exotic
     // global this compiler has no dedicated native representation for,
@@ -7737,7 +7737,7 @@ fn compiles_regexp_has_indices_and_base64_globals() {
     );
 }
 
-/// `globalThis` as a value (a live quickjs global handle),
+/// `globalThis` as a value (a live js global handle),
 /// `Reflect.apply`, and `Reflect.construct`.
 #[test]
 fn compiles_globalthis_and_reflect_apply_construct() {
@@ -8460,7 +8460,7 @@ fn compiles_await_using_declarations() {
     );
 }
 
-/// `DisposableStack`/`AsyncDisposableStack` are real QuickJS handles, so
+/// `DisposableStack`/`AsyncDisposableStack` are real JS engine handles, so
 /// `defer`/`dispose` (and `disposeAsync`) delegate exactly, and `use` of a
 /// compiled resource works because its `[Symbol.dispose]`/
 /// `[Symbol.asyncDispose]` sentinel key is re-keyed onto the real symbol by
@@ -8601,8 +8601,8 @@ fn aggregate_error_copies_a_promoted_json_array_and_rejects_json_objects() {
 
 /// `WeakRef`/`FinalizationRegistry`/`Proxy`. `WeakRef` is a strong-holding
 /// one-element array (`.deref()` always yields the target); `Proxy` is a
-/// genuine QuickJS proxy over a by-value copy of the target. A
-/// `FinalizationRegistry` is the real QuickJS global (its callback fires
+/// genuine JS engine proxy over a by-value copy of the target. A
+/// `FinalizationRegistry` is the real JS engine global (its callback fires
 /// non-deterministically on collection, so this test's callback is silent).
 #[test]
 fn compiles_weak_ref_finalization_registry_and_proxy() {
@@ -8675,12 +8675,12 @@ fn proxy_set_trap_mutation_reaches_the_real_target_through_the_proxy() {
 /// variable *directly* (bypassing the proxy) after a trap mutation used
 /// to diverge from Node, since `new Proxy(target, handler)`'s own
 /// `target` constructor argument was unconditionally coerced to a fresh
-/// one-off JSON snapshot -- the QuickJS-side Proxy's internal target
+/// one-off JSON snapshot -- the JS-engine-side Proxy's internal target
 /// was never a live alias of the Thaw-side `target` variable. Fixed
 /// without changing `target`'s own declared type/ABI at all: when
 /// `target` is a simple identifier already declared `Object`/
 /// `Dictionary`-shaped, `lower_var_decl` (statements/declarations.rs)
-/// retains it as an independent, live QuickJS handle up front
+/// retains it as an independent, live JS engine handle up front
 /// (`retainDynamicJson`, reusing the same `JsValue`-target coercion an
 /// unrelated earlier fix already built) and every later read of the
 /// `target` identifier itself in this same function is redirected to
@@ -8789,7 +8789,7 @@ fn compiles_bigint_from_number_range_errors() {
 /// `BigInt(string)` for a *non-literal* string -- unlike a literal
 /// argument, whether it's small, needs real arbitrary precision, or is
 /// outright invalid can't be known until runtime, so this always goes
-/// through the real QuickJS `BigInt` constructor now (previously a
+/// through the real JS engine `BigInt` constructor now (previously a
 /// native `i64` parser silently truncated at the first non-digit and
 /// saturated out-of-range values instead of a real `SyntaxError`/exact
 /// value). Also pins that `console.log` of the resulting (or any other)
@@ -8825,7 +8825,7 @@ fn compiles_bigint_from_non_literal_string() {
 }
 
 /// A `bigint` literal (or a literal `BigInt("...")` argument) beyond
-/// Thaw's fixed-width `i64` is kept as the real QuickJS BigInt, so
+/// Thaw's fixed-width `i64` is kept as the real JS engine BigInt, so
 /// `.toString()`/radix conversion stay exact. Comparing (`>`, `==`,
 /// `===`, ...), arithmetic (`+`, `-`, `*`, `/`, `%`), bitwise
 /// (`&`, `|`, `^`, `<<`, `>>`), and unary `-` with another `bigint` go
@@ -9020,7 +9020,7 @@ fn compiles_temporal_values() {
 }
 
 /// `String.prototype.replace`/`replaceAll` with a *function* replacer,
-/// delegated to QuickJS (`callDynamicMethod`) so the compiled closure is
+/// delegated to the JS engine (`callDynamicMethod`) so the compiled closure is
 /// invoked per match with the real `(match, captures..., offset, string)`
 /// arguments -- including the `replaceAll` + non-global-`RegExp`
 /// `TypeError`.
@@ -9081,7 +9081,7 @@ fn compiles_escape_and_error_statics() {
 }
 
 #[test]
-fn caught_quickjs_error_console_reads_message_once_without_calling_to_string() {
+fn caught_js_error_console_reads_message_once_without_calling_to_string() {
     let source = r#"
         declare function __thaw_typed_js_7468726f77436f6e736f6c654572726f72(): void;
         declare function __thaw_typed_js_636f6e736f6c654572726f72436f756e7473(): string;
@@ -9093,13 +9093,13 @@ fn caught_quickjs_error_console_reads_message_once_without_calling_to_string() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "caught_quickjs_error_console_message_once"),
+        compile_and_run(source, "caught_js_error_console_message_once"),
         "caught message\n1:0\n"
     );
 }
 
 #[test]
-fn caught_quickjs_error_console_propagates_message_getter_failure_without_partial_output() {
+fn caught_js_error_console_propagates_message_getter_failure_without_partial_output() {
     let source = r#"
         declare function __thaw_typed_js_7468726f77436f6e736f6c654572726f72(): void;
         declare function __thaw_typed_js_636f6e736f6c654572726f725265616473(): number;
@@ -9115,13 +9115,13 @@ fn caught_quickjs_error_console_propagates_message_getter_failure_without_partia
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "caught_quickjs_error_console_getter_failure"),
+        compile_and_run(source, "caught_js_error_console_getter_failure"),
         "Error: message getter failed\n1\n"
     );
 }
 
 #[test]
-fn caught_quickjs_plain_strings_and_fake_errors_keep_their_value_format() {
+fn caught_js_plain_strings_and_fake_errors_keep_their_value_format() {
     let source = r#"
         declare function __thaw_typed_js_7468726f77507265666978537472696e67(): void;
         declare function __thaw_typed_js_7468726f7746616b654572726f72(): void;
@@ -9134,13 +9134,13 @@ fn caught_quickjs_plain_strings_and_fake_errors_keep_their_value_format() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "caught_quickjs_plain_string_and_fake_error"),
+        compile_and_run(source, "caught_js_plain_string_and_fake_error"),
         "prefix:\u{1f}@@iterator\n{ name: 'Error', message: 'fake' }\n"
     );
 }
 
 #[test]
-fn caught_quickjs_proxy_prototype_trap_propagates_without_partial_output() {
+fn caught_js_proxy_prototype_trap_propagates_without_partial_output() {
     let source = r#"
         declare function __thaw_typed_js_7468726f7750726f746f7479706554726170(): void;
         function main(): void {
@@ -9154,13 +9154,13 @@ fn caught_quickjs_proxy_prototype_trap_propagates_without_partial_output() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "caught_quickjs_error_prototype_trap"),
+        compile_and_run(source, "caught_js_error_prototype_trap"),
         "Error: prototype trap failed\n"
     );
 }
 
 #[test]
-fn napi_caught_json_console_does_not_enable_quickjs() {
+fn napi_caught_json_console_does_not_enable_js() {
     let source = r#"
         declare function __thaw_typed_napi_6e61706963616c6c(): number;
         function main(): void {
@@ -9182,7 +9182,7 @@ fn napi_caught_json_console_does_not_enable_quickjs() {
             line.split_ascii_whitespace().any(|word| word == "call")
                 && line.contains("@thaw_js_call_graph_result(")
         }),
-        "N-API-only console emitted a QuickJS graph-call instruction:\n{ir}"
+        "N-API-only console emitted a JS graph-call instruction:\n{ir}"
     );
     assert!(
         !ir.contains("thaw_js_register_callback_host_operations"),
@@ -9219,7 +9219,7 @@ fn compiles_reflect_and_object_descriptors() {
     );
 }
 
-/// `JSON.parse` with a reviver callback (delegated to QuickJS) and
+/// `JSON.parse` with a reviver callback (delegated to the JS engine) and
 /// `SuppressedError`.
 #[test]
 fn compiles_json_reviver_and_suppressed_error() {
@@ -10073,7 +10073,7 @@ fn compiles_proxy_revocable_and_intl_statics() {
 }
 
 /// `Iterator.concat`/`zip` (ES2025 lazy composition), delegated to the
-/// QuickJS realm.
+/// JS engine realm.
 #[test]
 fn compiles_iterator_composition() {
     let source = r#"
@@ -10670,10 +10670,10 @@ fn compiles_json_parse_lone_surrogate_and_numbers() {
     );
 }
 
-/// `eval(code)` lowers to the QuickJS realm's global `eval` (indirect
+/// `eval(code)` lowers to the JS engine realm's global `eval` (indirect
 /// eval semantics).
 #[test]
-fn compiles_eval_through_quickjs() {
+fn compiles_eval_through_js() {
     let source = r#"
         function main(): void {
             console.log(eval("1+1"));
@@ -10682,7 +10682,7 @@ fn compiles_eval_through_quickjs() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "eval_through_quickjs"),
+        compile_and_run(source, "eval_through_js"),
         "2\nab\n10\n"
     );
 }
@@ -11135,7 +11135,7 @@ fn date_constructor_uses_live_value_without_snapshot_or_user_date_globals() {
 }
 
 #[test]
-fn typed_quickjs_date_results_authenticate_and_preserve_timestamp() {
+fn typed_js_date_results_authenticate_and_preserve_timestamp() {
     let source = r#"
         declare function __thaw_typed_js_706f736974697665(): Date;
         declare function __thaw_typed_js_6e65676174697665(): Date;
@@ -11159,7 +11159,7 @@ fn typed_quickjs_date_results_authenticate_and_preserve_timestamp() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "typed_quickjs_date_results"),
+        compile_and_run(source, "typed_js_date_results"),
         "true 1704067200500\ntrue -86400000\ntrue true\nrejected plain object\nrejected forged marker\n23 false\n"
     );
 }

@@ -1037,7 +1037,7 @@ fn arrow_returns_call_result(arrow: &swc_ecma_ast::ArrowExpr) -> bool {
 }
 
 impl<'a> FnLowerer<'a> {
-    /// An ambient QuickJS/thaw-js export passed by bare name as a value argument
+    /// An ambient JS engine/thaw-js export passed by bare name as a value argument
     /// (`promisify(execFile)`) is the package's real JS function, fetched by its
     /// registry key, so `promisify.custom` and identity survive. Any other use of
     /// the name keeps the typed stub. thaw-js method/class symbols (`$`-prefixed)

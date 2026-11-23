@@ -3033,7 +3033,7 @@ impl<'a> FnLowerer<'a> {
                                 );
                                 return self.wrap_call_argument_bindings(result, &bindings);
                             }
-                            // A `JsValue` -- a retained QuickJS handle, real
+                            // A `JsValue` -- a retained JS engine handle, real
                             // example: a real npm package's own class method
                             // declared to return `Buffer` (not one of
                             // thaw's own hand-authored ambient builtins, so
@@ -3733,7 +3733,7 @@ impl<'a> FnLowerer<'a> {
                             }
                 let json_arguments =
                     self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_arguments))?;
-                            // A lone value goes through the QuickJS `__thaw_json_stringify_direct`
+                            // A lone value goes through the JS engine `__thaw_json_stringify_direct`
                             // helper, which drops symbol-keyed wire properties. Passing it as the
                             // same Json argument keeps the conversion identical to the old
                             // `JSON.stringify` method call; any replacer/space keeps that call.
@@ -4752,7 +4752,7 @@ impl<'a> FnLowerer<'a> {
                         // A real, statically typed `async function*`
                         // producer (thaw's own internal generator ABI, see
                         // `is_generator_producer_type`) has no JS-visible
-                        // shape the QuickJS-delegating path below could ever
+                        // shape the engine-delegating path below could ever
                         // hand off to -- its first parameter is an internal
                         // `i64` resume point, not a real argument, so
                         // crossing it as a dynamic-call argument fails deep
@@ -6030,7 +6030,7 @@ impl<'a> FnLowerer<'a> {
                         && matches!(property.sym.as_ref(), "concat" | "zip" | "zipKeyed")
                     {
                         // Lazy iterator composition lives in the JS realm
-                        // (the bundled QuickJS provides
+                        // (the bundled JS engine provides
                         // `Iterator.concat`/`zip`/`zipKeyed`), so keep the
                         // result a live handle and let its own
                         // `.toArray()`/`.next()` run there too.
@@ -6090,7 +6090,7 @@ impl<'a> FnLowerer<'a> {
                             "getCanonicalLocales" | "supportedValuesOf"
                         )
                     {
-                        // The bundled QuickJS `Intl` polyfill doesn't expose
+                        // The bundled JS engine `Intl` polyfill doesn't expose
                         // these statics, so thaw approximates them: locale
                         // tags are canonicalized at compile time when they
                         // are literals, and `supportedValuesOf` returns a
@@ -6202,7 +6202,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     if object.sym == *"Error" && property.sym == *"isError" {
                         // `Error.isError(value)`: true for a tagged error
-                        // string (`new Error(...)`-family / a QuickJS-thrown
+                        // string (`new Error(...)`-family / a JS-engine-thrown
                         // error) or an instance of a user class extending one,
                         // false for any other value.
                         let (arguments, bindings) =

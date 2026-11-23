@@ -2796,7 +2796,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     // The two original operands have already been bound. Keep both as
-    // positional graph arguments: the QuickJS bridge appends handle-array
+    // positional graph arguments: the JS engine bridge appends handle-array
     // arguments after JSON arguments, which would reverse ToPrimitive order.
     fn function_loose_dynamic_value(
         &mut self,
@@ -3625,7 +3625,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         helper_name: &str,
     ) -> Result<HirExpr, String> {
-        // Keep numeric conversion on the live QuickJS value: JSON graph
+        // Keep numeric conversion on the live JS engine value: JSON graph
         // projection drops symbol-keyed Symbol.toPrimitive methods.
         let value = self.coerce_to_declared(&HirType::Json, value)?;
         let argument = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![value]))?;
@@ -3988,12 +3988,12 @@ impl<'a> FnLowerer<'a> {
     /// `coerce_primitive_to_string`/`coerce_primitive_to_number` (already
     /// handling a `Json` result via a plain decode, no second `ToPrimitive`
     /// call).
-    /// A dynamic (Json-backed) operand, which may be a live QuickJS handle.
+    /// A dynamic (Json-backed) operand, which may be a live JS engine handle.
     fn add_operand_is_json(ty: &HirType) -> bool {
         matches!(ty, HirType::Json) || *ty == HirType::Optional(Box::new(HirType::Json))
     }
 
-    /// Runtime guard for the QuickJS default-hint path: true when a dynamic
+    /// Runtime guard for the JS engine default-hint path: true when a dynamic
     /// operand is an object or function, the only kinds that can be a live
     /// handle with its own `Symbol.toPrimitive`. Plain numbers and strings
     /// fail it and keep the native coercion.
@@ -4026,7 +4026,7 @@ impl<'a> FnLowerer<'a> {
         self.lower_logical_expr(is_object, is_function, false)
     }
 
-    /// `+` with a dynamic operand: an object-like operand takes the QuickJS
+    /// `+` with a dynamic operand: an object-like operand takes the JS engine
     /// default-hint `+`; otherwise the native ToPrimitive path (unchanged).
     pub(super) fn lower_add_json_guarded(
         &mut self,
@@ -4291,7 +4291,7 @@ impl<'a> FnLowerer<'a> {
                 HirType::Json,
             );
             // Building the host arm at all makes an otherwise native-only
-            // module depend on QuickJS. Only two bigint-capable static types
+            // module depend on JS engine. Only two bigint-capable static types
             // can ever reach this path at runtime.
             let numeric = if Self::add_operand_may_be_bigint(&lhs_ty)
                 && Self::add_operand_may_be_bigint(&rhs_ty)
@@ -4971,7 +4971,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
                 vec![rhs],
             )),
-            // A live `JsValue` (a real QuickJS handle, e.g. `const x:
+            // A live `JsValue` (a real JS engine handle, e.g. `const x:
             // JsValue = someDynamicCall()`) has no equivalent of the
             // `Json` case above's `$__thaw_napi_undefined$` sentinel
             // tag to check locally -- there's no local representation
@@ -5287,7 +5287,7 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
-    /// Asks the live QuickJS engine a yes/no question about a `JsValue`
+    /// Asks the live JS engine engine a yes/no question about a `JsValue`
     /// by calling one of the small bootstrap-registered globals in
     /// `crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js`
     /// (`__thaw_typeof_dynamic_value`'s siblings), the same way `typeof`

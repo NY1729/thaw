@@ -1,6 +1,6 @@
 // thaw-js (`DynamicBackend::ThawJs`): a compiled callback that takes a live JS value is a graph callback
 // registered with `thaw_tjs_register_native_callback_graph`, and the Promise-awaiting handle
-// operations resolve to their `thaw_tjs_*` twins, so the build links no QuickJS.
+// operations resolve to their `thaw_tjs_*` twins, so the build links no JS engine.
 
 const THAW_JS_CALLBACK_PROGRAM: &str = "function main(): void {
        const callback: (value: JsValue) => number = (value: JsValue): number => 1;

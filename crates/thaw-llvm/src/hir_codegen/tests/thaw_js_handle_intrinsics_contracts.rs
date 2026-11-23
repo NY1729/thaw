@@ -1,5 +1,5 @@
 // thaw-js (`DynamicBackend::ThawJs`): the live-handle intrinsics (property reads, selected method calls,
-// exception capture, console probes) resolve to `thaw_tjs_*` and the build links no QuickJS.
+// exception capture, console probes) resolve to `thaw_tjs_*` and the build links no JS engine.
 
 fn thaw_js_routed_ir(source: &str) -> (bool, String) {
     let module = thaw_parser::parse_typescript(source).unwrap();
@@ -34,7 +34,7 @@ fn thaw_js_routed_handle_intrinsics_name_only_thaw_tjs_symbols() {
             "{symbol} missing: {ir}"
         );
     }
-    // Only declarations of unused QuickJS intrinsics may remain, never a call.
+    // Only declarations of unused JS engine intrinsics may remain, never a call.
     assert!(
         !ir.lines().any(|line| {
             line.contains(" call ")
@@ -50,7 +50,7 @@ fn thaw_js_routed_handle_intrinsics_name_only_thaw_tjs_symbols() {
 #[test]
 fn routed_absent_global_reads_through_the_handle_lane() {
     // An absent global is handle 0, which is `undefined` at run time: the program compiles on the
-    // thaw-js lane and reads the global by name, with no QuickJS builder.
+    // thaw-js lane and reads the global by name, with no JS engine builder.
     let source = "function main(): void {
        const kind = typeof navigator;
        const missing = navigator === undefined;

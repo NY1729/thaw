@@ -1315,9 +1315,9 @@ impl<'a> FnLowerer<'a> {
                         Expr::Arrow(arrow) => arrow.span,
                         _ => unreachable!(),
                     };
-                    let preserve_native_return = !is_quickjs_function_value(span)
-                        && !is_quickjs_function_value_slot(span)
-                        && !is_quickjs_function_value_result_slot(span);
+                    let preserve_native_return = !is_js_function_value(span)
+                        && !is_js_function_value_slot(span)
+                        && !is_js_function_value_result_slot(span);
                     let previous = std::mem::replace(
                         &mut self.stored_arrow_initializer,
                         preserve_native_return,

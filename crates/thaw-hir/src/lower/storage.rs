@@ -37,9 +37,9 @@ struct StoragePlan {
     sink_results: HashSet<(u32, u32)>,
     argument_parameters: HashMap<(u32, u32), HashSet<(u32, u32)>>,
     callable_parameters: HashMap<u32, Vec<(u32, u32)>>,
-    quickjs_function_value_nodes: HashSet<(u32, u32)>,
-    quickjs_function_value_slots: HashSet<(u32, u32)>,
-    quickjs_function_sources: HashSet<u32>,
+    js_function_value_nodes: HashSet<(u32, u32)>,
+    js_function_value_slots: HashSet<(u32, u32)>,
+    js_function_sources: HashSet<u32>,
     jit_calls: Vec<JitStorageCall>,
 }
 
@@ -51,9 +51,9 @@ struct JitStorageCall {
 
 struct StorageCallConnections {
     jit_calls: Vec<JitStorageCall>,
-    quickjs_function_value_nodes: HashSet<(u32, u32)>,
-    quickjs_function_value_slots: HashSet<(u32, u32)>,
-    quickjs_function_sources: HashSet<u32>,
+    js_function_value_nodes: HashSet<(u32, u32)>,
+    js_function_value_slots: HashSet<(u32, u32)>,
+    js_function_sources: HashSet<u32>,
 }
 
 impl StoragePlan {
@@ -119,9 +119,9 @@ impl StoragePlan {
         let graph_sink_results = graph.sink_results.clone();
         let StorageCallConnections {
             jit_calls,
-            quickjs_function_value_nodes,
-            quickjs_function_value_slots,
-            quickjs_function_sources,
+            js_function_value_nodes,
+            js_function_value_slots,
+            js_function_sources,
         } = connect(&mut graph);
         let mut pending: Vec<_> = graph.seeds.iter().copied().collect();
         let mut dynamic = graph.seeds;
@@ -166,9 +166,9 @@ impl StoragePlan {
             sink_results: graph_sink_results,
             argument_parameters: graph.argument_parameters,
             callable_parameters,
-            quickjs_function_value_nodes,
-            quickjs_function_value_slots,
-            quickjs_function_sources,
+            js_function_value_nodes,
+            js_function_value_slots,
+            js_function_sources,
             jit_calls,
         })
     }
@@ -178,9 +178,9 @@ impl StoragePlan {
     fn assert_same_as(&self, reference: &Self) {
         assert_eq!(self.dynamic, reference.dynamic, "dynamic storage differs from the reference fixpoint");
         assert_eq!(self.argument_parameters, reference.argument_parameters, "argument parameters differ from the reference fixpoint");
-        assert_eq!(self.quickjs_function_value_nodes, reference.quickjs_function_value_nodes, "QuickJS function-value nodes differ from the reference fixpoint");
-        assert_eq!(self.quickjs_function_value_slots, reference.quickjs_function_value_slots, "QuickJS function-value slots differ from the reference fixpoint");
-        assert_eq!(self.quickjs_function_sources, reference.quickjs_function_sources, "QuickJS function sources differ from the reference fixpoint");
+        assert_eq!(self.js_function_value_nodes, reference.js_function_value_nodes, "JS function-value nodes differ from the reference fixpoint");
+        assert_eq!(self.js_function_value_slots, reference.js_function_value_slots, "JS function-value slots differ from the reference fixpoint");
+        assert_eq!(self.js_function_sources, reference.js_function_sources, "JS function sources differ from the reference fixpoint");
         let jit = |plan: &Self| {
             plan.jit_calls
                 .iter()
@@ -320,7 +320,7 @@ struct StorageGraph {
     call_result_bindings: HashMap<(u32, u32), Vec<(u32, u32)>>,
     captures: HashSet<((u32, u32), (u32, u32))>,
     jit_declarations: HashMap<(u32, u32), Symbol>,
-    quickjs_function_declarations: HashMap<(u32, u32), u32>,
+    js_function_declarations: HashMap<(u32, u32), u32>,
     exceptions: Vec<Span>,
     /// Member reads (`p.n`) of maybe-uninitialised fields in `undefined`-keeping sinks.
     uninit_sinks: HashSet<(u32, u32)>,
@@ -731,7 +731,7 @@ impl StorageGraph {
     }
 
     /// Records the links of calls the fixpoint could not resolve and collects the JIT,
-    /// QuickJS function-value and storage results derived from the connected graph.
+    /// JS engine function-value and storage results derived from the connected graph.
     fn finish_call_connections(&mut self, connected_calls: &HashSet<usize>) -> StorageCallConnections {
         let jit_calls = self.calls.iter().filter_map(|call| {
             let symbols = self.reachable_jit_symbols(call.callee);
@@ -741,22 +741,22 @@ impl StorageGraph {
                 result: call.result,
             })
         }).collect();
-        let quickjs_function_value_nodes = self.reachable_quickjs_function_values();
-        let mut quickjs_function_value_slots: HashSet<_> = quickjs_function_value_nodes
+        let js_function_value_nodes = self.reachable_js_function_values();
+        let mut js_function_value_slots: HashSet<_> = js_function_value_nodes
             .iter()
             .filter_map(|node| self.callables.get(node))
             .flat_map(|callable| callable.escaped.iter().copied())
             .collect();
         for call in &self.calls {
-            if quickjs_function_value_nodes.contains(&storage_key(call.callee)) {
-                quickjs_function_value_slots.insert((call.result.lo.0, 0));
+            if js_function_value_nodes.contains(&storage_key(call.callee)) {
+                js_function_value_slots.insert((call.result.lo.0, 0));
                 if let Some(bindings) = self.call_result_bindings.get(&storage_key(call.result)) {
-                    quickjs_function_value_slots.extend(bindings.iter().copied());
+                    js_function_value_slots.extend(bindings.iter().copied());
                 }
             }
         }
-        let quickjs_function_sources = self
-            .quickjs_function_declarations
+        let js_function_sources = self
+            .js_function_declarations
             .values()
             .copied()
             .collect();
@@ -769,17 +769,17 @@ impl StorageGraph {
         }
         StorageCallConnections {
             jit_calls,
-            quickjs_function_value_nodes,
-            quickjs_function_value_slots,
-            quickjs_function_sources,
+            js_function_value_nodes,
+            js_function_value_slots,
+            js_function_sources,
         }
     }
 
 
-    fn reachable_quickjs_function_values(&self) -> HashSet<(u32, u32)> {
+    fn reachable_js_function_values(&self) -> HashSet<(u32, u32)> {
         let mut values = HashSet::new();
         let mut pending = self
-            .quickjs_function_declarations
+            .js_function_declarations
             .keys()
             .copied()
             .collect::<Vec<_>>();
@@ -914,7 +914,7 @@ impl StorageGraph {
             Decl::Fn(function) => {
                 self.bind(&function.ident);
                 if function.function.body.is_some()
-                    || ordinary_quickjs_typed_symbol(function.ident.sym.as_ref()).is_some()
+                    || ordinary_js_typed_symbol(function.ident.sym.as_ref()).is_some()
                         && function.function.type_params.as_ref().is_none_or(|params| params.params.is_empty())
                         && function.function.this_param.is_none()
                         && function.function.params.iter().all(|parameter| {
@@ -1161,7 +1161,7 @@ impl Visit for StorageGraph {
     fn visit_fn_decl(&mut self, declaration: &FnDecl) {
         self.link(declaration.ident.span, declaration.function.span);
         if declaration.function.body.is_none() {
-            if ordinary_quickjs_typed_symbol(declaration.ident.sym.as_ref()).is_some()
+            if ordinary_js_typed_symbol(declaration.ident.sym.as_ref()).is_some()
                 && declaration.function.type_params.as_ref().is_none_or(|params| params.params.is_empty())
                 && declaration.function.this_param.is_none()
                 && declaration.function.params.iter().all(|parameter| {
@@ -1170,7 +1170,7 @@ impl Visit for StorageGraph {
                 })
             {
                 let function_span = storage_key(declaration.function.span);
-                self.quickjs_function_declarations
+                self.js_function_declarations
                     .insert(function_span, declaration.function.span.lo.0);
                 let parameters = declaration
                     .function
@@ -1531,65 +1531,65 @@ fn has_dynamic_storage(span: Span) -> bool {
     ACTIVE_STORAGE_PLAN.with(|active| active.borrow().is_dynamic(span))
 }
 
-fn is_quickjs_function_value(span: Span) -> bool {
+fn is_js_function_value(span: Span) -> bool {
     !span.is_dummy()
         && ACTIVE_STORAGE_PLAN.with(|active| {
             active
                 .borrow()
-                .quickjs_function_value_nodes
+                .js_function_value_nodes
                 .contains(&storage_key(span))
         })
 }
 
-fn is_quickjs_function_value_slot(span: Span) -> bool {
+fn is_js_function_value_slot(span: Span) -> bool {
     !span.is_dummy()
         && ACTIVE_STORAGE_PLAN.with(|active| {
             active
                 .borrow()
-                .quickjs_function_value_slots
+                .js_function_value_slots
                 .contains(&storage_key(span))
         })
 }
 
-fn is_quickjs_function_value_result_slot(span: Span) -> bool {
+fn is_js_function_value_result_slot(span: Span) -> bool {
     !span.is_dummy()
         && ACTIVE_STORAGE_PLAN.with(|active| {
             active
                 .borrow()
-                .quickjs_function_value_slots
+                .js_function_value_slots
                 .contains(&(span.lo.0, 0))
         })
 }
 
-fn is_quickjs_function_value_expression(expression: &Expr) -> bool {
+fn is_js_function_value_expression(expression: &Expr) -> bool {
     match expression {
-        Expr::Paren(value) => is_quickjs_function_value_expression(&value.expr),
-        Expr::TsAs(value) => is_quickjs_function_value_expression(&value.expr),
-        Expr::TsTypeAssertion(value) => is_quickjs_function_value_expression(&value.expr),
-        Expr::TsNonNull(value) => is_quickjs_function_value_expression(&value.expr),
-        _ => is_quickjs_function_value(expression.span()),
+        Expr::Paren(value) => is_js_function_value_expression(&value.expr),
+        Expr::TsAs(value) => is_js_function_value_expression(&value.expr),
+        Expr::TsTypeAssertion(value) => is_js_function_value_expression(&value.expr),
+        Expr::TsNonNull(value) => is_js_function_value_expression(&value.expr),
+        _ => is_js_function_value(expression.span()),
     }
 }
 
-fn is_quickjs_function_source(source_start: u32) -> bool {
+fn is_js_function_source(source_start: u32) -> bool {
     source_start != 0
         && ACTIVE_STORAGE_PLAN.with(|active| {
             active
                 .borrow()
-                .quickjs_function_sources
+                .js_function_sources
                 .contains(&source_start)
         })
 }
 
-fn quickjs_function_source_type(source_start: u32, source: HirType) -> HirType {
-    if is_quickjs_function_source(source_start) {
-        quickjs_function_value_type(source)
+fn js_function_source_type(source_start: u32, source: HirType) -> HirType {
+    if is_js_function_source(source_start) {
+        js_function_value_type(source)
     } else {
         source
     }
 }
 
-fn quickjs_function_value_type(source: HirType) -> HirType {
+fn js_function_value_type(source: HirType) -> HirType {
     fn contains_reference(ty: &HirType) -> bool {
         match ty {
             HirType::Array(_)
@@ -1653,7 +1653,7 @@ fn quickjs_function_value_type(source: HirType) -> HirType {
         }
         HirType::FunctionWithThis(receiver, inner) => HirType::FunctionWithThis(
             receiver,
-            Box::new(quickjs_function_value_type(*inner)),
+            Box::new(js_function_value_type(*inner)),
         ),
         other => other,
     }
@@ -2094,17 +2094,17 @@ fn storage_type(span: Span, source: HirType) -> HirType {
     if is_sink_slot(span) {
         return widen_sink_type(source);
     }
-    if is_quickjs_function_value(span)
+    if is_js_function_value(span)
         && matches!(
             &source,
             HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)
                 | HirType::OverloadedFunction(..)
         )
     {
-        return quickjs_function_value_type(source);
+        return js_function_value_type(source);
     }
-    if is_quickjs_function_value_slot(span) {
-        return quickjs_reference_slot_type(source);
+    if is_js_function_value_slot(span) {
+        return js_reference_slot_type(source);
     }
     if !has_dynamic_storage(span) { return source; }
     // An `extends Array/Map/Set` instance keeps its wrapper layout: collapsing it to `Json` would
@@ -2113,7 +2113,7 @@ fn storage_type(span: Span, source: HirType) -> HirType {
     dynamic_storage_type(source)
 }
 
-fn quickjs_reference_slot_type(source: HirType) -> HirType {
+fn js_reference_slot_type(source: HirType) -> HirType {
     fn contains_reference(ty: &HirType) -> bool {
         match ty {
             HirType::Array(_)
@@ -2135,10 +2135,10 @@ fn quickjs_reference_slot_type(source: HirType) -> HirType {
         | HirType::Object(_)
         | HirType::Dictionary(_)
         | HirType::Bytes => HirType::Json,
-        HirType::Optional(inner) => HirType::Optional(Box::new(quickjs_reference_slot_type(*inner))),
-        HirType::Nullable(inner) => HirType::Nullable(Box::new(quickjs_reference_slot_type(*inner))),
-        HirType::Nullish(inner) => HirType::Nullish(Box::new(quickjs_reference_slot_type(*inner))),
-        HirType::Promise(inner) => HirType::Promise(Box::new(quickjs_reference_slot_type(*inner))),
+        HirType::Optional(inner) => HirType::Optional(Box::new(js_reference_slot_type(*inner))),
+        HirType::Nullable(inner) => HirType::Nullable(Box::new(js_reference_slot_type(*inner))),
+        HirType::Nullish(inner) => HirType::Nullish(Box::new(js_reference_slot_type(*inner))),
+        HirType::Promise(inner) => HirType::Promise(Box::new(js_reference_slot_type(*inner))),
         HirType::Union(types) if types.iter().any(contains_reference) => HirType::Json,
         other => other,
     }
@@ -2273,8 +2273,8 @@ fn storage_reference_type(ty: &TsType) -> bool {
 }
 fn storage_parameter_type(pattern: &Pat, source: HirType) -> HirType {
     remember_storage_source(storage_key(pattern.span()), &source);
-    if is_quickjs_function_value_slot(pattern.span()) {
-        return quickjs_reference_slot_type(source);
+    if is_js_function_value_slot(pattern.span()) {
+        return js_reference_slot_type(source);
     }
     if matches!(pattern, Pat::Rest(_)) && has_dynamic_storage(pattern.span()) {
         return HirType::Array(Box::new(HirType::Json));
@@ -2291,8 +2291,8 @@ fn storage_return_type(span: Span, source: HirType) -> HirType {
     if ACTIVE_STORAGE_PLAN.with(|active| active.borrow().sink_results.contains(&(span.lo.0, 0))) {
         return widen_sink_type(source);
     }
-    if is_quickjs_function_value(span) || is_quickjs_function_value_result_slot(span) {
-        return quickjs_reference_slot_type(source);
+    if is_js_function_value(span) || is_js_function_value_result_slot(span) {
+        return js_reference_slot_type(source);
     }
     if ACTIVE_STORAGE_PLAN.with(|active| active.borrow().result_is_dynamic(span)) {
         if is_generator_producer_type(&source) {
@@ -2468,7 +2468,7 @@ impl FnLowerer<'_> {
                         let signature = self.signatures.get(&name)?;
                         (signature.is_extern
                             && signature.generic_type_params.is_empty()
-                            && is_quickjs_function_source(signature.source_range.0))
+                            && is_js_function_source(signature.source_range.0))
                         .then(|| {
                             let ret = if signature.is_async {
                                 HirType::Promise(Box::new(signature.ret.clone()))
@@ -2794,12 +2794,12 @@ impl FnLowerer<'_> {
         Ok(())
     }
 
-    fn validate_quickjs_function_value_arguments(
+    fn validate_js_function_value_arguments(
         &mut self,
         target: &Expr,
         arguments: &[swc_ecma_ast::ExprOrSpread],
     ) -> Result<bool, String> {
-        if !is_quickjs_function_value_expression(target) {
+        if !is_js_function_value_expression(target) {
             return Ok(false);
         }
         let Some(source) = self.source_value_hint(target) else {

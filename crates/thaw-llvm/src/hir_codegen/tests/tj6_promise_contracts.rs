@@ -1,5 +1,5 @@
 // thaw-js typed calls with a `Promise<T>` result: the thaw-js side awaits the settled value and the
-// compiled side wraps it in a resolved native Promise (as the QuickJS path does).
+// compiled side wraps it in a resolved native Promise (as the JS engine path does).
 
 fn tj6_hex(key: &str) -> String {
     key.bytes().map(|b| format!("{b:02x}")).collect()
@@ -111,7 +111,7 @@ fn tj6_routed_union_promise_method_sets_the_union_await_bit() {
 }
 
 #[test]
-fn routed_typed_call_rethrows_the_exact_thrown_object_without_quickjs() {
+fn routed_typed_call_rethrows_the_exact_thrown_object_without_js() {
     let run = tj6_hex("k::boom");
     let source = format!(
         "declare function __thaw_typed_tjs_{run}(x: number): number;

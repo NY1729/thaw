@@ -91,7 +91,7 @@ impl<'a> FnLowerer<'a> {
 
     /// Preserve the allocation's full typed view before structural narrowing.
     /// Nonprefix views also record physical field offsets before type erasure;
-    /// the QuickJS factory itself remains lazy in native-only programs.
+    /// the JS engine factory itself remains lazy in native-only programs.
     /// `Call(Lambda(.., body), args)` wrappers (evaluation-order temporaries) around an `ObjectLit`.
     fn is_wrapped_object_literal(value: &HirExpr) -> bool {
         match value {
@@ -1649,14 +1649,14 @@ impl<'a> FnLowerer<'a> {
             if Self::contains_js_value_member(&actual) {
                 return self.coerce_composite_to_declared(declared, value, actual);
             }
-            // A `JsValue` (an opaque handle to a live QuickJS-retained
+            // A `JsValue` (an opaque handle to a live JS-engine-retained
             // object, e.g. zod's `z.string()` returning a `ZodString`
             // schema instance) has no direct JSON representation. Wrapped
             // via `HirExpr::JsValueAsJson` -- a real, valid `Json` value
             // (the same `{"__thaw_js_handle_id__": <id>}` placeholder
             // object `compile_dynamic_value_placeholder` already builds
             // for a `JsValue` crossing into a dynamic call's own JSON
-            // argument array; the QuickJS-side reviver splices the real
+            // argument array; the JS-engine-side reviver splices the real
             // live value back in whenever this placeholder is later
             // JSON-parsed there, same as it already does for a `Date`) --
             // rather than left as the raw, unwrapped handle. `HirType::
@@ -1707,7 +1707,7 @@ impl<'a> FnLowerer<'a> {
             // 0` passed to zod's `z.number().refine(...)`) has no JSON
             // representation either -- but unlike `JsValue` above, it
             // can't just pass through unchanged: there is no existing
-            // *live* value on the QuickJS side to reference yet, only a
+            // *live* value on the JS engine side to reference yet, only a
             // native function pointer thaw-llvm needs to bridge into one.
             // Wrapped in a manual `registerNativeCallback` call (the same
             // convention `getDynamicProperty`/`callDynamicMethod`/etc.
@@ -1716,7 +1716,7 @@ impl<'a> FnLowerer<'a> {
             // callback`, thaw-llvm's `dynamic_host.rs`), which builds a
             // native-to-JS adapter (reusing the existing N-API `compile_
             // napi_value_callback`, itself backend-agnostic) and registers
-            // it as a real, retained QuickJS value -- yielding an ordinary
+            // it as a real, retained JS engine value -- yielding an ordinary
             // `JsValue` handle from here on, so everything downstream
             // (`compile_dynamic_value_placeholder`'s own `is_int_value()`
             // detection, the args-JSON reviver, ...) treats it exactly
@@ -2087,7 +2087,7 @@ impl<'a> FnLowerer<'a> {
                         || Self::is_wrapped_object_literal(&value)
                         || matches!(&value, HirExpr::Var(name)
                             if self.fresh_object_bindings.contains(name)));
-                    // A fresh literal handed to a thaw-js package is a plain-data copy: no QuickJS-hosted
+                    // A fresh literal handed to a thaw-js package is a plain-data copy: no JS-engine-hosted
                     // projection is needed (a live reference to an existing owner keeps the projection).
                     // A literal with accessors is not plain data: a copy would freeze the getter's
                     // result, so it crosses as a live accessor projection (a getter runs per read).
@@ -2163,7 +2163,7 @@ impl<'a> FnLowerer<'a> {
             // uses for a `JsValue` source. Without this, a `Dictionary`-
             // declared slot fed a genuinely dynamic value (e.g. `new
             // Proxy(target, handler)`'s own `target` re-read through a
-            // live QuickJS handle) hit the `ObjectLit`-only check below
+            // live JS engine handle) hit the `ObjectLit`-only check below
             // and hard-errored instead.
             if matches!(actual, HirType::Json | HirType::JsValue) {
                 return if actual == HirType::JsValue {

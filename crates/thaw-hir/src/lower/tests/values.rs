@@ -2617,7 +2617,7 @@ fn lowers_abort_controller_through_the_dynamic_host() {
 
 /// `AbortSignal.timeout(ms)`/`AbortSignal.any(signals)` used to fail to
 /// compile ("cannot infer the type of ... call to unknown function
-/// AbortSignal.timeout") even though the QuickJS Fallback engine
+/// AbortSignal.timeout") even though the retired Fallback engine
 /// already implements both correctly (`platform_globals/workers/
 /// abort_timers.js`) -- the native compiler's dynamic-value receiver
 /// inference (`infer_member_receiver_type`) recognized `Atomics`/

@@ -109,7 +109,7 @@ fn native_event_key_scalar_ownership_stays_in_nested_lambda_function() {
 }
 
 #[test]
-fn native_event_key_quickjs_setter_transfers_handle_once() {
+fn native_event_key_js_setter_transfers_handle_once() {
     let source = r#"
         declare function __thaw_typed_js_2473657474657224626f782476616c7565(receiver: JsValue, value: JsValue): void;
         function main(): void {
@@ -131,7 +131,7 @@ fn native_event_key_quickjs_setter_transfers_handle_once() {
             console.log(caught, callDynamicValue(check, __thaw_json_argument_array()));
         }
     "#;
-    assert_eq!(compile_and_run(source, "typed_quickjs_event_key_setter"), "true\ntrue true\n");
+    assert_eq!(compile_and_run(source, "typed_js_event_key_setter"), "true\ntrue true\n");
 }
 
 #[test]
@@ -2472,11 +2472,11 @@ fn nested_finally_blocks_run_inside_out() {
     );
 }
 
-/// The QuickJS-NG fallback path (docs/design/bridge.md section 7): a
+/// The retired fallback path (docs/design/bridge.md section 7): a
 /// compiled Thaw program loads real JS source and calls into it,
 /// round-tripping arguments/results through `Json`.
 #[test]
-fn compiles_quickjs_fallback_path() {
+fn compiles_js_fallback_path() {
     let source = r#"
         function main(): void {
             const ok: boolean = loadScript(
@@ -2545,13 +2545,13 @@ fn compiles_quickjs_fallback_path() {
         function keepDynamic(value: JsValue): JsValue { return value; }
     "#;
     assert_eq!(
-        compile_and_run(source, "quickjs_fallback"),
+        compile_and_run(source, "js_fallback"),
         "true\n5\nhello, thaw\n42\n84\n42\n42\ntrue\nfalse\n3\n3\ntrue\n10\n10\n12\n12\n10\nkept\ntrue\ntrue\n7\ngetter failed\nsum:86\n42\ntrue\ntrue\n"
     );
 }
 
 #[test]
-fn quickjs_dynamic_property_first_boundary_preserves_exact_getter_throws() {
+fn js_dynamic_property_first_boundary_preserves_exact_getter_throws() {
     let source = r#"
         function main(): void {
             console.log(loadScript(
@@ -2587,13 +2587,13 @@ fn quickjs_dynamic_property_first_boundary_preserves_exact_getter_throws() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "quickjs_dynamic_property_exact_first_throw"),
+        compile_and_run(source, "js_dynamic_property_exact_first_throw"),
         "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
     );
 }
 
 #[test]
-fn quickjs_dynamic_property_exact_read_preserves_order_and_success_identity() {
+fn js_dynamic_property_exact_read_preserves_order_and_success_identity() {
     let source = r#"
         function main(): void {
             console.log(loadScript(
@@ -2628,13 +2628,13 @@ fn quickjs_dynamic_property_exact_read_preserves_order_and_success_identity() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "quickjs_dynamic_property_exact_order"),
+        compile_and_run(source, "js_dynamic_property_exact_order"),
         "true\nR\nK\nG\ntrue\ntrue\ntrue\nR\nK\nG\ntrue\n"
     );
 }
 
 #[test]
-fn quickjs_dynamic_property_exact_receiver_and_key_throws_keep_order() {
+fn js_dynamic_property_exact_receiver_and_key_throws_keep_order() {
     let source = r#"
         function main(): void {
             console.log(loadScript(
@@ -2659,7 +2659,7 @@ fn quickjs_dynamic_property_exact_receiver_and_key_throws_keep_order() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "quickjs_dynamic_property_exact_argument_throws"),
+        compile_and_run(source, "js_dynamic_property_exact_argument_throws"),
         "true\nR\ntrue\nR\nK\ntrue\n"
     );
 }
@@ -2672,7 +2672,7 @@ fn quickjs_dynamic_property_exact_receiver_and_key_throws_keep_order() {
 /// "JavaScript value handle N has non-object type String", because the
 /// bridge required a real object handle.
 #[test]
-fn quickjs_dynamic_property_and_method_box_a_primitive_string() {
+fn js_dynamic_property_and_method_box_a_primitive_string() {
     let source = r#"
         function main(): void {
             const ok: boolean = loadScript("globalThis.dynamicText = 'hello';");
@@ -2685,18 +2685,18 @@ fn quickjs_dynamic_property_and_method_box_a_primitive_string() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "quickjs_dynamic_primitive"),
+        compile_and_run(source, "js_dynamic_primitive"),
         "true\n5\nHELLO\nel\n"
     );
 }
 
 /// A dynamic call (`Json`-typed) as the *right* operand of `&&`/`||` --
-/// `label && lookup()` where `lookup` is a QuickJS-backed method returning a
+/// `label && lookup()` where `lookup` is a JS-engine-backed method returning a
 /// dynamic value. Real trigger: highlight.js's `lang && hljs.getLanguage
 /// (lang)`, which used to fail with "logical operands have incompatible
 /// types Str and Json" because only a `Json` *left* operand was handled.
 #[test]
-fn quickjs_dynamic_call_is_a_logical_operand() {
+fn js_dynamic_call_is_a_logical_operand() {
     let source = r#"
         function main(): void {
             const ok: boolean = loadScript(
@@ -2712,7 +2712,7 @@ fn quickjs_dynamic_call_is_a_logical_operand() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "quickjs_dynamic_logical"),
+        compile_and_run(source, "js_dynamic_logical"),
         "true\nyes\n\nyes\nx\n"
     );
 }
@@ -2745,7 +2745,7 @@ fn keeps_a_dynamic_value_stored_by_an_assignment_statement() {
 }
 
 #[test]
-fn passes_callbacks_to_typed_quickjs_calls() {
+fn passes_callbacks_to_typed_js_calls() {
     let source = r#"
         declare function __thaw_typed_js_72756e43616c6c6261636b(
             callback?: (value: number) => number,
@@ -2762,13 +2762,13 @@ fn passes_callbacks_to_typed_quickjs_calls() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "typed_quickjs_callback_argument"),
+        compile_and_run(source, "typed_js_callback_argument"),
         "42\n"
     );
 }
 
 #[test]
-fn returned_closure_keeps_mutable_state_across_quickjs_callbacks() {
+fn returned_closure_keeps_mutable_state_across_js_callbacks() {
     let source = r#"
         declare function __thaw_typed_js_696e766f6b655477696365(
             callback: () => number,
@@ -2790,7 +2790,7 @@ fn returned_closure_keeps_mutable_state_across_quickjs_callbacks() {
 }
 
 #[test]
-fn decodes_nullable_typed_quickjs_callback_arguments() {
+fn decodes_nullable_typed_js_callback_arguments() {
     let source = r#"
         declare function __thaw_typed_js_72756e4e756c6c43616c6c6261636b(
             callback: (error: Json | null) => void,
@@ -2803,11 +2803,11 @@ fn decodes_nullable_typed_quickjs_callback_arguments() {
             );
         }
     "#;
-    assert_eq!(compile_and_run(source, "nullable_quickjs_callback"), "true\n");
+    assert_eq!(compile_and_run(source, "nullable_js_callback"), "true\n");
 }
 
 #[test]
-fn propagates_synchronous_native_callback_exceptions_to_quickjs() {
+fn propagates_synchronous_native_callback_exceptions_to_js() {
     let source = r#"
         declare function __thaw_typed_js_696e766f6b6543616c6c6261636b(
             callback: () => void,
@@ -3119,7 +3119,7 @@ fn embedded_nuls_survive_native_strings_and_json_boundaries() {
 }
 
 #[test]
-fn compiled_quickjs_graph_result_keeps_cycle_identity() {
+fn compiled_js_graph_result_keeps_cycle_identity() {
     let source = r#"
         function main(): void {
             loadScript("globalThis.returnCycle = () => { const value = {}; value.self = value; return value; };");
@@ -3127,7 +3127,7 @@ fn compiled_quickjs_graph_result_keeps_cycle_identity() {
             console.log(result === result.self);
         }
     "#;
-    assert_eq!(compile_and_run(source, "quickjs_graph_cycle_result"), "true\n");
+    assert_eq!(compile_and_run(source, "js_graph_cycle_result"), "true\n");
 }
 
 #[test]
@@ -3693,7 +3693,7 @@ fn inline_nullish_comparison_callees_release_their_handles() {
 }
 
 #[test]
-fn native_typed_quickjs_fresh_json_arguments_survive_all_return_lanes() {
+fn native_typed_js_fresh_json_arguments_survive_all_return_lanes() {
     let source = r#"
         declare function __thaw_typed_js_73746f7265566f6964(value: Json): void;
         declare function __thaw_typed_js_73746f7265426f6f6c(value: Json): boolean;
@@ -3739,11 +3739,11 @@ fn native_typed_quickjs_fresh_json_arguments_survive_all_return_lanes() {
         }
     "#;
 
-    assert_eq!(compile_and_run(source, "typed_quickjs_all_return_lanes"), "true true true true true true true true\n");
+    assert_eq!(compile_and_run(source, "typed_js_all_return_lanes"), "true true true true true true true true\n");
 }
 
 #[test]
-fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() {
+fn native_typed_js_argument_array_is_released_when_later_argument_throws() {
     let source = r#"
         declare function __thaw_typed_js_616363657074(first: Json, second: JsValue): void;
         declare function __thaw_typed_js_7468726f775f696e6e6572(): void;
@@ -3768,7 +3768,7 @@ fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() 
             }
             const afterFresh = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
             const borrowed: Json = JSON.parse('{"marker":"borrowed"}');
-            // JSON.parse adds one intentionally live QuickJS host handle.
+            // JSON.parse adds one intentionally live JS engine host handle.
             const borrowedBaseline = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
             let borrowedCaught = 0;
             for (let index = 0; index < 3; index++) {
@@ -3796,7 +3796,7 @@ fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() 
     "#;
 
     assert_eq!(
-        compile_and_run(source, "typed_quickjs_argument_array_unwind"),
+        compile_and_run(source, "typed_js_argument_array_unwind"),
         "true true true true true true true true true true\n"
     );
 }
@@ -3804,7 +3804,7 @@ fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() 
 
 // This runtime case checks alias usability of native Json argument coercion in a local function.
 #[test]
-fn stored_json_alias_survives_nested_outer_quickjs_call() {
+fn stored_json_alias_survives_nested_outer_js_call() {
     let source = r#"
         declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
         declare function __thaw_typed_js_766572696679(value: Json): boolean;

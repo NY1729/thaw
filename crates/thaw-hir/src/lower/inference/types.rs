@@ -3104,7 +3104,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&space_type, space, "JSON.stringify space")?;
                         return Ok(HirType::Str);
                     }
-                    // QuickJS-NG fallback path (docs/design/bridge.md
+                    // retired fallback path (docs/design/bridge.md
                     // section 7): `loadScript` evaluates JS source into
                     // the global engine context; `callDynamic` calls a
                     // top-level function it defined, by name, with `Json`
@@ -3191,7 +3191,7 @@ impl<'a> FnLowerer<'a> {
                     "callNativeAddonWithCallback" => return Ok(HirType::Json),
                     "pollNativeAddonEvents" => return Ok(HirType::F64),
                     // Wraps a real compiled (native) function value as a
-                    // live, retained QuickJS-callable value -- see
+                    // live, retained JS-engine-callable value -- see
                     // `coerce_to_declared`'s own doc comment for why this
                     // is built here instead of a bare pass-through the
                     // way `JsValue`/`Undefined` are.

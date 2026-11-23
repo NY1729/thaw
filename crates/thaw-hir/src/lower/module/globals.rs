@@ -493,7 +493,7 @@ fn lower_static_class_globals(
 }
 
 /// Removes every decorator (class, member, parameter) from a cloned class
-/// so its JavaScript codegen can be evaluated by QuickJS, which has no
+/// so its JavaScript codegen can be evaluated by JS engine, which has no
 /// decorator syntax. thaw applies decorators natively.
 fn strip_class_decorators(class: &mut swc_ecma_ast::Class) {
     struct Stripper;
@@ -1087,7 +1087,7 @@ fn display_class_name(class_name: &str) -> &str {
 
 /// Renders one class as JavaScript with its TypeScript-only syntax
 /// (annotations, `readonly`/`declare`/accessibility modifiers, type params)
-/// stripped, for evaluation by QuickJS. Decorators are dropped (applied
+/// stripped, for evaluation by JS engine. Decorators are dropped (applied
 /// natively instead). Returns `None` if the class can't be codegen'd, in
 /// which case the caller falls back to a `new Function()` token.
 fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl, class_tokens: &HashSet<Symbol>, ctor_bridge: bool) -> Option<String> {
@@ -1197,7 +1197,7 @@ fn class_decorator_token_init(lowerer: &mut FnLowerer<'_>) -> Result<HirExpr, St
 
 /// Gives every class that is used dynamically (decorated, referenced as a
 /// bare value, or constructed) one real, live `JsValue` "class token" --
-/// a genuine distinct QuickJS object -- stored as an ordinary global
+/// a genuine distinct JS engine object -- stored as an ordinary global
 /// (`class_decorator_token_symbol`). A decorator's `target` argument (see
 /// `lower_class_decorator_call`/`lower_member_decorator_call` below) is
 /// built from this same token, and so is the `constructor` field

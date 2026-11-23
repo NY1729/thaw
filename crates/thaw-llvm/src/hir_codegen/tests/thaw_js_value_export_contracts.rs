@@ -13,7 +13,7 @@ fn thaw_js_value_export_program(statement: &str) -> String {
 
 #[test]
 #[allow(clippy::single_element_loop)]
-fn thaw_js_routed_value_export_handle_calls_link_no_quickjs() {
+fn thaw_js_routed_value_export_handle_calls_link_no_js() {
     for statement in ["const text: JsValue = chalk.red(\"x\"); console.log(text);"] {
         let source = thaw_js_value_export_program(statement);
         let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);

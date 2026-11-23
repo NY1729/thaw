@@ -1,6 +1,6 @@
 // A live object literal with methods, passed to a thaw-js routed call, is built as plain Json by
 // the call's argument compile: each method is a receiver callback passed as a `__thaw_tjs_handle__`
-// marker, and no QuickJS builder is compiled for it. Getters keep a loud stub, and the QuickJS
+// marker, and no JS engine builder is compiled for it. Getters keep a loud stub, and the JS engine
 // engine keeps the builder.
 
 fn thaw_js_object_literal_program(members: &str) -> String {
@@ -22,7 +22,7 @@ fn thaw_js_routed_object_literal_methods_are_receiver_handles() {
     assert!(ir.contains("call { i64, ptr } @thaw_tjs_register_native_method_callback_graph("), "{ir}");
     assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("), "{ir}");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
-    // the member is no longer built by the QuickJS builder
+    // the member is no longer built by the JS engine builder
     assert!(!ir.contains("__thaw_object_from_operations"), "{ir}");
 }
 
@@ -51,11 +51,11 @@ fn thaw_js_routed_object_literal_getters_stay_loud() {
 }
 
 // A thaw-js routed call builds its method-bearing object literal argument from the members, so the
-// QuickJS builder in the marker's first operand must not make the program need QuickJS. The QuickJS
-// lane keeps the builder and the QuickJS requirement.
+// JS engine builder in the marker's first operand must not make the program need JS engine. The JS engine
+// lane keeps the builder and the JS engine requirement.
 
 #[test]
-fn thaw_js_routed_object_literal_argument_does_not_require_the_quickjs_builder() {
+fn thaw_js_routed_object_literal_argument_does_not_require_the_js_builder() {
     let source = thaw_js_object_literal_program("{ cb(x: number): number { return x + 1; }, n: 1 }");
     let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
     assert!(uses_thaw_js, "{ir}");

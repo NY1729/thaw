@@ -1851,15 +1851,15 @@ impl<'a> FnLowerer<'a> {
                     HirType::Function(..) | HirType::CallableFunction(..) | HirType::OverloadedFunction(..))));
         if indexed_function_element
             || (matches!(callee_expr.as_ref(), Expr::Ident(identifier)
-                if is_quickjs_function_value(identifier.span())
+                if is_js_function_value(identifier.span())
                     && call.args.iter().any(|argument| argument.spread.is_some())))
             || !matches!(callee_expr.as_ref(), Expr::Ident(_) | Expr::Member(_))
         {
             if call.type_args.is_some() {
                 return Err("function-value invocation does not accept type arguments".into());
             }
-            let quickjs_function_value = self
-                .validate_quickjs_function_value_arguments(callee_expr, &call.args)?;
+            let js_function_value = self
+                .validate_js_function_value_arguments(callee_expr, &call.args)?;
             // `chalk.hex("#f80")("x")`: a dynamic method call only yields a
             // handle when hinted `JsValue`; unhinted it snapshots to `Json`.
             let callee = if matches!(callee_expr.as_ref(), Expr::Call(_)) {
@@ -1984,7 +1984,7 @@ impl<'a> FnLowerer<'a> {
                         public_expected.as_ref(),
                         argument,
                     )?;
-                    if quickjs_function_value {
+                    if js_function_value {
                         self.coerce_primitive_array_argument_aliasing(argument, expected)
                     } else {
                         self.coerce_to_declared(expected, argument)
@@ -2204,7 +2204,7 @@ impl<'a> FnLowerer<'a> {
                 // instance) has no known class/method table the way the
                 // branch above needs, but calling a method on it by name
                 // is still meaningful: the value really is a live JS
-                // object on the other side of the QuickJS boundary, it's
+                // object on the other side of the JS engine boundary, it's
                 // just one thaw has no compiled knowledge of the shape
                 // of. Real example: that same schema's own
                 // `.safeParse(data)`. Routes through `callDynamicMethod`
@@ -3181,7 +3181,7 @@ impl<'a> FnLowerer<'a> {
             );
         }
 
-        // Native callbacks crossing into QuickJS need a live projection for
+        // Native callbacks crossing into JS engine need a live projection for
         // accessor-bearing results. Keep the original native function ABI
         // behind the wrapper; the graph callback marshaller sees its owned
         // Json (or Promise<Json>) result.
@@ -3212,7 +3212,7 @@ impl<'a> FnLowerer<'a> {
         }
 
         // `eval(code)` -- an AOT compiler can't evaluate in the compiled
-        // scope, so this is lowered to the QuickJS realm's own global
+        // scope, so this is lowered to the JS engine realm's own global
         // `eval` (`callDynamic("eval", [code])`), i.e. the semantics of
         // *indirect* eval: it sees globals, not local bindings.
         if callee_name == "eval"
@@ -3826,8 +3826,8 @@ impl<'a> FnLowerer<'a> {
             _ => None,
             }
         });
-        let quickjs_function_value = if let Callee::Expr(callee) = &call.callee {
-            self.validate_quickjs_function_value_arguments(callee, &call.args)?
+        let js_function_value = if let Callee::Expr(callee) = &call.callee {
+            self.validate_js_function_value_arguments(callee, &call.args)?
         } else {
             false
         };
@@ -4064,7 +4064,7 @@ impl<'a> FnLowerer<'a> {
                         })
                 })
                 .collect::<Vec<_>>();
-            // An ambient QuickJS export passed by bare name to a generic or dynamic
+            // An ambient JS engine export passed by bare name to a generic or dynamic
             // parameter (`promisify(execFile)`) is the package's real JS function
             // (see `ambient_js_export_argument`), not the typed stub.
             let ambient_value = if matches!(argument.expr.as_ref(), Expr::Ident(_))
@@ -4744,7 +4744,7 @@ impl<'a> FnLowerer<'a> {
                             Ok(value)
                         } else if jit_structural_class_object {
                             self.coerce_jit_structural_class_argument(value, declared)
-                        } else if quickjs_function_value
+                        } else if js_function_value
                             || user_function
                             || (thaw_js_live_json_slot
                                 && i > 0
@@ -5020,7 +5020,7 @@ impl<'a> FnLowerer<'a> {
                 // `size?` above, can legitimately be omitted; arity is
                 // somebody else's job, not this coercion step's).
                 // `fs.readSync(fd, buf, offset, ..)` declares `buf: any`, so a
-                // native Buffer reaches QuickJS as a copy and the bytes read
+                // native Buffer reaches JS engine as a copy and the bytes read
                 // never come back. Keep the (side-effect free) buffer and
                 // offset operands to copy them back after the call.
                 let read_sync_writeback = if symbol == "node:fs::readSync"
@@ -5903,7 +5903,7 @@ impl<'a> FnLowerer<'a> {
         }
     }
     /// A Json-typed `.includes` receiver can either be an ordinary decoded
-    /// value or a live QuickJS handle carried through the JSON bridge. Reuse
+    /// value or a live JS engine handle carried through the JSON bridge. Reuse
     /// the selected-method path in both cases: preserve an existing handle
     /// when present, otherwise materialize the captured Json value as a live
     /// value before normal JavaScript property lookup and invocation.

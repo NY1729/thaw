@@ -1,7 +1,7 @@
 // Native timers: `setTimeout`/`setInterval`/`setImmediate` with a zero-argument native callback lower
-// to `__thaw_timer_*` builtins (thaw-runtime's timer queue) instead of the QuickJS globals, so a
+// to `__thaw_timer_*` builtins (thaw-runtime's timer queue) instead of the JS engine globals, so a
 // timer-only program never creates a JS context. Ineligible calls return `Ok(None)` and take the
-// ordinary path; the CLI re-lowers without this mode when the program still needs QuickJS.
+// ordinary path; the CLI re-lowers without this mode when the program still needs JS engine.
 impl<'a> FnLowerer<'a> {
     fn timer_global_unshadowed(&self, name: &str) -> bool {
         !self.scope.contains_key(name) && !self.signatures.contains_key(name)
