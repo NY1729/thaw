@@ -11,8 +11,8 @@ fn routed_function_with_this_callback_is_a_graph_handle_with_identity() {
            __thaw_typed_tjs_{run}(function (this: Json, v: number): void {{ console.log(typeof this, v); }});
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = compile_routed(&source, "thaw_js_receiver_callback");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = compile_routed(&source, "thaw_js_receiver_callback");
+    assert!(uses_thaw_js, "{ir}");
     let calls = |name: &str| ir.lines().any(|line| line.contains("call ") && line.contains(name));
     assert!(calls("@thaw_tjs_register_native_callback_graph("), "{ir}");
     assert!(calls("@thaw_tjs_callback_identity("), "{ir}");

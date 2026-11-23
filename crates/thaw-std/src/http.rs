@@ -22,7 +22,7 @@ unsafe extern "C" {
     ) -> u64;
     fn thaw_runtime_unwatch_fd(id: u64) -> bool;
     fn thaw_runtime_run_one_event() -> bool;
-    /// Lets a host event loop that is not `thaw_http_run_servers` (QuickJS's) poll the servers.
+    /// Lets a host event loop that is not `thaw_http_run_servers` (a JS engine's) poll the servers.
     fn thaw_runtime_set_server_poll_hook(hook: extern "C" fn() -> u8);
     /// Registers a timer promise that settles after at least `milliseconds`.
     /// Used here only to bound how long the event loop blocks in `poll`, so
@@ -1855,7 +1855,7 @@ pub extern "C" fn thaw_http_run_servers() {
 }
 
 /// One non-blocking server-event pass for a host loop that interleaves its own work
-/// (the QuickJS event loop): bit 0 = servers or connections are still live,
+/// (the JS engine event loop): bit 0 = servers or connections are still live,
 /// bit 1 = a listening/error/close callback ran and the host should drain microtasks.
 #[no_mangle]
 pub extern "C" fn thaw_http_poll_servers() -> u8 {

@@ -1,16 +1,13 @@
 /// Compiles routed (the only lane) and reports whether the program needs a JS engine at all.
 fn compile_to_ir_and_js_engine_use(source: &str, module_name: &str) -> (String, bool) {
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, module_name);
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     (
         compiler.print_to_string(),
-        compiler.uses_thaw_js() || compiler.uses_quickjs(),
+        compiler.uses_thaw_js(),
     )
 }
 

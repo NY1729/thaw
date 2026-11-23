@@ -1518,13 +1518,10 @@ fn native_promise_scope_boundaries_codegen_regression_control() {
         }
     "#;
     let parsed = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&parsed).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "native_promise_scope_boundaries");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("cleanup_before_catch"), "{ir}");
     assert!(ir.contains("release_stack_promise"), "{ir}");
@@ -1544,13 +1541,10 @@ fn native_promise_scope_boundaries_codegen_regression_control() {
         function main(): void {}
     "#;
     let parsed = thaw_parser::parse_typescript(module_source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&parsed).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "module_scope_boundary");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     assert!(compiler.print_to_string().contains("__thaw_top_level_init"));
 
     // Resume-entry reset control for the paired catch/loop context state.
@@ -1563,13 +1557,10 @@ fn native_promise_scope_boundaries_codegen_regression_control() {
         }
     "#;
     let parsed = thaw_parser::parse_typescript(async_source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&parsed).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "async_scope_boundary");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("thaw_user_main.resume"), "{ir}");
 }

@@ -39,7 +39,6 @@ use swc_ecma_ast::{
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 thread_local! {
-    static THAW_JS_ROUTED: Cell<bool> = const { Cell::new(false) };
     static NATIVE_TIMERS: Cell<bool> = const { Cell::new(false) };
     static SHARED_ENV_PROGRAM: Cell<bool> = const { Cell::new(false) };
 }
@@ -55,24 +54,13 @@ pub(crate) fn shared_env_program() -> bool {
 }
 
 /// Lower eligible `setTimeout`/`setInterval`/`setImmediate` calls to thaw-runtime's native timer
-/// queue. The CLI turns it on first and re-lowers with it off when the program still needs QuickJS.
+/// queue. The CLI turns it on first and re-lowers with it off when the program still needs the JS timer heap.
 pub fn set_native_timers(enabled: bool) {
     NATIVE_TIMERS.with(|flag| flag.set(enabled));
 }
 
 pub(crate) fn native_timers() -> bool {
     NATIVE_TIMERS.with(Cell::get)
-}
-
-/// Lower for a thaw-js routed build (the CLI retries unrouted if it still needs QuickJS): values
-/// handed to package calls are plain data, so fresh object literals cross as native copies instead of
-/// QuickJS-hosted projections.
-pub fn set_thaw_js_routed(routed: bool) {
-    THAW_JS_ROUTED.with(|flag| flag.set(routed));
-}
-
-pub(crate) fn thaw_js_routed() -> bool {
-    THAW_JS_ROUTED.with(Cell::get)
 }
 
 use crate::{
@@ -87,10 +75,6 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
     let (backend, hex) = name
         .strip_prefix("__thaw_typed_jit_")
         .map(|hex| (DynamicBackend::Jit, hex))
-        .or_else(|| {
-            name.strip_prefix("__thaw_typed_js_")
-                .map(|hex| (DynamicBackend::QuickJs, hex))
-        })
         .or_else(|| {
             name.strip_prefix("__thaw_typed_tjs_")
                 .map(|hex| (DynamicBackend::ThawJs, hex))
@@ -161,35 +145,15 @@ fn imported_class_key(name: &str) -> Option<String> {
     rest.contains("::").then(|| rest.to_string())
 }
 
-fn is_ordinary_quickjs_symbol(backend: DynamicBackend, symbol: &str) -> bool {
-    // (thaw-js calls are deliberately not "ordinary QuickJS typed calls": they take plain data by
-    // value, so none of the live-handle/dynamic-storage handling applies.)
-    backend == DynamicBackend::QuickJs
-        && ![
-            "$getter$",
-            "$setter$",
-            "$method$",
-            "$methodvoid$",
-            "$staticgetter$",
-            "$staticsetter$",
-            "$staticmethod$",
-            "$staticmethodvoid$",
-            "$new$",
-        ]
-        .iter()
-        .any(|prefix| symbol.starts_with(prefix))
-}
-
 fn ordinary_quickjs_typed_symbol(name: &str) -> Option<String> {
     let (backend, symbol) = dynamic_symbol(name)?;
     // A thaw-js plain function is the same kind of function value: reference parameters become
     // live `Json` views (see `quickjs_function_value_type`) instead of by-value copies.
-    (is_ordinary_quickjs_symbol(backend, &symbol)
-        // ponytail: arity/overload-expanded shims (optional parameters) keep the by-value path.
-        || backend == DynamicBackend::ThawJs
-            && !symbol.starts_with('$')
-            && !name.contains("__arity_")
-            && !name.contains("__overload_"))
+    // ponytail: arity/overload-expanded shims (optional parameters) keep the by-value path.
+    (backend == DynamicBackend::ThawJs
+        && !symbol.starts_with('$')
+        && !name.contains("__arity_")
+        && !name.contains("__overload_"))
     .then_some(symbol)
 }
 

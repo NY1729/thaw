@@ -83,10 +83,6 @@ fn thaw_js_instance_method_json_slot_keeps_copying_literals_numbers_and_non_meth
     let function = thaw_js_live_arg_symbol("tjs", "$fn$k::emit$arity3");
     let non_method = thaw_js_live_arg_main_body(&function, "const arr = [1, 2];", "arr");
     assert!(!non_method.contains("__thaw_array_with_native_view"), "{non_method}");
-    // a QuickJS symbol keeps its own lowering
-    let quickjs = thaw_js_live_arg_symbol("js", "$method$k::Emitter$emit$overload0$arity3");
-    let quickjs_body = thaw_js_live_arg_main_body(&quickjs, "const arr = [1, 2];", "arr");
-    assert!(!quickjs_body.contains("__thaw_array_with_native_view"), "{quickjs_body}");
 }
 
 #[test]

@@ -12,18 +12,13 @@ fn stream_ctor_lowered_dump(source: &str) -> String {
     format!("{program:?}")
 }
 
-fn stream_ctor_routed_build(source: &str) -> Result<(bool, bool, String), String> {
+fn stream_ctor_routed_build(source: &str) -> Result<(bool, String), String> {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "thaw_js_stream_ctor");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program)?;
-    Ok((
-        compiler.uses_thaw_js(),
-        compiler.uses_quickjs(),
-        compiler.print_to_string(),
-    ))
+    Ok((compiler.uses_thaw_js(), compiler.print_to_string()))
 }
 
 const STREAM_WRITABLE_CTOR: &str = "$new$node:stream::Writable$arity1";
@@ -85,10 +80,10 @@ fn method_symbol_callback_object_literal_stays_typed() {
 
 #[test]
 fn thaw_js_routed_ctor_callback_object_literal_is_json_with_handles() {
-    let (uses_thaw_js, uses_quickjs, ir) =
+    let (uses_thaw_js, ir) =
         stream_ctor_routed_build(&stream_writable_source("{ write(c, e, cb) { cb(); } }"))
             .expect("the Writable option object builds on thaw-js");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(
         ir.contains("call { i64, ptr } @thaw_tjs_register_native_method_callback_graph("),
@@ -115,11 +110,11 @@ fn thaw_js_routed_ctor_object_variable_is_a_loud_error() {
 
 #[test]
 fn thaw_js_routed_ctor_arrow_callback_object_literal_is_json_with_handles() {
-    let (uses_thaw_js, uses_quickjs, ir) = stream_ctor_routed_build(&stream_writable_source(
+    let (uses_thaw_js, ir) = stream_ctor_routed_build(&stream_writable_source(
         "{ write: (c, e, cb) => { cb(); } }",
     ))
     .expect("the arrow-valued Writable option object builds on thaw-js");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(uses_thaw_js, "{ir}");
     // an arrow property is a data member holding a closure: plain graph ABI, not a method handle
     assert!(ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("), "{ir}");
     assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_method_callback_graph("), "{ir}");
@@ -149,9 +144,9 @@ fn thaw_js_routed_transform_ctor_with_a_callable_cb_builds() {
         "{ transform(c, e, cb) { cb(null, 'X'); } }",
         &format!("transform: {TRANSFORM_FN}"),
     );
-    let (uses_thaw_js, uses_quickjs, ir) =
+    let (uses_thaw_js, ir) =
         stream_ctor_routed_build(&source).expect("the Transform option object builds on thaw-js");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(
         ir.contains("call { i64, ptr } @thaw_tjs_register_native_method_callback_graph("),
@@ -167,9 +162,9 @@ fn thaw_js_routed_transform_ctor_with_flush_builds() {
         "{ transform(c, e, cb) { cb(null, 'X'); }, flush(cb) { cb(null, 'z'); } }",
         &format!("transform: {TRANSFORM_FN}, flush: {FLUSH_FN}"),
     );
-    let (uses_thaw_js, uses_quickjs, ir) =
+    let (uses_thaw_js, ir) =
         stream_ctor_routed_build(&source).expect("the Transform flush option builds on thaw-js");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(uses_thaw_js, "{ir}");
     assert!(!ir.contains("cannot cross the thaw-js boundary"), "{ir}");
 }
 

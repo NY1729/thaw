@@ -772,13 +772,10 @@ fn async_catch_rethrow_carries_owned_native_text_provenance() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "async_catch_native_text_ir");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("@thaw_promise_exception_native_text_copy"), "{ir}");
     assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");
@@ -811,13 +808,10 @@ fn promise_any_aggregate_metadata_reaches_async_catch_and_rethrow() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "promise_any_aggregate_transport_ir");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("@thaw_promise_exception_aggregate_errors"), "{ir}");
     assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");

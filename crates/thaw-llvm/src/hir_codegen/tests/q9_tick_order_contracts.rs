@@ -7,7 +7,6 @@ fn routed_entry_ir(source: &str, commonjs: bool) -> (bool, String) {
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "q9_tick_order");
     compiler.set_commonjs_entry(commonjs);
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
     (compiler.uses_thaw_js(), compiler.print_to_string())
 }

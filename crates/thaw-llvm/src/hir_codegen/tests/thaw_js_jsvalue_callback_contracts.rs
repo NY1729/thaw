@@ -16,8 +16,8 @@ fn sqlite3_shaped_class_callbacks_build_on_the_graph_route() {
            __thaw_typed_tjs_{all}(db, \"select 1\", (error: JsValue, rows: Json[]): void => {{ console.log(rows); }});
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = compile_routed(&source, "thaw_js_sqlite3_shape");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = compile_routed(&source, "thaw_js_sqlite3_shape");
+    assert!(uses_thaw_js, "{ir}");
     assert!(!ir.contains("cannot cross"), "{ir}");
     let graph_calls = ir
         .lines()

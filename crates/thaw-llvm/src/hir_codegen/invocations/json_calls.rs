@@ -1183,12 +1183,12 @@ impl<'ctx> HirCompiler<'ctx> {
             ).map_err(|error| error.to_string())?;
         }
         for handle_array in handles {
-            self.builder.build_call(self.module.get_function("thaw_js_release_native_handle_array").unwrap(),
+            self.builder.build_call(self.module.get_function("thaw_tjs_release_native_handle_array").unwrap(),
                 &[(*handle_array).into()], "release_failed_projection_callbacks")
                 .map_err(|error| error.to_string())?;
         }
         for handle in direct_handles {
-            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
                 &[(*handle).into()], "release_failed_projection_builder")
                 .map_err(|error| error.to_string())?;
         }
@@ -1235,12 +1235,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
         }
         for handle_array in handles {
-            self.builder.build_call(self.module.get_function("thaw_js_release_native_handle_array").unwrap(),
+            self.builder.build_call(self.module.get_function("thaw_tjs_release_native_handle_array").unwrap(),
                 &[(*handle_array).into()], "release_failed_projection_callbacks")
                 .map_err(|error| error.to_string())?;
         }
         for handle in direct_handles {
-            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
                 &[(*handle).into()], "release_failed_projection_builder")
                 .map_err(|error| error.to_string())?;
         }

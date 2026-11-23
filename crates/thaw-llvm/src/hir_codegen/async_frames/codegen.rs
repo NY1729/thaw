@@ -599,7 +599,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.position_at_end(schedule);
             }
             // Evaluating the operand of `await` can itself throw before it
-            // produces a native Promise (notably when a QuickJS-backed call
+            // produces a native Promise (notably when a thaw-js-backed call
             // returns a rejected JavaScript Promise). JavaScript turns that
             // into an awaited rejection, so route the existing exception
             // slot through the same resume/rejection machinery instead of
@@ -852,7 +852,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if *ty == HirType::JsValue {
             self.js_mark_handles_used();
             self.builder.build_call(
-                self.module.get_function("thaw_js_retain_handle").unwrap(),
+                self.module.get_function("thaw_tjs_retain_handle").unwrap(),
                 &[value.into()], "retain_iteration_js_handle",
             ).map_err(|error| error.to_string())?;
         }

@@ -12,8 +12,8 @@ fn thaw_js_dynamic_has_call(ir: &str, symbol: &str) -> bool {
 
 #[test]
 fn thaw_js_routed_dynamic_code_names_only_thaw_tjs_symbols() {
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(THAW_JS_DYNAMIC_PROGRAM, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(THAW_JS_DYNAMIC_PROGRAM);
+    assert!(uses_thaw_js, "{ir}");
     for symbol in ["thaw_tjs_new_function", "thaw_tjs_call_graph_result"] {
         assert!(thaw_js_dynamic_has_call(&ir, symbol), "{symbol} missing: {ir}");
     }

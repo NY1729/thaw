@@ -34,10 +34,6 @@ impl<'ctx> HirCompiler<'ctx> {
                         .first()
                         .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
                     {
-                        if !self.thaw_js_routed {
-                            self.note_quickjs("decoding:class_identity");
-                            self.uses_quickjs_handles = true;
-                        }
                         let (pointer, present) =
                             self.query_native_receiver(json.into_pointer_value(), "")?;
                         let pointer = self
@@ -897,7 +893,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // here, this doesn't come from real JSON data: `compile_
             // register_native_callback`'s own `jsvalue_param_mask` tells
             // the JS-side wrapper (`thaw_js_register_native_callback`,
-            // thaw-quickjs) to retain exactly the arguments at a
+            // thaw-js) to retain exactly the arguments at a
             // `JsValue`-typed position and encode them as the same
             // `{"__thaw_js_handle_id__": N}` marker `compile_dynamic_
             // value_placeholder` already builds for the opposite
@@ -1260,10 +1256,6 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_validate_native_argument(json, &HirType::Array(Box::new(element.clone())))?;
         // A native array view passed through a dynamic callback still carries its original owner.
         // Recover it so typed callback arguments keep the same array handle instead of decoding a copy.
-        if !self.thaw_js_routed {
-            self.note_quickjs("decoding:native_array_view");
-            self.uses_quickjs_handles = true;
-        }
         let layout = format!("array:{element:?}");
         let (pointer, present) = self.query_native_receiver(json.into_pointer_value(), &layout)?;
         let function = self.current_function();
@@ -1553,22 +1545,19 @@ impl<'ctx> HirCompiler<'ctx> {
         // `array` is a freshly built raw buffer; wrap it in a handle before
         // treating it as this call's array-typed return value (see
         // `compile_array_wrap`'s doc comment). A thaw-js array keeps its holes absent.
-        if self.thaw_js_routed {
-            let mask = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_json_array_hole_mask").unwrap(),
-                    &[json.into()],
-                    "json_array_hole_mask",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or("thaw_json_array_hole_mask returned no value")?
-                .into_pointer_value();
-            return self.compile_array_wrap_with_presence(array, mask);
-        }
-        self.compile_array_wrap(array)
+        let mask = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_hole_mask").unwrap(),
+                &[json.into()],
+                "json_array_hole_mask",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_array_hole_mask returned no value")?
+            .into_pointer_value();
+        self.compile_array_wrap_with_presence(array, mask)
     }
 
     fn compile_json_to_native_tuple(

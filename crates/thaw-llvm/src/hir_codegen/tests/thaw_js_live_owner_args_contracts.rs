@@ -2,7 +2,7 @@
 // sent as its live handle and a returned handle maps back to the owner; literals and QuickJS keep the old IR.
 
 // `SYM` in `body` stands for the extern identity function's symbol in the given lane.
-fn live_owner_ir(symbol_lane: &str, body: &str, routed: bool) -> String {
+fn live_owner_ir(symbol_lane: &str, body: &str) -> String {
     let hex: String = "k::identity".bytes().map(|byte| format!("{byte:02x}")).collect();
     let symbol = format!("__thaw_typed_{symbol_lane}_{hex}");
     let source = format!(
@@ -16,7 +16,6 @@ fn live_owner_ir(symbol_lane: &str, body: &str, routed: bool) -> String {
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "thaw_js_live_owner_args");
-    compiler.set_thaw_js_routed(routed);
     compiler.compile_program(&program).unwrap();
     compiler.print_to_string()
 }
@@ -31,16 +30,16 @@ fn calls_owner_pointer(ir: &str) -> bool {
 
 #[test]
 fn thaw_js_function_named_object_arg_sends_a_live_handle_and_maps_the_owner_back() {
-    let ir = live_owner_ir("tjs", "const source = { n: 1 }; const back = SYM(source);", true);
+    let ir = live_owner_ir("tjs", "const source = { n: 1 }; const back = SYM(source);");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(calls_owner_pointer(&ir), "{ir}");
 }
 
 #[test]
 fn thaw_js_function_literal_and_array_args_keep_the_by_value_ir() {
-    let literal = live_owner_ir("tjs", "const back = SYM({ n: 1 });", true);
+    let literal = live_owner_ir("tjs", "const back = SYM({ n: 1 });");
     assert!(!calls_owner_pointer(&literal), "{literal}");
-    let array = live_owner_ir("tjs", "const arr = [1, 2]; const back = SYM(arr);", true);
+    let array = live_owner_ir("tjs", "const arr = [1, 2]; const back = SYM(arr);");
     assert!(!calls_owner_pointer(&array), "{array}");
 }
 

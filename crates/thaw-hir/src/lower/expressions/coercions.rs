@@ -5382,9 +5382,8 @@ impl<'a> FnLowerer<'a> {
         ))))
     }
 
-    /// `value instanceof class` for a live `JsValue` handle. A handle that is the interned view of a
-    /// native instance is answered from the owner's allocation identity (ancestry included); any
-    /// other handle asks the realm, through the class token when it has one.
+    /// `value instanceof class` for a live `JsValue` handle: the realm answers, through the class token
+    /// when it has one.
     fn lower_live_handle_instanceof(
         &mut self,
         value: HirExpr,
@@ -5399,58 +5398,9 @@ impl<'a> FnLowerer<'a> {
             }
             None => self.dynamic_value_check_by_name(class, HirExpr::Var(name.clone()))?,
         };
-        // (A thaw-js build has no interned native views: its handles never alias a native owner,
-        // so the realm question below is the whole answer and needs no QuickJS pointer query.)
-        let native = self.interfaces.get(class).cloned().filter(|ty| {
-            if crate::lower::thaw_js_routed() {
-                return false;
-            }
-            let nested = std::mem::replace(&mut self.alias_native_arrays, true);
-            let live = self.class_instance_supports_live_methods(ty);
-            self.alias_native_arrays = nested;
-            live
-        });
-        let Some(ty @ HirType::Object(_)) = native else {
-            return self.wrap_call_argument_bindings(fallback, &[(name, HirType::JsValue, value)]);
-        };
-        let HirType::Object(fields) = &ty else {
-            unreachable!()
-        };
-        let owner = format!("__thaw_live_instanceof_owner_{}", self.next_binding);
-        self.next_binding += 1;
-        let owner_type = HirType::Optional(Box::new(ty.clone()));
-        self.scope.insert(owner.clone(), owner_type.clone());
-        let owner_call = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_native_view_target".into())),
-            vec![
-                HirExpr::Var(name.clone()),
-                HirExpr::Lit(HirLit::Str(crate::native_object_layout_token(fields))),
-                HirExpr::TypedClosure(ty.clone(), Box::new(HirExpr::Lit(HirLit::Undefined))),
-            ],
-        );
-        let identity = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
-            vec![
-                HirExpr::OptionalValue(Box::new(HirExpr::Var(owner.clone())), ty.clone()),
-                HirExpr::Lit(HirLit::Str(class.to_string())),
-            ],
-        );
-        let result = HirExpr::Conditional(
-            Box::new(HirExpr::OptionalIsNone(
-                Box::new(HirExpr::Var(owner.clone())),
-                ty.clone(),
-            )),
-            Box::new(fallback),
-            Box::new(identity),
-            HirType::Bool,
-        );
-        self.wrap_call_argument_bindings(
-            result,
-            &[
-                (name, HirType::JsValue, value),
-                (owner, owner_type, owner_call),
-            ],
-        )
+        // A thaw-js handle never aliases a native owner (no interned native views), so the realm
+        // question is the whole answer.
+        self.wrap_call_argument_bindings(fallback, &[(name, HirType::JsValue, value)])
     }
 
     /// `left instanceof right` through the realm's own `instanceof` (custom

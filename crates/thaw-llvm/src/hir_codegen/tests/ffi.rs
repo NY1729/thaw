@@ -14,7 +14,6 @@ fn compiles_ambient_declaration_and_links_a_real_native_function() {
     "#;
 
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     assert_eq!(
         program.extern_functions.len(),
@@ -24,9 +23,7 @@ fn compiles_ambient_declaration_and_links_a_real_native_function() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_ambient");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi_ambient-{}",
@@ -200,7 +197,6 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     assert!(program
         .extern_functions
@@ -260,9 +256,7 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_variadic");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-variadic-{}",
         std::process::id()
@@ -470,7 +464,6 @@ fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_error_abi(
         &mut program,
@@ -481,9 +474,7 @@ fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_result_abi");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-result-{}",
         std::process::id()
@@ -560,7 +551,6 @@ fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_error_abi(
         &mut program,
@@ -580,9 +570,7 @@ fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_void_result");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-void-result-{}",
         std::process::id()
@@ -662,7 +650,6 @@ fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_error_abi(
         &mut program,
@@ -683,9 +670,7 @@ fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_owned_result");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-owned-{}",
         std::process::id()
@@ -765,7 +750,6 @@ fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_ownership(
         &mut program,
@@ -805,9 +789,7 @@ fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_aggregate_returns");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-aggregate-{}",
         std::process::id()
@@ -883,7 +865,6 @@ fn ffi_call_marshals_object_returns_from_packed_c_structs() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -911,9 +892,7 @@ fn ffi_call_marshals_object_returns_from_packed_c_structs() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_packed_return");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-packed-{}",
         std::process::id()
@@ -1012,7 +991,6 @@ fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -1264,9 +1242,7 @@ fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_explicit_aggregate_layout");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.module.print_to_string().to_string();
     assert!(ir.contains("alloca <{ i8, [15 x i8], double, [8 x i8] }>, align 32"));
     assert!(ir.contains("declare { i64, double } @native_register_record()"));
@@ -1364,7 +1340,6 @@ fn ffi_object_return_copies_and_destroys_owned_string_fields() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     for symbol in ["native_message", "native_checked_message"] {
         thaw_hir::set_ffi_ownership(
@@ -1399,9 +1374,7 @@ fn ffi_object_return_copies_and_destroys_owned_string_fields() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_owned_object_fields");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-owned-object-{}",
         std::process::id()
@@ -1487,7 +1460,6 @@ fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     for symbol in ["native_nested", "native_checked_nested"] {
         thaw_hir::set_ffi_ownership(
@@ -1522,9 +1494,7 @@ fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_nested_aggregate");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-nested-aggregate-{}",
         std::process::id()
@@ -1603,7 +1573,6 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -1616,9 +1585,7 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_string_slice");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-string-slice-{}",
         std::process::id()
@@ -1695,7 +1662,6 @@ fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
     "#;
 
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     assert_eq!(
         program.extern_functions.len(),
@@ -1705,9 +1671,7 @@ fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_array_marshal");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi_array_marshal-{}",
@@ -1782,7 +1746,6 @@ fn ffi_call_marshals_string_arrays_in_both_directions() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -1796,9 +1759,7 @@ fn ffi_call_marshals_string_arrays_in_both_directions() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_string_arrays");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-string-arrays-{}",
         std::process::id()
@@ -1863,7 +1824,6 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -1877,9 +1837,7 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_boolean_arrays");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-boolean-arrays-{}",
         std::process::id()
@@ -1944,7 +1902,6 @@ fn ffi_owned_boolean_array_return_is_copied_and_destroyed() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_ownership(
         &mut program,
@@ -1966,9 +1923,7 @@ fn ffi_owned_boolean_array_return_is_copied_and_destroyed() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_owned_boolean_array");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-owned-bool-array-{}",
         std::process::id()
@@ -2039,7 +1994,6 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -2053,9 +2007,7 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_js_value_arrays");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-js-value-arrays-{}",
         std::process::id()
@@ -2129,13 +2081,10 @@ fn ffi_call_recursively_marshals_array_fields_in_object_parameters() {
         }
     "#;
         let module = thaw_parser::parse_typescript(source).unwrap();
-        thaw_hir::set_thaw_js_routed(true);
         let program = thaw_hir::lower_module(&module).unwrap();
         let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_nested_object_arrays");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-nested-object-arrays-{}",
         std::process::id()
@@ -2226,13 +2175,10 @@ fn ffi_call_recursively_marshals_tagged_fixed_parameters() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_tagged_fixed_parameters");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-tagged-fixed-{}",
         std::process::id()
@@ -2310,7 +2256,6 @@ fn ffi_call_restores_portable_tagged_returns() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     for symbol in ["native_optional", "native_nullable", "native_nullish"] {
         thaw_hir::set_ffi_string_abi(
@@ -2325,9 +2270,7 @@ fn ffi_call_restores_portable_tagged_returns() {
     }
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_portable_tagged_returns");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-tagged-returns-{}",
         std::process::id()
@@ -2399,7 +2342,6 @@ fn ffi_call_marshals_portable_tuples_in_both_directions() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -2412,9 +2354,7 @@ fn ffi_call_marshals_portable_tuples_in_both_directions() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_portable_tuples");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-tuples-{}",
         std::process::id()
@@ -2482,7 +2422,6 @@ fn ffi_owned_tuple_return_releases_each_owned_leaf() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_ownership(
         &mut program,
@@ -2504,9 +2443,7 @@ fn ffi_owned_tuple_return_releases_each_owned_leaf() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_owned_tuple");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-owned-tuple-{}",
         std::process::id()
@@ -2580,7 +2517,6 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
     "#;
 
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     assert_eq!(
         program.extern_functions.len(),
@@ -2590,9 +2526,7 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_object_marshal");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi_object_marshal-{}",
@@ -2711,16 +2645,13 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(&mut program, "native_storage_values", vec![],
         thaw_hir::FfiStringAbi::NullTerminated, thaw_hir::FfiCallingConvention::C,
         thaw_hir::FfiAggregateAbi::Portable).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_dynamic_storage");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!("thaw-ffi-dynamic-storage-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let object = dir.join("program.o");
@@ -2888,13 +2819,10 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_js_collection_copyin");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.module.print_to_string().to_string();
     assert!(ir.contains("ffi_copyin_map_allocation_failed"), "Map allocation failure must branch before the native call");
     assert!(ir.contains("ffi_copyin_map_insert_failed"), "Map insertion failure must branch before the native call");

@@ -15,12 +15,12 @@ impl<'ctx> HirCompiler<'ctx> {
         if self.js_handles_used() {
             self.compile_register_js_callback_host_operations().unwrap();
         }
-        let quickjs_failure = self
+        let js_status_slot = self
             .builder
-            .build_alloca(self.context.i32_type(), "quickjs_event_loop_status")
+            .build_alloca(self.context.i32_type(), "js_event_loop_status")
             .unwrap();
         self.builder
-            .build_store(quickjs_failure, self.context.i32_type().const_zero())
+            .build_store(js_status_slot, self.context.i32_type().const_zero())
             .unwrap();
         // Projection wrappers and owned Json receivers can outlive a call
         // through a global or captured arena cell. Start tracing before
@@ -47,27 +47,27 @@ impl<'ctx> HirCompiler<'ctx> {
         self.configure_unhandled_rejection_reporter();
         self.call_module_init_if_present(cleanup);
         // A thaw-js build calls the same CLI shim, renamed to `thaw_tjs_run_cli` by the rename table.
-        if self.uses_quickjs || self.uses_thaw_js {
+        if self.uses_thaw_js {
             let status = self
                 .builder
                 .build_call(
-                    self.module.get_function("thaw_js_run_cli").unwrap(),
+                    self.module.get_function("thaw_tjs_run_cli").unwrap(),
                     &[],
-                    "run_quickjs_cli",
+                    "run_js_cli",
                 )
                 .unwrap()
                 .try_as_basic_value()
                 .basic()
                 .unwrap()
                 .into_int_value();
-            self.builder.build_store(quickjs_failure, status).unwrap();
+            self.builder.build_store(js_status_slot, status).unwrap();
             let handled = self
                 .builder
                 .build_int_compare(
                     IntPredicate::SGE,
                     status,
                     status.get_type().const_zero(),
-                    "quickjs_cli_handled",
+                    "js_cli_handled",
                 )
                 .unwrap();
             let ordinary_entry = self.context.append_basic_block(main_fn, "ordinary_entry");
@@ -76,7 +76,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .unwrap();
             self.builder.position_at_end(ordinary_entry);
             self.builder
-                .build_store(quickjs_failure, self.context.i32_type().const_zero())
+                .build_store(js_status_slot, self.context.i32_type().const_zero())
                 .unwrap();
         }
         let main_returns_promise = self.frame_async_functions.contains_key("main")
@@ -101,22 +101,13 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_conditional_branch(thrown, cleanup, continue_main).unwrap();
             self.builder.position_at_end(continue_main);
         }
-        if self.uses_quickjs && self.commonjs_entry {
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_js_drain_next_ticks").unwrap(),
-                    &[],
-                    "drain_next_ticks_after_commonjs_main",
-                )
-                .unwrap();
-        }
-        // Routed thaw-js CommonJS entry: the main's own process.nextTick callbacks run before the native promise
+        // Thaw-js CommonJS entry: the main's own process.nextTick callbacks run before the native promise
         // queue (Node order). An ES module body runs inside a microtask, so its promises run first and the drain
         // is skipped. The drain precedes both the native drain and the async-main wait below.
-        if self.commonjs_entry && self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs {
+        if self.commonjs_entry && self.uses_thaw_js {
             self.builder
                 .build_call(
-                    self.module.get_function("thaw_js_drain_next_ticks").unwrap(),
+                    self.module.get_function("thaw_tjs_drain_next_ticks").unwrap(),
                     &[],
                     "drain_next_ticks_before_native_jobs",
                 )
@@ -153,44 +144,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .unwrap();
             }
-            if self.uses_quickjs {
-                self.builder
-                    .build_call(
-                        self.module
-                            .get_function("thaw_js_run_until_native_resolved")
-                            .unwrap(),
-                        &[completion.into()],
-                        "interleave_quickjs_for_async_main",
-                    )
-                    .unwrap();
-            }
-            if self.uses_napi && self.uses_quickjs {
-                self.builder
-                    .build_call(
-                        self.module
-                            .get_function("thaw_napi_run_async_work")
-                            .unwrap(),
-                        &[],
-                        "drain_napi_after_quickjs",
-                    )
-                    .unwrap();
-                self.builder
-                    .build_call(
-                        self.module
-                            .get_function("thaw_runtime_run_until_resolved")
-                            .unwrap(),
-                        &[completion.into()],
-                        "resume_async_main_after_napi_quickjs",
-                    )
-                    .unwrap();
-            }
-            // Routed thaw-js: the worker and timer callbacks that settle this promise run only inside the
+            // Thaw-js: the worker and timer callbacks that settle this promise run only inside the
             // thaw-js event loop, so drive it and wait on the completion again before it is released.
-            if self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs {
+            if self.uses_thaw_js {
                 let status = self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_js_run_event_loop").unwrap(),
+                        self.module.get_function("thaw_tjs_run_event_loop").unwrap(),
                         &[],
                         "run_thaw_js_for_async_main",
                     )
@@ -198,7 +158,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
-                self.builder.build_store(quickjs_failure, status).unwrap();
+                self.builder.build_store(js_status_slot, status).unwrap();
                 self.builder
                     .build_call(
                         self.module
@@ -290,24 +250,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 "drain_native_microtasks",
             )
             .unwrap();
-        // a routed build with `createServer` has no QuickJS, but its thaw-js loop must run before the server
+        // a routed build with `createServer` has no thaw-js, but its thaw-js loop must run before the server
         // runner blocks: it drives the http client and the server's listen/close callbacks
-        let thaw_js_serves = self.thaw_js_routed
-            && self.uses_thaw_js
-            && self.module.get_function("createServer").is_some();
-        if self.uses_quickjs || thaw_js_serves {
+        let thaw_js_serves = self.uses_thaw_js && self.module.get_function("createServer").is_some();
+        if thaw_js_serves {
             let status = self
                 .builder
                 .build_call(
-                    self.module.get_function("thaw_js_run_event_loop").unwrap(),
+                    self.module.get_function("thaw_tjs_run_event_loop").unwrap(),
                     &[],
-                    "run_quickjs_event_loop",
+                    "run_js_event_loop",
                 )
                 .unwrap()
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
-            self.builder.build_store(quickjs_failure, status).unwrap();
+            self.builder.build_store(js_status_slot, status).unwrap();
         }
         if self.module.get_function("createServer").is_some() {
             self.builder
@@ -328,43 +286,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     "drain_napi_async_work",
                 )
                 .unwrap();
-            if self.uses_quickjs {
-                let status = self
-                    .builder
-                    .build_call(
-                        self.module.get_function("thaw_js_run_event_loop").unwrap(),
-                        &[],
-                        "run_quickjs_after_napi",
-                    )
-                    .unwrap()
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap()
-                    .into_int_value();
-                let previous = self
-                    .builder
-                    .build_load(self.context.i32_type(), quickjs_failure, "previous_quickjs_status")
-                    .unwrap()
-                    .into_int_value();
-                let has_status = self
-                    .builder
-                    .build_int_compare(
-                        IntPredicate::NE,
-                        status,
-                        status.get_type().const_zero(),
-                        "has_quickjs_status",
-                    )
-                    .unwrap();
-                let combined = self
-                    .builder
-                    .build_select(has_status, status, previous, "combined_quickjs_status")
-                    .unwrap();
-                self.builder.build_store(quickjs_failure, combined).unwrap();
-            }
         }
         self.builder.build_unconditional_branch(cleanup).unwrap();
         self.builder.position_at_end(cleanup);
-        self.finish_c_main(Some(quickjs_failure));
+        self.finish_c_main(Some(js_status_slot));
     }
 
     /// Calls `__thaw_module_init` before user code, if the program defines
@@ -575,10 +500,10 @@ impl<'ctx> HirCompiler<'ctx> {
         };
 
         let i8_ptr = self.context.ptr_type(AddressSpace::default());
-        // Only a QuickJS-backed Lambda needs to refresh the JavaScript
+        // Only a thaw-js-backed Lambda needs to refresh the JavaScript
         // process.env snapshot. This direct call also retains the helper in
-        // the linked archive without adding a runtime-to-QuickJS dependency.
-        let handler_fn = if self.uses_quickjs || self.uses_quickjs_handles {
+        // the linked archive without adding a runtime-to-thaw-js dependency.
+        let handler_fn = if false {
             let sync = self.module.add_function(
                 "thaw_js_sync_lambda_trace_from_env",
                 self.context.i8_type().fn_type(&[], false),
@@ -734,9 +659,9 @@ impl<'ctx> HirCompiler<'ctx> {
             )
         });
         self.builder.build_call(register_fn, &[limit_slot.into()], "stack_guard_register").unwrap();
-        let reporter = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
+        let reporter = if self.uses_thaw_js {
             self.module
-                .get_function("thaw_js_emit_unhandled_rejection_result")
+                .get_function("thaw_tjs_emit_unhandled_rejection_result")
                 .unwrap()
                 .as_global_value()
                 .as_pointer_value()
@@ -752,9 +677,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 "configure_unhandled_rejection_reporter",
             )
             .unwrap();
-        let handled_reporter = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
+        let handled_reporter = if self.uses_thaw_js {
             self.module
-                .get_function("thaw_js_emit_rejection_handled_result")
+                .get_function("thaw_tjs_emit_rejection_handled_result")
                 .unwrap()
                 .as_global_value()
                 .as_pointer_value()
@@ -844,9 +769,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(pending, "process_exception_failed")
             .unwrap();
-        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
+        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_thaw_js {
             let emission = self.builder.build_call(
-                self.module.get_function("thaw_js_emit_uncaught_result").unwrap(),
+                self.module.get_function("thaw_tjs_emit_uncaught_result").unwrap(),
                 &[pending_report.into()],
                 "emit_process_uncaught_exception",
             ).unwrap().try_as_basic_value().basic().unwrap().into_struct_value();
@@ -965,9 +890,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(rejection, "process_rejection_failed")
             .unwrap();
-        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
+        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_thaw_js {
             let emission = self.builder.build_call(
-                self.module.get_function("thaw_js_emit_unhandled_rejection_result").unwrap(),
+                self.module.get_function("thaw_tjs_emit_unhandled_rejection_result").unwrap(),
                 &[rejection.into()],
                 "emit_process_unhandled_rejection",
             ).unwrap().try_as_basic_value().basic().unwrap().into_struct_value();
@@ -1031,9 +956,9 @@ impl<'ctx> HirCompiler<'ctx> {
             &[rejection.into()],
             "destroy_detached_rejection_report",
         ).unwrap();
-        let rejection_reporter = if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
+        let rejection_reporter = if self.uses_thaw_js {
             self.module
-                .get_function("thaw_js_emit_unhandled_rejection_result")
+                .get_function("thaw_tjs_emit_unhandled_rejection_result")
                 .unwrap()
                 .as_global_value()
                 .as_pointer_value()
@@ -1176,11 +1101,11 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     // One pass through every callback-capable queue. A zero native drain alone
-    // says nothing about QuickJS jobs or N-API completions, so check all three.
+    // says nothing about thaw-js jobs or N-API completions, so check all three.
     fn drive_terminal_work(
         &mut self,
         failure: PointerValue<'ctx>,
-        quickjs_failure: Option<PointerValue<'ctx>>,
+        js_status_slot: Option<PointerValue<'ctx>>,
         before_shutdown: bool,
     ) -> IntValue<'ctx> {
         let reported_failure = self.report_c_main();
@@ -1196,9 +1121,9 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_runtime_abort_pending_work").unwrap(), &[],
             "abort_pending_work_after_fatal",
         ).unwrap();
-        if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
+        if self.uses_thaw_js {
             self.builder.build_call(
-                self.module.get_function("thaw_js_fatal_exit").unwrap(), &[],
+                self.module.get_function("thaw_tjs_fatal_exit").unwrap(), &[],
                 "emit_exit_after_fatal",
             ).unwrap();
         }
@@ -1212,32 +1137,32 @@ impl<'ctx> HirCompiler<'ctx> {
             IntPredicate::NE, native_before, native_before.get_type().const_zero(),
             "terminal_native_before_progress",
         ).unwrap();
-        if self.uses_quickjs || self.uses_quickjs_handles || (self.thaw_js_routed && self.uses_thaw_js) {
+        if self.uses_thaw_js {
             let status = self.builder.build_call(
-                self.module.get_function("thaw_js_run_event_loop").unwrap(), &[],
-                "terminal_quickjs_jobs",
+                self.module.get_function("thaw_tjs_run_event_loop").unwrap(), &[],
+                "terminal_js_jobs",
             ).unwrap().try_as_basic_value().basic().unwrap().into_int_value();
             let failed = self.builder.build_int_compare(
-                IntPredicate::NE, status, status.get_type().const_zero(), "terminal_quickjs_failed",
+                IntPredicate::NE, status, status.get_type().const_zero(), "terminal_js_failed",
             ).unwrap();
-            if let Some(slot) = quickjs_failure {
-                let previous = self.builder.build_load(self.context.i32_type(), slot, "terminal_previous_quickjs_status")
+            if let Some(slot) = js_status_slot {
+                let previous = self.builder.build_load(self.context.i32_type(), slot, "terminal_previous_js_status")
                     .unwrap().into_int_value();
-                let combined = self.builder.build_select(failed, status, previous, "terminal_quickjs_status")
+                let combined = self.builder.build_select(failed, status, previous, "terminal_js_status")
                     .unwrap();
                 self.builder.build_store(slot, combined).unwrap();
             } else {
                 self.latch_terminal_failure(failure, failed);
             }
             let pending = self.builder.build_call(
-                self.module.get_function("thaw_js_terminal_work_pending").unwrap(), &[],
-                "terminal_quickjs_pending_query",
+                self.module.get_function("thaw_tjs_terminal_work_pending").unwrap(), &[],
+                "terminal_js_pending_query",
             ).unwrap().try_as_basic_value().basic().unwrap().into_int_value();
             let pending = self.builder.build_int_compare(
                 IntPredicate::NE, pending, pending.get_type().const_zero(),
-                "terminal_quickjs_work_pending",
+                "terminal_js_work_pending",
             ).unwrap();
-            progressed = self.builder.build_or(progressed, pending, "terminal_quickjs_more_work").unwrap();
+            progressed = self.builder.build_or(progressed, pending, "terminal_js_more_work").unwrap();
         }
         if self.uses_napi && before_shutdown {
             let count = self.builder.build_call(
@@ -1317,43 +1242,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(has_error, report, done).unwrap();
         self.builder.position_at_end(report);
         self.builder.build_store(seen, self.context.bool_type().const_int(1, false)).unwrap();
-        if self.uses_quickjs_handles {
-            let result = self.builder.build_call(
-                self.module.get_function("thaw_js_emit_uncaught_result").unwrap(),
-                &[error.into()], "emit_shutdown_exception",
-            ).unwrap().try_as_basic_value().basic().unwrap().into_struct_value();
-            let handled = self.builder.build_extract_value(result, 0, "shutdown_exception_handled")
-                .unwrap().into_int_value();
-            let listener_error = self.builder.build_extract_value(result, 1, "shutdown_listener_error")
-                .unwrap().into_pointer_value();
-            let unhandled = self.builder.build_int_compare(
-                IntPredicate::EQ, handled, handled.get_type().const_zero(), "shutdown_exception_unhandled",
-            ).unwrap();
-            let listener_failed = self.builder.build_is_not_null(listener_error, "shutdown_listener_failed").unwrap();
-            let failed = self.builder.build_or(unhandled, listener_failed, "shutdown_exception_failed").unwrap();
-            self.latch_terminal_failure(failure, failed);
-            let report_error = self.builder.build_select(
-                unhandled, error, error.get_type().const_null(), "unhandled_shutdown_exception",
-            ).unwrap().into_pointer_value();
-            self.builder.build_call(
-                self.module.get_function("thaw_runtime_report_uncaught").unwrap(),
-                &[report_error.into()], "report_shutdown_exception",
-            ).unwrap();
-            self.builder.build_call(
-                self.module.get_function("thaw_runtime_report_uncaught").unwrap(),
-                &[listener_error.into()], "report_shutdown_listener_error",
-            ).unwrap();
-            self.builder.build_call(
-                self.module.get_function("thaw_cstring_destroy").unwrap(),
-                &[listener_error.into()], "destroy_shutdown_listener_error",
-            ).unwrap();
-        } else {
-            self.latch_terminal_failure(failure, self.context.bool_type().const_int(1, false));
-            self.builder.build_call(
-                self.module.get_function("thaw_runtime_report_uncaught").unwrap(),
-                &[error.into()], "report_shutdown_exception",
-            ).unwrap();
-        }
+        self.latch_terminal_failure(failure, self.context.bool_type().const_int(1, false));
+        self.builder.build_call(
+            self.module.get_function("thaw_runtime_report_uncaught").unwrap(),
+            &[error.into()], "report_shutdown_exception",
+        ).unwrap();
         self.builder.build_call(
             self.module.get_function("thaw_cstring_destroy").unwrap(),
             &[error.into()], "destroy_shutdown_error",
@@ -1367,12 +1260,12 @@ impl<'ctx> HirCompiler<'ctx> {
     fn release_terminal_handles(&self) -> IntValue<'ctx> {
         // A routed thaw-js addon wrapper holds native pins in thaw-js's own handle table and proxy caches even when
         // compiled code names no handle; the N-API shutdown barrier stays closed until they are released.
-        let routed_napi = self.uses_napi && self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs;
+        let routed_napi = self.uses_napi && self.uses_thaw_js;
         if !self.js_handles_used() && !routed_napi {
             return self.context.bool_type().const_zero();
         }
         let count = self.builder.build_call(
-            self.module.get_function("thaw_js_release_all_handles").unwrap(), &[],
+            self.module.get_function("thaw_tjs_release_all_handles").unwrap(), &[],
             "release_terminal_handles",
         ).unwrap().try_as_basic_value().basic().unwrap().into_int_value();
         self.builder.build_int_compare(
@@ -1380,7 +1273,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ).unwrap()
     }
 
-    fn finish_c_main(&mut self, quickjs_failure: Option<PointerValue<'ctx>>) {
+    fn finish_c_main(&mut self, js_status_slot: Option<PointerValue<'ctx>>) {
         let i32_type = self.context.i32_type();
         let failure = self.builder.build_alloca(self.context.bool_type(), "terminal_failure").unwrap();
         let shutdown_error_seen = self.builder.build_alloca(self.context.bool_type(), "shutdown_error_seen").unwrap();
@@ -1392,7 +1285,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let finished = self.context.append_basic_block(function, "terminal_finished");
         self.builder.build_unconditional_branch(ordinary).unwrap();
         self.builder.position_at_end(ordinary);
-        let progressed = self.drive_terminal_work(failure, quickjs_failure, true);
+        let progressed = self.drive_terminal_work(failure, js_status_slot, true);
         if self.uses_napi {
             let errors = self.report_napi_shutdown_errors(failure, shutdown_error_seen);
             let after_errors = self.context.append_basic_block(function, "terminal_after_ordinary_errors");
@@ -1421,15 +1314,6 @@ impl<'ctx> HirCompiler<'ctx> {
             ).unwrap();
             self.builder.build_conditional_branch(started, collect, wait).unwrap();
             self.builder.position_at_end(collect);
-            // The N-API pin barrier may depend on ordinary QuickJS function
-            // finalizers. Collect once while addon Envs are still live; the
-            // normal event-loop and N-API poll path below drains their jobs.
-            if self.uses_quickjs {
-                self.builder.build_call(
-                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
-                    "collect_terminal_graph_roots",
-                ).unwrap();
-            }
             self.builder.build_unconditional_branch(poll).unwrap();
             self.builder.position_at_end(poll);
             // A live unreferenced handle can keep the phase barrier closed.
@@ -1443,13 +1327,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "poll_napi_shutdown",
             ).unwrap();
             self.report_napi_shutdown_errors(failure, shutdown_error_seen);
-            self.drive_terminal_work(failure, quickjs_failure, false);
-            if self.uses_quickjs {
-                self.builder.build_call(
-                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
-                    "collect_terminal_work_garbage",
-                ).unwrap();
-            }
+            self.drive_terminal_work(failure, js_status_slot, false);
             let ready = self.builder.build_call(
                 self.module.get_function("thaw_napi_poll_shutdown").unwrap(), &[],
                 "confirm_napi_shutdown",
@@ -1458,19 +1336,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 IntPredicate::NE, ready, ready.get_type().const_zero(), "napi_shutdown_ready",
             ).unwrap();
             let new_errors = self.report_napi_shutdown_errors(failure, shutdown_error_seen);
-            let new_work = self.drive_terminal_work(failure, quickjs_failure, false);
-            let pending_after_gc = if self.uses_quickjs {
-                self.builder.build_call(
-                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
-                    "collect_terminal_work_garbage_again",
-                ).unwrap();
-                self.builder.build_call(
-                    self.module.get_function("thaw_js_terminal_work_pending").unwrap(), &[],
-                    "shutdown_work_pending_after_gc",
-                ).unwrap().try_as_basic_value().basic().unwrap().into_int_value()
-            } else {
-                self.context.i8_type().const_zero()
-            };
+            let new_work = self.drive_terminal_work(failure, js_status_slot, false);
+            let pending_after_gc = self.context.i8_type().const_zero();
             let pending_after_gc = self.builder.build_int_compare(
                 IntPredicate::NE, pending_after_gc, pending_after_gc.get_type().const_zero(),
                 "shutdown_more_work_after_gc",
@@ -1502,21 +1369,15 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_conditional_branch(released_handles, wait, finished).unwrap();
         }
         self.builder.position_at_end(finished);
-        if self.uses_quickjs {
-            self.builder.build_call(
-                self.module.get_function("thaw_js_shutdown_context").unwrap(), &[],
-                "shutdown_quickjs_context",
-            ).unwrap();
-        }
         let process_failure = self.builder.build_load(
             self.context.bool_type(), failure, "terminal_failure_status",
         ).unwrap().into_int_value();
-        let quickjs_status = quickjs_failure.map_or_else(
+        let js_status = js_status_slot.map_or_else(
             || i32_type.const_zero(),
             |failure| {
                 self
                     .builder
-                    .build_load(i32_type, failure, "quickjs_event_loop_status")
+                    .build_load(i32_type, failure, "js_event_loop_status")
                     .unwrap()
                     .into_int_value()
             },
@@ -1530,7 +1391,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_select(
                 process_failure,
                 failure_status,
-                quickjs_status,
+                js_status,
                 "process_exit_status",
             )
             .unwrap();

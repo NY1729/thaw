@@ -906,7 +906,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_handle_is_plain_data")
+                    .get_function("thaw_tjs_handle_is_plain_data")
                     .unwrap(),
                 &[handle.into()],
                 "console_js_plain_probe",
@@ -961,7 +961,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_handle_to_console_string")
+                    .get_function("thaw_tjs_handle_to_console_string")
                     .unwrap(),
                 &[handle.into()],
                 "console_js_value",
@@ -975,7 +975,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_handle_typed_array_probe")
+                    .get_function("thaw_tjs_handle_typed_array_probe")
                     .unwrap(),
                 &[handle.into()],
                 "console_js_typed_probe",

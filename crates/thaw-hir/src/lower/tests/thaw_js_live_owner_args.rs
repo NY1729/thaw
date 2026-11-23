@@ -69,14 +69,10 @@ fn thaw_js_function_concrete_object_param_stays_by_value() {
 }
 
 #[test]
-fn thaw_js_method_and_quickjs_symbols_never_get_the_owner_marker() {
+fn thaw_js_method_symbols_never_get_the_owner_marker() {
     let method = thaw_js_owner_symbol("tjs", "$method$k::Emitter$emit$overload0$arity1");
     let decls = format!("declare function {method}(value: Json): Json;");
     let body = thaw_js_owner_main_body(&decls, &method, "const source = { n: 1 };", "source");
-    assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
-    let quickjs = thaw_js_owner_symbol("js", "k::identity");
-    let decls = format!("declare function {quickjs}(value: Json): Json;");
-    let body = thaw_js_owner_main_body(&decls, &quickjs, "const source = { n: 1 };", "source");
     assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
 }
 
@@ -171,18 +167,7 @@ fn thaw_js_concrete_param_does_not_take_promoted_lease() {
 }
 
 #[test]
-fn thaw_js_quickjs_and_method_symbols_do_not_take_promoted_lease() {
-    let quickjs = thaw_js_owner_symbol("js", "k::identity");
-    let decls = format!("declare function {quickjs}<T>(value: T): T;");
-    let body = thaw_js_owner_main_body(
-        &decls,
-        &quickjs,
-        "const source = { n: 1 }; const exposed: any = source;",
-        "source",
-    );
-    // QuickJS keeps its own Json-typed call shape (the lease gate is ThawJs-only).
-    assert!(body.contains("backend: QuickJs"), "{body}");
-    assert!(!body.contains("__thaw_tjs_live_owner_arg"), "{body}");
+fn thaw_js_method_symbols_do_not_take_promoted_lease() {
     let method = thaw_js_owner_symbol("tjs", "$method$k::Emitter$emit$overload0$arity1");
     let decls = format!("declare function {method}<T>(value: T): T;");
     let body = thaw_js_owner_main_body(

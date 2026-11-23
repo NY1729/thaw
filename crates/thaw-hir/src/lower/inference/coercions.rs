@@ -1697,42 +1697,11 @@ impl<'a> FnLowerer<'a> {
             // already use for `JsValue === null`/`undefined` comparisons
             // elsewhere) since nothing static can know which case a
             // given call actually returns.
-            if actual == HirType::JsValue && crate::lower::thaw_js_routed() {
+            if actual == HirType::JsValue {
                 // A thaw-js build's `JsValue` is a handle into the thaw-js heap, so it is never null. It can
                 // be `undefined` though (handle 0, or an absent global): the host resolves that handle to
                 // `undefined` (thaw-js host.rs `slot`), so the marker reads back as `undefined`.
                 return Ok(HirExpr::JsValueAsJson(Box::new(value)));
-            }
-            if actual == HirType::JsValue {
-                let temp = format!("__thaw_json_wrap_source_{}", self.next_binding);
-                self.next_binding += 1;
-                self.scope.insert(temp.clone(), HirType::JsValue);
-                let null_json =
-                    self.wrap_native_value_as_json(HirExpr::Lit(HirLit::Null), HirType::Null)?;
-                let undefined_json = HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
-                    vec![HirExpr::JsonObjectLit(
-                        vec![(
-                            "$__thaw_napi_undefined$".to_string(),
-                            HirExpr::Lit(HirLit::Bool(true)),
-                        )],
-                        HirType::Bool,
-                    )],
-                );
-                let is_null = self.dynamic_value_is_null(HirExpr::Var(temp.clone()));
-                let is_undefined = self.dynamic_value_is_undefined(HirExpr::Var(temp.clone()));
-                let body = HirExpr::Conditional(
-                    Box::new(is_null),
-                    Box::new(null_json),
-                    Box::new(HirExpr::Conditional(
-                        Box::new(is_undefined),
-                        Box::new(undefined_json),
-                        Box::new(HirExpr::JsValueAsJson(Box::new(HirExpr::Var(temp.clone())))),
-                        HirType::Json,
-                    )),
-                    HirType::Json,
-                );
-                return self.wrap_call_argument_bindings(body, &[(temp, HirType::JsValue, value)]);
             }
             // A real compiled (native) closure (e.g. `(n: number) => n >
             // 0` passed to zod's `z.number().refine(...)`) has no JSON
@@ -2120,7 +2089,7 @@ impl<'a> FnLowerer<'a> {
                             if self.fresh_object_bindings.contains(name)));
                     // A fresh literal handed to a thaw-js package is a plain-data copy: no QuickJS-hosted
                     // projection is needed (a live reference to an existing owner keeps the projection).
-                    if !live && crate::lower::thaw_js_routed() {
+                    if !live {
                         return self.wrap_native_value_as_json(value, actual.clone());
                     }
                     let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live, false)?;

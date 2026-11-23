@@ -541,7 +541,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         None => {
                             self.builder
                                 .build_call(
-                                    self.module.get_function("thaw_js_release_handle").unwrap(),
+                                    self.module.get_function("thaw_tjs_release_handle").unwrap(),
                                     &[value.into()],
                                     "release_discarded_dynamic_value",
                                 )
@@ -578,7 +578,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             self.builder.position_at_end(release_bb);
                             self.builder
                                 .build_call(
-                                    self.module.get_function("thaw_js_release_handle").unwrap(),
+                                    self.module.get_function("thaw_tjs_release_handle").unwrap(),
                                     &[value.into()],
                                     "release_discarded_dynamic_value",
                                 )

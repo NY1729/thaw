@@ -1892,7 +1892,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 result.add_incoming(&[(&undefined, missing_end), (&value, present_end)]);
                 self.tracks_owned_json_roots = true;
                 // Both parse and undefined allocate a fresh Box<Value>. Check
-                // any QuickJS getter/coercion failure before registering the
+                // any thaw-js getter/coercion failure before registering the
                 // successful merged value as an invocation-owned root.
                 let checked = self.compile_check_json_host_error(
                     result.as_basic_value(), Some("thaw_json_destroy"),
@@ -2122,7 +2122,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_call(
                         self.module
-                            .get_function("thaw_js_handle_to_string")
+                            .get_function("thaw_tjs_handle_to_string")
                             .unwrap(),
                         &[value.into()],
                         "js_value_to_string",
@@ -2224,7 +2224,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err(format!("{name} expects one operand"));
                 };
                 let handle = self.compile_expr(value)?;
-                return self.compile_original_quickjs_exception_handle(handle, false);
+                return self.compile_original_js_exception_handle(handle, false);
             }
             "__thaw_set_pending_exception_json" => {
                 let [operand] = args else {
@@ -3010,14 +3010,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
             })?;
 
-        if self.is_proven_typed_quickjs_wrapper(name) {
-            self.with_typed_wrapper_argument_scope(
-                TypedJsonArgumentOwner::ProvenWrapper(name.to_string()),
-                |compiler| compiler.build_call_with(function, args, name),
-            )
-        } else {
-            self.build_call_with(function, args, name)
-        }
+        self.build_call_with(function, args, name)
     }
 
 }

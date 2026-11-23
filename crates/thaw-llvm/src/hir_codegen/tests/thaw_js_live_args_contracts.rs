@@ -22,11 +22,10 @@ fn live_arg_ir(prelude: &str, argument: &str) -> String {
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "thaw_js_live_args");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    let (uses_thaw_js, uses_quickjs) = (compiler.uses_thaw_js(), compiler.uses_quickjs());
+    let uses_thaw_js = compiler.uses_thaw_js();
     let ir = compiler.print_to_string();
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(uses_thaw_js, "{ir}");
     ir
 }
 

@@ -206,7 +206,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let result = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_call_handle_graph_result").unwrap(),
+                self.module.get_function("thaw_tjs_call_handle_graph_result").unwrap(),
                 &[adapter_handle.into(), arguments_json.into()],
                 "js_callback_result",
             )
@@ -262,7 +262,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_return(None)
                 .map_err(|error| error.to_string())?;
         } else {
-            let result_json = self.compile_decode_quickjs_graph(value)?;
+            let result_json = self.compile_decode_js_graph(value)?;
 
             let decoded = self.compile_typed_dynamic_result(result_json, ret)?;
             self.builder
@@ -501,10 +501,10 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn compile_register_js_callback_host_operations(&mut self) -> Result<(), String> {
         let operations = [
-            "thaw_js_retain_handle", "thaw_js_release_handle",
-            "thaw_js_get_property_json_key_result", "thaw_js_host_query_result",
-            "thaw_js_host_date_set_result", "thaw_js_set_property_graph_result",
-            "thaw_js_property_predicate_json_key_result", "thaw_js_host_enumerate_result",
+            "thaw_tjs_retain_handle", "thaw_tjs_release_handle",
+            "thaw_tjs_get_property_json_key_result", "thaw_tjs_host_query_result",
+            "thaw_tjs_host_date_set_result", "thaw_tjs_set_property_graph_result",
+            "thaw_tjs_property_predicate_json_key_result", "thaw_tjs_host_enumerate_result",
         ].iter().map(|name| self.module.get_function(name).unwrap()
             .as_global_value().as_pointer_value().into())
             .collect::<Vec<BasicMetadataValueEnum<'ctx>>>();
@@ -517,9 +517,9 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn compile_register_js_error_factory(&mut self) -> Result<(), String> {
         let operations = [
-            "thaw_js_error_from_tagged_handle",
-            "thaw_js_lookup_native_object",
-            "thaw_js_intern_native_object",
+            "thaw_tjs_error_from_tagged_handle",
+            "thaw_tjs_lookup_native_object",
+            "thaw_tjs_intern_native_object",
         ].iter().map(|name| self.module.get_function(name).unwrap()
             .as_global_value().as_pointer_value().into())
             .collect::<Vec<BasicMetadataValueEnum<'ctx>>>();
@@ -529,7 +529,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "register_js_error_factory",
         ).map_err(|error| error.to_string())?;
         let engine_id = self.builder.build_call(
-            self.module.get_function("thaw_js_engine_id").unwrap(),
+            self.module.get_function("thaw_tjs_engine_id").unwrap(),
             &[],
             "js_engine_id",
         ).map_err(|error| error.to_string())?;
@@ -709,7 +709,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let handle = self.builder.build_load(self.context.i64_type(), handle_slot,
             "js_callback_this_handle").map_err(|error| error.to_string())?;
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_call_handle_with_this_graph_wire_result").unwrap(),
+            self.module.get_function("thaw_tjs_call_handle_with_this_graph_wire_result").unwrap(),
             &[handle.into(), arguments_json.into()], "js_callback_this_result",
         ).map_err(|error| error.to_string())?
             .try_as_basic_value().basic()
@@ -738,7 +738,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.builder.build_return(None).map_err(|error| error.to_string())?;
         } else {
-            let result_json = self.compile_decode_quickjs_graph(value)?;
+            let result_json = self.compile_decode_js_graph(value)?;
             let decoded = self.compile_typed_dynamic_result(result_json, ret)?;
             self.builder.build_return(Some(&decoded)).map_err(|error| error.to_string())?;
         }
@@ -1048,8 +1048,8 @@ impl<'ctx> HirCompiler<'ctx> {
         self.next_lambda += 1;
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let adapter_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        // thaw-js passes `undefined` as a text-lane result too; QuickJS keeps `null`.
-        let undefined_result = graph_wire || self.js_engine() == JsEngine::ThawJs;
+        // thaw-js passes `undefined` as a text-lane result too.
+        let undefined_result = true;
         let adapter = self
             .module
             .add_function(&callback_name, adapter_type, Some(Linkage::Internal));
@@ -1077,7 +1077,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // `hdl` wire nodes decode to live host leases instead of markers.
         // Only under thaw-js: native-addon (napi) callbacks share this adapter
         // and must not reference the engine's `thaw_js_*` symbols.
-        if graph_wire && self.js_engine() == JsEngine::ThawJs {
+        if graph_wire {
             self.js_mark_handles_used();
             self.compile_register_js_callback_host_operations()?;
         }
@@ -1473,7 +1473,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for slot in handle_slots.iter().flatten() {
             let handle = self.builder.build_load(self.context.i64_type(), *slot, "failed_callback_handle")
                 .map_err(|error| error.to_string())?;
-            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
                 &[handle.into()], "release_failed_callback_argument")
                 .map_err(|error| error.to_string())?;
         }
@@ -1498,7 +1498,7 @@ impl<'ctx> HirCompiler<'ctx> {
             for (index, param) in params.iter().enumerate() {
                 if *param == HirType::JsValue {
                     self.builder.build_call(
-                        self.module.get_function("thaw_js_release_handle").unwrap(),
+                        self.module.get_function("thaw_tjs_release_handle").unwrap(),
                         &[callback_args[index + 1 + holder_offset]],
                         "release_deferred_callback_argument",
                     ).map_err(|error| error.to_string())?;
@@ -1658,10 +1658,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     let method = self.compile_dynamic_value_placeholder_unchecked(method_handle.into())?;
                     self.compile_json_array_push_owned(result_json, method)?;
                 } else {
-                    let outer_compiling_quickjs_dynamic_arguments =
-                        self.compiling_quickjs_dynamic_arguments;
+                    let outer_compiling_js_dynamic_arguments =
+                        self.compiling_js_dynamic_arguments;
                     if !graph_wire {
-                        self.compiling_quickjs_dynamic_arguments = true;
+                        self.compiling_js_dynamic_arguments = true;
                     }
                     let pushed = self.compile_json_array_push_native_with_undefined(
                         result_json,
@@ -1669,8 +1669,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         ret,
                         true,
                     );
-                    self.compiling_quickjs_dynamic_arguments =
-                        outer_compiling_quickjs_dynamic_arguments;
+                    self.compiling_js_dynamic_arguments =
+                        outer_compiling_js_dynamic_arguments;
                     pushed?;
                 }
                 self.builder
@@ -1693,11 +1693,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let marshalled = self.builder.get_insert_block().unwrap();
         self.builder.position_at_end(result_marshalling_failed);
         // Only a graph callback returning a function can have projected a method handle; emitting
-        // the QuickJS release anywhere else would make every callback depend on the QuickJS archive.
+        // the thaw-js release anywhere else would make every callback depend on the thaw-js archive.
         if graph_wire && matches!(ret, HirType::Function(..) | HirType::CallableFunction(..)) {
             let projected = self.builder.build_load(self.context.i64_type(), projected_method_slot,
                 "failed_projected_method_handle").map_err(|error| error.to_string())?;
-            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
                 &[projected.into()], "release_failed_projected_method")
                 .map_err(|error| error.to_string())?;
         }
@@ -1758,7 +1758,7 @@ impl<'ctx> HirCompiler<'ctx> {
             if *param == HirType::JsValue {
                 self.builder
                     .build_call(
-                        self.module.get_function("thaw_js_release_handle").unwrap(),
+                        self.module.get_function("thaw_tjs_release_handle").unwrap(),
                         &[callback_args[index + 1 + holder_offset]],
                         "release_native_callback_argument",
                     )
@@ -1769,7 +1769,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // The graph encoder retained its own output lease before this
             // registration reference is dropped. The JS method wrapper
             // remains alive through the decoded object's property value.
-            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
                 &[method.into()], "release_projected_method_registration")
                 .map_err(|error| error.to_string())?;
         }
@@ -2026,11 +2026,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut result_array = None;
         let result_json = if *resolved == HirType::Void {
             self.drive_promise_to_completion(promise)?;
-            if graph_wire || self.js_engine() == JsEngine::ThawJs {
-                self.compile_napi_undefined_json()?
-            } else {
-                self.compile_json_null()?
-            }
+            self.compile_napi_undefined_json()?
         } else {
             let value = self.drive_promise_to_resolved_value(promise, resolved)?;
             let array = self
@@ -2049,15 +2045,15 @@ impl<'ctx> HirCompiler<'ctx> {
             // this same function's synchronous counterpart above -- a
             // resolved `Promise<Optional<Json>>`/`Promise<Nullish<Json>>`
             // value needs the same real-`undefined`-vs-`null` distinction.
-            let outer_compiling_quickjs_dynamic_arguments =
-                self.compiling_quickjs_dynamic_arguments;
+            let outer_compiling_js_dynamic_arguments =
+                self.compiling_js_dynamic_arguments;
             if !graph_wire {
-                self.compiling_quickjs_dynamic_arguments = true;
+                self.compiling_js_dynamic_arguments = true;
             }
             let pushed =
                 self.compile_json_array_push_native_with_undefined(array, value, resolved, true);
-            self.compiling_quickjs_dynamic_arguments =
-                outer_compiling_quickjs_dynamic_arguments;
+            self.compiling_js_dynamic_arguments =
+                outer_compiling_js_dynamic_arguments;
             pushed?;
             self.builder
                 .build_call(
@@ -2300,13 +2296,13 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(settler.as_global_value().as_pointer_value())
     }
 
-    /// Wraps a real compiled (native) closure as a live, retained QuickJS
+    /// Wraps a real compiled (native) closure as a live, retained thaw-js
     /// value the Fallback dynamic-call path can pass around like any
     /// other `JsValue` -- real example: zod's `z.number().refine((n:
     /// number) => n > 0, {...})`, whose predicate has nowhere to go
     /// without this (`coerce_to_declared`'s own doc comment on the
     /// thaw-hir side explains why a bare pass-through, the way `JsValue`
-    /// itself gets, doesn't work here: there is no existing *live* QuickJS
+    /// itself gets, doesn't work here: there is no existing *live* thaw-js
     /// value yet, only a native function pointer that needs bridging into
     /// one first).
     ///
@@ -2314,9 +2310,9 @@ impl<'ctx> HirCompiler<'ctx> {
     /// generic `(context, args_json) -> result_json` adapter around the
     /// real closure, entirely backend-agnostic despite the name) rather
     /// than duplicating it -- the *only* new piece is handing that
-    /// `(adapter, closure)` pair to QuickJS-NG (`thaw_js_register_native_
-    /// callback`, thaw-quickjs) instead of to N-API, which wraps it in a
-    /// real `rquickjs::Function` backed by a Rust closure that marshals a
+    /// `(adapter, closure)` pair to thaw-js (`thaw_js_register_native_
+    /// callback`, thaw-js) instead of to N-API, which wraps it in a
+    /// real `rjs::Function` backed by a Rust closure that marshals a
     /// JS call into exactly the JSON-string-in/JSON-string-out shape the
     /// adapter expects, then retains and returns it the same way any
     /// other live value gets a permanent handle.
@@ -2404,7 +2400,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         };
         // Tells the JS-side wrapper (`thaw_js_register_native_callback`,
-        // thaw-quickjs) which argument positions to retain as a live
+        // thaw-js) which argument positions to retain as a live
         // handle (encoded as the same `{"__thaw_js_handle_id__": N}`
         // marker `compile_dynamic_value_placeholder` builds for the
         // opposite direction) instead of naively `JSON.stringify`-ing --
@@ -2460,7 +2456,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let undefined = self.intern_string("undefined", "native_callback_undefined")
                 .map_err(|error| error.to_string())?;
             let undefined = self.builder.build_call(
-                self.module.get_function("thaw_js_get_global").unwrap(),
+                self.module.get_function("thaw_tjs_get_global").unwrap(),
                 &[undefined.as_pointer_value().into()],
                 "native_callback_undefined_handle",
             ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
@@ -2480,59 +2476,6 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
-    fn compile_quickjs_callback_argument(
-        &mut self,
-        array: BasicValueEnum<'ctx>,
-        argument: &HirExpr,
-    ) -> Result<(), String> {
-        let Some(HirType::Optional(inner)) = self.expr_hir_type(argument) else {
-            let value = self.compile_register_native_callback(std::slice::from_ref(argument), false)?;
-            return self.compile_typed_dynamic_argument(array, value, &HirType::JsValue);
-        };
-        let (mut params, rest, ret) = match inner.as_ref() {
-            HirType::Function(params, ret) => (params.clone(), None, ret.as_ref()),
-            HirType::CallableFunction(params, _, rest, ret) => {
-                (params.clone(), rest.as_ref(), ret.as_ref())
-            }
-            _ => return Err("optional QuickJS callback must be a function".into()),
-        };
-        let has_rest = rest.is_some();
-        if let Some(rest) = rest {
-            params.push(HirType::Array(rest.clone()));
-        }
-        let tagged = self.compile_expr(argument)?.into_struct_value();
-        let present = self.builder
-            .build_extract_value(tagged, 0, "quickjs_callback_present")
-            .map_err(|error| error.to_string())?
-            .into_int_value();
-        let closure = self.builder
-            .build_extract_value(tagged, 1, "quickjs_callback_payload")
-            .map_err(|error| error.to_string())?
-            .into_pointer_value();
-        let function = self.current_function();
-        let present_block = self.context.append_basic_block(function, "quickjs_callback_present");
-        let absent_block = self.context.append_basic_block(function, "quickjs_callback_absent");
-        let done = self.context.append_basic_block(function, "quickjs_callback_done");
-        self.builder.build_conditional_branch(present, present_block, absent_block)
-            .map_err(|error| error.to_string())?;
-
-        self.builder.position_at_end(present_block);
-        let callback = self.compile_register_native_callback_from_closure_with_rest(
-            closure, &params, ret, has_rest, json_callback_wants_graph(&params),
-        )?;
-        self.compile_typed_dynamic_argument(array, callback, &HirType::JsValue)?;
-        self.builder.build_unconditional_branch(done)
-            .map_err(|error| error.to_string())?;
-
-        self.builder.position_at_end(absent_block);
-        let undefined = self.compile_napi_undefined_json()?;
-        self.compile_json_array_push_owned(array, undefined)?;
-        self.builder.build_unconditional_branch(done)
-            .map_err(|error| error.to_string())?;
-        self.builder.position_at_end(done);
-        Ok(())
-    }
-
     pub(super) fn compile_register_native_callback_from_closure(
         &mut self,
         closure: PointerValue<'ctx>,
@@ -2548,7 +2491,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// `HirType::CallableFunction`'s rest parameter into this exact
     /// shape) should collect every *actual* trailing JS argument at call
     /// time, not just the one at that position. Without `has_rest`, the
-    /// JS-side wrapper (`thaw_js_register_native_callback`, thaw-quickjs)
+    /// JS-side wrapper (`thaw_js_register_native_callback`, thaw-js)
     /// sliced `arguments` down to a fixed `param_count` unconditionally
     /// -- for a rest callback called with more real arguments than the
     /// flattened ABI's param count (real trigger: better-sqlite3's own
@@ -2587,7 +2530,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let graph_mode = graph_mode || json_callback_result_wants_graph(ret)
             || (has_rest && params.last().is_some_and(json_callback_result_wants_graph));
         // thaw-js has no JSON-text protocol for live handle arguments: every callback is a graph callback.
-        let graph_mode = graph_mode || (!method_mode && self.js_engine() == JsEngine::ThawJs);
+        let graph_mode = graph_mode || !method_mode;
         self.tracks_owned_json_roots = true;
         let absent = self.builder.build_is_null(closure, "native_callback_is_undefined")
             .map_err(|error| error.to_string())?;
@@ -2604,7 +2547,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         // thaw-js: the alias-resolved closure is the callback's identity, so registering the same
         // closure again (`on` then `off`) yields the same JS function. Announced to the next register call.
-        let identity = if self.js_engine() == JsEngine::ThawJs && !method_mode {
+        let identity = if !method_mode {
             Some(self.resolve_closure_alias(closure)?)
         } else {
             None
@@ -2625,17 +2568,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let has_rest = self.context.i8_type().const_int(has_rest as u64, false);
         if graph_mode {
             // The graph callback decodes live JS handles into Json::Host.
-            // Install the existing QuickJS operations on this callback thread
+            // Install the existing thaw-js operations on this callback thread
             // before any decoder or compiled replacer can touch them.
             let operations = [
-                "thaw_js_retain_handle",
-                "thaw_js_release_handle",
-                "thaw_js_get_property_json_key_result",
-                "thaw_js_host_query_result",
-                "thaw_js_host_date_set_result",
-                "thaw_js_set_property_graph_result",
-                "thaw_js_property_predicate_json_key_result",
-                "thaw_js_host_enumerate_result",
+                "thaw_tjs_retain_handle",
+                "thaw_tjs_release_handle",
+                "thaw_tjs_get_property_json_key_result",
+                "thaw_tjs_host_query_result",
+                "thaw_tjs_host_date_set_result",
+                "thaw_tjs_set_property_graph_result",
+                "thaw_tjs_property_predicate_json_key_result",
+                "thaw_tjs_host_enumerate_result",
             ].iter().map(|name| self.module.get_function(name).unwrap()
                 .as_global_value().as_pointer_value().into())
                 .collect::<Vec<BasicMetadataValueEnum<'ctx>>>();
@@ -2656,9 +2599,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function(if method_mode { "thaw_js_register_native_method_callback_graph" }
-                        else if graph_mode { "thaw_js_register_native_callback_graph" }
-                        else { "thaw_js_register_native_callback" })
+                    .get_function(if method_mode { "thaw_tjs_register_native_method_callback_graph" }
+                        else { "thaw_tjs_register_native_callback_graph" })
                     .unwrap(),
                 &[
                     adapter.into(),
@@ -2697,7 +2639,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let undefined_name = self.intern_string("undefined", "native_callback_undefined_name")
             .map_err(|error| error.to_string())?;
         let undefined = self.builder.build_call(
-            self.module.get_function("thaw_js_get_global").unwrap(),
+            self.module.get_function("thaw_tjs_get_global").unwrap(),
             &[undefined_name.as_pointer_value().into()], "native_callback_undefined_handle",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("thaw_js_get_global returned no undefined handle")?;
@@ -3088,7 +3030,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // | Promise<string>`, whose sync-vs-async return depends on an
         // `opts.async` flag no overload-dispatch narrows away) but needs no
         // special runtime discrimination here: `resolve_value_impl`/
-        // `resolve_promise_value` (thaw-quickjs) already fully resolve any
+        // `resolve_promise_value` (thaw-js) already fully resolve any
         // real Promise a dynamic call's result carries *before* it reaches
         // this decoder, so `json` is always the final, already-awaited
         // value -- the same raw shape a plain `T` member would have. Only

@@ -32,7 +32,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.builder.position_at_end(cleanup);
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[handle.into()],
             "release_inline_dynamic_callee_on_error",
         ).map_err(|error| error.to_string())?;
@@ -42,100 +42,14 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(success);
         let result = result?;
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[handle.into()],
             "release_inline_dynamic_callee_after_call",
         ).map_err(|error| error.to_string())?;
         Ok(result)
     }
 
-    fn compile_typed_quickjs_setter(
-        &mut self,
-        signature: &DynamicSignature,
-        args: &[HirExpr],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
-        let [receiver, assigned] = args else {
-            return Err("typed QuickJS setter expects a receiver and value".into());
-        };
-        let receiver = self.compile_expr(receiver)?;
-        let assigned_type = signature
-            .params
-            .get(1)
-            .ok_or("typed QuickJS setter is missing its value type")?;
-        let array = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_array_new").unwrap(),
-                &[],
-                "quickjs_setter_args",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap();
-        self.begin_fresh_event_key_argument_scope();
-        let assigned = self.compile_expr(assigned)?;
-        let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
-        self.compile_typed_dynamic_argument(array, assigned, assigned_type)?;
-        let property = dynamic_member_name(&signature.symbol, false)
-            .ok_or("invalid typed QuickJS setter symbol")?;
-        let property = self.intern_string(&property, "quickjs_setter_name")
-            .map_err(|error| error.to_string())?;
-        let args_json = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_graph_encode").unwrap(),
-                &[array.into()],
-                "quickjs_setter_args_json",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap();
-        let raw_fresh_handles = Self::fresh_event_key_raw_handles(&fresh_handles);
-        let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
-            args_json, &[array], &[], &[], &raw_fresh_handles,
-        )?;
-        self.release_fresh_event_key_handles(&fresh_handles)?;
-        let result = self
-            .builder
-            .build_call(
-                self.module
-                    .get_function("thaw_js_set_property_json_graph_result")
-                    .unwrap(),
-                &[
-                    receiver.into(),
-                    property.as_pointer_value().into(),
-                    args_json.into(),
-                ],
-                "quickjs_setter_result",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap()
-            .into_struct_value();
-        let value = self
-            .builder
-            .build_extract_value(result, 0, "quickjs_setter_json")
-            .map_err(|error| error.to_string())?;
-        let error = self
-            .builder
-            .build_extract_value(result, 1, "quickjs_setter_error")
-            .map_err(|error| error.to_string())?;
-        self.destroy_typed_host_arguments(array, args_json)?;
-        self.builder
-            .build_store(self.pending_exception().as_pointer_value(), error)
-            .map_err(|error| error.to_string())?;
-        self.clear_pending_native_text()?;
-        self.mark_pending_native_text(error)?;
-        self.branch_on_pending_exception()?;
-        let json = self.compile_decode_quickjs_graph(value)?;
-
-        self.compile_typed_dynamic_result(json, &signature.ret)
-    }
-
-    /// `loadScript(source): boolean`, via thaw-quickjs's `thaw_js_load`.
+    /// `loadScript(source): boolean`, via thaw-js's `thaw_js_load`.
     /// Same `i8` -> `i1` conversion as `compile_json_as_bool` and for the
     /// same reason (the extern function avoids relying on `bool`'s C ABI
     /// shape).
@@ -143,18 +57,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source] = args else {
             return Err("loadScript expects exactly one argument".to_string());
         };
-        // A routed build runs every script on thaw-js; only the legacy QuickJS lane uses `thaw_js_load`.
-        let on_thaw_js = self.js_engine() == JsEngine::ThawJs;
-        if on_thaw_js {
-            self.js_mark_handles_used();
-        } else {
-            self.note_quickjs("quickjs:package_bundle");
-        }
+        self.js_mark_handles_used();
         let source_val = self.compile_expr(source)?;
-        let function = self
-            .module
-            .get_function(if on_thaw_js { "thaw_tjs_load_script" } else { "thaw_js_load" })
-            .unwrap();
+        let function = self.module.get_function("thaw_tjs_load_script").unwrap();
         let call = self
             .builder
             .build_call(function, &[source_val.into()], "load_script_u8")
@@ -162,7 +67,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let u8_val = call
             .try_as_basic_value()
             .basic()
-            .ok_or("thaw_js_load did not return a value")?
+            .ok_or("thaw_tjs_load_script did not return a value")?
             .into_int_value();
         let zero = self.context.i8_type().const_int(0, false);
         self.builder
@@ -313,7 +218,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = self.compile_expr(value)?;
         self.builder
             .build_call(
-                self.module.get_function("thaw_js_set_process_env").unwrap(),
+                self.module.get_function("thaw_tjs_set_process_env").unwrap(),
                 &[name.into(), value.into()],
                 "set_process_env",
             )
@@ -389,13 +294,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
-    /// `callDynamic(name, args): Json` -- the QuickJS-NG fallback path
+    /// `callDynamic(name, args): Json` -- the thaw-js fallback path
     /// (docs/design/bridge.md section 7). Composes thaw-std's
-    /// `thaw_json_stringify`/`thaw_json_parse` with thaw-quickjs's
+    /// `thaw_json_stringify`/`thaw_json_parse` with thaw-js's
     /// `thaw_js_call` so a `Json` value flows in and out without this
-    /// module needing to know thaw-quickjs's internals (or vice versa).
+    /// module needing to know thaw-js's internals (or vice versa).
     fn compile_call_dynamic(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
-        self.compile_json_backend_call(args, "thaw_js_call_graph_result", "callDynamic")
+        self.compile_json_backend_call(args, "thaw_tjs_call_graph_result", "callDynamic")
     }
 
     fn compile_get_dynamic_value(
@@ -403,14 +308,14 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
-        self.compile_single_arg_call("thaw_js_get_global", args, "getDynamicValue")
+        self.compile_single_arg_call("thaw_tjs_get_global", args, "getDynamicValue")
     }
 
     fn compile_call_dynamic_value(
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.compile_json_backend_call(args, "thaw_js_call_handle_graph_result", "callDynamicValue")
+        self.compile_json_backend_call(args, "thaw_tjs_call_handle_graph_result", "callDynamicValue")
     }
 
     /// `newDynamicFunction(args_json): JsValue` -- `new Function(...)` via
@@ -426,11 +331,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let call_args = self.compile_expr(call_args)?;
         // Under thaw-js this is `thaw_tjs_new_function`, so its arguments take the same serializer as every
         // other thaw-js JSON argument (a JsValue argument crosses as a handle marker, not a copy).
-        let new_function_symbol = if self.js_engine() == JsEngine::ThawJs {
-            "thaw_tjs_new_function"
-        } else {
-            "thaw_js_new_function"
-        };
+        let new_function_symbol = "thaw_tjs_new_function";
         let args_json = self
             .builder
             .build_call(
@@ -448,7 +349,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let result = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_new_function").unwrap(),
+                self.module.get_function("thaw_tjs_new_function").unwrap(),
                 &[args_json.into()],
                 "new_function_result",
             )
@@ -522,10 +423,10 @@ impl<'ctx> HirCompiler<'ctx> {
         self.js_mark_handles_used();
         // Arguments may carry live handles; encoding/decoding them needs the host operations.
         self.compile_register_js_callback_host_operations()?;
-        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
-        self.compiling_quickjs_dynamic_arguments = true;
+        let outer_compiling_js_dynamic_arguments = self.compiling_js_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = true;
         let call_args = self.compile_expr(call_args);
-        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = outer_compiling_js_dynamic_arguments;
         let call_args = call_args?;
         let args_json = self
             .builder
@@ -543,7 +444,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_call_handle_handle_graph_args_result")
+                    .get_function("thaw_tjs_call_handle_handle_graph_args_result")
                     .unwrap(),
                 &[
                     handle.into(),
@@ -613,7 +514,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_call_handle_value_graph_result")
+                    .get_function("thaw_tjs_call_handle_value_graph_result")
                     .unwrap(),
                 &[callable.into(), argument.into()],
                 "dynamic_value_argument_result",
@@ -637,7 +538,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        self.compile_decode_quickjs_graph(value)
+        self.compile_decode_js_graph(value)
     }
 
     fn compile_release_dynamic_value(
@@ -652,7 +553,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let released = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_release_handle").unwrap(),
+                self.module.get_function("thaw_tjs_release_handle").unwrap(),
                 &[handle.into()],
                 "release_dynamic_handle",
             )
@@ -670,7 +571,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "released_dynamic_value",
             )
             .map_err(|error| error.to_string())?;
-        // Handle 0 is `undefined` on thaw-js: it holds no reference, so releasing it is a success (QuickJS
+        // Handle 0 is `undefined` on thaw-js: it holds no reference, so releasing it is a success (thaw-js
         // keeps a real handle for `undefined` and reports the same).
         let undefined = self
             .builder
@@ -761,7 +662,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         // Keep the receiver's original value alive even if an argument
         // releases the caller's own handle after the member has been read.
-        let retained = self.builder.build_call(self.module.get_function("thaw_js_retain_handle").unwrap(),
+        let retained = self.builder.build_call(self.module.get_function("thaw_tjs_retain_handle").unwrap(),
             &[receiver.into()], "retain_selected_method_receiver")
             .map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("receiver retain returned no value")?.into_int_value();
@@ -776,7 +677,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_throw_type_error("Invalid JavaScript method receiver")?;
         self.builder.position_at_end(ready);
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_get_property_result").unwrap(),
+            self.module.get_function("thaw_tjs_get_property_result").unwrap(),
             &[receiver.into(), name.into()], "selected_method",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap().into_struct_value();
         let selected = self.builder.build_extract_value(result, 0, "selected_method_handle")
@@ -790,7 +691,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(failed, release, continue_block)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(release);
-        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+        self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[receiver.into()], "release_failed_selected_receiver")
             .map_err(|error| error.to_string())?;
         self.builder.build_unconditional_branch(continue_block)
@@ -813,8 +714,8 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<(BasicValueEnum<'ctx>, BasicValueEnum<'ctx>), String> {
         let cleanup = self.context.append_basic_block(self.current_function(), "selected_method_arg_cleanup");
         self.push_catch_target(cleanup);
-        let outer = self.compiling_quickjs_dynamic_arguments;
-        self.compiling_quickjs_dynamic_arguments = true;
+        let outer = self.compiling_js_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = true;
         let compiled = (|| -> Result<_, String> {
             let array = if let HirExpr::Call(callee, values) = expression {
                 if matches!(callee.as_ref(), HirExpr::Var(name)
@@ -833,14 +734,14 @@ impl<'ctx> HirCompiler<'ctx> {
             let encoded = self.compile_check_json_stringify_error_with_cleanup(encoded, &[array])?;
             Ok((array, encoded))
         })();
-        self.compiling_quickjs_dynamic_arguments = outer;
+        self.compiling_js_dynamic_arguments = outer;
         self.pop_catch_target();
         let success = self.builder.get_insert_block().unwrap();
         self.builder.position_at_end(cleanup);
-        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+        self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[selected.into()], "release_selected_method_on_argument_error")
             .map_err(|error| error.to_string())?;
-        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+        self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[receiver.into()], "release_selected_receiver_on_argument_error")
             .map_err(|error| error.to_string())?;
         self.branch_on_pending_exception()?;
@@ -932,7 +833,7 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
-        // May be the first QuickJS operation on the thread; Json arguments can
+        // May be the first thaw-js operation on the thread; Json arguments can
         // carry Host leases, so install the retained-value callbacks first
         // (same reasoning as compile_call_dynamic_value_mixed_exact).
         self.compile_register_js_callback_host_operations()?;
@@ -954,10 +855,10 @@ impl<'ctx> HirCompiler<'ctx> {
         // ambient-declaration dispatch path did), so a `JsValue` nested in
         // a method call's own arguments -- as opposed to a top-level
         // function call's -- failed outright until now.
-        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
-        self.compiling_quickjs_dynamic_arguments = true;
+        let outer_compiling_js_dynamic_arguments = self.compiling_js_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = true;
         let call_args = self.compile_expr(call_args);
-        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = outer_compiling_js_dynamic_arguments;
         let call_args = call_args?;
         let args_json = self
             .builder
@@ -975,7 +876,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_call_method_graph_result")
+                    .get_function("thaw_tjs_call_method_graph_result")
                     .unwrap(),
                 &[handle.into(), name.into(), args_json.into()],
                 "dynamic_method_result",
@@ -1013,7 +914,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let parsed = self.compile_decode_quickjs_graph(value)?;
+        let parsed = self.compile_decode_js_graph(value)?;
 
         Ok(parsed)
     }
@@ -1023,7 +924,7 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
-        // May be the first QuickJS operation on the thread; Json arguments can
+        // May be the first thaw-js operation on the thread; Json arguments can
         // carry Host leases, so install the retained-value callbacks first
         // (same reasoning as compile_call_dynamic_value_mixed_exact).
         self.compile_register_js_callback_host_operations()?;
@@ -1039,7 +940,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_call_selected_method_graph_result")
+                    .get_function("thaw_tjs_call_selected_method_graph_result")
                     .unwrap(),
                 &[handle.into(), selected.into(), name.into(), args_json.into()],
                 "dynamic_method_result",
@@ -1072,10 +973,10 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[selected.into()], "release_selected_method",
         ).map_err(|error| error.to_string())?;
-        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+        self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[handle.into()], "release_selected_receiver")
             .map_err(|error| error.to_string())?;
         self.builder
@@ -1084,7 +985,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let parsed = self.compile_decode_quickjs_graph(value)?;
+        let parsed = self.compile_decode_js_graph(value)?;
 
         Ok(parsed)
     }
@@ -1102,7 +1003,7 @@ impl<'ctx> HirCompiler<'ctx> {
         chain_intermediate: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
-        // May be the first QuickJS operation on the thread; Json arguments can
+        // May be the first thaw-js operation on the thread; Json arguments can
         // carry Host leases, so install the retained-value callbacks first
         // (same reasoning as compile_call_dynamic_value_mixed_exact).
         self.compile_register_js_callback_host_operations()?;
@@ -1112,10 +1013,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let handle = self.compile_dynamic_method_receiver(handle)?;
         let name = self.compile_expr(name)?;
         // See the matching comment in `compile_call_dynamic_method`.
-        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
-        self.compiling_quickjs_dynamic_arguments = true;
+        let outer_compiling_js_dynamic_arguments = self.compiling_js_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = true;
         let call_args = self.compile_expr(call_args);
-        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = outer_compiling_js_dynamic_arguments;
         let call_args = call_args?;
         let args_json = self
             .builder
@@ -1137,7 +1038,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_call_method_handle_graph_args_result")
+                    .get_function("thaw_tjs_call_method_handle_graph_args_result")
                     .unwrap(),
                 &[
                     handle.into(),
@@ -1189,7 +1090,7 @@ impl<'ctx> HirCompiler<'ctx> {
         chain_intermediate: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.js_mark_handles_used();
-        // May be the first QuickJS operation on the thread; Json arguments can
+        // May be the first thaw-js operation on the thread; Json arguments can
         // carry Host leases, so install the retained-value callbacks first
         // (same reasoning as compile_call_dynamic_value_mixed_exact).
         self.compile_register_js_callback_host_operations()?;
@@ -1207,7 +1108,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_call_selected_method_handle_graph_args_result")
+                    .get_function("thaw_tjs_call_selected_method_handle_graph_args_result")
                     .unwrap(),
                 &[
                     handle.into(),
@@ -1246,10 +1147,10 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[selected.into()], "release_selected_method",
         ).map_err(|error| error.to_string())?;
-        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+        self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[handle.into()], "release_selected_receiver")
             .map_err(|error| error.to_string())?;
         self.builder
@@ -1274,7 +1175,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_resolve_handle_graph_result")
+                    .get_function("thaw_tjs_resolve_handle_graph_result")
                     .unwrap(),
                 &[handle.into()],
                 "read_dynamic_value",
@@ -1298,7 +1199,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        self.compile_decode_quickjs_graph(value)
+        self.compile_decode_js_graph(value)
     }
 
     fn compile_call_dynamic_value_mixed_exact(
@@ -1309,7 +1210,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [callable, json_args, handles] = args else {
             return Err("callDynamicValueMixedExact expects callable, JSON arguments, and owned handle array".into());
         };
-        // This path can be the first QuickJS operation on the thread. Json
+        // This path can be the first thaw-js operation on the thread. Json
         // arguments may carry Host/function/Symbol leases, so install the
         // retained-value callbacks before graph encoding or decoding them.
         self.compile_register_js_callback_host_operations()?;
@@ -1361,13 +1262,13 @@ impl<'ctx> HirCompiler<'ctx> {
         for cell in &direct_cells {
             let value = self.builder.build_load(i64_type, *cell, "failed_direct_handle")
                 .map_err(|error| error.to_string())?.into_int_value();
-            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
                 &[value.into()], "release_staged_direct_handle")
                 .map_err(|error| error.to_string())?;
         }
         let staged_callable = self.builder.build_load(i64_type, callable_cell,
             "failed_mixed_callable").map_err(|error| error.to_string())?.into_int_value();
-        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+        self.builder.build_call(self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[staged_callable.into()], "release_staged_callable")
             .map_err(|error| error.to_string())?;
         let staged_json = self.builder.build_load(ptr_type, json_cell, "failed_mixed_json")
@@ -1416,7 +1317,7 @@ impl<'ctx> HirCompiler<'ctx> {
             text, &[json_args.into()], &[], &[handles], &[callable],
         )?;
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_call_handle_mixed_exact_consuming_result").unwrap(),
+            self.module.get_function("thaw_tjs_call_handle_mixed_exact_consuming_result").unwrap(),
             &[callable.into(), text.into(), handles.into()], "exact_mixed_result",
         ).map_err(|error| error.to_string())?
             .try_as_basic_value().basic()
@@ -1430,7 +1331,7 @@ impl<'ctx> HirCompiler<'ctx> {
             &[json_args.into()], "destroy_exact_mixed_args_json",
         ).map_err(|error| error.to_string())?;
         let value = self.compile_exact_iterator_handle_result(result, "exact_mixed_call")?;
-        self.compile_original_quickjs_exception_handle(value, true)
+        self.compile_original_js_exception_handle(value, true)
     }
 
     fn compile_call_dynamic_value_mixed(
@@ -1479,7 +1380,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_call_handle_mixed_graph_result")
+                    .get_function("thaw_tjs_call_handle_mixed_graph_result")
                     .unwrap(),
                 &[callable.into(), text.into(), handles.into()],
                 "mixed_dynamic_result",
@@ -1511,7 +1412,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        self.compile_decode_quickjs_graph(value)
+        self.compile_decode_js_graph(value)
     }
 
     fn compile_call_dynamic_value_mixed_native_json(
@@ -1584,7 +1485,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let parsed = self.compile_decode_quickjs_graph(result_text)?;
+        let parsed = self.compile_decode_js_graph(result_text)?;
 
         Ok(parsed)
     }
@@ -1668,8 +1569,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_call(
                 self.module
                     .get_function(if consume_handles {
-                        "thaw_js_call_handle_mixed_handle_graph_args_consuming_result"
-                    } else { "thaw_js_call_handle_mixed_handle_graph_args_result" })
+                        "thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result"
+                    } else { "thaw_tjs_call_handle_mixed_handle_graph_args_result" })
                     .unwrap(),
                 &[callable.into(), text.into(), handles.into()],
                 "mixed_handle_result",
@@ -1728,10 +1629,10 @@ impl<'ctx> HirCompiler<'ctx> {
         self.js_mark_handles_used();
         // Arguments may carry live handles; encoding/decoding them needs the host operations.
         self.compile_register_js_callback_host_operations()?;
-        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
-        self.compiling_quickjs_dynamic_arguments = true;
+        let outer_compiling_js_dynamic_arguments = self.compiling_js_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = true;
         let json_args = self.compile_expr(json_args);
-        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = outer_compiling_js_dynamic_arguments;
         let json_args = json_args?;
         let text = self
             .builder
@@ -1749,7 +1650,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_construct_handle_graph_args_result")
+                    .get_function("thaw_tjs_construct_handle_graph_args_result")
                     .unwrap(),
                 &[constructor.into(), text.into()],
                 "construct_dynamic_result",

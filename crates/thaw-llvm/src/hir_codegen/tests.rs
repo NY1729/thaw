@@ -176,13 +176,10 @@ fn compiles_typed_napi_collection_arguments_and_results() {
            }"#,
     )
     .unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "typed_napi_tuple");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
 }
 
 /// Builds the given TS source into a standalone native binary (linking
@@ -276,7 +273,6 @@ fn compile_and_run_raw_with_opt(
     )
     .unwrap();
     // Routed mode, as thaw-cli sets it (HIR lowering reads a thread-local, the compiler a field).
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     // THAW_TEST_HIR=<file> writes the lowered HIR (debug aid next to THAW_TEST_IR)
     if let Some(path) = std::env::var_os("THAW_TEST_HIR") {
@@ -287,18 +283,10 @@ fn compile_and_run_raw_with_opt(
     let mut compiler = HirCompiler::new(&context, test_name);
     compiler.set_commonjs_entry(commonjs);
     compiler.set_codegen_opt(codegen_opt);
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     if let Some(path) = std::env::var_os("THAW_TEST_IR") {
         std::fs::write(path, compiler.print_to_string()).unwrap();
     }
-    // thaw-cli rejects a routed build that still needs QuickJS; the blockers are PR2 data.
-    assert!(
-        !compiler.uses_quickjs(),
-        "thaw-js lane: program still needs QuickJS: {}",
-        compiler.quickjs_blockers().join(",")
-    );
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-{test_name}-{}",
