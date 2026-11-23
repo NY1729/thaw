@@ -13440,3 +13440,12 @@ console.log([keys(o), Object.keys(o), Object.getPrototypeOf(o) === null, '__prot
         expected
     );
 }
+
+#[test]
+fn a_json_stringify_property_list_reads_a_proxy_through_its_get_trap() {
+    // node 22: {"a":1} {"a":1,"z":0}
+    assert_eq!(
+        one("console.log(JSON.stringify(new Proxy({}, { get: (t, k) => k === 'a' ? 1 : undefined }), ['a', 'b']), JSON.stringify(new Proxy({ z: 0 }, { get: (t, k) => k === 'a' ? 1 : t[k] }), ['a', 'z']))"),
+        "{\"a\":1} {\"a\":1,\"z\":0}"
+    );
+}

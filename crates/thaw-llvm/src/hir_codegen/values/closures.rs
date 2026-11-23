@@ -1868,29 +1868,35 @@ impl<'ctx> HirCompiler<'ctx> {
                         .builder
                         .build_int_to_ptr(word, pointer, "receiver_json_symbol")
                         .map_err(|error| error.to_string())?;
-                    let placeholder = self
-                        .compile_live_symbol_json_placeholder(symbol, ledger)?
-                        .into_pointer_value();
-                    let handle = self
-                        .builder
-                        .build_call(
-                            self.module
-                                .get_function("thaw_json_borrowed_handle_id")
-                                .unwrap(),
-                            &[placeholder.into()],
-                            "receiver_symbol_handle_id",
-                        )
-                        .map_err(|error| error.to_string())?
-                        .try_as_basic_value()
-                        .basic()
-                        .ok_or("symbol receiver placeholder has no borrowed handle")?;
-                    self.builder
-                        .build_call(
-                            self.module.get_function("thaw_json_destroy").unwrap(),
-                            &[placeholder.into()],
-                            "destroy_receiver_symbol_placeholder",
-                        )
-                        .map_err(|error| error.to_string())?;
+                    // a thaw-js handle needs no placeholder object to be read back as its id
+                    let handle: BasicValueEnum<'ctx> = if self.thaw_js_routed {
+                        self.compile_live_symbol_handle(symbol, ledger)?.into()
+                    } else {
+                        let placeholder = self
+                            .compile_live_symbol_json_placeholder(symbol, ledger)?
+                            .into_pointer_value();
+                        let handle = self
+                            .builder
+                            .build_call(
+                                self.module
+                                    .get_function("thaw_json_borrowed_handle_id")
+                                    .unwrap(),
+                                &[placeholder.into()],
+                                "receiver_symbol_handle_id",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or("symbol receiver placeholder has no borrowed handle")?;
+                        self.builder
+                            .build_call(
+                                self.module.get_function("thaw_json_destroy").unwrap(),
+                                &[placeholder.into()],
+                                "destroy_receiver_symbol_placeholder",
+                            )
+                            .map_err(|error| error.to_string())?;
+                        handle
+                    };
                     let converted = self
                         .builder
                         .build_call(

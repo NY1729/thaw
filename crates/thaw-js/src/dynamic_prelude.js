@@ -3,6 +3,7 @@
 // QuickJS bootstrap helpers (thaw-quickjs `platform_globals/runtime.js`), run against thaw-js with the
 // captured intrinsics re-bound here.
 (function () {
+  'use strict';
   const thawGraphApply = Reflect.apply;
   const thawGraphObjectToString = Object.prototype.toString;
   const thawDateApply = Reflect.apply;

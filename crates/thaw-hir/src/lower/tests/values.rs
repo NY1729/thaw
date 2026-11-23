@@ -2924,6 +2924,38 @@ fn routed_carrier_error_instanceof_after_property_write_asks_the_error_identity(
     );
 }
 
+/// The routed copy rule (design note native-owner-projection-routed): an `any` view of a NAMED native object
+/// stays a live reference to its owner (its attributes, writes and receiver authority are the owner's), and only
+/// a literal nobody else can name (a fresh argument) is copied as plain data.
+#[test]
+fn routed_any_view_of_a_named_native_object_stays_live_and_a_fresh_literal_argument_is_a_copy() {
+    let named = r#"
+            class Owner { value: number = 1; }
+            function take(value: any): void { console.log(value.value); }
+            function main(): void {
+                const owner = new Owner();
+                take(owner);
+                console.log(owner.value);
+            }
+        "#;
+    let fresh = r#"
+            function take(value: any): void { console.log(value.value); }
+            function main(): void { take({ value: 1 }); }
+        "#;
+    crate::set_thaw_js_routed(true);
+    let named_routed = format!("{:?}", lower(named).functions);
+    let fresh_routed = format!("{:?}", lower(fresh).functions);
+    crate::set_thaw_js_routed(false);
+    assert!(
+        named_routed.contains("__thaw_json_from_consumed_dynamic"),
+        "a named owner viewed as any must be projected live under routed lowering:\n{named_routed}"
+    );
+    assert!(
+        !fresh_routed.contains("__thaw_json_from_consumed_dynamic"),
+        "a fresh literal argument is a plain-data copy under routed lowering:\n{fresh_routed}"
+    );
+}
+
 /// An ordinary `string` union member (not a caught carrier) keeps the plain "string" typeof.
 #[test]
 fn typeof_of_an_ordinary_string_union_member_does_not_use_the_error_receiver() {

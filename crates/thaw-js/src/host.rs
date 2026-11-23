@@ -3631,24 +3631,11 @@ pub(crate) fn json_key(key_json: *const c_char) -> Result<String, String> {
     }
 }
 
-/// Host-side `target[key] = value` under strict mode (compiled code is strict): a write to a frozen object
-/// or a new key on a non-extensible one throws, where `Interp::set` silently ignores it.
+/// Host-side `target[key] = value` under strict mode (compiled code is strict): a refused write (a frozen or
+/// non-writable property, a getter-only accessor, a new key on a non-extensible object, a Proxy trap answering
+/// false) throws, where `Interp::set` silently ignores it.
 fn strict_host_set(it: &mut Interp, target: &Value, key: &str, value: Value) -> R<()> {
-    if let Value::Object(o) = target {
-        if o.frozen.get() {
-            return it.throw_error(
-                "TypeError",
-                &format!("Cannot assign to read only property '{key}' of object"),
-            );
-        }
-        if o.ext.get() != 0 && crate::find_in_chain(o, key).is_none() {
-            return it.throw_error(
-                "TypeError",
-                &format!("Cannot add property {key}, object is not extensible"),
-            );
-        }
-    }
-    it.set(target, key, value)
+    it.set_impl(target, key, value, true)
 }
 
 /// `handle[key] = value` with the key as JSON text and the value a graph wire; the result value is 1.
@@ -9487,6 +9474,23 @@ mod strict_host_set_tests {
         let obj = it.run("Object.freeze({value: 1})").unwrap();
         assert!(strict_host_set(&mut it, &obj, "value", Value::Number(99.0)).is_err());
         assert!(matches!(it.get(&obj, "value"), Ok(Value::Number(n)) if n == 1.0));
+    }
+
+    #[test]
+    fn host_set_throws_for_a_non_writable_property_and_a_getter_only_accessor() {
+        let mut it = Interp::new();
+        let obj = it
+            .run("var o = { w: 1 }; Object.defineProperty(o, 'ro', { value: 1, writable: false, enumerable: true }); Object.defineProperty(o, 'g', { get() { return 3; } }); o")
+            .unwrap();
+        for key in ["ro", "g"] {
+            assert!(
+                strict_host_set(&mut it, &obj, key, Value::Number(9.0)).is_err(),
+                "{key}"
+            );
+        }
+        assert!(matches!(it.get(&obj, "ro"), Ok(Value::Number(n)) if n == 1.0));
+        strict_host_set(&mut it, &obj, "w", Value::Number(2.0)).unwrap();
+        assert!(matches!(it.get(&obj, "w"), Ok(Value::Number(n)) if n == 2.0));
     }
 
     #[test]

@@ -304,12 +304,10 @@ impl Interp {
                         pieces.push(piece);
                     }
                 } else {
+                    // the property list is read with [[Get]] whatever the object has (a Proxy's `get` trap or an
+                    // exotic object answers keys the ordinary chain does not hold); `undefined` is skipped below
                     let keys = match &ser.allow {
-                        Some(a) => a
-                            .iter()
-                            .filter(|k| find_in_chain(o, k).is_some())
-                            .cloned()
-                            .collect(),
+                        Some(a) => a.clone(),
                         None => self.own_keys(&v),
                     };
                     for k in keys {
