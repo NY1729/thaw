@@ -127,11 +127,11 @@ fn os_network_interfaces_reports_more_than_loopback_with_real_shapes() {
 /// `[]` back on failure), `path.join`/`path.resolve`/`path.dirname`,
 /// and `os.arch`/`os.platform` while hunting for a prebuilt `.node`
 /// binary that this registry never bundles. Confirms all three
-/// polyfills actually run together through real QuickJS-NG and that
+/// polyfills actually run together through real retired-engine-NG and that
 /// `fs.readdirSync` failing is silently absorbed exactly the way real
 /// Node's `ENOENT` would be, rather than crashing the whole load.
 #[test]
-fn path_os_fs_polyfills_actually_run_through_quickjs() {
+fn path_os_fs_polyfills_actually_run_through_thaw_js() {
     use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_addon_chase");
@@ -474,7 +474,7 @@ fn rewrites_import_meta_url_without_touching_text() {
 /// this bundler's own per-module wrapper function already provides as
 /// real parameters (`module`/`exports`/`require`/`requireAsync`/
 /// `__filename`/`__dirname`, see `bundle/render.rs`). Real trigger:
-/// yargs's own `platform-shims/esm.mjs`. QuickJS (like real JS) rejects
+/// yargs's own `platform-shims/esm.mjs`. retired-engine (like real JS) rejects
 /// a lexical redeclaration of a parameter name outright ("invalid
 /// redefinition of parameter name"); the fix drops the `const`/`let`
 /// keyword, turning it into a plain reassignment of the existing
@@ -496,13 +496,13 @@ fn strips_a_top_level_const_that_redeclares_a_reserved_wrapper_parameter() {
 }
 
 /// `import.meta.resolve(...)` (or any `import.meta.*` access besides
-/// `.url`) used to survive the CJS rewrite untouched -- QuickJS's
+/// `.url`) used to survive the CJS rewrite untouched -- retired-engine's
 /// script-mode parser (this bundler always evaluates as a script, not
 /// real ESM) rejects a literal `import.meta` outright with "import.meta
 /// only valid in module code", even on a code path the program never
 /// actually reaches (real trigger: yargs's own unused `.config()`
 /// "extends" feature). Every `import.meta` expression, not just
-/// `.url`, must be replaced with something QuickJS can parse.
+/// `.url`, must be replaced with something retired-engine can parse.
 #[test]
 fn rewrites_import_meta_resolve_so_the_bundle_still_parses() {
     let rewritten = rewrite_esm_to_commonjs(
@@ -780,13 +780,13 @@ fn live_import_rewrite_updates_destructured_parameter_defaults() {
 
 /// The bundle isn't just plausible-looking text: an ESM main file
 /// importing from an ESM sibling file must actually run correctly
-/// through the real QuickJS-NG engine, exactly like the equivalent
-/// CommonJS package already does (`bundle_actually_runs_through_quickjs`).
+/// through the real retired-engine-NG engine, exactly like the equivalent
+/// CommonJS package already does (`bundle_actually_runs_through_thaw_js`).
 #[test]
-fn esm_bundle_actually_runs_through_quickjs() {
+fn esm_bundle_actually_runs_through_thaw_js() {
     use std::ffi::{CStr, CString};
 
-    let dir = temp_registry("esm_bundle_runs_through_quickjs");
+    let dir = temp_registry("esm_bundle_runs_through_thaw_js");
     fs::write(
             dir.join("index.js"),
             "import { double } from './double.js';\nexport default function run(n) { return double(n); }",
@@ -1092,7 +1092,7 @@ fn nested_dynamic_import_rewrites_without_overlapping_ranges() {
 
 #[test]
 fn dynamic_import_uses_final_exports_after_async_factory_and_keeps_rejections() {
-    // Node 22 twin (.mjs files, same bodies). The second import() of each module replaces the QuickJS-only
+    // Node 22 twin (.mjs files, same bodies). The second import() of each module replaces the retired-engine-only
     // __thaw_bundle_create_import_async half; the result is Node's array. The files are `.js` ESM: the registry
     // routes `.mjs` through the native-ESM path, which has no async factories yet (PR-I).
     let dir = temp_registry("dynamic_import_final_exports");

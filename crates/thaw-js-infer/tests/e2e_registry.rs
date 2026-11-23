@@ -142,7 +142,7 @@ fn case(thaw: &str, c: &Case) {
 }
 
 #[test]
-fn aot_clones_match_node_and_beat_the_quickjs_calls() {
+fn aot_clones_match_node_and_beat_the_dynamic_calls() {
     let Ok(thaw) = std::env::var("THAW_JS_INFER_THAW_BIN") else {
         eprintln!("skipped: set THAW_JS_INFER_THAW_BIN to run");
         return;
@@ -197,7 +197,7 @@ fn aot_clones_match_node_and_beat_the_quickjs_calls() {
             direct: &[],
             guarded: &["sum", "max"],
         },
-        // records, string / boolean arrays; the mutating `grow` stays a QuickJS call
+        // records, string / boolean arrays; the mutating `grow` stays a retired-engine call
         Case {
             name: "aot-shapes",
             package: "aot-shapes",
@@ -219,7 +219,7 @@ fn aot_clones_match_node_and_beat_the_quickjs_calls() {
             direct: &["isPrime"],
             guarded: &[],
         },
-        // `numericSort` sorts: the cost heuristic keeps it a QuickJS call (its clone measured 0.2x),
+        // `numericSort` sorts: the cost heuristic keeps it a retired-engine call (its clone measured 0.2x),
         // the output must still match Node
         Case {
             name: "simple-statistics-array",

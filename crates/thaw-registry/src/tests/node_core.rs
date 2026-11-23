@@ -1,7 +1,7 @@
 /// The exact pattern found in a real ESM npm package (`has-flag`):
 /// `import process from 'process'`, then reading `process.argv`.
 #[test]
-fn process_builtin_polyfill_actually_runs_through_quickjs() {
+fn process_builtin_polyfill_actually_runs_through_thaw_js() {
     let dir = temp_registry("builtin_process");
     fs::write(
         dir.join("index.js"),
@@ -354,12 +354,12 @@ fn assert_builtin_reports_structured_failures_through_commonjs_require() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
-/// Not just plausible text -- runs through the real QuickJS-NG
+/// Not just plausible text -- runs through the real retired-engine-NG
 /// engine, confirming `util.inspect.custom` actually comes back as a
 /// real `Symbol` (what `object-inspect` needs it to be), not merely
 /// present.
 #[test]
-fn util_polyfill_actually_runs_through_quickjs() {
+fn util_polyfill_actually_runs_through_thaw_js() {
     let dir = temp_registry("builtin_util_runs");
     fs::write(
         dir.join("index.js"),

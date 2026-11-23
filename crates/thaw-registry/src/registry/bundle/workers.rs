@@ -448,7 +448,7 @@ fn rewrite_static_worker_urls_named(
         let worker_source =
             rewrite_esm_to_commonjs_mode_named(&worker_source, false, &worker_source_name).unwrap_or(worker_source);
         // These bindings share the Worker source's function scope after the
-        // QuickJS host wrapper. Choose names absent from its original text.
+        // retired-engine host wrapper. Choose names absent from its original text.
         let synthetic = (0..).find(|index| {
             !worker_source.contains(&format!("__thaw_finish_worker_main_{index}"))
                 && !worker_source.contains(&format!("__thaw_worker_main_error_{index}"))

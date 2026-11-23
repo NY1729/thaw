@@ -1,6 +1,6 @@
 //! Pure-Rust digests and HMAC for `node:crypto`: SHA-3 (Keccak), RIPEMD-160 and HMAC over every
 //! digest. Copied from thaw-quickjs (lib.rs, quickjs/symmetric_cipher.rs), which stays the oracle
-//! until QuickJS is removed; the md5/sha1/sha2 crates do the rest.
+//! until retired-engine is removed; the md5/sha1/sha2 crates do the rest.
 
 use sha2::Digest;
 

@@ -3131,7 +3131,7 @@ fn global_construct_and_call_handles() {
 }
 
 #[test]
-fn with_this_call_and_event_key_handle_match_the_quickjs_contract() {
+fn with_this_call_and_event_key_handle_match_the_contract() {
     use crate::host::*;
     use std::ffi::{CStr, CString};
     let q = |s: &str| CString::new(s).unwrap();
@@ -5271,7 +5271,7 @@ fn cheerio_undici_is_stubbed_with_a_clear_error() {
 
 use crate::host::Native;
 
-// A package bundle that embeds the QuickJS form of `node:worker_threads` (crates/thaw-registry builtins/system/workers.rs:
+// A package bundle that embeds the retired-engine form of `node:worker_threads` (crates/thaw-registry builtins/system/workers.rs:
 // natives `__thaw_worker_poll`, `__thaw_native_workers`, `__thaw_vm_contexts`, and `require('node:stream')`).
 const QJS_WORKER_BUNDLE: &str = r#"module.exports = (function(require){
 var __thaw_bundle_factories = {
@@ -5296,8 +5296,8 @@ var __thaw_bundle_entry_key = "app/index.js";
 })(globalThis.require);"#;
 
 #[test]
-fn embedded_quickjs_worker_threads_is_substituted_with_the_thaw_js_form() {
-    // red before the substitution: the QuickJS natives are blockers
+fn embedded_legacy_worker_threads_is_substituted_with_the_thaw_js_form() {
+    // red before the substitution: the retired-engine natives are blockers
     let r = crate::scan::scan_bundle(QJS_WORKER_BUNDLE).ok().unwrap();
     assert!(r.is_clean(), "{:?}", r.blockers);
     // green: the package loads, and its worker_threads is the thaw-js module object (the `new Worker` path)
@@ -6790,9 +6790,9 @@ fn vm_eval_syntax_errors_and_script_emulation() {
 }
 
 /// A computed spec that names a bundled node builtin (absent from the factory's map) resolves like the
-/// QuickJS lane's global `require(spec)` fallback; an unserved builtin still throws MODULE_NOT_FOUND.
+/// retired-engine lane's global `require(spec)` fallback; an unserved builtin still throws MODULE_NOT_FOUND.
 #[test]
-fn computed_builtin_require_falls_back_like_quickjs() {
+fn computed_builtin_require_falls_back_to_builtins() {
     use crate::host::{Native, Package};
     let bundle = r#"module.exports = (function(require) {
 var __thaw_bundle_factories = {
@@ -12643,7 +12643,7 @@ fn graph_wire_origin_serials_name_the_decoded_root_container() {
     use crate::host::*;
     use std::ffi::CString;
     // `origins[i]` is node i's native serial; the root array decoded from node 0 reports serial 7,
-    // a plain value reports 0, and an unknown handle reports 0 (QuickJS `__thaw_origin_serial`).
+    // a plain value reports 0, and an unknown handle reports 0 (retired-engine `__thaw_origin_serial`).
     let with_origin = CString::new(
         r#"{"root":{"r":0},"nodes":[{"a":[{"v":1}]}],"leases":[],"napiLeases":[],"origins":[7]}"#,
     )
@@ -13064,7 +13064,7 @@ fn symbol_to_number_throws_type_error_not_nan() {
 }
 
 /// `thaw_tjs_dynamic_object_query` snapshots a Set-like handle's keys (size/has/keys protocol) and rejects
-/// a value that breaks the protocol, as QuickJS `thaw_js_dynamic_object_query` does.
+/// a value that breaks the protocol, as retired-engine `thaw_js_dynamic_object_query` does.
 #[test]
 fn set_like_snapshot_validates_the_protocol_and_lists_the_keys() {
     use crate::host::{set_like_snapshot_text, thaw_tjs_register};

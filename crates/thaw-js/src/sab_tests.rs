@@ -440,7 +440,7 @@ fn atomics_wait_async_sync_results_shapes_and_argument_errors() {
 
 #[test]
 fn atomics_wait_async_fixture_n66_timeout_then_notify_resolves_ok() {
-    // QuickJS contract n66, run as a program: the setInterval keeps the loop alive while the promises settle
+    // retired-engine contract n66, run as a program: the setInterval keeps the loop alive while the promises settle
     let src = "(async () => {
       const keep = setInterval(() => {}, 50);
       const ia = new Int32Array(new SharedArrayBuffer(16)); const out = [];
@@ -489,7 +489,7 @@ fn atomics_wait_async_fixture_n68_coerces_value_then_timeout_then_count() {
 
 #[test]
 fn atomics_wait_async_fixture_n70_int32_value_coercion() {
-    // QuickJS contract n70 without its BigInt64Array rows (BigInt64 is not supported yet; see atomics_wait_async note)
+    // retired-engine contract n70 without its BigInt64Array rows (BigInt64 is not supported yet; see atomics_wait_async note)
     let src = "(async () => {
       const ia = new Int32Array(new SharedArrayBuffer(16)); const out = [];
       out.push(Atomics.waitAsync(ia, 0, '0', 0).value, Atomics.waitAsync(ia, 0, 2**32, 0).value, Atomics.waitAsync(ia, 0, 1.9, 0).value);

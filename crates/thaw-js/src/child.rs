@@ -1,6 +1,6 @@
 //! `node:child_process` host: the `__thaw_child_process_*` functions the registry shim calls, plus a thread-local
 //! process table the event loop polls (`__thaw_poll_platform_events` -> `__thaw_child_process_poll`).
-//! Plain std/libc; the JSON event shapes match the QuickJS host so the one JavaScript shim serves both.
+//! Plain std/libc; the JSON event shapes match the retired-engine host so the one JavaScript shim serves both.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

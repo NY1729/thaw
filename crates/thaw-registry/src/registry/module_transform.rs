@@ -712,7 +712,7 @@ fn rewrite_live_import_references_named(
     )
 }
 
-// Native QuickJS cannot link a named export against an opaque CJS shell. Keep
+// Native retired-engine cannot link a named export against an opaque CJS shell. Keep
 // the shell as a side-effect import at that declaration's position, and let
 // the already-collected origin graph publish its live name on the facade.
 fn native_opaque_link_checks_named(
@@ -909,13 +909,13 @@ fn rewrite_import_meta_urls_named(source: &str, source_name: &thaw_parser::commo
     use thaw_parser::common::Spanned;
 
     // `import.meta` itself (bare, or as the object of `.url`/`.resolve`/
-    // any other member access) is rejected outright by QuickJS's
+    // any other member access) is rejected outright by retired-engine's
     // script-mode parser -- it's only valid in real ESM module code,
     // and this bundler's CJS-rewritten output is evaluated as a plain
     // script. A real package's source can reference it even on a path
     // this build never actually executes (e.g. yargs's `.config()`
     // "extends" feature uses `import.meta.resolve(...)`) -- since
-    // QuickJS parses the whole file eagerly, an unreached reference
+    // retired-engine parses the whole file eagerly, an unreached reference
     // still blocks every other statement in the bundle from loading at
     // all. All references in a module must share one object, including
     // properties added by its own code. Keep its declaration inside the
@@ -987,7 +987,7 @@ fn rewrite_import_meta_urls_named(source: &str, source_name: &thaw_parser::commo
 /// import.meta.url));`, `const require = createRequire(import.meta.
 /// url);`) as an ESM/CJS-dual-package shim -- since ESM has no such
 /// globals natively. Once wrapped, that redeclaration collides with
-/// the wrapper's own parameter of the identical name, which QuickJS
+/// the wrapper's own parameter of the identical name, which retired-engine
 /// (like real JS) rejects outright ("invalid redefinition of parameter
 /// name") -- even though the value it computes is equivalent to what
 /// the wrapper already supplies.

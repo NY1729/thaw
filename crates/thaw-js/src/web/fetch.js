@@ -1347,8 +1347,8 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
   }
   // Global fetch (Q9 plan-q9-thawjs-fetch.md). Defined in every thaw-js realm, beside Request/Response. The HTTP
   // client is the node:http / node:https bundle modules: the host installs `__thaw_fetch_transport(name)` for a
-  // bundle that contains them and evaluates the module on the first call. Logic mirrors the QuickJS polyfill in
-  // thaw-registry's bundle/render.rs (kept until QuickJS is removed); this copy is the thaw-js one.
+  // bundle that contains them and evaluates the module on the first call. Logic mirrors the retired-engine polyfill in
+  // thaw-registry's bundle/render.rs (kept until retired-engine is removed); this copy is the thaw-js one.
   function fetchTransport(name) {
     var load = globalThis.__thaw_fetch_transport;
     if (typeof load !== 'function') throw new TypeError('fetch: no HTTP client is loaded in this runtime');

@@ -1,4 +1,4 @@
-//! `node:dgram` host (UDP): the `__thaw_udp_*` natives the registry's dgram shim calls. Same wire protocol as the QuickJS
+//! `node:dgram` host (UDP): the `__thaw_udp_*` natives the registry's dgram shim calls. Same wire protocol as the retired-engine
 //! host (crates/thaw-quickjs/src/quickjs/networking.rs): `ok|...` / `pending` / `err|CODE|message`, payloads as hex.
 //!
 //! Liveness is not handled here. The shim's receive pump is a timer that re-arms itself while the socket is open, so an
@@ -109,7 +109,7 @@ pub(crate) fn receive(handle: u32) -> String {
         let Some(socket) = sockets.1.get(&handle) else {
             return BAD_HANDLE.to_string();
         };
-        // ponytail: a 64 KiB buffer per poll (the QuickJS host does the same); reuse one per socket if polls show up in profiles.
+        // ponytail: a 64 KiB buffer per poll (the retired-engine host does the same); reuse one per socket if polls show up in profiles.
         let mut value = vec![0u8; 65_536];
         match socket.recv_from(&mut value) {
             Ok((length, peer)) => {

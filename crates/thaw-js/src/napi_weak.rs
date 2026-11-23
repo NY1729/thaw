@@ -2,7 +2,7 @@
 //!
 //! The proxy layer gives each non-function object it sends to native code a reference id. The native side copies
 //! the object and may attach `napi_add_finalizer` records to the copy; they must run when the JS object is
-//! collected (the QuickJS lane does this with a FinalizationRegistry). Only these objects are weak: `watch` flags
+//! collected (the retired-engine lane does this with a FinalizationRegistry). Only these objects are weak: `watch` flags
 //! the object, `ObjData::drop` queues its id, and `drain` (at `__thaw_gc` and at an event-loop turn) tells the
 //! bridge to `release` it. `WeakRef`/`FinalizationRegistry` stay strong for ordinary programs.
 //!

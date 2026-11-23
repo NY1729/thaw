@@ -1,4 +1,4 @@
-//! Scope-aware rewrite of references to imported bindings, shared by the registry's QuickJS ESM
+//! Scope-aware rewrite of references to imported bindings, shared by the registry's retired-engine ESM
 //! transform and thaw-js's native ESM conversion: every reference to an imported local becomes the
 //! replacement expression the caller supplies (a live read of the dependency's export).
 

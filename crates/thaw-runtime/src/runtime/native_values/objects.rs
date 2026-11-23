@@ -5,7 +5,7 @@ thread_local! {
     static OBJECT_ACCESSORS: RefCell<HashMap<usize, HashMap<String, [usize; 2]>>> =
         RefCell::new(HashMap::new());
     // Descriptor attributes belong to the original native allocation, not a
-    // transient Json/QuickJS projection. Three bits model writable,
+    // transient Json/retired-engine projection. Three bits model writable,
     // enumerable, and configurable for a visible fixed data field.
     static OBJECT_PROPERTY_FLAGS: RefCell<HashMap<usize, HashMap<String, u8>>> =
         RefCell::new(HashMap::new());
@@ -15,7 +15,7 @@ thread_local! {
     static OBJECT_PROJECTORS: RefCell<HashMap<usize, (String, usize)>> =
         RefCell::new(HashMap::new());
     // A thrown Error record's `() -> Json` describer, so a catch can read the
-    // record without any QuickJS projection. Arena child of its owner like a
+    // record without any retired-engine projection. Arena child of its owner like a
     // projector.
     static OBJECT_DESCRIBERS: RefCell<HashMap<usize, usize>> =
         RefCell::new(HashMap::new());

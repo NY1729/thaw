@@ -1,6 +1,6 @@
 //! Fetch classes (`Headers`, `FormData`, `Request`, `Response`) and the full web streams
 //! (`tee`, `pipeThrough`, `TransformStream`, `TextEncoderStream`, ...), ported from the
-//! QuickJS platform globals. Installed before `streams.js`, whose minimal version then no-ops.
+//! retired-engine platform globals. Installed before `streams.js`, whose minimal version then no-ops.
 
 use crate::Interp;
 

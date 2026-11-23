@@ -1,6 +1,6 @@
 (function () {
   if (typeof globalThis.WebAssembly === 'object') return;
-  // ponytail: honest stub, no wasm engine here. The scan keeps any real use of WebAssembly on QuickJS; only typeof/in probes pass.
+  // ponytail: honest stub, no wasm engine here. The scan keeps any real use of WebAssembly on retired-engine; only typeof/in probes pass.
   const unsupported = () => new Error('WebAssembly is not supported on this runtime');
   const WebAssembly = {
     validate() { throw unsupported(); },

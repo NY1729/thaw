@@ -342,7 +342,7 @@ pub(crate) fn install(it: &mut Interp) {
     ] {
         // Declared in the global scope, as the other host globals are: not an own property of
         // `globalThis`'s object, so `Object.keys` skips it. The four `__thaw_napi_bridge_*` entry points
-        // stay assignable (as on QuickJS) so a host or test can substitute a bridge; the rest are immutable.
+        // stay assignable (as on retired-engine) so a host or test can substitute a bridge; the rest are immutable.
         it.global
             .declare(name, value, name.starts_with("__thaw_napi_bridge_"));
     }

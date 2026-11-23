@@ -1,6 +1,6 @@
 //! Password-based KDFs for `node:crypto`: PBKDF2 (RFC 8018) over the `digest.rs` HMAC, and
 //! scrypt (RFC 7914) through the `scrypt` crate. Copied from thaw-quickjs (lib.rs `pbkdf2_bytes`,
-//! quickjs/context.rs `scrypt_hex`), which stays the oracle until QuickJS is removed.
+//! quickjs/context.rs `scrypt_hex`), which stays the oracle until retired-engine is removed.
 
 use super::digest::{digest_bytes, hmac_bytes};
 
@@ -29,7 +29,7 @@ pub(crate) fn pbkdf2_bytes(
     Some(output)
 }
 
-/// The QuickJS PBKDF2 loop (RFC 8018 section 5.2) over `hmac_bytes`; `None` = unsupported digest.
+/// The retired-engine PBKDF2 loop (RFC 8018 section 5.2) over `hmac_bytes`; `None` = unsupported digest.
 pub(crate) fn pbkdf2_in_house(
     algorithm: &str,
     password: &[u8],
@@ -59,12 +59,12 @@ pub(crate) fn pbkdf2_in_house(
     Some(output)
 }
 
-/// Same message shape as the QuickJS native's `rquickjs` conversion error (thrown as TypeError).
+/// Same message shape as the retired-engine native's conversion error (thrown as TypeError).
 fn conversion_message(from: &str, to: &str, message: &str) -> String {
     format!("Error converting from js '{from}' into type '{to}': {message}")
 }
 
-/// scrypt with the QuickJS wrapper's parameter checks and messages.
+/// scrypt with the retired-engine wrapper's parameter checks and messages.
 pub(crate) fn scrypt_bytes(
     password: &[u8],
     salt: &[u8],

@@ -338,7 +338,7 @@ pub(crate) fn symbol_from_metadata(
 
 // ---- The N-API encoder (PR 6a-3): the data part of runtime.js `thawGraphEncode`, live mode. ----
 // ponytail: no plain-result mode here; `__thaw_json_graph_encode_js` (plainResult) uses the plain WireOut.
-// ponytail: a Proxy, Promise, Generator, wrapper or global object is a handle, not a copy (QuickJS copies its own keys).
+// ponytail: a Proxy, Promise, Generator, wrapper or global object is a handle, not a copy (retired-engine copies its own keys).
 
 use crate::builtins::{json_quote, str_units};
 use crate::host::{live_handle_of, store_handle, thaw_tjs_retain_handle};
