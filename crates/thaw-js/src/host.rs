@@ -1652,6 +1652,8 @@ const BIGINT_KEY: &str = "__thaw_tjs_bigint__";
 const NUM_KEY: &str = "__thaw_tjs_num__";
 /// `{"__thaw_tjs_hole__": 1}` as an array element: a hole of a compiled sparse array.
 const HOLE_KEY: &str = "__thaw_tjs_hole__";
+/// Wraps a string shaped like a framed native Error that is not one (a thrown JS string): it stays a string.
+const PLAIN_STR_KEY: &str = "__thaw_tjs_str__";
 /// `{"__thaw_tjs_bytes__": {"k": "Buffer" | "Uint8Array" | "ArrayBuffer" | "DataView", "b64": "..."}}`:
 /// compiled `Bytes` crossing as base64 text. `k` selects the JS kind; a missing or unknown `k` is a Buffer.
 /// ArrayBuffer and DataView cross by copy (a DataView over a fresh ArrayBuffer of exactly its window).
@@ -6857,6 +6859,14 @@ pub fn to_value(it: &mut Interp, n: &Native) -> Value {
         }
         // `{"__thaw_tjs_date__": ms[, "__thaw_tjs_id__": n]}`: a compiled `Date` (`null` for an Invalid Date).
         Native::Object(fields) if is_date_node(fields) => date_node(it, fields),
+        // `{"__thaw_tjs_str__": text}`: a string that looks like a framed native Error and must stay a string.
+        Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Str(_))] if k == PLAIN_STR_KEY) =>
+        {
+            let Native::Str(text) = &fields[0].1 else {
+                unreachable!()
+            };
+            Value::str(text)
+        }
         // `{"__thaw_tjs_bigint__": "<decimal>"}`: a compiled BigInt.
         Native::Object(fields) if matches!(fields.as_slice(), [(k, Native::Str(_))] if k == BIGINT_KEY) =>
         {

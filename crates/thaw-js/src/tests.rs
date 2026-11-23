@@ -5931,6 +5931,19 @@ fn registering_the_same_closure_identity_twice_returns_one_callback_id() {
 }
 
 #[test]
+fn a_plain_string_token_stays_a_string_where_a_bare_framed_string_becomes_an_error() {
+    use crate::host::Native;
+    let mut it = crate::Interp::new();
+    let frame = "\u{1}Error\u{1}boom";
+    let token = Native::Object(vec![("__thaw_tjs_str__".into(), Native::Str(frame.into()))]);
+    assert!(matches!(crate::host::to_value(&mut it, &token), Value::Str(s) if &*s == frame));
+    assert!(matches!(
+        crate::host::to_value(&mut it, &Native::Str(frame.into())),
+        Value::Object(_)
+    ));
+}
+
+#[test]
 fn a_regexp_marker_argument_becomes_a_real_regexp() {
     use crate::host::Native;
     let mut it = crate::Interp::new();
