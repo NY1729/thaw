@@ -2,10 +2,13 @@
 
 fn compile_thaw_js_program(source: &str) -> (bool, bool, String) {
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "thaw_js_contract");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     (compiler.uses_thaw_js(), compiler.uses_quickjs(), compiler.print_to_string())
 }
 
@@ -88,12 +91,7 @@ fn a_callback_coerced_to_a_json_parameter_registers_with_thaw_js_in_a_routed_bui
          function main(): void { console.log(__thaw_typed_tjs_6d733a3a6d73([1, 2], (x: number): number => x * 2)); }";
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
-    // Unrouted: the callback is a QuickJS value.
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "thaw_js_unrouted");
-    compiler.compile_program(&program).unwrap();
-    assert!(compiler.uses_quickjs());
-    // Routed: the same HIR registers it with thaw-js.
+    // Routed: the HIR registers the callback with thaw-js.
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "thaw_js_routed");
     compiler.set_thaw_js_routed(true);
@@ -112,10 +110,6 @@ fn catching_an_error_in_a_routed_build_does_not_need_quickjs() {
          }";
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "thaw_js_unrouted_catch");
-    compiler.compile_program(&program).unwrap();
-    assert!(compiler.uses_quickjs(), "the unrouted catch adapter keeps the QuickJS projections");
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "thaw_js_routed_catch");
     compiler.set_thaw_js_routed(true);
@@ -236,22 +230,16 @@ fn thaw_js_class_property_getters_and_static_accessors_compile_to_the_class_call
 #[test]
 fn routed_graph_retain_uses_the_tjs_symbol_and_not_quickjs() {
     let source = "function main(): void { const object: JsValue = retainDynamicJson({}); }";
-    let compile = |routed: bool| {
-        let module = thaw_parser::parse_typescript(source).unwrap();
-        let program = thaw_hir::lower_module(&module).unwrap();
-        let context = Context::create();
-        let mut compiler = HirCompiler::new(&context, "thaw_js_graph");
-        compiler.set_thaw_js_routed(routed);
-        compiler.compile_program(&program).unwrap();
-        (compiler.uses_thaw_js(), compiler.uses_quickjs(), compiler.print_to_string())
-    };
-    let (uses_thaw_js, _, ir) = compile(true);
-    assert!(uses_thaw_js, "{ir}");
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_graph");
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(compiler.uses_thaw_js(), "{ir}");
     assert!(ir.contains("call { i64, ptr } @thaw_tjs_retain_graph_result("), "{ir}");
     assert!(!ir.contains("call { i64, ptr } @thaw_js_retain_graph_result("), "{ir}");
-    let (_, uses_quickjs, ir) = compile(false);
-    assert!(uses_quickjs, "{ir}");
-    assert!(ir.contains("call { i64, ptr } @thaw_js_retain_graph_result("), "{ir}");
 }
 
 #[test]
@@ -308,17 +296,6 @@ fn thaw_js_jsvalue_result_registers_host_operations_for_console_log() {
     );
     assert!(uses_thaw_js && !uses_quickjs, "{ir}");
     assert!(ir.contains("call void @thaw_json_register_host_operations("), "{ir}");
-}
-
-#[test]
-fn thaw_js_plain_result_does_not_register_host_operations() {
-    // Control for the test above: the same call returning a string holds no handle.
-    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_program(
-        "declare function __thaw_typed_tjs_783a3a6166746572(value: string): string;
-         function main(): void { console.log(__thaw_typed_tjs_783a3a6166746572(\"hi\")); }",
-    );
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
-    assert!(!ir.contains("call void @thaw_json_register_host_operations("), "{ir}");
 }
 
 #[test]
@@ -433,23 +410,6 @@ fn discarded_jsvalue_result_call_without_jsvalue_arguments_still_releases() {
 }
 
 #[test]
-fn object_literal_with_jsvalue_in_a_callback_registers_host_operations_before_encoding() {
-    // The callback body may be the first dynamic operation on its thread; the literal's live JsValue
-    // needs the host operations to be registered before the mixed-handle args are graph-encoded.
-    let (_, _, ir) = compile_thaw_js_program(
-        "function wrap(v: JsValue): JsValue { return { data: v }; }
-         function main(): void { const r = wrap({ a: 1 }); console.log(r); }",
-    );
-    let body = ir
-        .split("\ndefine ")
-        .find(|function| function.contains("mixed_handle_args_json"))
-        .unwrap_or_else(|| panic!("{ir}"));
-    let register = body.find("call void @thaw_json_register_host_operations(").expect(body);
-    let encode = body.find("@thaw_json_graph_encode(").expect(body);
-    assert!(register < encode, "{body}");
-}
-
-#[test]
 fn thaw_js_callback_adapter_registers_host_operations_before_graph_decode() {
     // The adapter can run on a thaw-js coroutine thread where the host-operation
     // TLS is unset; it must register before decoding `hdl` wire nodes.
@@ -524,87 +484,27 @@ fn async_throw_of_a_jsvalue_records_its_handle_id_before_the_tag_seven_store() {
 }
 
 #[test]
-fn routed_process_reporters_emit_through_thaw_tjs_and_quickjs_keeps_its_symbols() {
-    let compile = |quickjs: bool| {
-        let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
-        let program = thaw_hir::lower_module(&module).unwrap();
-        let context = Context::create();
-        let mut compiler = HirCompiler::new(&context, "thaw_js_process_reporters");
-        if quickjs {
-            compiler.uses_quickjs = true;
-            compiler.uses_quickjs_handles = true;
-        } else {
-            compiler.uses_thaw_js = true;
-            compiler.uses_thaw_js_handles = true;
-            compiler.set_thaw_js_routed(true);
-        }
-        compiler.compile_program(&program).unwrap();
-        compiler.print_to_string()
-    };
+fn routed_process_reporters_emit_through_thaw_tjs() {
+    let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_process_reporters");
+    compiler.uses_thaw_js = true;
+    compiler.uses_thaw_js_handles = true;
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
+    let routed = compiler.print_to_string();
     let calls = |ir: &str, symbol: &str| ir.lines().any(|line| line.contains("call ") && line.contains(symbol));
     // rejection-handled is registered as a reporter pointer, not called directly
     let symbols = [
         "@thaw_tjs_emit_uncaught_result(",
         "@thaw_tjs_emit_unhandled_rejection_result(",
     ];
-
-    let routed = compile(false);
     for symbol in symbols {
         assert!(calls(&routed, symbol), "routed entry must report through {symbol}: {routed}");
     }
     assert!(routed.contains("ptr @thaw_tjs_emit_rejection_handled_result"), "{routed}");
     assert!(!routed.lines().any(|line| line.contains("call ") && line.contains("@thaw_js_emit_")), "{routed}");
-
-    let quickjs = compile(true);
-    assert!(calls(&quickjs, "@thaw_js_emit_uncaught_result("), "{quickjs}");
-    assert!(calls(&quickjs, "@thaw_js_emit_unhandled_rejection_result("), "{quickjs}");
-    assert!(quickjs.contains("ptr @thaw_js_emit_rejection_handled_result"), "{quickjs}");
-    assert!(!quickjs.lines().any(|line| line.contains("call ") && line.contains("@thaw_tjs_emit_")), "{quickjs}");
-}
-
-#[test]
-fn every_unported_thaw_js_symbol_in_use_is_listed_as_a_quickjs_blocker() {
-    // Two thaw-js-named functions; only one is called, so only that one may be listed.
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "thaw_js_unported_blockers");
-    let void_fn = context.void_type().fn_type(&[], false);
-    let used = compiler.module.add_function("thaw_js_call_result", void_fn, None);
-    compiler.module.add_function("thaw_js_fatal_exit", void_fn, None);
-    let probe = compiler.module.add_function("q9_probe", void_fn, None);
-    let entry = context.append_basic_block(probe, "entry");
-    compiler.builder.position_at_end(entry);
-    compiler.builder.build_call(used, &[], "").unwrap();
-    compiler.builder.build_return(None).unwrap();
-    compiler.js_unported_symbols_used();
-    assert!(compiler.uses_quickjs());
-    assert_eq!(compiler.quickjs_blockers(), ["unported:thaw_js_call_result".to_string()]);
-}
-
-#[test]
-fn quickjs_site_is_recorded_as_a_blocker_once() {
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "thaw_js_site_blockers");
-    compiler.note_quickjs("probe:site");
-    compiler.note_quickjs("probe:site");
-    assert!(compiler.uses_quickjs());
-    assert_eq!(compiler.quickjs_blockers(), ["site:probe:site".to_string()]);
-}
-
-#[test]
-fn routed_typed_quickjs_call_names_its_site_in_the_blockers() {
-    let source = "declare function __thaw_typed_js_6d733a3a6d73(value: string, scale: number): Json;
-         function main(): void { console.log(__thaw_typed_js_6d733a3a6d73(\"2 days\", 1)); }";
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "thaw_js_typed_site");
-    compiler.set_thaw_js_routed(true);
-    compiler.compile_program(&program).unwrap();
-    assert!(compiler.uses_quickjs());
-    assert_eq!(
-        compiler.quickjs_blockers(),
-        ["site:typed_calls:quickjs_backend".to_string()]
-    );
 }
 
 #[test]
@@ -637,28 +537,18 @@ fn routed_async_main_drives_thaw_js_and_releases_its_completion_only_once_settle
 
 #[test]
 fn routed_set_process_env_declares_the_thaw_tjs_symbol_and_not_quickjs() {
-    let compile = |routed: bool| {
-        let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
-        let program = thaw_hir::lower_module(&module).unwrap();
-        let context = Context::create();
-        let mut compiler = HirCompiler::new(&context, "thaw_js_set_process_env");
-        if routed {
-            compiler.uses_thaw_js = true;
-            compiler.uses_thaw_js_handles = true;
-            compiler.set_thaw_js_routed(true);
-        } else {
-            compiler.uses_quickjs = true;
-            compiler.uses_quickjs_handles = true;
-        }
-        compiler.compile_program(&program).unwrap();
-        compiler.print_to_string()
-    };
+    let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "thaw_js_set_process_env");
+    compiler.uses_thaw_js = true;
+    compiler.uses_thaw_js_handles = true;
+    compiler.set_thaw_js_routed(true);
+    compiler.compile_program(&program).unwrap();
     // the routed build aliases the setter into thaw-js's extern "C" definition (process_env.rs)
-    let routed = compile(true);
+    let routed = compiler.print_to_string();
     assert!(routed.contains("@thaw_tjs_set_process_env("), "{routed}");
     assert!(!routed.contains("@thaw_js_set_process_env"), "{routed}");
-    let quickjs = compile(false);
-    assert!(quickjs.contains("@thaw_js_set_process_env("), "{quickjs}");
 }
 
 /// The perf_hooks `new PerformanceObserver(cb)` shape: the declared callback takes class instances

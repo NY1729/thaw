@@ -36,13 +36,3 @@ fn thaw_js_routed_live_value_callbacks_use_the_graph_registration() {
     );
 }
 
-#[test]
-fn thaw_js_unrouted_live_value_callbacks_keep_the_quickjs_registration() {
-    let (_, uses_quickjs, ir) = thaw_js_routed_ir(THAW_JS_CALLBACK_PROGRAM, false);
-    assert!(uses_quickjs, "{ir}");
-    assert!(ir.contains("@thaw_js_register_native_callback"), "{ir}");
-    assert!(
-        !ir.contains("@thaw_tjs_register_native_callback_graph("),
-        "{ir}"
-    );
-}

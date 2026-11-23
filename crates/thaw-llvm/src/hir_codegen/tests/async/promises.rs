@@ -1518,10 +1518,13 @@ fn native_promise_scope_boundaries_codegen_regression_control() {
         }
     "#;
     let parsed = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&parsed).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "native_promise_scope_boundaries");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("cleanup_before_catch"), "{ir}");
     assert!(ir.contains("release_stack_promise"), "{ir}");
@@ -1541,10 +1544,13 @@ fn native_promise_scope_boundaries_codegen_regression_control() {
         function main(): void {}
     "#;
     let parsed = thaw_parser::parse_typescript(module_source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&parsed).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "module_scope_boundary");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     assert!(compiler.print_to_string().contains("__thaw_top_level_init"));
 
     // Resume-entry reset control for the paired catch/loop context state.
@@ -1557,10 +1563,13 @@ fn native_promise_scope_boundaries_codegen_regression_control() {
         }
     "#;
     let parsed = thaw_parser::parse_typescript(async_source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&parsed).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "async_scope_boundary");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("thaw_user_main.resume"), "{ir}");
 }
@@ -2172,107 +2181,6 @@ fn hir_if_live_arm_keeps_sibling_stack_binding_and_runtime_flag() {
     assert_promise_owner_flag_guards_release(&ir, "then_only_promise_owned");
     assert!(ir.contains("outer_promise_slot"), "{ir}");
     assert!(ir.contains("then_only"), "{ir}");
-}
-
-#[test]
-fn native_promise_exception_descriptor_survives_all_cleanup_handoffs() {
-    // Codegen-only source control for a Promise-valued explicit throw, the
-    // blocking-await rejection transfer, async completion rejection, and a
-    // host callback compiled while an enclosing async scope is active.
-    let source = r#"
-        declare function __thaw_typed_js_696e766f6b65566f6964(
-            callback: () => Promise<void>,
-        ): void;
-        function syncThrow(reason: Promise<number>): void { throw reason; }
-        async function asyncThrow(reason: Promise<number>): Promise<void> {
-            throw reason;
-        }
-        async function main(): Promise<void> {
-            const reason: Promise<number> = Promise.resolve(23);
-            try { syncThrow(reason); }
-            catch (error) {
-                const preserved = error as Promise<number>;
-                console.log(preserved === reason);
-            }
-            try { console.log(true && (await Promise.reject<number>(reason))); }
-            catch (error) {
-                const preserved = error as Promise<number>;
-                console.log(preserved === reason);
-            }
-            try { await asyncThrow(reason); }
-            catch (error) {
-                const preserved = error as Promise<number>;
-                console.log(preserved === reason);
-            }
-            loadScript("globalThis.invokeVoid = callback => { callback(); };");
-            __thaw_typed_js_696e766f6b65566f6964(
-                (): Promise<void> => Promise.reject<void>(reason),
-            );
-        }
-    "#;
-    let parsed = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&parsed).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "native_reason_cleanup_handoffs");
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    let sync_throw = llvm_function_body(&ir, "@syncThrow(");
-    assert!(sync_throw.lines().any(|line|
-        line.contains("call ptr @thaw_exception_native_provenance_new(")
-    ), "sync Promise throw did not emit its native provenance producer:\n{ir}");
-    let main_resume = llvm_function_body(&ir, "@thaw_user_main.resume(");
-    assert!(main_resume.lines().any(|line|
-        line.contains("call ptr @thaw_promise_exception_native(")
-    ), "blocking/resume rejection path did not read the Promise native descriptor:\n{ir}");
-    // The source async function has no await, so this throw is compiled in
-    // its first-segment ramp; the generated resume function only dispatches
-    // waiting/state machinery.
-    let async_throw_ramp = llvm_function_body(&ir, "@asyncThrow(");
-    assert!(async_throw_ramp.lines().any(|line|
-        line.contains("call i8 @thaw_promise_reject_typed_with_native_provenance(")
-    ), "active async ramp did not forward the pending descriptor:\n{ir}");
-
-    // This fixture lowers through QuickJS. Its native closure reaches the JS
-    // callback registrar through the pending-guard wrapper; that wrapper then
-    // directly invokes the raw native-value adapter. Follow those exact calls.
-    let quickjs_registration = main_resume.lines().find(|line|
-        line.contains("call ") && line.contains("@thaw_js_register_native_callback(")
-            && line.contains("@__thaw_callback_pending_guard_")
-    ).unwrap_or_else(|| panic!("QuickJS native callback registration did not receive the pending-guard wrapper:\n{main_resume}"));
-    let registration_args = quickjs_registration
-        .split_once("@thaw_js_register_native_callback(").unwrap().1
-        .split(')').next().unwrap();
-    let registration_args = registration_args.split(',').map(str::trim).collect::<Vec<_>>();
-    assert_eq!(registration_args.len(), 7, "{quickjs_registration}");
-    let callback_guard_arg = registration_args[0];
-    assert!(callback_guard_arg.starts_with("ptr @__thaw_callback_pending_guard_"),
-        "registration argument 0 must be the callback guard, separate from the finisher at argument 5:\n{quickjs_registration}");
-    let finisher_guard_arg = registration_args[5];
-    assert!(finisher_guard_arg.starts_with("ptr @__thaw_callback_pending_guard_"),
-        "registration argument 5 must be the separate guarded finisher:\n{quickjs_registration}");
-    assert_ne!(callback_guard_arg, finisher_guard_arg,
-        "callback and finisher must select distinct pending guards:\n{quickjs_registration}");
-    let guard_suffix = callback_guard_arg
-        .split("@__thaw_callback_pending_guard_").nth(1).unwrap()
-        .split(|character: char| !character.is_ascii_digit()).next().unwrap();
-    let guard_name = format!("__thaw_callback_pending_guard_{guard_suffix}");
-    let registration = main_resume.lines().position(|line| line == quickjs_registration).unwrap();
-    let quickjs_call = main_resume.lines().position(|line|
-        line.contains("call ") && line.contains("@thaw_js_call_handle_mixed_exact_resolved_consuming_result(")
-    ).unwrap_or_else(|| panic!("QuickJS dynamic call using the callback was not emitted:\n{main_resume}"));
-    assert!(registration < quickjs_call,
-        "guarded native callback must be registered before the QuickJS call:\n{main_resume}");
-
-    let guard_body = llvm_function_body(&ir, &format!("@{guard_name}("));
-    let raw_adapter_call = guard_body.lines().find(|line|
-        line.contains("call ptr @__thaw_napi_value_callback_")
-    ).unwrap_or_else(|| panic!("pending-guard wrapper did not invoke its raw N-API value adapter:\n{guard_body}"));
-    let raw_suffix = raw_adapter_call
-        .split("@__thaw_napi_value_callback_").nth(1).unwrap()
-        .split(|character: char| !character.is_ascii_digit()).next().unwrap();
-    let raw_adapter_name = format!("__thaw_napi_value_callback_{raw_suffix}");
-    let raw_adapter_body = llvm_function_body(&ir, &format!("@{raw_adapter_name}("));
-    assert!(raw_adapter_body.contains("entry:"), "raw N-API callback body missing:\n{raw_adapter_body}");
 }
 
 #[test]

@@ -1,9 +1,12 @@
 fn resolver_provenance_compile_source_to_ir(source: &str) -> String {
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "resolver_native_string_provenance");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     compiler.module.verify().unwrap();
     compiler.print_to_string()
 }

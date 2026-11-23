@@ -130,27 +130,6 @@ fn native_timer_exception_is_fatal_and_skips_later_timers() {
     assert!(stderr.contains("boom"), "{stderr}");
 }
 
-#[test]
-fn timers_combined_with_a_js_engine_conflict_and_keep_the_quickjs_path() {
-    thaw_hir::set_native_timers(true);
-    let module = thaw_parser::parse_typescript(
-        r#"function main(): void {
-  setTimeout(() => console.log("native"), 1);
-  setTimeout((a: number) => console.log("with arg", a), 1, 7);
-}"#,
-    )
-    .unwrap();
-    let program = thaw_hir::lower_module(&module);
-    thaw_hir::set_native_timers(false);
-    let program = program.unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "native_timer_conflict");
-    compiler.compile_program(&program).unwrap();
-    assert!(compiler.uses_native_timers());
-    assert!(compiler.uses_quickjs());
-    assert!(compiler.native_timers_conflict(), "the CLI must rebuild this on QuickJS timers");
-}
-
 // A self-referencing `any` timer handle: the callback captures the handle while its storage is still being
 // decided (thaw-hir pre-binds it with the final JsValue storage type). Expected output recorded from Node 22.23.
 

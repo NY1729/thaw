@@ -50,10 +50,13 @@ fn lb_contract_ffi_map_copyin_failing_at_third_entry_is_clean() {
     "#
     );
     let module = thaw_parser::parse_typescript(&source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "lb_ffi_map_copyin_failure");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     if let Ok(path) = std::env::var("LB_DUMP_IR") {
         std::fs::write(path, compiler.module.print_to_string().to_string()).unwrap();
     }
@@ -89,9 +92,8 @@ fn lb_contract_ffi_map_copyin_failing_at_third_entry_is_clean() {
     let arena = build_staticlib("thaw-arena");
     let std_lib = build_staticlib("thaw-std");
     let runtime = build_staticlib("thaw-runtime");
-    let quickjs = build_staticlib("thaw-quickjs");
     assert!(cc_command().arg(&object).arg(&native_object).arg(&arena).arg(&std_lib).arg(&runtime)
-        .arg(&std_lib).arg(&runtime).arg(&quickjs).arg("-lm").arg("-Wl,--export-dynamic")
+        .arg(&std_lib).arg(&runtime).args(thaw_js_link_args(&std_lib, &runtime, false)).arg("-Wl,--export-dynamic")
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

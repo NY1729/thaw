@@ -102,6 +102,7 @@ fn bigint_followup_contract_ffi_struct_int64_fields_round_trip_raw_integers() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     for (name, params) in [
         ("native_pair", vec![]),
@@ -119,7 +120,9 @@ fn bigint_followup_contract_ffi_struct_int64_fields_round_trip_raw_integers() {
     }
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_bigint_struct");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!("thaw-ffi-bigint-struct-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let obj_path = dir.join("out.o");
@@ -147,8 +150,7 @@ fn bigint_followup_contract_ffi_struct_int64_fields_round_trip_raw_integers() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        .arg(build_staticlib("thaw-quickjs"))
-        .arg("-lm")
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()

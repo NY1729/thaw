@@ -14,6 +14,7 @@ fn compiles_ambient_declaration_and_links_a_real_native_function() {
     "#;
 
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     assert_eq!(
         program.extern_functions.len(),
@@ -23,7 +24,9 @@ fn compiles_ambient_declaration_and_links_a_real_native_function() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_ambient");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi_ambient-{}",
@@ -62,8 +65,7 @@ fn compiles_ambient_declaration_and_links_a_real_native_function() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -198,6 +200,7 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     assert!(program
         .extern_functions
@@ -257,7 +260,9 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_variadic");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-variadic-{}",
         std::process::id()
@@ -432,8 +437,7 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -466,6 +470,7 @@ fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_error_abi(
         &mut program,
@@ -476,7 +481,9 @@ fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_result_abi");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-result-{}",
         std::process::id()
@@ -515,8 +522,7 @@ fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -554,6 +560,7 @@ fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_error_abi(
         &mut program,
@@ -573,7 +580,9 @@ fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_void_result");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-void-result-{}",
         std::process::id()
@@ -619,8 +628,7 @@ fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -654,6 +662,7 @@ fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_error_abi(
         &mut program,
@@ -674,7 +683,9 @@ fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_owned_result");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-owned-{}",
         std::process::id()
@@ -720,8 +731,7 @@ fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -755,6 +765,7 @@ fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_ownership(
         &mut program,
@@ -794,7 +805,9 @@ fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_aggregate_returns");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-aggregate-{}",
         std::process::id()
@@ -838,8 +851,7 @@ fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -871,6 +883,7 @@ fn ffi_call_marshals_object_returns_from_packed_c_structs() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -898,7 +911,9 @@ fn ffi_call_marshals_object_returns_from_packed_c_structs() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_packed_return");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-packed-{}",
         std::process::id()
@@ -939,8 +954,7 @@ fn ffi_call_marshals_object_returns_from_packed_c_structs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -998,6 +1012,7 @@ fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -1249,7 +1264,9 @@ fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_explicit_aggregate_layout");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.module.print_to_string().to_string();
     assert!(ir.contains("alloca <{ i8, [15 x i8], double, [8 x i8] }>, align 32"));
     assert!(ir.contains("declare { i64, double } @native_register_record()"));
@@ -1310,8 +1327,7 @@ fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1348,6 +1364,7 @@ fn ffi_object_return_copies_and_destroys_owned_string_fields() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     for symbol in ["native_message", "native_checked_message"] {
         thaw_hir::set_ffi_ownership(
@@ -1382,7 +1399,9 @@ fn ffi_object_return_copies_and_destroys_owned_string_fields() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_owned_object_fields");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-owned-object-{}",
         std::process::id()
@@ -1428,8 +1447,7 @@ fn ffi_object_return_copies_and_destroys_owned_string_fields() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1469,6 +1487,7 @@ fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     for symbol in ["native_nested", "native_checked_nested"] {
         thaw_hir::set_ffi_ownership(
@@ -1503,7 +1522,9 @@ fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_nested_aggregate");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-nested-aggregate-{}",
         std::process::id()
@@ -1555,8 +1576,7 @@ fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1583,6 +1603,7 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -1595,7 +1616,9 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_string_slice");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-string-slice-{}",
         std::process::id()
@@ -1637,8 +1660,7 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1673,6 +1695,7 @@ fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
     "#;
 
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     assert_eq!(
         program.extern_functions.len(),
@@ -1682,7 +1705,9 @@ fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_array_marshal");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi_array_marshal-{}",
@@ -1730,8 +1755,7 @@ fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1758,6 +1782,7 @@ fn ffi_call_marshals_string_arrays_in_both_directions() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -1771,7 +1796,9 @@ fn ffi_call_marshals_string_arrays_in_both_directions() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_string_arrays");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-string-arrays-{}",
         std::process::id()
@@ -1813,8 +1840,7 @@ fn ffi_call_marshals_string_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1837,6 +1863,7 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -1850,7 +1877,9 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_boolean_arrays");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-boolean-arrays-{}",
         std::process::id()
@@ -1891,8 +1920,7 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1916,6 +1944,7 @@ fn ffi_owned_boolean_array_return_is_copied_and_destroyed() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_ownership(
         &mut program,
@@ -1937,7 +1966,9 @@ fn ffi_owned_boolean_array_return_is_copied_and_destroyed() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_owned_boolean_array");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-owned-bool-array-{}",
         std::process::id()
@@ -1984,8 +2015,7 @@ double flag_destroy_count(void) { return destroyed; }
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2009,6 +2039,7 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -2022,7 +2053,9 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_js_value_arrays");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-js-value-arrays-{}",
         std::process::id()
@@ -2064,8 +2097,7 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2097,10 +2129,13 @@ fn ffi_call_recursively_marshals_array_fields_in_object_parameters() {
         }
     "#;
         let module = thaw_parser::parse_typescript(source).unwrap();
+        thaw_hir::set_thaw_js_routed(true);
         let program = thaw_hir::lower_module(&module).unwrap();
         let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_nested_object_arrays");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-nested-object-arrays-{}",
         std::process::id()
@@ -2148,8 +2183,7 @@ fn ffi_call_recursively_marshals_array_fields_in_object_parameters() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2192,10 +2226,13 @@ fn ffi_call_recursively_marshals_tagged_fixed_parameters() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_tagged_fixed_parameters");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-tagged-fixed-{}",
         std::process::id()
@@ -2247,8 +2284,7 @@ double native_tagged(
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2274,6 +2310,7 @@ fn ffi_call_restores_portable_tagged_returns() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     for symbol in ["native_optional", "native_nullable", "native_nullish"] {
         thaw_hir::set_ffi_string_abi(
@@ -2288,7 +2325,9 @@ fn ffi_call_restores_portable_tagged_returns() {
     }
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_portable_tagged_returns");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-tagged-returns-{}",
         std::process::id()
@@ -2334,8 +2373,7 @@ TaggedNumber native_nullish(double state) {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2361,6 +2399,7 @@ fn ffi_call_marshals_portable_tuples_in_both_directions() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(
         &mut program,
@@ -2373,7 +2412,9 @@ fn ffi_call_marshals_portable_tuples_in_both_directions() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_portable_tuples");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-tuples-{}",
         std::process::id()
@@ -2417,8 +2458,7 @@ NativeTuple native_tuple(double number, const char *text, bool flag) {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2442,6 +2482,7 @@ fn ffi_owned_tuple_return_releases_each_owned_leaf() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_ownership(
         &mut program,
@@ -2463,7 +2504,9 @@ fn ffi_owned_tuple_return_releases_each_owned_leaf() {
     .unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_owned_tuple");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi-owned-tuple-{}",
         std::process::id()
@@ -2514,8 +2557,7 @@ double tuple_destroy_count(void) { return destroyed; }
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2538,6 +2580,7 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
     "#;
 
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     assert_eq!(
         program.extern_functions.len(),
@@ -2547,7 +2590,9 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_object_marshal");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-ffi_object_marshal-{}",
@@ -2586,8 +2631,7 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
-        .arg(build_staticlib("thaw-quickjs"))
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2667,13 +2711,16 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let mut program = thaw_hir::lower_module(&module).unwrap();
     thaw_hir::set_ffi_string_abi(&mut program, "native_storage_values", vec![],
         thaw_hir::FfiStringAbi::NullTerminated, thaw_hir::FfiCallingConvention::C,
         thaw_hir::FfiAggregateAbi::Portable).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_dynamic_storage");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let dir = std::env::temp_dir().join(format!("thaw-ffi-dynamic-storage-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let object = dir.join("program.o");
@@ -2705,109 +2752,12 @@ fn ffi_dynamic_storage_validates_before_invoking_native() {
     let arena = build_staticlib("thaw-arena");
     let std_lib = build_staticlib("thaw-std");
     let runtime = build_staticlib("thaw-runtime");
-    let quickjs = build_staticlib("thaw-quickjs");
     assert!(cc_command().arg(&object).arg(&native_object).arg(&arena).arg(&std_lib).arg(&runtime)
-        .arg(&std_lib).arg(&runtime).arg(&quickjs).arg("-lm").arg("-Wl,--export-dynamic")
+        .arg(&std_lib).arg(&runtime).args(thaw_js_link_args(&std_lib, &runtime, false)).arg("-Wl,--export-dynamic")
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "3 1\ntrue 1\n7 2\ntrue 2\ntrue 2\n8 1 3\n9 4\ntrue 4\n1 5\n1 6\ntrue 6\ntrue true bad\n11 false 7\ntrue 11 7\n1 8\ntrue object 1\n");
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn ffi_collection_copy_in_keeps_live_any_values_and_releases_temporary_handles() {
-    let source = r#"
-        declare function native_number_map_sum(value: Map<string, number>): number;
-        declare function native_any_map_alias(value: Map<any, any>): Map<any, any>;
-        declare function native_any_set_alias(value: Set<any>): Set<any>;
-        declare function native_jsvalue_map(value: Map<string, JsValue>): number;
-        declare function native_jsvalue_map_calls(): number;
-        async function main(): Promise<void> {
-            const liveHandles: any = new Function("return () => globalThis.__thaw_value_handle_live.reduce((count, live) => count + Number(live), 0)")();
-            const jsvalueMap: any = new Function("return new Map([['value', {}]])")();
-            try { native_jsvalue_map(jsvalueMap); console.log("accepted", native_jsvalue_map_calls()); }
-            catch (error) { console.log(error instanceof TypeError, native_jsvalue_map_calls()); }
-
-            const key: any = new Function("return {key: true}")();
-            const stored: any = new Function("return {value: 3}")();
-            const source: any = new Function("key", "value", "return new Map([[key, value]])")(key, stored);
-            const returned: any = native_any_map_alias(source);
-            const setSource: any = new Function("key", "return new Set([key])")(key);
-            const returnedSet: any = native_any_set_alias(setSource);
-            const values: any = new Function("return new Map(Array.from({length: 1024}, (_, i) => ['value' + i, i]))")();
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
-            const failing: any = new Function("return new Map([['valid', 1], ['bad', 'wrong']])")();
-            try { native_number_map_sum(failing); } catch (_) {}
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
-            const afterWarmFailure = liveHandles();
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
-            const afterNoopFailure = liveHandles();
-            for (let i = 0; i < 15; i++) {
-                try { native_number_map_sum(failing); } catch (_) {}
-            }
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
-            const afterFailures = liveHandles();
-            console.log(afterFailures - afterNoopFailure === afterNoopFailure - afterWarmFailure);
-            native_number_map_sum(values);
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
-            const afterFirst = liveHandles();
-            for (let i = 0; i < 15; i++) native_number_map_sum(values);
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
-            const afterMany = liveHandles();
-            console.log(afterMany - afterFirst === afterNoopFailure - afterWarmFailure);
-            console.log(returned.get(key) === stored, returned.get(key).value, returnedSet.has(key));
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
-            console.log(returned.get(key) === stored, returned.get(key).value, returnedSet.has(key));
-            returned.get(key).value = 9;
-            console.log(stored.value);
-        }
-    "#;
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "ffi_collection_copyin_ownership");
-    compiler.compile_program(&program).unwrap();
-    let dir = std::env::temp_dir().join(format!("thaw-ffi-collection-copyin-ownership-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let object = dir.join("program.o");
-    let native = dir.join("native.c");
-    let native_object = dir.join("native.o");
-    let executable = dir.join("program");
-    compiler.write_object_file(&object).unwrap();
-    std::fs::write(&native, r#"
-        #include <stdint.h>
-        #include <string.h>
-        static int jsvalue_calls;
-        double native_jsvalue_map(void *map) { (void)map; jsvalue_calls++; return 1; }
-        double native_jsvalue_map_calls(void) { return jsvalue_calls; }
-        static double sum_words(void *array) {
-            if (!array) return 0;
-            int64_t length; memcpy(&length, array, sizeof(length));
-            double total = 0;
-            for (int64_t i = 0; i < length; i++) {
-                uint64_t word; double value;
-                memcpy(&word, (uint8_t *)array + 8 + i * 8, sizeof(word));
-                memcpy(&value, &word, sizeof(value)); total += value;
-            }
-            return total;
-        }
-        extern void *thaw_map_snapshot_values(const void *map);
-        double native_number_map_sum(void *map) { return sum_words(thaw_map_snapshot_values(map)); }
-        void *native_any_map_alias(void *map) { return map; }
-        void *native_any_set_alias(void *set) { return set; }
-    "#).unwrap();
-    assert!(cc_command().arg("-c").arg(&native).arg("-o").arg(&native_object).status().unwrap().success());
-    let arena = build_staticlib("thaw-arena");
-    let std_lib = build_staticlib("thaw-std");
-    let runtime = build_staticlib("thaw-runtime");
-    let quickjs = build_staticlib("thaw-quickjs");
-    assert!(cc_command().arg(&object).arg(&native_object).arg(&arena).arg(&std_lib).arg(&runtime)
-        .arg(&std_lib).arg(&runtime).arg(&quickjs).arg("-lm").arg("-Wl,--export-dynamic")
-        .arg("-o").arg(&executable).status().unwrap().success());
-    let output = Command::new(&executable).output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\ntrue\ntrue\ntrue 3 true\ntrue 3 true\n9\n");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2938,10 +2888,13 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "ffi_js_collection_copyin");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.module.print_to_string().to_string();
     assert!(ir.contains("ffi_copyin_map_allocation_failed"), "Map allocation failure must branch before the native call");
     assert!(ir.contains("ffi_copyin_map_insert_failed"), "Map insertion failure must branch before the native call");
@@ -3025,9 +2978,8 @@ fn ffi_js_owned_maps_and_sets_copy_in_before_native_invocation() {
     let arena = build_staticlib("thaw-arena");
     let std_lib = build_staticlib("thaw-std");
     let runtime = build_staticlib("thaw-runtime");
-    let quickjs = build_staticlib("thaw-quickjs");
     assert!(cc_command().arg(&object).arg(&native_object).arg(&arena).arg(&std_lib).arg(&runtime)
-        .arg(&std_lib).arg(&runtime).arg(&quickjs).arg("-lm").arg("-Wl,--export-dynamic")
+        .arg(&std_lib).arg(&runtime).args(thaw_js_link_args(&std_lib, &runtime, false)).arg("-Wl,--export-dynamic")
         .arg("-o").arg(&executable).status().unwrap().success());
     let output = Command::new(&executable).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

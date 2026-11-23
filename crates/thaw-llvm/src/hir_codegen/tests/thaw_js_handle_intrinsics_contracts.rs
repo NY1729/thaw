@@ -53,14 +53,6 @@ fn thaw_js_routed_handle_intrinsics_name_only_thaw_tjs_symbols() {
 }
 
 #[test]
-fn thaw_js_unrouted_handle_intrinsics_keep_the_quickjs_symbols() {
-    let (_, uses_quickjs, ir) = thaw_js_routed_ir(THAW_JS_HANDLE_PROGRAM, false);
-    assert!(uses_quickjs, "{ir}");
-    assert!(ir.contains("@thaw_js_get_property_result("), "{ir}");
-    assert!(!ir.contains("@thaw_tjs_get_property_result("), "{ir}");
-}
-
-#[test]
 fn routed_absent_global_reads_through_the_handle_lane() {
     // An absent global is handle 0, which is `undefined` at run time: the program compiles on the
     // thaw-js lane and reads the global by name, with no QuickJS builder.
