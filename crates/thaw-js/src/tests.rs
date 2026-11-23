@@ -2810,6 +2810,22 @@ fn a_thrown_errors_own_to_string_is_not_run_when_the_host_reports_it() {
 }
 
 #[test]
+fn reporting_a_thrown_error_reads_its_message_once_and_keeps_a_getter_failure() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.ok = function () { globalThis.__reads = 0; var e = new Error('x'); Object.defineProperty(e, 'message', { get() { globalThis.__reads++; return 'm'; } }); throw e; };\nexports.bad = function () { globalThis.__reads = 0; var e = new Error('x'); Object.defineProperty(e, 'message', { get() { globalThis.__reads++; throw new RangeError('getter failed'); } }); throw e; };\nexports.trap = function () { throw new Proxy(new Error('hidden'), { getPrototypeOf() { throw new TypeError('trap failed'); } }); };\nexports.reads = function () { return globalThis.__reads; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    assert!(matches!(p.call("ok", &[]), Err(HostError::Thrown(d)) if d == "Error: m"));
+    assert!(matches!(p.call("reads", &[]), Ok(crate::host::Native::Number(n)) if n == 1.0));
+    // a failing getter is not read again for the display text; the report says so without running it
+    assert!(matches!(p.call("bad", &[]), Err(HostError::Thrown(d)) if d == "Error"));
+    assert!(matches!(p.call("reads", &[]), Ok(crate::host::Native::Number(n)) if n == 1.0));
+    assert!(matches!(p.call("trap", &[]), Err(HostError::Thrown(d)) if d == "Error"));
+}
+
+#[test]
 fn a_later_string_throw_does_not_pick_up_the_previous_errors_frame() {
     use crate::host::{HostError, Package};
     let bundle = MINI.replace(

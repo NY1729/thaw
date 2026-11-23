@@ -9306,6 +9306,18 @@ pub unsafe extern "C" fn thaw_json_is_host_arraybuffer(value: *const Value) -> u
     u8::from(host_query(lease, 31).is_some_and(|bytes| bytes != "null"))
 }
 
+/// `message` of a caught live Error for `console.log(error)`: with thaw-js, the text read when the error was
+/// reported (host query 35, once), so the console never runs the getter a second time.
+#[no_mangle]
+pub extern "C" fn thaw_json_caught_error_message(value: *mut Value) -> *mut Value {
+    if engine_is_thaw_js() {
+        if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+            return leak(host_query(lease, 35).map_or(Value::Null, Value::String));
+        }
+    }
+    thaw_json_get(value, c"message".as_ptr())
+}
+
 #[no_mangle]
 /// Returns whether a live Host value is an actual JavaScript Error-family instance.
 /// Plain Json values and non-Host values are not authenticated as Errors.

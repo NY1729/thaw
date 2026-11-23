@@ -1292,13 +1292,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(render);
-        let key = self.intern_string("message", "console_caught_message_key")
-            .map_err(|error| error.to_string())?;
         let message = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_get").unwrap(),
-                &[json.into(), key.as_pointer_value().into()],
+                self.module
+                    .get_function("thaw_json_caught_error_message")
+                    .unwrap(),
+                &[json.into()],
                 "console_caught_message",
             )
             .map_err(|error| error.to_string())?

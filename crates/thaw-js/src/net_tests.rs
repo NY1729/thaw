@@ -203,7 +203,9 @@ fn thrown_error_properties_survive_the_framed_text_round_trip() {
              e",
         )
         .unwrap_or_else(|_| panic!("script must run"));
-    let (_, framed) = crate::host::frame_error(&mut it, &err).expect("error-like value");
+    let (_, framed, _) = crate::host::frame_error(&mut it, &err)
+        .unwrap()
+        .expect("error-like value");
     let crate::Ctl::Throw(back) = crate::host::tagged_error(&mut it, &framed) else {
         panic!("tagged_error must produce a throw");
     };
