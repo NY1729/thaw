@@ -144,35 +144,17 @@ jobs:
           LEG: ${{ matrix.group }}
         run: |
           python3 -I - "$REPORTS" "$LEG" "$OUT" <<'PY' >> "$GITHUB_STEP_SUMMARY" || true
-          import glob, json, os, re, sys
-          from collections import Counter
+          import glob, json, os, sys
 
           reports_dir, leg, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
           os.makedirs(out_dir, exist_ok=True)
-          MARK = "thaw-js routing needs QuickJS: "
 
           def clean(text, limit):
               # One line, no tabs: the output files are tab-separated.
               return " ".join(str(text).split())[:limit]
 
-          def norm(text):
-              text = re.sub(r'/tmp/\S+', '<path>', text)
-              text = re.sub(r'\b\d+(:\d+)?\b', 'N', text)
-              text = re.sub(r'`[^`]*`', '`...`', text)
-              return text[:160]
-
-          def blocker_keys(reason):
-              # Same logic as the q9 aggregate: a THAW_JS_MIXED fallback lists its QuickJS blockers
-              # after the marker, one key per token; anything else is normalised.
-              if MARK in reason:
-                  tokens = [t.strip() for t in reason.split(MARK, 1)[1].split(",") if t.strip()]
-                  if tokens:
-                      return {t[:160] for t in tokens}
-              return {norm(reason)}
-
-          mismatch_lines, linking_lines, per_file = [], [], []
-          hist = Counter()
-          total = linked = nonmatched = 0
+          mismatch_lines, per_file = [], []
+          total = nonmatched = 0
           for path in sorted(glob.glob(os.path.join(reports_dir, "*.json"))):
               label = os.path.basename(path)[:-len(".json")]
               manifest = label + ".json"
@@ -190,28 +172,19 @@ jobs:
               if not isinstance(results, list):
                   per_file.append(f"- {manifest}: exit {exit_status}, no results array")
                   continue
-              file_linked = file_nonmatched = 0
+              file_nonmatched = 0
               for case in results:
                   total += 1
                   name = clean(case.get("name", ""), 300)
-                  if case.get("linksQuickjs") is True:
-                      linked += 1
-                      file_linked += 1
-                      reasons = [clean(r, 2000) for r in (case.get("quickjsReasons") or [])]
-                      linking_lines.append(f"{manifest}\t{name}\tquickjs_blockers: " + " | ".join(reasons))
-                      seen = set()
-                      for reason in reasons:
-                          seen |= blocker_keys(reason)
-                      hist.update(seen)
                   if case.get("classification") != "matched":
                       nonmatched += 1
                       file_nonmatched += 1
                       classification = clean(case.get("classification", ""), 200)
                       detail = clean(case.get("detail") or "", 200)
                       mismatch_lines.append(f"{manifest}\t{name}\t{classification}" + (f": {detail}" if detail else ""))
-              per_file.append(f"- {manifest}: exit {exit_status}, cases {len(results)}, linksQuickjs true {file_linked}, not matched {file_nonmatched}")
+              per_file.append(f"- {manifest}: exit {exit_status}, cases {len(results)}, not matched {file_nonmatched}")
 
-          for fname, lines in (("routeall_mismatches.txt", mismatch_lines), ("routeall_quickjs_linking.txt", linking_lines)):
+          for fname, lines in (("routeall_mismatches.txt", mismatch_lines),):
               with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as handle:
                   handle.write("\n".join(lines) + ("\n" if lines else ""))
 
@@ -219,16 +192,9 @@ jobs:
           print("")
           print("\n".join(per_file))
           print("")
-          print(f"Totals: cases {total}, linksQuickjs true {linked}, not matched {nonmatched}")
-          print("")
-          print("Blocker histogram (cases per normalised quickjsReasons entry, top 80):")
-          print("")
-          print("| cases | blocker |")
-          print("|---:|---|")
-          for blocker, count in hist.most_common(80):
-              print(f"| {count} | {blocker.replace('|', '/')} |")
+          print(f"Totals: cases {total}, not matched {nonmatched}")
           PY
-          for f in routeall_mismatches.txt routeall_quickjs_linking.txt; do
+          for f in routeall_mismatches.txt; do
             {
               echo ""
               echo "#### $f: $(wc -l < "$OUT/$f" 2>/dev/null || echo 0) lines (first 300 shown, cut to 600 chars; full file in the artifact)"
@@ -357,9 +323,8 @@ jobs:
                   for (p in seen) {
                     ok = v[p SUBSEP "build_ok"] == "1" && v[p SUBSEP "run_exit"] == "0" && v[p SUBSEP "stdout_eq_node"] == "1"
                     if (ok) pass++; else { fail++; failed = failed "- " p "\n" }
-                    if (v[p SUBSEP "links_quickjs"] == "1") linked++
                   }
-                  printf "\nPrograms %d: pass %d, fail %d (build, run exit, or stdout differs from Node). Linking QuickJS: %d\n", n + 0, pass + 0, fail + 0, linked + 0
+                  printf "\nPrograms %d: pass %d, fail %d (build, run exit, or stdout differs from Node).\n", n + 0, pass + 0, fail + 0
                   if (fail) printf "\nFailing programs:\n%s", failed
                 }' "$tsv"
             fi

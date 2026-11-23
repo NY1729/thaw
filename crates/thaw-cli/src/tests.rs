@@ -1919,66 +1919,6 @@ fn thaw_js_declares_an_object_bearing_union_parameter_as_json() {
 }
 
 #[test]
-fn quickjs_manifest_detection_tracks_dynamic_host_calls() {
-    assert!(!source_uses_quickjs("function main() { return 42; }"));
-    assert!(source_uses_quickjs(
-        "function main() { return callDynamic('add', []); }"
-    ));
-    assert!(source_uses_quickjs(
-        "declare function __thaw_typed_js_616464(value: number): number;"
-    ));
-}
-
-/// `eval(` stays a dynamic-code marker (the thaw-js lane serves the program's own dynamic code).
-#[test]
-fn direct_eval_source_is_a_dynamic_code_marker() {
-    assert!(source_uses_quickjs(
-        "function main(): void { console.log(eval('1 + 2')); }"
-    ));
-}
-
-#[test]
-fn manifest_quickjs_flag_matches_the_linked_quickjs_archive() {
-    let directory =
-        std::env::temp_dir().join(format!("thaw-cli-quickjs-flag-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
-    // `globalThis.fetch` is a JsValue dynamic read; the flag must follow whatever archive the build links.
-    let cases = [
-        (
-            "probe",
-            "function main(): void { console.log(typeof (globalThis as any).fetch); }\n",
-        ),
-        ("plain", "function main(): void { console.log(1 + 1); }\n"),
-    ];
-    for (name, source) in cases {
-        let entry = directory.join(format!("{name}.ts"));
-        std::fs::write(&entry, source).unwrap();
-        let executable = directory.join(name);
-        build_with_assets(
-            &entry,
-            &executable,
-            &[],
-            &[],
-            &[],
-            &directory.join("registry"),
-            &[],
-            false,
-            None,
-        )
-        .unwrap();
-        let bytes = std::fs::read(&executable).unwrap();
-        let manifest = artifact_manifest_from_bytes(&bytes).unwrap();
-        let linked = bytes.windows(8).any(|window| window == b"rquickjs");
-        assert_eq!(
-            manifest["quickjs"].as_bool(),
-            Some(linked),
-            "{name}: {manifest}"
-        );
-    }
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn quickjs_fallback_reasons_include_operation_package_and_location() {
     let source = "import { parse } from 'dynamic-package';\nfunction main(): void { parse('x'); callDynamic('other', []); }\n";
     let mut exports = ExternalExports::new();

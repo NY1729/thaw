@@ -218,13 +218,11 @@
     {
       "name": "v8 serialization round trip",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { deserialize, serialize } from 'node:v8'; function main(): void { const invalid = new Date(NaN); const value = deserialize(serialize({ valid: new Date(1234), invalid, again: invalid })); console.log(value.valid.getTime(), Number.isNaN(value.invalid.getTime()), value.invalid === value.again); }"
     },
     {
       "name": "v8 shared date identity",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { deserialize, serialize } from 'node:v8'; function main(): void { const d = new Date(1234); const e = new Date(1234); const r: any = deserialize(serialize([d, d, e])); console.log(r[0] === r[1], r[1] === r[2], r[2].getTime(), r[0].getTime()); }"
     },
     {
@@ -752,19 +750,16 @@
     {
       "name": "path family one value across path, node:path/posix and path/win32",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import path from 'path'; import { posix } from 'node:path/posix'; import win from 'path/win32'; function main(): void { console.log(JSON.stringify([path === posix, path.posix === posix, path.win32 === win, posix.win32 === win, win.posix === posix, win.win32 === win])); }"
     },
     {
       "name": "path family default, named and subpath values across specifiers",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import path, { win32 } from 'node:path'; import posix from 'node:path/posix'; import w from 'path/win32'; function main(): void { console.log(JSON.stringify([win32 === w, posix === path.posix, path.win32 === w, w.win32 === win32, posix.join('/a', 'b', '..', 'c'), w.join('C:\\\\a', '..', 'b')])); }"
     },
     {
       "name": "path family named values from path/posix, node:path and node:path/win32",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { posix as a } from 'path/posix'; import { posix as b, win32 as c } from 'node:path'; import { win32 as d } from 'node:path/win32'; function main(): void { console.log(JSON.stringify([a === b, c === d, a.sep === b.sep, c.sep, d.join('x', 'y'), a.basename('/q/r.txt')])); }"
     },
     {
@@ -775,7 +770,6 @@
     {
       "name": "console constructor output",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { Console } from 'node:console'; import { Writable } from 'node:stream'; function main(): void { let text: string = ''; const output = new Writable({ write(chunk, encoding, callback) { text += chunk.toString(); callback(); } }); const logger = new Console(output); logger.log('value', 42); console.log(JSON.stringify(text)); }"
     },
     {
@@ -836,7 +830,6 @@
     {
       "name": "dgram binds and closes udp socket",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createSocket } from 'node:dgram'; function main(): void { const socket = createSocket('udp4'); socket.bind(0, '127.0.0.1', (): void => { const address = socket.address(); console.log(address.family, address.port > 0); socket.close(); }); }"
     },
     {
@@ -867,13 +860,11 @@
     {
       "name": "wasi exposes preview1 import object",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { WASI } from 'node:wasi'; function main(): void { const wasi = new WASI({ version: 'preview1' }); const imports = wasi.getImportObject(); console.log(imports.wasi_snapshot_preview1 !== undefined); }"
     },
     {
       "name": "node test dot reporter terminates output",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { dot } from 'node:test/reporters'; async function main(): Promise<void> { const reporter = dot([]); const result = await reporter.next(); console.log(result.done, JSON.stringify(result.value)); }"
     },
     {
@@ -974,7 +965,6 @@
     {
       "name": "cluster executes worker process",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import cluster, { isPrimary } from 'node:cluster'; import process from 'node:process'; function main(): void { if (isPrimary) cluster.fork(); else { console.log('worker'); process.disconnect(); } }"
     },
     {
@@ -1000,7 +990,6 @@
     {
       "name": "async_hooks createHook reports resources timers and promises",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createHook, AsyncResource, executionAsyncId, triggerAsyncId } from 'node:async_hooks'; function main(): void { const types = new Map<number, string>(); const log: string[] = []; const hook = createHook({ init(id: number, type: string, trigger: number) { if (type === 'MyRes' || type === 'Timeout' || type === 'PROMISE') { types.set(id, type); if (type !== 'PROMISE') log.push('init:' + type); } }, before(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('before:' + t); }, after(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('after:' + t); }, destroy(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('destroy:' + t); }, promiseResolve(id: number) { if (types.get(id) === 'PROMISE') log.push('resolve:PROMISE'); } }).enable(); const resource = new AsyncResource('MyRes'); resource.runInAsyncScope(() => { log.push('scope ' + (executionAsyncId() === resource.asyncId()) + ' ' + (triggerAsyncId() === resource.triggerAsyncId())); }); setTimeout(() => { log.push('timeout'); resource.emitDestroy(); }, 10); setTimeout(() => { hook.disable(); console.log(log.filter((entry) => !entry.endsWith('PROMISE')).join(',')); }, 40); }"
     },
     {
@@ -1011,7 +1000,6 @@
     {
       "name": "cluster workers are real processes with an IPC channel",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import cluster from 'node:cluster'; import process from 'node:process'; function main(): void { if (cluster.isPrimary) { const worker = cluster.fork(); const log: string[] = []; worker.on('online', () => { log.push('online'); worker.send({ hello: 1 }); }); worker.on('message', (message: any) => { log.push('message ' + JSON.stringify(message)); log.push('connected ' + worker.isConnected()); worker.kill(); }); worker.on('disconnect', () => { log.push('disconnect'); }); worker.on('exit', (code: any, signal: any) => { log.push('exit ' + signal + ' dead ' + worker.isDead() + ' after ' + worker.exitedAfterDisconnect); console.log(log.join('|')); }); } else { process.on('message', (message: any) => { process.send!({ echo: message, worker: cluster.worker!.id }); }); } }"
     },
     {
@@ -1042,7 +1030,6 @@
     {
       "name": "websocket client echo with a hand-written net server",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import net from 'node:net';\nimport { createHash } from 'node:crypto';\nfunction frame(op: number, payload: any): any { return Buffer.concat([Buffer.from([0x80 | op, payload.length]), payload]); }\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    let buf: any = Buffer.alloc(0);\n    let up = false;\n    socket.on('data', (d: any) => {\n      buf = Buffer.concat([buf, d]);\n      if (!up) {\n        const end = buf.indexOf('\\r\\n\\r\\n');\n        if (end < 0) return;\n        const head: any = /Sec-WebSocket-Key: (.*)/i.exec(buf.subarray(0, end).toString());\n        const accept = createHash('sha1').update(String(head[1]).trim() + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');\n        socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: ' + accept + '\\r\\n\\r\\n');\n        buf = buf.subarray(end + 4);\n        up = true;\n      }\n      while (buf.length >= 6) {\n        const op: number = buf[0] & 15;\n        const len: number = buf[1] & 127;\n        if (buf.length < 6 + len) break;\n        const payload: any = Buffer.alloc(len);\n        for (let i = 0; i < len; i++) payload[i] = buf[6 + i] ^ buf[2 + (i & 3)];\n        buf = buf.subarray(6 + len);\n        if (op === 1 || op === 2) socket.write(frame(op, payload));\n        else if (op === 8) {\n          console.log('server close', payload.readUInt16BE(0), payload.subarray(2).toString());\n          socket.write(frame(8, payload));\n          socket.end();\n        }\n      }\n    });\n    socket.on('error', () => {});\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const ws: any = new WebSocket('ws://127.0.0.1:' + port + '/chat');\n    ws.binaryType = 'arraybuffer';\n    ws.onopen = () => { console.log('open', ws.readyState, ws.protocol === ''); ws.send('hi'); ws.send(new Uint8Array([1, 2, 3])); };\n    let received = 0;\n    ws.onmessage = (e: any) => {\n      received++;\n      if (typeof e.data === 'string') console.log('message text', e.data);\n      else console.log('message bytes', e.data.byteLength, Array.from(new Uint8Array(e.data)).join(','));\n      if (received === 2) ws.close(1000, 'bye');\n    };\n    ws.onclose = (e: any) => {\n      console.log('close', e.code, e.reason, e.wasClean, ws.readyState);\n      server.close();\n    };\n  });\n}\n"
     },
     {
@@ -1093,19 +1080,16 @@
     {
       "name": "resourceLimits stop a runaway allocation",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }`, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });\n  const result: string = await new Promise<string>((resolve) => { worker.on('error', (e: any) => { resolve('error ' + e.code); }); worker.on('exit', () => { resolve('exit'); }); });\n  console.log(result);\n}"
     },
     {
       "name": "resourceLimits limit not reached leaves the worker alone",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); let sum = 0; for (let i = 0; i < 1000; i++) { const a = new Array(1000).fill(i); sum += a.length; } parentPort.postMessage('fine ' + sum);`, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });\n  const result: string = await new Promise<string>((resolve) => { worker.on('message', (v: any) => { resolve('message ' + v); }); worker.on('error', (e: any) => { resolve('error ' + e.code); }); });\n  console.log(result);\n}"
     },
     {
       "name": "worker data shares a SharedArrayBuffer",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const shared = new SharedArrayBuffer(8);\n  const view = new Int32Array(shared);\n  const worker = new Worker(`const { parentPort, workerData } = require('node:worker_threads'); const view = new Int32Array(workerData); Atomics.store(view, 0, 42); parentPort.postMessage(workerData instanceof SharedArrayBuffer);`, { eval: true, workerData: shared });\n  const kind: boolean = await new Promise<boolean>((resolve) => { worker.once('message', (value: boolean) => { resolve(value); }); });\n  await worker.terminate();\n  console.log(kind, view[0]);\n}"
     },
     {
@@ -2166,7 +2150,6 @@
     {
       "name": "fetch Response from a local http server",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.setHeader('x-a', 'b'); res.end('{\"k\":1}'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r: Response = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok, r.headers.get('x-a'), r.statusText); console.log(await r.json()); srv.close(); }"
     },
     {
@@ -2178,7 +2161,6 @@
     {
       "name": "unannotated await fetch is a Response",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import * as http from 'node:http'; async function main(): Promise<void> { const srv = http.createServer((req, res) => { res.statusCode = 201; res.end('hi'); }); await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r())); const port = (srv.address() as any).port; const r = await fetch('http://127.0.0.1:' + port + '/'); console.log(r.status, r.ok); console.log(await r.text()); srv.close(); }"
     },
     {
@@ -4104,25 +4086,21 @@
     {
       "name": "nd7 perf_hooks mark detail and PerformanceObserver export",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  console.log(performance.mark(\"d\", { detail: { z: 1 } }).detail);\n  const o = new PerformanceObserver((list) => { console.log(\"obs\", list.getEntries().map((e) => e.name)); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"c\");\n  setTimeout(() => o.disconnect(), 20);\n}\n"
     },
     {
       "name": "perf_hooks observer getEntriesByName on the entry list",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const o = new PerformanceObserver((list) => { console.log(\"named\", list.getEntriesByName(\"c\").length, list.getEntriesByType(\"mark\").length, list.getEntriesByName(\"c\", \"mark\")[0].entryType); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"c\");\n  setTimeout(() => o.disconnect(), 20);\n}\n"
     },
     {
       "name": "perf_hooks two PerformanceObserver callbacks on the same mark",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const a = new PerformanceObserver((list) => { console.log(\"a\", list.getEntries().map((e) => e.name)); });\n  const b = new PerformanceObserver((list) => { console.log(\"b\", list.getEntries().map((e) => e.name)); });\n  a.observe({ entryTypes: [\"mark\"] });\n  b.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"x\");\n  setTimeout(() => { a.disconnect(); b.disconnect(); console.log(\"done\"); }, 20);\n}\n"
     },
     {
       "name": "perf_hooks observer disconnects itself through the declared observer parameter",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const o = new PerformanceObserver((list, observer) => { console.log(\"once\", list.getEntries().length); observer.disconnect(); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"y\");\n  setTimeout(() => performance.mark(\"z\"), 20);\n  setTimeout(() => console.log(\"after\"), 40);\n}\n"
     },
     {
@@ -4563,7 +4541,6 @@
     {
       "name": "r2c for await over http request body",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer(async (req, res) => {\n  const chunks: Buffer[] = [];\n  for await (const c of req) chunks.push(c as Buffer);\n  res.end(Buffer.concat(chunks));\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const r = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`, { method: \"POST\", body: \"payload\" });\n    console.log(await r.text());\n    const g = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(JSON.stringify(await g.text()));\n    srv.close();\n  });\n}"
     },
     {
@@ -4579,13 +4556,11 @@
     {
       "name": "r2c http chunked response framing headers",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => {\n  if (req.url === \"/stream\") { res.writeHead(200, { \"Content-Type\": \"text/plain\" }); res.write(\"a\"); res.write(\"b\"); res.end(\"c\"); return; }\n  res.writeHead(200, { \"Transfer-Encoding\": \"chunked\" }); res.end(\"x\");\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const base = `http://127.0.0.1:${(srv.address() as any).port}`;\n    const a = await fetch(base + \"/\");\n    console.log(a.headers.get(\"transfer-encoding\"), a.headers.get(\"content-length\"), a.headers.has(\"date\"), await a.text());\n    const b = await fetch(base + \"/stream\");\n    console.log(b.headers.get(\"transfer-encoding\"), b.headers.get(\"content-length\"), b.headers.has(\"date\"), await b.text());\n    srv.close();\n  });\n}"
     },
     {
       "name": "r2c Response static members spread of Headers and res.end without arguments",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => { res.statusCode = 404; res.end(); });\nfunction main(): void {\n  const a = Response.json({ a: 1 });\n  console.log(a.headers.get(\"content-type\"), a.status);\n  const b = Response.redirect(\"http://a.test/\", 301);\n  console.log(b.status, b.headers.get(\"location\"));\n  console.log(Response.error().type);\n  const h = new Headers({ a: \"1\", b: \"2\" });\n  console.log([...h]);\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const c = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(c.status, c.ok);\n    srv.close();\n  });\n}"
     },
     {
@@ -4896,7 +4871,6 @@
     {
       "name": "waitAsync notify from a worker thread",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { Worker } from 'node:worker_threads';\nfunction main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  const worker = new Worker(`\n    const { parentPort, workerData } = require('node:worker_threads');\n    const ia = new Int32Array(workerData);\n    const keep = setTimeout(() => {}, 300);\n    Atomics.waitAsync(ia, 0, 0).value.then((v) => { parentPort.postMessage('got ' + v); clearTimeout(keep); });\n    parentPort.postMessage('ready');\n  `, { eval: true, workerData: ia.buffer });\n  worker.on('message', (m: any) => {\n    if (m === 'ready') {\n      setTimeout(() => console.log('notify', Atomics.notify(ia, 0, 1)), 50);\n    } else {\n      console.log('main saw', m);\n      void worker.terminate();\n    }\n  });\n}"
     },
     {
@@ -4947,13 +4921,11 @@
     {
       "name": "http server + fs.readFileSync bytes response",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import * as fs from 'node:fs';\nimport * as http from 'node:http';\nimport * as os from 'node:os';\nimport * as path from 'node:path';\nimport process from 'node:process';\nfunction main(): void {\n  const file = path.join(os.tmpdir(), 'thaw-compat-bytes-' + process.pid + '.bin');\n  fs.writeFileSync(file, Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 250]));\n  const srv = http.createServer((req: any, res: any) => {\n    const body: Uint8Array = fs.readFileSync(file);\n    res.writeHead(200, { 'content-type': 'application/octet-stream' });\n    res.end(body);\n  });\n  srv.listen(0, '127.0.0.1', (): void => {\n    const port = (srv.address() as any).port;\n    http.get({ host: '127.0.0.1', port, path: '/' }, (res: any): void => {\n      const chunks: Buffer[] = [];\n      res.on('data', (chunk: Buffer): void => { chunks.push(chunk); });\n      res.on('end', (): void => {\n        const all = Buffer.concat(chunks);\n        console.log(res.statusCode, all.length, all[0], all[1], all.toString('hex'));\n        srv.close();\n        fs.rmSync(file);\n      });\n    });\n  });\n}\n"
     },
     {
       "name": "http.get chunks -> Buffer.concat -> zlib.gunzipSync round trip",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import * as http from 'node:http';\nimport * as zlib from 'node:zlib';\nfunction main(): void {\n  const original = 'chunked gzip body line\\n'.repeat(50);\n  const gz: Buffer = zlib.gzipSync(Buffer.from(original));\n  const srv = http.createServer((req: any, res: any) => {\n    res.writeHead(200, { 'content-type': 'application/gzip' });\n    const step = Math.ceil(gz.length / 4);\n    for (let i = 0; i < gz.length; i += step) res.write(gz.subarray(i, i + step));\n    res.end();\n  });\n  srv.listen(0, '127.0.0.1', (): void => {\n    const port = (srv.address() as any).port;\n    http.get({ host: '127.0.0.1', port, path: '/' }, (res: any): void => {\n      const chunks: Buffer[] = [];\n      res.on('data', (chunk: Buffer): void => { chunks.push(chunk); });\n      res.on('end', (): void => {\n        const text = zlib.gunzipSync(Buffer.concat(chunks)).toString('utf8');\n        console.log(res.statusCode, text.split('\\n').length, text.slice(0, 22), text === original);\n        srv.close();\n      });\n    });\n  });\n}\n"
     },
     {
@@ -4964,43 +4936,36 @@
     {
       "name": "async_hooks promise ctor resolve then",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { setTimeout((): void => { const hook = trace(); new Promise<number>((resolve: (v: number) => void): void => { resolve(1); }).then((v: number): void => { console.log('then', v); }); setTimeout((): void => { hook.disable(); }, 5); }, 0); }"
     },
     {
       "name": "async_hooks promise then chain",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { setTimeout((): void => { const hook = trace(); Promise.resolve(1).then((a: number): number => a + 1).then((b: number): void => { console.log('chain', b); }); setTimeout((): void => { hook.disable(); }, 5); }, 0); }"
     },
     {
       "name": "async_hooks promise resolved with a thenable",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { setTimeout((): void => { const hook = trace(); new Promise<number>((resolve: (v: number) => void): void => { resolve(Promise.resolve(2)); }).then((v: number): void => { console.log('thenable', v); }); setTimeout((): void => { hook.disable(); }, 5); }, 0); }"
     },
     {
       "name": "async_hooks promise then returning a promise",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { setTimeout((): void => { const hook = trace(); Promise.resolve(1).then((): Promise<number> => Promise.resolve(2)).then((v: number): void => { console.log('returned', v); }); setTimeout((): void => { hook.disable(); }, 5); }, 0); }"
     },
     {
       "name": "async_hooks promise rejection caught",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { setTimeout((): void => { const hook = trace(); Promise.reject(new Error('boom')).catch((e: Error): void => { console.log('caught', e.message); }); setTimeout((): void => { hook.disable(); }, 5); }, 0); }"
     },
     {
       "name": "async_hooks promise settles once",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { setTimeout((): void => { const hook = trace(); new Promise<number>((resolve: (v: number) => void, reject: (e: unknown) => void): void => { resolve(1); resolve(2); reject(new Error('late')); }); setTimeout((): void => { hook.disable(); }, 5); }, 0); }"
     },
     {
       "name": "async_hooks promise execution ids inside then",
       "expect": "matched",
-      "expectQuickjsLink": false,
       "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nfunction main(): void { setTimeout((): void => { const hook = trace(); Promise.resolve(1).then((): void => { console.log('exec', label(executionAsyncId()), 'trig', label(triggerAsyncId())); }); setTimeout((): void => { hook.disable(); }, 5); }, 0); }"
     },
     {
@@ -5076,49 +5041,41 @@
   {
     "name": "async_hooks promise async function awaits with a timer",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { createHook, executionAsyncId, triggerAsyncId, AsyncLocalStorage } from 'node:async_hooks';\nconst known = new Map<number, number>();\nfunction label(id: number): string { const k = known.get(id); return k === undefined ? 'ext' : '#' + k; }\nfunction trace(): { disable(): void } {\n  return createHook({\n    init(id: number, type: string, trigger: number): void { if (type === 'PROMISE') { known.set(id, known.size + 1); console.log('init', label(id), 'trig', label(trigger)); } },\n    before(id: number): void { if (known.has(id)) { console.log('before', label(id)); } },\n    after(id: number): void { if (known.has(id)) { console.log('after', label(id)); } },\n    promiseResolve(id: number): void { if (known.has(id)) { console.log('resolve', label(id)); } },\n  }).enable();\n}\nasync function work(): Promise<void> { console.log('a'); await 1; console.log('b'); await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 1); }); console.log('c'); }\nfunction main(): void { setTimeout((): void => { const hook = trace(); work(); setTimeout((): void => { console.log('timer'); }, 0); setTimeout((): void => { hook.disable(); }, 30); }, 0); }"
   },
   {
     "name": "postMessageToThread main to worker round trip",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  process.on('workerMessage', (value: any, src: any) => console.log('main workerMessage', JSON.stringify(value), src));\n  const echo = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    let hello = null, src0 = null;\n    process.on('workerMessage', (value, src) => { hello = value.hello; src0 = src; });\n    wt.parentPort.on('message', (m) => {\n      if (m === 'report') wt.parentPort.postMessage('worker got ' + JSON.stringify({ hello }) + ' from ' + src0);\n      else if (m === 'send') wt.postMessageToThread(0, { back: hello }).then((r) => { wt.parentPort.postMessage('worker send ' + r); }, (e) => { wt.parentPort.postMessage('worker send ' + e.code); });\n    });\n    wt.parentPort.postMessage('ready');\n  `, { eval: true });\n  let message: any = undefined;\n  await new Promise<void>((resolve: () => void): void => { echo.once('message', (m: any) => { message = m; resolve(); }); });\n  console.log('from echo:', message);\n  const attempt1 = async (): Promise<void> => { try { await wt.postMessageToThread(echo.threadId, { hello: 'worker' }); console.log('A main send resolved', undefined); } catch (e: any) { console.log('A main send', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt1();\n  echo.postMessage('report');\n  await new Promise<void>((resolve: () => void): void => { echo.once('message', (m: any) => { message = m; resolve(); }); });\n  console.log('from echo:', message);\n  echo.postMessage('send');\n  await new Promise<void>((resolve: () => void): void => { echo.once('message', (m: any) => { message = m; resolve(); }); });\n  console.log('from echo:', message);\n  await echo.terminate();\n  console.log('done');\n}"
   },
   {
     "name": "postMessageToThread worker to main",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  process.on('workerMessage', (value: any, src: any) => console.log('main workerMessage', JSON.stringify(value), src));\n  const sender = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    wt.parentPort.on('message', (go) => {\n      wt.postMessageToThread(0, { from: 'sender', go }).then((r) => { wt.parentPort.postMessage('sender resolved ' + r); }, (e) => { wt.parentPort.postMessage('sender ' + e.code); });\n    });\n    wt.parentPort.postMessage('ready');\n  `, { eval: true });\n  let message: any = undefined;\n  await new Promise<void>((resolve: () => void): void => { sender.once('message', (m: any) => { message = m; resolve(); }); });\n  sender.postMessage('go');\n  await new Promise<void>((resolve: () => void): void => { sender.once('message', (m: any) => { message = m; resolve(); }); });\n  console.log('from sender:', message);\n  await sender.terminate();\n  console.log('done');\n}"
   },
   {
     "name": "postMessageToThread rejection codes and timeout",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const attempt1 = async (): Promise<void> => { try { await wt.postMessageToThread(0, 1); console.log('same thread', 'resolved', undefined); } catch (e: any) { console.log('same thread', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt1();\n  const attempt2 = async (): Promise<void> => { try { await wt.postMessageToThread(99, 1); console.log('unknown id', 'resolved', undefined); } catch (e: any) { console.log('unknown id', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt2();\n  const bare = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    wt.parentPort.postMessage('bare ready');\n  `, { eval: true });\n  await new Promise<void>((resolve: () => void): void => { bare.once('message', (m: any) => { resolve(); }); });\n  const attempt3 = async (): Promise<void> => { try { await wt.postMessageToThread(bare.threadId, 'x'); console.log('no listener', 'resolved', undefined); } catch (e: any) { console.log('no listener', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt3();\n  const thrower = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    process.on('workerMessage', () => { throw new Error('boom'); });\n    wt.parentPort.postMessage('thrower ready');\n  `, { eval: true });\n  await new Promise<void>((resolve: () => void): void => { thrower.once('message', (m: any) => { resolve(); }); });\n  const attempt4 = async (): Promise<void> => { try { await wt.postMessageToThread(thrower.threadId, 'x'); console.log('listener throws', 'resolved', undefined); } catch (e: any) { console.log('listener throws', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt4();\n  const busy = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    process.on('workerMessage', () => {});\n    wt.parentPort.postMessage('busy started');\n    const end = Date.now() + 600; while (Date.now() < end) {}\n  `, { eval: true });\n  await new Promise<void>((resolve: () => void): void => { busy.once('message', (m: any) => { resolve(); }); });\n  const attempt5 = async (): Promise<void> => { try { await wt.postMessageToThread(busy.threadId, 'x', [], 50); console.log('timeout', 'resolved', undefined); } catch (e: any) { console.log('timeout', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt5();\n  await bare.terminate();\n  await thrower.terminate();\n  await busy.terminate();\n  console.log('done');\n}"
   },
   {
     "name": "postMessageToThread isInternalThread and argument errors",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  console.log('isInternalThread main', wt.isInternalThread);\n  const worker = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    wt.parentPort.postMessage('isInternalThread in worker ' + wt.isInternalThread + ' threadId ' + wt.threadId);\n  `, { eval: true });\n  let message: any = undefined;\n  await new Promise<void>((resolve: () => void): void => { worker.once('message', (m: any) => { message = m; resolve(); }); });\n  console.log(message);\n  const attempt1 = async (): Promise<void> => { try { await wt.postMessageToThread(99, 1, [], 'soon'); console.log('timeout type', 'resolved', undefined); } catch (e: any) { console.log('timeout type', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt1();\n  const attempt2 = async (): Promise<void> => { try { await wt.postMessageToThread(99, 1, [], -1); console.log('timeout range', 'resolved', undefined); } catch (e: any) { console.log('timeout range', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt2();\n  const attempt3 = async (): Promise<void> => { try { await wt.postMessageToThread(99, 1, [], 0); console.log('timeout zero unknown', 'resolved', undefined); } catch (e: any) { console.log('timeout zero unknown', e.name, e.code, JSON.stringify(e.message)); } };\n  await attempt3();\n  await worker.terminate();\n  console.log('done');\n}"
   },
   {
     "name": "events exports usingDomains symbols defaults and EventEmitterAsyncResource",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as ev from 'node:events';\nconst E: any = ev;\nfunction main(): void {\n  console.log('usingDomains', typeof E.usingDomains, E.usingDomains);\n  console.log('defaultMaxListeners', typeof E.defaultMaxListeners, E.defaultMaxListeners);\n  console.log('captureRejections', typeof E.captureRejections, E.captureRejections);\n  console.log('errorMonitor', typeof E.errorMonitor, String(E.errorMonitor));\n  const r: any = new E.EventEmitterAsyncResource({ name: 'probe' });\n  console.log('EventEmitterAsyncResource', typeof E.EventEmitterAsyncResource, typeof r, typeof r.asyncId, typeof r.triggerAsyncId, typeof r.emitDestroy, typeof r.on);\n  try { new E.EventEmitterAsyncResource({}); console.log('no error'); } catch (e: any) { console.log('nameError', e.name, e.code); }\n}\n"
   },
   {
     "name": "zlib codes map both directions and is frozen",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as zlib from 'node:zlib';\nfunction main(): void {\n  const codes: any = (zlib as any).codes;\n  console.log('codes', typeof codes, Object.keys(codes).length, Object.isFrozen(codes));\n  console.log(Object.keys(codes).map((k: string): string => k + '=' + codes[k]).join(' '));\n  console.log(codes.Z_OK, codes[0], codes[-6], codes.Z_VERSION_ERROR, codes[-3]);\n}\n"
   },
   {
     "name": "fs and fs/promises constants full object",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { constants } from 'node:fs';\nimport { constants as promiseConstants } from 'node:fs/promises';\nfunction main(): void {\n  const c: any = promiseConstants;\n  console.log('fs/promises constants', typeof c, Object.keys(c).length, Object.getPrototypeOf(c) === null);\n  console.log(Object.keys(c).map((k: string): string => k + '=' + c[k]).join(' '));\n  const f: any = constants;\n  console.log('fs constants', typeof f, Object.keys(f).length, Object.getPrototypeOf(f) === null, f.O_NONBLOCK, f.S_IRWXU, f.UV_DIRENT_BLOCK);\n}\n"
     },
     {
@@ -5144,115 +5101,96 @@
   {
     "name": "zlib one-shot sync argument validation and view inputs",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as zlib from 'node:zlib';\n\nfunction report(label: string, fn: () => any): void {\n  try {\n    const r: any = fn();\n    console.log(label, 'OK', r.length);\n  } catch (e: any) {\n    console.log(label, e.name, e.code, e.message);\n  }\n}\n\nfunction main(): void {\n  report('gzip number', () => zlib.gzipSync(5 as any));\n  report('gzip object', () => zlib.gzipSync({ a: 1 } as any));\n  report('gunzip null', () => zlib.gunzipSync(null as any));\n  report('inflate undefined', () => zlib.inflateSync(undefined as any));\n  report('deflate array', () => zlib.deflateSync([1, 2, 3] as any));\n  report('unzip boolean', () => zlib.unzipSync(true as any));\n  report('brotli string-like number', () => zlib.brotliCompressSync(7 as any));\n  report('options before buffer', () => zlib.gzipSync(5 as any, { level: 99 }));\n  report('level string', () => zlib.deflateSync(Buffer.from('abc'), { level: 'x' } as any));\n  report('level range', () => zlib.inflateRawSync(Buffer.from('abc'), { level: 99 }));\n  report('brotli ignores level', () => zlib.brotliCompressSync(Buffer.from('hello'), { level: 99 } as any));\n  report('DataView input', () => zlib.gzipSync(new DataView(new ArrayBuffer(4))));\n  report('ArrayBuffer input', () => zlib.deflateSync(new ArrayBuffer(4)));\n  const backing = new Uint8Array(32);\n  backing.set(Buffer.from('hello thaw zlib'), 5);\n  const view = new Uint8Array(backing.buffer, 5, 15);\n  console.log('subview round trip', zlib.gunzipSync(zlib.gzipSync(view)).toString());\n  const dv = new DataView(backing.buffer, 5, 15);\n  console.log('dataview round trip', zlib.inflateSync(zlib.deflateSync(dv)).toString());\n}\n"
   },
   {
     "name": "zlib async callback validation and view inputs",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as zlib from 'node:zlib';\n\nfunction report(label: string, fn: () => void): void {\n  try {\n    fn();\n    console.log(label, 'returned');\n  } catch (e: any) {\n    console.log(label, e.name, e.code, e.message);\n  }\n}\n\nfunction roundTrip(label: string, value: Buffer | DataView | ArrayBuffer | Uint8Array): Promise<void> {\n  return new Promise<void>((resolve: () => void) => {\n    zlib.gzip(value, (err: any, packed: Buffer) => {\n      if (err) {\n        console.log(label, 'error', err.message);\n        resolve();\n        return;\n      }\n      zlib.gunzip(packed, (err2: any, back: Buffer) => {\n        console.log(label, err2 ? err2.message : back.toString());\n        resolve();\n      });\n    });\n  });\n}\n\nasync function main(): Promise<void> {\n  report('no callback', () => zlib.gzip(Buffer.from('x')));\n  report('callback is a number', () => zlib.gzip(Buffer.from('x'), 5 as any));\n  report('bad chunk with callback', () => zlib.gzip(5 as any, (e: any, r: Buffer) => {}));\n  report('level out of range with callback', () => zlib.deflate(Buffer.from('x'), { level: 99 }, (e: any, r: Buffer) => {}));\n  report('options before callback', () => zlib.deflate(5 as any, { level: 99 }));\n  report('brotli ignores level', () => zlib.brotliCompress(Buffer.from('hello'), { level: 99 } as any, (e: any, r: Buffer) => {}));\n  await roundTrip('dataview', new DataView(new Uint8Array([104, 105, 33]).buffer));\n  await roundTrip('arraybuffer', new Uint8Array([104, 105, 33]).buffer);\n  await roundTrip('uint8array subview', new Uint8Array([0, 104, 105, 33]).subarray(1));\n  await roundTrip('empty null', null as any);\n  console.log('done');\n}\n"
   },
   {
     "name": "SHARE_ENV visibility, writes, deletes and coercion across the worker",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { Worker, SHARE_ENV } from 'node:worker_threads';\n\nfunction ask(worker: Worker, step: string): Promise<any> {\n  return new Promise<any>((resolve: (value: any) => void): void => {\n    worker.once('message', resolve);\n    worker.postMessage(step);\n  });\n}\n\nasync function main(): Promise<void> {\n  console.log(typeof SHARE_ENV, String(SHARE_ENV));\n  process.env.SV_A = 'parent1';\n  process.env.SV_DEL = 'gone';\n  const worker = new Worker(`\n    const { parentPort } = require('node:worker_threads');\n    parentPort.on('message', (step) => {\n      if (step === 'ready') {\n        parentPort.postMessage('ready');\n      } else if (step === 'read') {\n        parentPort.postMessage([process.env.SV_A, process.env.SV_AFTER, process.env.SV_DEL === undefined, 'SV_DEL' in process.env, Object.keys(process.env).includes('SV_A')].join(' '));\n      } else {\n        process.env.SV_B = 'fromworker';\n        process.env.SV_N = 7;\n        process.env.SV_U = undefined;\n        parentPort.postMessage('wrote');\n      }\n    });\n    setInterval(() => {}, 1000);\n  `, { eval: true, env: SHARE_ENV });\n  console.log('main got', await ask(worker, 'ready'));\n  process.env.SV_AFTER = 'afterstart';\n  delete process.env.SV_DEL;\n  console.log('main got', await ask(worker, 'read'));\n  console.log('main got', await ask(worker, 'write'));\n  await worker.terminate();\n  console.log('main after', process.env.SV_B, typeof process.env.SV_N, process.env.SV_N, process.env.SV_U, Object.keys(process.env).includes('SV_B'));\n}\n"
   },
   {
     "name": "Default and object env are copies the parent never sees",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { Worker } from 'node:worker_threads';\n\nfunction ask(worker: Worker, step: string): Promise<any> {\n  return new Promise<any>((resolve: (value: any) => void): void => {\n    worker.once('message', resolve);\n    worker.postMessage(step);\n  });\n}\n\nasync function main(): Promise<void> {\n  process.env.SV_C = 'parent1';\n  const alive = 'setInterval(() => {}, 1000);';\n  const copySource = `\n    const { parentPort } = require('node:worker_threads');\n    parentPort.on('message', (step) => {\n      if (step === 'view') {\n        parentPort.postMessage('view ' + process.env.SV_C + ' ' + Object.keys(process.env).includes('SV_C'));\n      } else {\n        process.env.SV_B = 'fromworker';\n        parentPort.postMessage('wrote');\n      }\n    });\n    ${alive}\n  `;\n  const objectSource = `\n    const { parentPort } = require('node:worker_threads');\n    parentPort.on('message', (step) => {\n      if (step === 'view') {\n        parentPort.postMessage('view ' + process.env.SV_O + ' ' + process.env.SV_C + ' ' + Object.keys(process.env).join(','));\n      } else {\n        process.env.SV_B = 'fromworker';\n        parentPort.postMessage('wrote');\n      }\n    });\n    ${alive}\n  `;\n  const w1 = new Worker(copySource, { eval: true });\n  console.log('default', await ask(w1, 'view'));\n  console.log('default', await ask(w1, 'write'));\n  await w1.terminate();\n  console.log('default after', process.env.SV_B);\n\n  const w2 = new Worker(objectSource, { eval: true, env: { SV_O: '1' } });\n  console.log('object', await ask(w2, 'view'));\n  console.log('object', await ask(w2, 'write'));\n  await w2.terminate();\n  console.log('object after', process.env.SV_B, process.env.SV_O);\n\n  const w3 = new Worker(copySource, { eval: true, env: process.env });\n  console.log('copy-env', await ask(w3, 'view'));\n  console.log('copy-env', await ask(w3, 'write'));\n  await w3.terminate();\n  console.log('copy-env after', process.env.SV_B);\n}\n"
   },
   {
     "name": "worker transfer list moves buffers from a worker, views and resizable buffers",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const worker = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    const buf = new ArrayBuffer(8); new Uint8Array(buf)[0] = 7;\n    wt.parentPort.postMessage({ tag: 'array', buf }, [buf]);\n    wt.parentPort.postMessage({ tag: 'sender', len: buf.byteLength, det: buf.detached });\n    const opt = new ArrayBuffer(4);\n    wt.parentPort.postMessage({ tag: 'options', buf: opt }, { transfer: [opt] });\n    wt.parentPort.postMessage({ tag: 'sender', len: opt.byteLength, det: opt.detached });\n    const big = new ArrayBuffer(16); const view = new Uint8Array(big, 4, 4);\n    wt.parentPort.postMessage({ tag: 'view', view }, [big]);\n    wt.parentPort.postMessage({ tag: 'sender', len: view.length, off: view.byteOffset, det: big.detached });\n    const rb = new ArrayBuffer(8, { maxByteLength: 16 });\n    wt.parentPort.postMessage({ tag: 'resizable', buf: rb }, [rb]);\n    wt.parentPort.postMessage({ tag: 'sender', len: rb.byteLength, res: rb.resizable, max: rb.maxByteLength });\n    const kept = new ArrayBuffer(3);\n    const attempt = (label, run) => { try { run(); } catch (e) { wt.parentPort.postMessage({ tag: 'error', label, name: e.name, code: e.code, message: e.message }); } };\n    attempt('object list', () => wt.parentPort.postMessage(1, [{}]));\n    attempt('duplicate', () => wt.parentPort.postMessage(1, [kept, kept]));\n    attempt('string list', () => wt.parentPort.postMessage(1, 'x'));\n    attempt('shared', () => wt.parentPort.postMessage(1, [new SharedArrayBuffer(2)]));\n    wt.parentPort.postMessage({ tag: 'kept', len: kept.byteLength, det: kept.detached });\n    wt.parentPort.postMessage({ tag: 'end' });\n  `, { eval: true });\n  const queue: any[] = [];\n  worker.on('message', (m: any): void => { queue.push(m); });\n  const next = async (): Promise<any> => {\n    while (queue.length === 0) { await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 1); }); }\n    return queue.shift();\n  };\n  let m: any = await next();\n  while (m.tag !== 'end') {\n    if (m.tag === 'array' || m.tag === 'options' || m.tag === 'view' || m.tag === 'resizable') console.log('received', m.tag);\n    else if (m.tag === 'sender') console.log('sender', JSON.stringify(m));\n    else if (m.tag === 'error') console.log(m.label, m.name, m.code, JSON.stringify(m.message));\n    else console.log('kept', m.len, m.det);\n    m = await next();\n  }\n  await worker.terminate();\n  const late = new ArrayBuffer(4);\n  worker.postMessage(1, [late]);\n  console.log('after exit', late.byteLength, late.detached);\n  console.log('done');\n}"
   },
   {
     "name": "worker postMessageToThread moves a buffer to the main thread and detaches on an unknown thread",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  process.on('workerMessage', (v: any, source: number): void => { console.log('main got', v.kind, source); });\n  const worker = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    wt.parentPort.on('message', (m) => {\n      if (m === 'send') {\n        const c = new ArrayBuffer(5);\n        wt.postMessageToThread(0, { kind: 'bytes', c }, [c]).then(() => wt.parentPort.postMessage({ tag: 'sent', len: c.byteLength, det: c.detached }));\n      } else {\n        const kept = new ArrayBuffer(4);\n        wt.postMessageToThread(99, 1, [kept]).then(() => wt.parentPort.postMessage({ tag: 'unknown resolved' }), (e) => wt.parentPort.postMessage({ tag: 'unknown', name: e.name, code: e.code, message: e.message, len: kept.byteLength, det: kept.detached }));\n      }\n    });\n    wt.parentPort.postMessage({ tag: 'ready' });\n  `, { eval: true });\n  const queue: any[] = [];\n  worker.on('message', (m: any): void => { queue.push(m); });\n  const next = async (): Promise<any> => {\n    while (queue.length === 0) { await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 1); }); }\n    return queue.shift();\n  };\n  await next();\n  worker.postMessage('send');\n  console.log('worker sent', JSON.stringify(await next()));\n  worker.postMessage('unknown');\n  const u: any = await next();\n  console.log('unknown', u.name, u.code, JSON.stringify(u.message), u.len, u.det);\n  await worker.terminate();\n  const late = new ArrayBuffer(4);\n  worker.postMessage(1, [late]);\n  console.log('after exit', late.byteLength, late.detached);\n  console.log('done');\n}"
   },
   {
     "name": "MessageChannel port transfer in thread moves the port and its queue",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { MessageChannel } from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const carrier = new MessageChannel();\n  const inner = new MessageChannel();\n  const carrierQueue: any[] = [];\n  carrier.port2.on('message', (m: any): void => { carrierQueue.push(m); });\n  const next = async (queue: any[]): Promise<any> => {\n    while (queue.length === 0) { await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 1); }); }\n    return queue.shift();\n  };\n  inner.port2.postMessage('q1');\n  inner.port2.postMessage('q2');\n  carrier.port1.postMessage({ tag: 'moved', p: inner.port1 }, [inner.port1]);\n  const msg: any = await next(carrierQueue);\n  console.log('moved', msg.tag, msg.p === inner.port1, typeof msg.p.postMessage);\n  console.log('sender copy', inner.port1.postMessage('after'));\n  const movedQueue: any[] = [];\n  msg.p.on('message', (v: any): void => { movedQueue.push(v); });\n  console.log('moved got', await next(movedQueue));\n  console.log('moved got', await next(movedQueue));\n  const peerQueue: any[] = [];\n  inner.port2.on('message', (v: any): void => { peerQueue.push(v); });\n  msg.p.postMessage('back');\n  console.log('peer got', await next(peerQueue));\n  inner.port2.close();\n  carrier.port1.close();\n  carrier.port2.close();\n  console.log('done');\n}"
   },
   {
     "name": "MessageChannel port transfer list errors and postMessage return values",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { MessageChannel } from 'node:worker_threads';\n\nfunction err(f: () => unknown): string {\n  try { const r = f(); return 'ok ' + String(r); } catch (e: any) { return `threw ${e?.name} code=${e?.code} ${JSON.stringify(e?.message ?? String(e))}`; }\n}\n\nfunction main(): void {\n  const c = new MessageChannel();\n  const d = new MessageChannel();\n  console.log('live return', c.port1.postMessage('a'));\n  console.log('transfer', err(() => c.port1.postMessage(1, [d.port1])));\n  console.log('again', err(() => c.port1.postMessage(1, [d.port1])));\n  console.log('dup', err(() => c.port1.postMessage(1, [d.port2, d.port2])));\n  console.log('own', err(() => c.port1.postMessage(1, [c.port1])));\n  console.log('own options', err(() => c.port1.postMessage(1, { transfer: [c.port1] })));\n  console.log('unlisted', err(() => c.port1.postMessage({ p: d.port2 })));\n  const e = new MessageChannel();\n  e.port1.close();\n  console.log('closed', err(() => c.port1.postMessage(1, [e.port1])));\n  console.log('closed return', err(() => e.port1.postMessage(2)));\n  console.log('bad', err(() => c.port1.postMessage(1, [{} as any])));\n  console.log('non-iterable', err(() => c.port1.postMessage(1, 'x' as any)));\n  console.log('transferred copy', err(() => d.port1.postMessage('x')));\n  c.port1.close();\n  c.port2.close();\n  d.port2.close();\n}"
   },
   {
     "name": "node:os signals/errno and node:constants values match Node",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as os from 'node:os';\nimport * as C from 'node:constants';\nfunction main(): void {\n  console.log(typeof os.constants.signals.SIGINT, os.constants.signals.SIGINT, os.constants.errno.ENOENT);\n  console.log(typeof C.O_CREAT, C.O_CREAT, C.E2BIG, C.SIGTERM, C.S_IFMT, C.RTLD_NOW, typeof C.defaultCoreCipherList);\n}"
   },
   {
     "name": "process platform, arch and debugPort match Node",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  console.log(process.platform, process.arch, process.debugPort, typeof process.version);\n}"
   },
   {
     "name": "node:dns error codes and node:tls defaults match Node",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as dns from 'node:dns';\nimport * as tls from 'node:tls';\nfunction main(): void {\n  console.log(dns.ALL, dns.V4MAPPED, dns.ADDRCONFIG, dns.BADFLAGS, typeof dns.Resolver);\n  console.log(tls.DEFAULT_ECDH_CURVE, tls.DEFAULT_MIN_VERSION, tls.CLIENT_RENEG_LIMIT, typeof tls.SecureContext);\n}"
   },
   {
     "name": "bare node:fs namespace used as a value keeps thaw-js and matches Node",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as fs from 'node:fs';\nconst f: any = fs;\nfunction main(): void {\n  console.log(typeof f.existsSync, f.existsSync('/nonexistent'), typeof f.promises, typeof f.constants);\n}"
   },
   {
     "name": "bare node:fs namespace passed to a helper function",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as fs from 'node:fs';\nfunction use(m: any): boolean { return Object.keys(m).length > 10; }\nfunction main(): void {\n  console.log(use(fs), typeof (fs as any).default, typeof (fs as any).promises.readFile);\n}"
   },
   {
     "name": "bare node:fs/promises namespace used as a value",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as fsp from 'node:fs/promises';\nconst f: any = fsp;\nfunction main(): void {\n  console.log(typeof f.readFile, typeof f.constants, typeof f.default);\n}"
   },
   {
     "name": "bare node:events namespace used as a value",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as ev from 'node:events';\nconst E: any = ev;\nfunction main(): void {\n  console.log(typeof E.default, typeof E.EventEmitter, typeof E.once, typeof E.default.defaultMaxListeners);\n}"
   },
   {
     "name": "bare node:path namespace used as a value",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as path from 'node:path';\nconst p: any = path;\nfunction main(): void {\n  console.log(typeof p.default, typeof p.join, p.default.join('a', 'b'), typeof p.posix);\n}"
   },
   {
     "name": "bare node:path namespace has Node's Module shape: default key, toStringTag, no __esModule",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as p from 'node:path';\nconst q: any = p;\nfunction main(): void {\n  console.log(Object.keys(q).includes('default'), Object.prototype.toString.call(q), typeof q.default.__esModule);\n}"
   },
   {
     "name": "bare node builtin namespaces fs/events/util/os/path have a default key and Module tag",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as fs from 'node:fs';\nimport * as events from 'node:events';\nimport * as util from 'node:util';\nimport * as os from 'node:os';\nimport * as path from 'node:path';\nconst all: any = { fs, events, util, os, path };\nfunction main(): void {\n  for (const k of Object.keys(all)) console.log(k, typeof all[k].default, Object.keys(all[k]).includes('default'), Object.prototype.toString.call(all[k]));\n}"
   },
   {
     "name": "bare node:http namespace used as a value exposes STATUS_CODES",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as http from 'node:http';\nconst h: any = http;\nfunction main(): void {\n  console.log(typeof h.createServer, typeof h.STATUS_CODES, typeof h.default);\n}"
   },
   {
@@ -5264,129 +5202,108 @@
   {
     "name": "main thread stdin beside worker_threads import reads data and end",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "stdin": "hi\nyo\n",
     "source": "import { isMainThread } from 'node:worker_threads'; function main(): void { let text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (chunk: string): void => { text += chunk; }); process.stdin.on('end', (): void => { console.log(isMainThread, JSON.stringify(text)); }); }"
   },
   {
     "name": "main thread stdin beside worker_threads import with empty stdin",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "stdin": "",
     "source": "import { isMainThread } from 'node:worker_threads'; function main(): void { let text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (chunk: string): void => { text += chunk; }); process.stdin.on('end', (): void => { console.log(isMainThread, JSON.stringify(text)); }); }"
   },
   {
     "name": "worker port transfer echoes a port message and closes both ends",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const channel = new wt.MessageChannel();\n  const port1 = channel.port1;\n  const port2 = channel.port2;\n  const worker = new wt.Worker(`\n    const { port } = require('node:worker_threads').workerData;\n    port.on('message', (m) => { port.postMessage('echo:' + m); if (m === 'bye') port.close(); });\n    port.postMessage('hello');\n  `, { eval: true, workerData: { port: port2 }, transferList: [port2] });\n  const exited = new Promise<number>((resolve: (code: number) => void): void => { worker.once('exit', resolve); });\n  const next = (): Promise<any> => new Promise<any>((resolve: (value: any) => void): void => { port1.once('message', resolve); });\n  console.log(await next());\n  port1.postMessage('a');\n  console.log(await next());\n  const closed = new Promise<void>((resolve: () => void): void => { port1.once('close', resolve); });\n  port1.postMessage('bye');\n  console.log(await next());\n  await closed;\n  console.log('closed');\n  console.log('exit', await exited);\n}\n"
   },
   {
     "name": "worker port transfer returns a port the worker made and answers through it",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const worker = new wt.Worker(`\n    const { parentPort, MessageChannel } = require('node:worker_threads');\n    parentPort.once('message', ({ p }) => {\n      const channel = new MessageChannel();\n      parentPort.postMessage({ tag: 'back', q: channel.port2 }, [channel.port2]);\n      channel.port1.on('message', (m) => { p.postMessage('echo ' + m); p.close(); channel.port1.close(); });\n    });\n  `, { eval: true });\n  const exited = new Promise<number>((resolve: (code: number) => void): void => { worker.once('exit', resolve); });\n  const channel = new wt.MessageChannel();\n  const port1 = channel.port1;\n  const port2 = channel.port2;\n  const back = new Promise<any>((resolve: (value: any) => void): void => { worker.once('message', resolve); });\n  worker.postMessage({ p: port2 }, [port2]);\n  const reply = await back;\n  console.log(reply.tag);\n  const echoed = new Promise<any>((resolve: (value: any) => void): void => { port1.once('message', resolve); });\n  reply.q.postMessage('ping');\n  console.log(await echoed);\n  console.log('exit', await exited);\n}\n"
   },
   {
     "name": "transfer list port errors match Node (duplicates, unlisted, detached, own port)",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  const err = (f: () => void): string => { try { f(); return 'ok'; } catch (e: any) { return `${e.name} ${e.code} ${e.message}`; } };\n  const worker = new wt.Worker('setInterval(() => {}, 1000)', { eval: true });\n  const channel = new wt.MessageChannel();\n  const port1 = channel.port1;\n  const port2 = channel.port2;\n  console.log('dup', err((): void => { worker.postMessage({}, [port2, port2]); }));\n  console.log('unlisted', err((): void => { worker.postMessage({ p: port2 }); }));\n  const c = new wt.MessageChannel();\n  console.log('transfer', err((): void => { worker.postMessage({}, [c.port1]); }));\n  console.log('again', err((): void => { worker.postMessage({}, [c.port1]); }));\n  c.port2.close();\n  console.log('closed', err((): void => { worker.postMessage({}, [c.port2]); }));\n  console.log('own', err((): void => { port1.postMessage('x', [port1]); }));\n  await worker.terminate();\n  console.log('terminated');\n}\n"
   },
   {
     "name": "moveMessagePortToContext delivers into a vm context",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { MessageChannel, moveMessagePortToContext } from 'node:worker_threads';\nimport { createContext, runInContext } from 'node:vm';\nasync function main(): Promise<void> {\n  const channel = new MessageChannel();\n  const port1: any = channel.port1;\n  const port2: any = channel.port2;\n  const ctx: any = { out: [] as string[], port: undefined as any };\n  createContext(ctx);\n  ctx.port = moveMessagePortToContext(port1, ctx);\n  runInContext(`port.onmessage = function (ev) { out.push([ev.data.constructor === Object, ev.data.list instanceof Array, Object.getPrototypeOf(ev.data) === Object.prototype, this === port, ev.target === port, ev.type, ev.ports.length, typeof MessagePort].join(',')); };`, ctx);\n  ctx.port.start();\n  port2.postMessage({ list: [1, 2] });\n  port2.postMessage({ list: [] });\n  for (let i = 0; i < 2000 && ctx.out.length < 2; i++) await new Promise<void>((resolve) => { setTimeout(resolve, 1); });\n  console.log(ctx.out.join('|'));\n  port2.close();\n  ctx.port.close();\n}"
   },
   {
     "name": "moveMessagePortToContext argument and closed-port errors",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { MessageChannel, moveMessagePortToContext } from 'node:worker_threads';\nimport { createContext } from 'node:vm';\nfunction main(): void {\n  const channel = new MessageChannel();\n  const port1: any = channel.port1;\n  const port2: any = channel.port2;\n  const ctx: any = createContext({});\n  const attempt = (run: () => unknown): string => { try { run(); return 'ok'; } catch (e: any) { return e.name + ' ' + e.code + ' ' + e.message; } };\n  const lines: string[] = [];\n  lines.push(attempt(() => moveMessagePortToContext()));\n  lines.push(attempt(() => moveMessagePortToContext({}, ctx)));\n  lines.push(attempt(() => moveMessagePortToContext(port1)));\n  lines.push(attempt(() => moveMessagePortToContext(port1, {})));\n  lines.push(attempt(() => moveMessagePortToContext(port1, null)));\n  lines.push(attempt(() => moveMessagePortToContext(port1, ctx)));\n  const closed = new MessageChannel();\n  closed.port1.close();\n  lines.push(attempt(() => moveMessagePortToContext(closed.port1, ctx)));\n  console.log(lines.join('\\n'));\n  port2.close();\n  closed.port2.close();\n}"
   },
   {
     "name": "dynamic any-typed Promise.any and allSettled consume inline rejected inputs",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const P: any = Promise;\n  P.any([P.reject(1), P.resolve(2)]).then((v: any): void => { console.log('any ' + v); });\n  P.allSettled([P.resolve(1), P.reject(2)]).then((v: any): void => { console.log(JSON.stringify(v)); });\n  P.allSettled([P.reject(3), P.reject(4)]).then((v: any): void => { console.log('settled-all-rejected ' + v.length + ' ' + v[1].reason); });\n}\n"
   },
   {
     "name": "dynamic any-typed Promise all race any reject paths and AggregateError errors order",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const P: any = Promise;\n  P.all([P.reject(3), P.resolve(4)]).catch((e: any): void => { console.log('all ' + e); });\n  P.race([P.reject(5), P.resolve(6)]).catch((e: any): void => { console.log('race ' + e); });\n  P.any([P.reject(7), P.reject(8)]).catch((e: any): void => { console.log('any ' + e.errors.join(',')); });\n  P.any([P.reject(9), P.resolve(10)]).then((v: any): void => { console.log('any-mixed ' + v); });\n}\n"
   },
   {
     "name": "net server destroys right after write, client still receives the echo",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as net from 'node:net';\nfunction main(): void {\n  let got = '';\n  let left = 2;\n  const finish = (): void => { if (--left === 0) console.log('client got', JSON.stringify(got)); };\n  const server: any = net.createServer((sock: any): void => {\n    sock.on('data', (d: any): void => { sock.write(d); sock.destroy(); server.close(); });\n  });\n  server.on('close', finish);\n  server.listen(0, '127.0.0.1', (): void => {\n    const port = server.address().port;\n    const c: any = net.connect(port, '127.0.0.1', (): void => { c.write('hello'); });\n    c.on('data', (d: any): void => { got += d.toString(); });\n    c.on('close', finish);\n  });\n}"
   },
   {
     "name": "net client writes then destroys right away, server still receives the bytes",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import * as net from 'node:net';\nfunction main(): void {\n  let got = '';\n  const server: any = net.createServer((sock: any): void => {\n    sock.on('data', (d: any): void => { got += d.toString(); });\n    sock.on('close', (): void => { server.close(); });\n  });\n  server.on('close', (): void => { console.log('server got', JSON.stringify(got)); });\n  server.listen(0, '127.0.0.1', (): void => {\n    const port = server.address().port;\n    const c: any = net.connect(port, '127.0.0.1', (): void => { c.write('ping'); c.destroy(); });\n  });\n}"
   },
   {
     "name": "async local storage survives await literal, timer and resolved promise in run",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function awaitLit(): Promise<void> { await 1; rec('await-lit'); }\nasync function awaitTimer(): Promise<void> { await sleep(2); rec('await-timer'); await Promise.resolve(); rec('await-resolved'); }\nasync function main(): Promise<void> {\n  await als.run('A', async (): Promise<void> => { rec('sync'); await awaitLit(); await awaitTimer(); rec('end'); });\n  rec('after-run');\n}\n"
   },
   {
     "name": "async local storage survives then, catch, finally and queueMicrotask after an await",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function main(): Promise<void> {\n  await als.run('B', async (): Promise<void> => {\n    await sleep(1);\n    queueMicrotask((): void => { rec('microtask-after-await'); });\n    await sleep(1);\n    await Promise.resolve(1).then((): void => { rec('then-after-await'); });\n    await Promise.reject(new Error('x')).catch((): void => { rec('catch-after-await'); });\n    await Promise.resolve(1).finally((): void => { rec('finally-after-await'); });\n    await Promise.resolve(1).then((): void => { rec('then-after-await2'); });\n    rec('end');\n  });\n  rec('outside');\n}\n"
   },
   {
     "name": "async local storage survives Promise.all, race, allSettled and any continuations",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function main(): Promise<void> {\n  await als.run('C', async (): Promise<void> => {\n    await Promise.all([sleep(1), sleep(2)]);\n    rec('after-all');\n    await Promise.race([sleep(1), sleep(3)]);\n    rec('after-race');\n    await Promise.allSettled([sleep(1)]);\n    rec('after-allSettled');\n    await Promise.any([sleep(1)]);\n    rec('after-any');\n  });\n  rec('outside');\n}\n"
   },
   {
     "name": "async local storage keeps two concurrent runs apart through an awaited run promise and enterWith",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function main(): Promise<void> {\n  const first = als.run('P1', async (): Promise<number> => { await sleep(1); rec('p1'); return 1; });\n  const second = als.run('P2', async (): Promise<number> => { const v = await first; rec('p2-after-p1'); return v + 1; });\n  const results = await Promise.all([first, second]);\n  console.log('results ' + results.join(','));\n  const outer = sleep(1);\n  await als.run('C', async (): Promise<void> => { await outer.then((): void => { rec('then-on-outer'); }); });\n  als.enterWith('E');\n  await sleep(1);\n  console.log('enterWith=' + String(als.getStore()));\n}\n"
   },
   {
     "name": "async local storage survives for await, an emitter after an await and promisify",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nimport { EventEmitter } from 'node:events';\nimport { promisify } from 'node:util';\nimport { setTimeout as delay } from 'node:timers/promises';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function* gen(): AsyncGenerator<number> { await sleep(1); rec('gen'); yield 1; }\nfunction cbApi(v: number, cb: (err: any, v?: number) => void): void { setTimeout((): void => { cb(null, v * 2); }, 1); }\nconst promisedApi = promisify(cbApi);\nasync function main(): Promise<void> {\n  await als.run('E', async (): Promise<void> => {\n    for await (const _x of gen()) { rec('for-await'); }\n    const em = new EventEmitter();\n    em.on('e', (): void => { rec('emitter-sync'); });\n    await delay(1);\n    em.emit('e');\n    const doubled = await promisedApi(21);\n    rec('promisify-' + doubled);\n  });\n  rec('outside');\n}\n"
   },
   {
     "name": "async local storage in two concurrent http handlers keeps each request store",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nimport * as http from 'node:http';\nconst als = new AsyncLocalStorage<string>();\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nfunction main(): void {\n  const srv = http.createServer((req: any, res: any): void => {\n    const id = String(req.url).slice(1);\n    als.run('req-' + id, async (): Promise<void> => {\n      await sleep(id === 'a' ? 4 : 1);\n      await sleep(1);\n      res.setHeader('x-store', String(als.getStore()));\n      res.end('ok');\n    });\n  });\n  srv.listen(0, '127.0.0.1', (): void => {\n    const port = (srv.address() as any).port;\n    const out: string[] = [];\n    for (const p of ['a', 'b']) {\n      http.get({ host: '127.0.0.1', port, path: '/' + p }, (res: any): void => {\n        res.on('data', (): void => {});\n        res.on('end', (): void => {\n          out.push(p + ':' + String(res.headers['x-store']));\n          if (out.length === 2) { console.log(out.sort().join(',')); srv.close(); }\n        });\n      });\n    }\n  });\n}\n"
   },
   {
     "name": "symbol key via Object.defineProperty enumerable is readable through index, hasOwnProperty.call and descriptor",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = { a: 1 };\n  Object.defineProperty(o, S, { value: 5, enumerable: true, writable: true, configurable: true });\n  console.log(o[S]);\n  console.log(Object.prototype.hasOwnProperty.call(o, S));\n  const d: any = Object.getOwnPropertyDescriptor(o, S);\n  console.log(d.enumerable, d.value, d.writable);\n}"
   },
   {
     "name": "non-enumerable symbol key from defineProperty and Reflect.defineProperty keeps its descriptor",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  console.log(o[T], Object.prototype.hasOwnProperty.call(o, T), o.hasOwnProperty(T));\n  const d: any = Object.getOwnPropertyDescriptor(o, T);\n  console.log(d.enumerable, d.value, d.writable);\n  console.log(Reflect.defineProperty(o, S, { value: 3, enumerable: true }));\n  console.log(o[S], Object.prototype.hasOwnProperty.call(o, S));\n}"
   },
   {
     "name": "non-enumerable symbol key is skipped by Object.assign, spread and rest",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1, [S]: 2 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  const c: any = Object.assign({}, o);\n  console.log(c[S], c[T], Object.getOwnPropertySymbols(c).length);\n  const sp: any = { ...o };\n  console.log(sp[S], sp[T], Object.getOwnPropertySymbols(sp).length);\n  const { a, ...rest }: any = o;\n  console.log(a, rest[S], rest[T], Object.getOwnPropertySymbols(rest).length);\n}"
   },
   {
     "name": "getOwnPropertySymbols and Reflect.ownKeys count enumerable and non-enumerable symbol keys",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1, [S]: 2 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  console.log(Object.getOwnPropertySymbols(o).length, Reflect.ownKeys(o).length, Object.keys(o).length);\n  console.log(Object.getOwnPropertySymbols(o).length, Object.getOwnPropertySymbols(o).length === 2);\n}"
   },
   {
@@ -5397,91 +5314,76 @@
   {
     "name": "Object.defineProperties accepts computed symbol, string and number keys",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({}, { [S]: { value: 1, enumerable: true, writable: true, configurable: true }, ['a' + 'b']: { value: 2, enumerable: true, writable: true, configurable: true }, 3: { value: 3, enumerable: true, writable: true, configurable: true } });\n  console.log(o[S], o.ab, o[3]);\n  console.log(Object.prototype.hasOwnProperty.call(o, S), Object.prototype.hasOwnProperty.call(o, 'ab'), Object.prototype.hasOwnProperty.call(o, 3));\n  console.log(Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n}"
   },
   {
     "name": "non-enumerable computed defineProperties key is excluded from keys, assign and spread",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const k = 'hid' + 'den';\n  const o: any = Object.defineProperties({ a: 1 }, { [k]: { value: 5, enumerable: false, writable: true, configurable: true }, ['vis' + 'ible']: { value: 6, enumerable: true, writable: true, configurable: true } });\n  console.log(Object.keys(o).join(), o.hidden, o.visible);\n  const c: any = Object.assign({}, o);\n  console.log(Object.keys(c).join());\n  const sp: any = { ...o };\n  console.log(Object.keys(sp).join());\n  const { a, ...rest }: any = o;\n  console.log(a, Object.keys(rest).join());\n}"
   },
   {
     "name": "defineProperties evaluates computed keys and descriptor values once in source order",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const log: string[] = [];\n  const key = (label: string): string => { log.push('key ' + label); return label; };\n  const tick = (label: string): number => { log.push('val ' + label); return log.length; };\n  const o: any = Object.defineProperties({}, {\n    [key('a')]: { value: tick('a'), enumerable: true, writable: true, configurable: true },\n    [key('b')]: { value: tick('b'), enumerable: true, writable: true, configurable: true },\n    c: { value: tick('c'), enumerable: true, writable: true, configurable: true },\n  });\n  console.log(log.join('|'));\n  console.log(o.a, o.b, o.c, Object.keys(o).join());\n}"
   },
   {
     "name": "computed non-enumerable symbol and string keys are read but excluded from keys, assign, spread and JSON",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7, enumerable: false, writable: true, configurable: true }, ['a' + 'b']: { value: 8, enumerable: false, writable: true, configurable: true } });\n  console.log(o[S], o.ab, Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n  const c: any = Object.assign({}, o);\n  console.log(c[S], c.ab, Object.getOwnPropertySymbols(c).length, Object.keys(c).join());\n  const sp: any = { ...o };\n  console.log(sp[S], sp.ab, Object.getOwnPropertySymbols(sp).length, Object.keys(sp).join());\n  console.log(JSON.stringify(o));\n}"
   },
   {
     "name": "computed writable data property accepts assignment and reads back the new value",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { ['w' + 'x']: { value: 1, enumerable: true, writable: true, configurable: true } });\n  o.wx = 5;\n  console.log(o.wx, Object.keys(o).join());\n}"
   },
   {
     "name": "computed key on a class instance with a fixed layout defines a dynamic field",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "class P { x = 1; }\nfunction main(): void {\n  const p: any = new P();\n  Object.defineProperties(p, { ['y' + 'z']: { value: 2, enumerable: true, writable: true, configurable: true } });\n  console.log(p.x, p.yz, Object.keys(p).join());\n}"
   },
   {
     "name": "computed key on a typed object literal with a fixed layout defines a dynamic field",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const q: { a: number } = { a: 1 };\n  Object.defineProperties(q, { ['b' + 'c']: { value: 2, enumerable: true, writable: true, configurable: true } });\n  console.log((q as any).bc, Object.keys(q).join());\n}"
   },
   {
     "name": "computed symbol key with omitted enumerable is non-enumerable: excluded from keys, assign and spread",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7, writable: true, configurable: true } });\n  console.log(o[S], Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n  const c: any = Object.assign({}, o);\n  console.log(c[S], Object.getOwnPropertySymbols(c).length);\n  const sp: any = { ...o };\n  console.log(sp[S], Object.getOwnPropertySymbols(sp).length, Object.keys(o).join());\n}"
   },
   {
     "name": "computed string key with omitted enumerable is non-enumerable and absent from JSON",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { ['a' + 'b']: { value: 7, writable: true, configurable: true } });\n  console.log(o.ab, Object.prototype.propertyIsEnumerable.call(o, 'ab'), Object.keys(o).join());\n  console.log(JSON.stringify(o));\n}"
   },
   {
     "name": "computed symbol accessor with get and set runs through the accessor and keeps its counters",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  let reads = 0;\n  let writes = 0;\n  let stored = 0;\n  const o: any = Object.defineProperties({}, { [S]: { get: () => { reads++; return stored; }, set: (v: number) => { writes++; stored = v; }, enumerable: true, configurable: true } });\n  o[S] = 9;\n  console.log(o[S], reads, writes, stored);\n}"
   },
   {
     "name": "literal key omitted enumerable on a dynamic target is non-enumerable",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { k: { value: 7, writable: true, configurable: true } });\n  console.log(o.k, Object.keys(o).join());\n}"
   },
   {
     "name": "computed keys that omit writable and configurable read back the value and stay non-enumerable",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7 }, ['x' + 'y']: { value: 8 } });\n  console.log(o[S], o.xy, Object.keys(o).join(), Object.getOwnPropertySymbols(o).length);\n  const c: any = Object.assign({}, o);\n  console.log(c.xy, Object.keys(c).join());\n  console.log(JSON.stringify(o));\n}"
   },
   {
     "name": "wasi embedded binary module exits through proc_exit with code 6",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { WASI } from 'node:wasi'; function main(): void { const wasi = new WASI({ version: 'preview1', returnOnExit: true, args: ['embedded'], env: { MODE: 'standalone' } }); const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,8,2,96,1,127,0,96,0,0,2,36,1,22,119,97,115,105,95,115,110,97,112,115,104,111,116,95,112,114,101,118,105,101,119,49,9,112,114,111,99,95,101,120,105,116,0,0,3,2,1,1,5,3,1,0,1,7,19,2,6,109,101,109,111,114,121,2,0,6,95,115,116,97,114,116,0,1,10,8,1,6,0,65,6,16,0,11]); const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { wasi_snapshot_preview1: wasi.wasiImport }); console.log(wasi.start(instance)); }"
   },
   {
     "name": "File global and node:buffer File: name, lastModified, slice to Blob, ERR_MISSING_ARGS, descriptor",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "import { File, Blob } from 'node:buffer'; async function main(): Promise<void> { const f = new File(['hello ', new Uint8Array([119, 111, 114, 108, 100])], 'greeting.txt', { type: 'Text/Plain', lastModified: 1700000000000 }); console.log(f.name, f.size, f.type, f.lastModified, typeof (f as any).webkitRelativePath); console.log(f instanceof File, f instanceof Blob, globalThis.File instanceof Function); const s = f.slice(0, 5, 'Text/Html'); console.log(s instanceof File, s instanceof Blob, s.size, s.type, await s.text(), await f.text()); const d: any = Object.getOwnPropertyDescriptor(globalThis, 'File'); console.log(typeof d.value, d.writable, d.enumerable, d.configurable); try { new (File as any)(['a']); } catch (e: any) { console.log(e.name, e.code, e.message); } const before = Date.now(); const dflt = new File([], 'd.bin'); const after = Date.now(); console.log(dflt.lastModified >= before && dflt.lastModified <= after, JSON.stringify(dflt.type), dflt.size); }"
   },
   {
     "name": "webcrypto PBKDF2 deriveBits/deriveKey, pg SCRAM shape, HMAC sign and importKey/deriveBits errors",
     "expect": "matched",
-    "expectQuickjsLink": false,
     "source": "const fail = async (run: () => any): Promise<string> => {\n  try {\n    await run();\n    return \"ok\";\n  } catch (e: any) {\n    return e.name + \": \" + e.message;\n  }\n};\nconst hex = (b: ArrayBuffer): string => Buffer.from(b).toString(\"hex\");\nasync function main(): Promise<void> {\n  const enc = new TextEncoder();\n  const base = await crypto.subtle.importKey(\"raw\", enc.encode(\"pencil\"), \"PBKDF2\", false, [\"deriveBits\", \"deriveKey\"]);\n  const salt = Buffer.from(\"QSXCR+Q6sek8bf92\", \"base64\");\n  const salted = await crypto.subtle.deriveBits({ name: \"PBKDF2\", hash: \"SHA-256\", salt: salt, iterations: 4096 }, base, 256);\n  console.log(hex(salted));\n  const hmac = await crypto.subtle.importKey(\"raw\", salted, { name: \"HMAC\", hash: { name: \"SHA-256\" } }, false, [\"sign\"]);\n  const clientKey = await crypto.subtle.sign(\"HMAC\", hmac, enc.encode(\"Client Key\"));\n  console.log(hex(await crypto.subtle.digest(\"SHA-256\", clientKey)));\n  const aes = await crypto.subtle.deriveKey({ name: \"PBKDF2\", hash: \"SHA-1\", salt: new Uint8Array(0), iterations: 2 }, base, { name: \"AES-GCM\", length: 128 }, true, [\"encrypt\"]);\n  console.log(aes.algorithm.name, aes.usages.join(\",\"), hex(await crypto.subtle.exportKey(\"raw\", aes)));\n  console.log(await fail(() => crypto.subtle.importKey(\"raw\", enc.encode(\"pw\"), \"PBKDF2\", true, [\"deriveBits\"])));\n  console.log(await fail(() => crypto.subtle.importKey(\"raw\", enc.encode(\"pw\"), \"PBKDF2\", false, [\"sign\"])));\n  console.log(await fail(() => crypto.subtle.deriveBits({ name: \"PBKDF2\", hash: \"SHA-256\", salt: salt, iterations: 0 }, base, 256)));\n  console.log(await fail(() => crypto.subtle.deriveBits({ name: \"PBKDF2\", hash: \"SHA-256\", salt: salt, iterations: 1 }, base, 7)));\n  console.log(await fail(() => crypto.subtle.deriveBits({ name: \"PBKDF2\", hash: \"MD5\", salt: salt, iterations: 1 }, base, 128)));\n  console.log(await fail(() => crypto.subtle.deriveBits({ name: \"PBKDF2\", hash: \"SHA-256\", salt: salt, iterations: 1 }, hmac, 128)));\n  console.log(await fail(() => crypto.subtle.deriveKey({ name: \"PBKDF2\", hash: \"SHA-256\", salt: salt, iterations: 1 }, base, { name: \"HMAC\", hash: \"SHA-256\", length: 0 }, true, [\"sign\"])));\n  console.log(await fail(() => crypto.subtle.exportKey(\"raw\", base)));\n  console.log(base.type, base.extractable, base.usages.join(\",\"), JSON.stringify(base.algorithm));\n}\n"
   }
 ]

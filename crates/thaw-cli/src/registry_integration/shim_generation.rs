@@ -878,7 +878,7 @@ fn generate_registry_shims_pass(
     // is JIT-targeted needs no `bundle.js`/`loadScript` at all, and counting
     // one here would link the whole QuickJS runtime back into an otherwise
     // pure-JIT build (a real regression: every `*_use_jit_without_quickjs`
-    // test started reporting `quickjs: true`).
+    // test started linking QuickJS).
     let mut jit_targets = std::collections::HashSet::new();
     let mut jit_fallback_reasons = JitFallbackReasons::new();
     let mut jit_symbol_origins = JitSymbolOrigins::new();
