@@ -2787,8 +2787,7 @@ pub(crate) fn dynamic_property_key(it: &mut Interp, name: &str) -> Result<String
 
 fn property(p: &mut Package, owner: usize, value: &Value, key: &str) -> Result<i64, HostError> {
     let it = &mut p.interp;
-    let key = dynamic_property_key(it, key)?;
-    let v = it.get(value, &key).map_err(|c| classify(it, c))?;
+    let v = it.get(value, key).map_err(|c| classify(it, c))?;
     Ok(store_handle(owner, v))
 }
 
@@ -2797,7 +2796,11 @@ fn property(p: &mut Package, owner: usize, value: &Value, key: &str) -> Result<i
 pub extern "C" fn thaw_tjs_get_property_result(handle: u64, name: *const c_char) -> HandleResult {
     handle_result((|| {
         let name = cstr(name).ok_or("invalid property name")?;
-        on_handle(handle, |p, owner, v| property(p, owner, &v, &name))
+        // a plain name may be Symbol wire text; the JSON-key form below is user data (a lookalike string key)
+        on_handle(handle, |p, owner, v| {
+            let name = dynamic_property_key(&mut p.interp, &name)?;
+            property(p, owner, &v, &name)
+        })
     })())
 }
 

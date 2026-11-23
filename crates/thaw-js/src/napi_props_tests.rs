@@ -796,6 +796,35 @@ fn own_entries_frozen_object_drops_writable_and_configurable() {
 }
 
 #[test]
+fn a_json_key_that_looks_like_symbol_wire_text_stays_a_string_key() {
+    // the JSON-key read is the compiled `obj["..."]` / `obj[key]` form: user data, never decoded
+    load("globalThis.__lk = { ['\\u001f@@iterator']: 29, ['__thaw_symbol_iterator']: 17, [Symbol.iterator]: 5 };");
+    let object = global("__lk");
+    assert!(is_number(
+        value(thaw_tjs_get_property_json_key_result(
+            object,
+            key("\u{1f}@@iterator").as_ptr()
+        )),
+        29.0
+    ));
+    assert!(is_number(
+        value(thaw_tjs_get_property_json_key_result(
+            object,
+            key("__thaw_symbol_iterator").as_ptr()
+        )),
+        17.0
+    ));
+    // the plain-name form decodes it
+    assert!(is_number(
+        value(thaw_tjs_get_property_result(
+            object,
+            q("\u{1f}@@iterator").as_ptr()
+        )),
+        5.0
+    ));
+}
+
+#[test]
 fn well_known_symbol_wire_text_names_the_symbol_keyed_property() {
     // The compiler addresses `obj[Symbol.dispose]` on a dynamic object as `\u{1f}@@dispose` text.
     load(
