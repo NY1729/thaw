@@ -805,6 +805,46 @@ fn storage_handoff_dynamic_json_error_instanceof_uses_realm_constructor() {
 }
 
 #[test]
+fn storage_handoff_typed_js_calls_use_active_nullish_narrowing() {
+    let ok = [
+        "if (value != undefined) return __thaw_typed_tjs_74616b65(value); return 0;",
+        "if (value != null) return __thaw_typed_tjs_74616b65(value); return 0;",
+        "if (value !== undefined && value !== null) return __thaw_typed_tjs_74616b65(value); return 0;",
+        "if (value == undefined) return 0; else return __thaw_typed_tjs_74616b65(value);",
+        "if (value == null) return 0; return __thaw_typed_tjs_74616b65(value);",
+        "if (value === undefined || value === null) return 0; return __thaw_typed_tjs_74616b65(value);",
+        "return value != undefined && __thaw_typed_tjs_74616b65(value) > 0 ? __thaw_typed_tjs_74616b65(value) : 0;",
+        "return value != null ? __thaw_typed_tjs_74616b65(value) : 0;",
+        "return value == null ? 0 : __thaw_typed_tjs_74616b65(value);",
+        "if (value == undefined) { return 0; } return __thaw_typed_tjs_74616b65(value);",
+        "if (null !== value && undefined !== value) return __thaw_typed_tjs_74616b65(value); return 0;",
+        "return value !== null && value !== undefined ? __thaw_typed_tjs_74616b65(value) : 0;",
+        "if (value === null || value === undefined) return 0; return __thaw_typed_tjs_74616b65(value);",
+    ];
+    let bad = [
+        "if (value !== undefined) return __thaw_typed_tjs_74616b65(value); return 0;",
+        "if (value !== null) return __thaw_typed_tjs_74616b65(value); return 0;",
+        "return __thaw_typed_tjs_74616b65(value);",
+        "if (value !== undefined && value !== undefined) return __thaw_typed_tjs_74616b65(value); return 0;",
+        "if (value !== undefined || value !== null) return __thaw_typed_tjs_74616b65(value); return 0;",
+    ];
+    let mut failures = Vec::new();
+    for (body, succeeds) in ok.iter().map(|b| (b, true)).chain(bad.iter().map(|b| (b, false))) {
+        let source = format!(
+            "declare function __thaw_typed_tjs_74616b65(value: number): number;\n\
+             function forward(value?: number | null): number {{ {body} }}\n\
+             function main(): number {{ forward(); return forward(2); }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let result = lower_module(&module);
+        if result.is_ok() != succeeds {
+            failures.push(format!("{body}: {:?}", result.err()));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
 fn storage_handoff_quickjs_function_values_keep_source_argument_contracts() {
     for call in [
         "alias([\"wrong\"]);",

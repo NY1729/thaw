@@ -1430,6 +1430,22 @@ impl<'a> FnLowerer<'a> {
         let Expr::Bin(binary) = expr else {
             return None;
         };
+        // `v !== undefined && v !== null` (either order) excludes both
+        // absences, so the whole condition proves the payload; the same
+        // holds for the negated `v === undefined || v === null`.
+        if matches!(binary.op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+            let conjunction = binary.op == BinaryOp::LogicalAnd;
+            if let (Some((left, left_null)), Some((right, right_null))) = (
+                self.strict_nullish_test(&binary.left, conjunction),
+                self.strict_nullish_test(&binary.right, conjunction),
+            ) {
+                if left == right && left_null != right_null {
+                    if let Some(HirType::Nullish(payload)) = self.scope.get(&left) {
+                        return Some((left, payload.as_ref().clone(), conjunction, 2));
+                    }
+                }
+            }
+        }
         if binary.op == BinaryOp::LogicalAnd {
             return self
                 .optional_undefined_narrowing(&binary.left)
@@ -1513,6 +1529,28 @@ impl<'a> FnLowerer<'a> {
             present_when_true,
             absence_kind,
         ))
+    }
+
+    /// Recognises `ident !== undefined|null` (`conjunct`) or
+    /// `ident === undefined|null` (otherwise) on a `Nullish` binding and
+    /// returns the resolved name and whether the compared absence is `null`.
+    fn strict_nullish_test(&self, expr: &Expr, conjunct: bool) -> Option<(Symbol, bool)> {
+        let Expr::Bin(binary) = expr else { return None };
+        if binary.op != if conjunct { BinaryOp::NotEqEq } else { BinaryOp::EqEqEq } {
+            return None;
+        }
+        let (ident, is_null) = match (binary.left.as_ref(), binary.right.as_ref()) {
+            (Expr::Ident(v), Expr::Ident(u)) | (Expr::Ident(u), Expr::Ident(v))
+                if u.sym == *"undefined" && !self.scope.contains_key("undefined") =>
+            {
+                (v, false)
+            }
+            (Expr::Ident(v), Expr::Lit(Lit::Null(_)))
+            | (Expr::Lit(Lit::Null(_)), Expr::Ident(v)) => (v, true),
+            _ => return None,
+        };
+        let name = self.resolve_binding(ident.sym.as_ref());
+        matches!(self.scope.get(&name), Some(HirType::Nullish(_))).then_some((name, is_null))
     }
 
     fn union_typeof_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
