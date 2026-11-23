@@ -647,7 +647,7 @@ impl<'a> FnLowerer<'a> {
     /// mixing `Promise<T>` and already-resolved `T` elements (real trigger:
     /// `Array.fromAsync([Promise.resolve(1), Promise.resolve(2), 3])`) --
     /// the general delegation this function's own caller otherwise falls
-    /// back to hands the whole array off to QuickJS's native `Array.
+    /// back to hands the whole array off to JS engine's native `Array.
     /// fromAsync` via a JSON-encoded argument, and JSON has no
     /// representation for a live `Promise` object at all ("cannot
     /// serialize collection element Promise(T) to JSON"). A native,
@@ -833,7 +833,7 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 // A read of a `new Proxy(target, handler)`'s own `target`
-                // identifier, redirected to re-read the live QuickJS
+                // identifier, redirected to re-read the live JS engine
                 // handle a `set` trap's mutation actually reaches (see
                 // `proxy_target_live_handles`'s own doc comment). Checked
                 // first, ahead of every other narrowing below, since none
@@ -860,7 +860,7 @@ impl<'a> FnLowerer<'a> {
                             // A monomorphic extern has no function body to point at, so a
                             // value use is a closure forwarding to the call.
                             let dynamic = dynamic_symbol(&name);
-                            let physical_signature = quickjs_function_source_type(
+                            let physical_signature = js_function_source_type(
                                 signature.source_range.0,
                                 HirType::Function(
                                     signature.params.clone(),
@@ -871,7 +871,7 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Function(params, ret) => (params, *ret),
                                 other => {
                                     return Err(format!(
-                                        "internal QuickJS function-value ABI is not callable: {other:?}"
+                                        "internal JS function-value ABI is not callable: {other:?}"
                                     ));
                                 }
                             };
@@ -2086,7 +2086,7 @@ impl<'a> FnLowerer<'a> {
                     //
                     // Two cases, two different checks:
                     // - `JsValue` (an opaque live handle): dispatch into
-                    //   QuickJS via `dynamic_value_check`, same as
+                    //   JS engine via `dynamic_value_check`, same as
                     //   `typeof`/`== null` already do.
                     // - `Json` (e.g. js-yaml's `load(): unknown`,
                     //   classified `Json` by the established "a bare
@@ -2103,7 +2103,7 @@ impl<'a> FnLowerer<'a> {
                     // class names (the comment below was written for
                     // that version) -- the `JsValue` case is now fully
                     // general (`dynamic_value_check_by_name`, below):
-                    // a live QuickJS handle checked against *any* named
+                    // a live JS engine handle checked against *any* named
                     // global constructor is safe and unambiguous to ask
                     // the engine about directly (`globalThis[name]`
                     // itself, on the JS side), so this no longer needs
@@ -2552,7 +2552,7 @@ impl<'a> FnLowerer<'a> {
                                 result = self.lower_logical_expr(result, check, false)?;
                             }
                         }
-                        // Caught QuickJS exceptions can retain their original
+                        // Caught JS engine exceptions can retain their original
                         // object in the Json arm. Check the union tag before
                         // projecting it, then hand that authenticated value to
                         // the engine's real `instanceof` path. This preserves
@@ -6259,7 +6259,7 @@ impl<'a> FnLowerer<'a> {
                         && !self.signatures.contains_key(&class_binding)
                     {
                         // No compiled object model exists for these, so
-                        // construct the real QuickJS global and keep it as
+                        // construct the real JS engine global and keep it as
                         // a dynamic handle instead of approximating it:
                         // `FinalizationRegistry` retains its callback (it
                         // only fires on collection, which never happens
@@ -6282,7 +6282,7 @@ impl<'a> FnLowerer<'a> {
                         // declarations.rs) already detected this exact
                         // shape ahead of time (before this expression is
                         // lowered at all) and emitted a `let` binding for
-                        // an *independent*, live QuickJS handle retaining
+                        // an *independent*, live JS engine handle retaining
                         // `target`'s current value, registering it in
                         // `proxy_target_live_handles`. Reused here as the
                         // constructor argument instead of a fresh one-off
@@ -6291,7 +6291,7 @@ impl<'a> FnLowerer<'a> {
                         // `Expr::Ident` arm's own check of the same table)
                         // observe the same handle -- a `set` trap's
                         // mutation, which lands on this handle's own
-                        // QuickJS object, becomes observable from `target`
+                        // JS engine object, becomes observable from `target`
                         // directly, not just through the proxy.
                         let mut values = Vec::with_capacity(args.len());
                         for (index, argument) in args.iter().enumerate() {

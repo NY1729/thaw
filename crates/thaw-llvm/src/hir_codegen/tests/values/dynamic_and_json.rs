@@ -69,7 +69,7 @@ fn dynamic_method_argument_host_alias_survives_await() {
 /// (`typeof String === 'function'`, `schema.name === String`), the
 /// exact idiom real `mongoose` schemas use (`{ name: String, age:
 /// Number }`). Fixed by bridging a bare reference to the real native
-/// `String`/`Number`/`Boolean` global QuickJS already provides, the
+/// `String`/`Number`/`Boolean` global JS engine already provides, the
 /// same "dynamic global" mechanism `process`/`crypto`/`Atomics`/
 /// `AbortSignal` already use -- doesn't interfere with the existing
 /// call-position intrinsic, which is intercepted earlier by
@@ -1489,7 +1489,7 @@ fn strict_optional_json_map_values_preserve_presence_and_native_identity() {
 /// `{"$__thaw_non_finite$": "NaN"|"Infinity"|"-Infinity"}` sentinel
 /// object (the same shape `platform_globals/dates.js`'s
 /// `__thaw_json_safe_stringify` JS-side replacer already produces for
-/// values crossing the QuickJS boundary) -- `number_value` just never
+/// values crossing the JS engine boundary) -- `number_value` just never
 /// produced it for the far more common native-compiled-code path.
 /// Fixed there, plus made the `JSON.stringify`/`console.log`/`String()`
 /// families recognize the sentinel too, matching real JS's own quirk
@@ -2177,7 +2177,7 @@ fn nested_typed_json_absence_chain_tracks_inner_nullable_state() {
     assert!(!HirCompiler::<'static>::typed_result_null_is_absent(&optional_only));
 }
 
-/// Native values crossed into `any` or a typed QuickJS call must retain
+/// Native values crossed into `any` or a typed JS engine call must retain
 /// explicit undefined slots; JSON.stringify still applies its public
 /// object-omission/array-null policy.
 #[test]

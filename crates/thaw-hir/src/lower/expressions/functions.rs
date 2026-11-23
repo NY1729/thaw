@@ -1560,7 +1560,7 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty.clone()
                 };
-                let ty = if is_quickjs_function_value_slot(pat.span()) {
+                let ty = if is_js_function_value_slot(pat.span()) {
                     storage_parameter_type(pat, ty)
                 } else {
                     ty

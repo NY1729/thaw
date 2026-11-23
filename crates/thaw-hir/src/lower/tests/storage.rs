@@ -845,7 +845,7 @@ fn storage_handoff_typed_js_calls_use_active_nullish_narrowing() {
 }
 
 #[test]
-fn storage_handoff_quickjs_function_values_keep_source_argument_contracts() {
+fn storage_handoff_js_function_values_keep_source_argument_contracts() {
     for call in [
         "alias([\"wrong\"]);",
         "(alias)([\"wrong\"]);",

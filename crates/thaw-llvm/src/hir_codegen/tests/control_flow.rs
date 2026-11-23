@@ -527,7 +527,7 @@ fn return_from_finally_overrides_an_earlier_return() {
 }
 
 #[test]
-fn quickjs_errors_use_thaw_try_catch_and_finally() {
+fn js_errors_use_thaw_try_catch_and_finally() {
     let source = r#"
         function main(): void {
             loadScript(
@@ -554,7 +554,7 @@ fn quickjs_errors_use_thaw_try_catch_and_finally() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "quickjs_result_abi"),
+        compile_and_run(source, "js_result_abi"),
         // The old "`label` threw:" / "`label`'s promise rejected:" prefixes were Thaw-only
         // decorations; a caught error prints its bare message (Node prints a stack trace
         // here, which a native binary has no equivalent of, so only the message remains).
@@ -563,7 +563,7 @@ fn quickjs_errors_use_thaw_try_catch_and_finally() {
 }
 
 #[test]
-fn async_await_catches_a_typed_quickjs_promise_rejection() {
+fn async_await_catches_a_typed_js_promise_rejection() {
     let source = r#"
         declare function __thaw_typed_js_6c617465724173796e63(): Promise<string>;
 
@@ -577,7 +577,7 @@ fn async_await_catches_a_typed_quickjs_promise_rejection() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "typed_quickjs_async_rejection"),
+        compile_and_run(source, "typed_js_async_rejection"),
         "AbortError stopped\n"
     );
 }
@@ -1918,7 +1918,7 @@ fn captured_closure_references_keep_allocation_identity() {
 }
 
 #[test]
-fn typed_quickjs_catches_preserve_original_thrown_values() {
+fn typed_js_catches_preserve_original_thrown_values() {
     let source = r#"
         declare function __thaw_typed_js_626f6f6d(): void;
         declare function __thaw_typed_js_6c69746572616c(): void;
@@ -1984,13 +1984,13 @@ fn typed_quickjs_catches_preserve_original_thrown_values() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "typed_quickjs_original_throw_identity"),
+        compile_and_run(source, "typed_js_original_throw_identity"),
         "42\ntrue\nobject 418 true true true\nobject 418 true undefined true\nstring true\nobject true\ntrue\nnumber true\nobject true\nundefined true\nfunction true\n"
     );
 }
 
 #[test]
-fn typed_quickjs_error_instanceof_uses_the_original_value() {
+fn typed_js_error_instanceof_uses_the_original_value() {
     let source = r#"
         declare function __thaw_typed_js_7468726f774d794572726f72(): void;
         declare function __thaw_typed_js_7468726f774572726f72(): void;
@@ -2016,7 +2016,7 @@ fn typed_quickjs_error_instanceof_uses_the_original_value() {
         }
     "#;
     assert_eq!(
-        compile_and_run(source, "typed_quickjs_error_instanceof_original_value"),
+        compile_and_run(source, "typed_js_error_instanceof_original_value"),
         "true\ntrue\nfalse\nfalse\ntrue true\n"
     );
 }

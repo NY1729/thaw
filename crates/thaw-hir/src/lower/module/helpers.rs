@@ -74,7 +74,7 @@ fn is_builtin_prototype_owner(name: &str) -> bool {
 
 /// Standard library / Web API type names thaw does not model natively. An
 /// annotation naming one is treated as an opaque `JsValue` -- at runtime the
-/// value is a real QuickJS object (thaw's platform globals provide these) --
+/// value is a real JS engine object (thaw's platform globals provide these) --
 /// rather than failing the build with the generic "unsupported type
 /// reference" error. `.d.ts` files and user annotations reference
 /// `URL`/`Response`/`AbortSignal`/... constantly.

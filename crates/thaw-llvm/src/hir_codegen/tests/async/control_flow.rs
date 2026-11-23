@@ -130,7 +130,7 @@ fn async_nested_loop_runs_until_first_await_synchronously() {
 /// before the loop) and captured by the closure `&&`/`||` desugar into
 /// (`lower_logical_expr`/`wrap_call_argument_bindings`). This exact
 /// shape, but with the awaited value coming from a real npm package's
-/// dynamic/QuickJS-backed call (Hono's `app.request(...)`/`response.
+/// dynamic/JS-engine-backed call (Hono's `app.request(...)`/`response.
 /// text()`) rather than a plain recursive `async` helper as here,
 /// segfaulted or silently misevaluated on the loop's second and later
 /// iterations -- see `registry_add_runs_a_real_hono_route_repeatedly_

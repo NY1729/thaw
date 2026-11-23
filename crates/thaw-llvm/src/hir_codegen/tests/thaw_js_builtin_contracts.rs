@@ -27,7 +27,7 @@ fn thaw_js_callback_types_include_rest_parameter_callables() {
     assert!(thaw_js_callback_type(&Optional(Box::new(rest.clone()))));
     let fixed = CallableFunction(vec![F64], Default::default(), None, Box::new(Void));
     assert!(thaw_js_callback_type(&fixed));
-    // a rest of non-plain elements, or a non-plain result, still stays on QuickJS
+    // a rest of non-plain elements, or a non-plain result, still stays on JS engine
     assert!(!thaw_js_callback_type(&CallableFunction(
         vec![],
         Default::default(),

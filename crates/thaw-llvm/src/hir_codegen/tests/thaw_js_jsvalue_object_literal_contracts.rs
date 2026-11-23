@@ -28,7 +28,7 @@ fn thaw_js_jsvalue_object_literal_is_sent_as_json_not_a_handle_id() {
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(ir.contains("@thaw_tjs_register_native_callback"), "{ir}");
     assert!(ir.contains("@thaw_json_object_set_number("), "{ir}");
-    // the literal is not converted to a handle id, and the QuickJS builder is not needed
+    // the literal is not converted to a handle id, and the JS engine builder is not needed
     assert!(!ir_calls(&ir, "thaw_json_handle_id"), "{ir}");
     assert!(!ir.contains("__thaw_object_from_operations"), "{ir}");
 }

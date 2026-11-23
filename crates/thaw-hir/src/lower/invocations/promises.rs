@@ -541,9 +541,9 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `Promise.<method>([...])` where every element is a dynamic
-    /// thenable (`Json` / `JsValue` -- a live QuickJS `Promise` handle,
+    /// thenable (`Json` / `JsValue` -- a live JS engine `Promise` handle,
     /// not a native `ThawPromise`). Returns `Some` with a call to
-    /// QuickJS's own `Promise.<method>` over the array via
+    /// JS engine's own `Promise.<method>` over the array via
     /// `callDynamicMethod`, which settles the returned promise and hands
     /// back its resolved value as `Json`; `Expr::Await` already treats a
     /// `callDynamicMethod` result as resolved-at-the-boundary, so
@@ -598,7 +598,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `await x` where `x` is `Json`/`any`: a value with a callable `then`
-    /// (a user-written thenable) is assimilated through QuickJS's own
+    /// (a user-written thenable) is assimilated through JS engine's own
     /// `Promise.resolve` -- same settle-at-the-boundary path as
     /// `try_dynamic_promise_combinator`; any other value is returned as is.
     fn lower_await_json_thenable(&mut self, value: HirExpr) -> Result<HirExpr, String> {

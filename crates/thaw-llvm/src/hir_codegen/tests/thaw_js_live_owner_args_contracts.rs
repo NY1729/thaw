@@ -1,5 +1,5 @@
 // Fix A (plan-tj88) contracts: a named object variable passed to a thaw-js extern FUNCTION `any`/generic slot is
-// sent as its live handle and a returned handle maps back to the owner; literals and QuickJS keep the old IR.
+// sent as its live handle and a returned handle maps back to the owner; literals and the JS engine keep the old IR.
 
 // `SYM` in `body` stands for the extern identity function's symbol in the given lane.
 fn live_owner_ir(symbol_lane: &str, body: &str) -> String {

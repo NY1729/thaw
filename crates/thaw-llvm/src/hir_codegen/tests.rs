@@ -409,7 +409,7 @@ fn diagnose_crashed_binary(exe_path: &std::path::Path, envs: &[(&str, &str)]) {
 
 /// The link tail of a routed (thaw-js) build, as thaw-cli's: the thaw-js archive, a trailing std/runtime pass
 /// (thaw-js reaches them through `extern "C"` only), and every symbol thaw-js finds with
-/// `dlsym(RTLD_DEFAULT, ...)` (thaw-cli's `quickjs_callback_export_args` / `thaw_js_extra_export_args` /
+/// `dlsym(RTLD_DEFAULT, ...)` (thaw-cli's `js_callback_export_args` / `thaw_js_extra_export_args` /
 /// `thaw_js_ready_export_args`: without them a bare, unawaited top-level async call never drains its native
 /// continuation queue). thaw-js carries its own thaw-intl copy (feature `intl`) when `intl` is set.
 fn thaw_js_link_args(

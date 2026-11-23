@@ -144,7 +144,7 @@ impl<'a> FnLowerer<'a> {
             } else {
                 expected.get(if options.logical_argument_offsets { argument_offset } else { source_argument_index }).or(rest)
             };
-            // An ambient QuickJS export passed by name keeps its real JS identity.
+            // An ambient JS engine export passed by name keeps its real JS identity.
             let ambient_value = self.ambient_js_export_argument(&argument.expr, argument.spread.is_some());
             let value = match ambient_value {
                 Some(value) => value,

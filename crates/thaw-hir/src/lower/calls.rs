@@ -2114,8 +2114,8 @@ impl<'a> FnLowerer<'a> {
         } else {
             supplied.to_vec()
         };
-        let quickjs_function_value = self
-            .validate_quickjs_function_value_arguments(&operation.obj, &forwarded)?;
+        let js_function_value = self
+            .validate_js_function_value_arguments(&operation.obj, &forwarded)?;
         let this_value = self.lower_expr(&this_argument.expr)?;
         let this_value = self.coerce_this_for_receiver(declared_receiver.as_ref(), this_value)?;
         let this_type = self.infer_expr_type(&this_value)?;
@@ -2211,7 +2211,7 @@ impl<'a> FnLowerer<'a> {
                     public_expected.as_ref(),
                     argument,
                 )?;
-                if quickjs_function_value {
+                if js_function_value {
                     self.coerce_primitive_array_argument_aliasing(argument, expected)
                 } else {
                     self.coerce_to_declared(expected, argument)

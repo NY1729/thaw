@@ -175,6 +175,6 @@ fn thaw_js_routed_transform_ctor_with_a_rest_nested_callback_is_still_rejected()
         "{ transform(c, e, cb) { cb(null, 'X'); } }",
         "transform: ((arg0: JsValue, arg1: string, arg2: (...a: Json[]) => void) => void) | undefined",
     );
-    let error = stream_ctor_routed_build(&source).expect_err("a rest nested callback stays on QuickJS");
+    let error = stream_ctor_routed_build(&source).expect_err("a rest nested callback stays on JS");
     assert!(error.contains("cannot cross the thaw-js boundary"), "{error}");
 }

@@ -401,7 +401,7 @@ fn marks_only_live_json_coercions_to_napi_constructors() {
 fn source_cannot_forge_typed_wrapper_json_ownership_marker() {
     let module = thaw_parser::parse_typescript(
         r#"declare function __thaw_mark_typed_wrapper_json_argument(ownerKind: string, ownerKey: string, value: Json): Json;
-           function main(value: Json): void { __thaw_mark_typed_wrapper_json_argument("direct-quickjs", "echo", value); }"#,
+           function main(value: Json): void { __thaw_mark_typed_wrapper_json_argument("direct-js", "echo", value); }"#,
     ).unwrap();
     let error = crate::lower_module(&module).unwrap_err();
     assert!(error.contains("compiler-private"), "{error}");

@@ -2,7 +2,7 @@ impl<'a> FnLowerer<'a> {
     /// A Json read now shares its native Array/Object allocation (or its
     /// live host lease). Thus an intermediate `.field`/`[index]` read keeps
     /// the same receiver identity for nested assignment. The old mutable
-    /// slot ABI cannot represent a QuickJS property, and is unnecessary
+    /// slot ABI cannot represent a JS engine property, and is unnecessary
     /// with shared native values.
     fn lower_json_mutable_chain(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         self.lower_expr(expr)

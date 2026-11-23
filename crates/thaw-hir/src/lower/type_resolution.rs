@@ -665,7 +665,7 @@ fn lower_ts_type(
             }
             // A standard-library / Web API type (`URL`, `Response`,
             // `AbortSignal`, `ReadableStream<T>`, ...) has no compiled layout;
-            // its value is a real QuickJS object at runtime, so an annotation
+            // its value is a real JS engine object at runtime, so an annotation
             // naming one is an opaque `JsValue`. Type arguments, if any, are
             // ignored.
             // `ArrayBuffer` / `DataView` are native byte views (`new ArrayBuffer(n)`, `buf.buffer`),

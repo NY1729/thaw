@@ -2907,7 +2907,7 @@ fn arrow_assigned_to_local_callback_keeps_native_scalar_return() {
 }
 
 #[test]
-fn named_function_assigned_to_quickjs_function_alias_keeps_boundary_mapping() {
+fn named_function_assigned_to_js_function_alias_keeps_boundary_mapping() {
     let program = lower(
         r#"declare function __thaw_typed_tjs_6563686f(values: number[]): number[];
         function main(): void {
@@ -2927,7 +2927,7 @@ fn named_function_assigned_to_quickjs_function_alias_keeps_boundary_mapping() {
     let body = format!("{:?}", main.body);
     assert!(
         body.contains("params: [Json], ret: Json"),
-        "the imported QuickJS function alias and its named replacement must keep live JSON slots: {body}"
+        "the imported JS function alias and its named replacement must keep live JSON slots: {body}"
     );
 }
 
@@ -4509,7 +4509,7 @@ fn dynamic_symbol_rejects_nonascii_hex_without_slicing_codepoints() {
     assert!(dynamic_symbol("__thaw_typed_napi_zz").is_none());
     assert_eq!(dynamic_symbol("__thaw_typed_tjs_666f6f__arity_1"),
         Some((DynamicBackend::ThawJs, "foo".into())));
-    // the QuickJS prefix no longer decodes
+    // the JS engine prefix no longer decodes
     assert!(dynamic_symbol("__thaw_typed_js_666f6f").is_none());
 }
 
@@ -4520,8 +4520,8 @@ fn dynamic_symbol_decodes_the_thaw_js_backend() {
     assert_eq!(dynamic_symbol("__thaw_typed_tjs_6d733a3a6d73__arity_2"),
         Some((DynamicBackend::ThawJs, "ms::ms".into())));
     // A thaw-js plain function is a function value (live reference slots), but a thaw-js method symbol is not.
-    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_some());
-    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_246d6574686f6424782424").is_none());
+    assert!(ordinary_js_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_some());
+    assert!(ordinary_js_typed_symbol("__thaw_typed_tjs_246d6574686f6424782424").is_none());
 }
 
 #[test]

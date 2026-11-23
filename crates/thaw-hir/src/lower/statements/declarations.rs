@@ -475,7 +475,7 @@ impl<'a> FnLowerer<'a> {
                 // `const proxy = new Proxy(target, handler)`, when
                 // `target` is a simple identifier already declared
                 // `Object`/`Dictionary`-shaped in this function: retain
-                // its *current* value as an independent, live QuickJS
+                // its *current* value as an independent, live JS engine
                 // handle (`retainDynamicJson`, via the existing
                 // `coerce_to_declared` path an unrelated earlier fix
                 // already built for a `JsValue`-declared target with an
@@ -492,7 +492,7 @@ impl<'a> FnLowerer<'a> {
                 // identifier itself (`Expr::Ident`'s own check of the
                 // same table) re-reads this handle instead of `target`'s
                 // own native storage -- making a `set` trap's mutation
-                // (which only ever reaches this handle's QuickJS object)
+                // (which only ever reaches this handle's JS engine object)
                 // observable from `target` directly, not just through the
                 // proxy. Scoped deliberately narrowly: only a bare
                 // identifier target, not an object literal or other
@@ -997,9 +997,9 @@ impl<'a> FnLowerer<'a> {
                                 format!("unknown function value `{}`", identifier.sym)
                             })?;
                             if signature.is_extern
-                                && ordinary_quickjs_typed_symbol(&source).is_some()
+                                && ordinary_js_typed_symbol(&source).is_some()
                                 && signature.generic_type_params.is_empty()
-                                && is_quickjs_function_source(signature.source_range.0)
+                                && is_js_function_source(signature.source_range.0)
                             {
                                 self.lower_expr(init)?
                             } else if signature.is_extern

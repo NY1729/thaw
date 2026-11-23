@@ -183,17 +183,17 @@ pub enum HirExpr {
     ObjectLit(Vec<(Symbol, HirExpr)>),
     /// A runtime-keyed homogeneous object backed by thaw-std's JSON value.
     JsonObjectLit(Vec<(Symbol, HirExpr)>, HirType),
-    /// Wraps a live `JsValue` (an opaque, permanent id into QuickJS's own
+    /// Wraps a live `JsValue` (an opaque, permanent id into JS engine's own
     /// retained-value table) as a genuine `Json` value -- there is no
     /// direct `Json` representation of "a live JS object", so this
     /// encodes it as the same `{"__thaw_js_handle_id__": <id>}`
     /// placeholder object `compile_dynamic_value_placeholder` already
     /// builds for a `JsValue` crossing into a dynamic call's own JSON
-    /// argument array; the QuickJS-side JSON reviver (`dates.js`)
+    /// argument array; the JS-engine-side JSON reviver (`dates.js`)
     /// splices the real live value back in the moment this placeholder
     /// gets JSON-parsed there, the same way it already does for a
     /// `Date`. Unlike that call-argument-only path (gated on
-    /// `compiling_quickjs_dynamic_arguments`, since nothing reads the
+    /// `compiling_js_dynamic_arguments`, since nothing reads the
     /// placeholder back on the far end anywhere else), this node exists
     /// specifically for `coerce_to_declared`'s `Json`-declared branch:
     /// a `JsValue`-actual value reaching a plain `Json`-typed slot
@@ -445,7 +445,7 @@ pub fn caught_native_object_json(active: HirExpr) -> HirExpr {
 /// Printing view of a caught native Object: the Json its throw registered
 /// (`__thaw_register_native_exception_describer`), else an empty object. It
 /// never touches the live-projection host, so a program that only prints a
-/// caught value does not become a QuickJS host program.
+/// caught value does not become a JS engine host program.
 pub fn caught_native_object_console_json(active: HirExpr) -> HirExpr {
     let call =
         |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);

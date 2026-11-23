@@ -1,6 +1,6 @@
 // A callback that reads the call-time receiver (`function (this: T) {}`) passed to a thaw-js typed
 // call is registered through the graph path, so its `this` arrives with each call, and it keeps the
-// closure identity so `off(listener)` finds it. No QuickJS fallback.
+// closure identity so `off(listener)` finds it. No retired-lane fallback.
 
 #[test]
 fn routed_function_with_this_callback_is_a_graph_handle_with_identity() {

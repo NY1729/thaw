@@ -165,7 +165,7 @@ impl<'a> FnLowerer<'a> {
                     let regex_type = regex_object_type();
                     // A replacer *function* has no native lowering (the
                     // runtime regex engine can't call back into a compiled
-                    // closure), so route the whole call through QuickJS:
+                    // closure), so route the whole call through JS engine:
                     // retain the receiver/argument as live JS values, pass
                     // the closure as a native callback
                     // (`registerNativeCallback`, via `coerce_to_declared`),
@@ -884,7 +884,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// Lowers `receiver.{replace,replaceAll}(search, replacerFn)` for a
-    /// function `replacerFn` by delegating to the QuickJS realm, which can
+    /// function `replacerFn` by delegating to the JS engine realm, which can
     /// call the compiled closure (registered as a native callback) for
     /// every match. A `RegExp` `search` is reconstructed as a live JS
     /// `RegExp` so `replaceAll`'s global-flag `TypeError` and the

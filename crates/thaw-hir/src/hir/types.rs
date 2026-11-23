@@ -238,7 +238,7 @@ pub enum HirType {
     /// payload, `null`, and `undefined` without relying on sentinels.
     Nullish(Box<HirType>),
     /// Type inference failed / not yet supported for this expression ->
-    /// falls back to QuickJS-NG at runtime (see design doc section 3.1).
+    /// falls back to the retired engine lane at runtime (see design doc section 3.1).
     Dynamic,
 }
 

@@ -145,10 +145,10 @@ fn imported_class_key(name: &str) -> Option<String> {
     rest.contains("::").then(|| rest.to_string())
 }
 
-fn ordinary_quickjs_typed_symbol(name: &str) -> Option<String> {
+fn ordinary_js_typed_symbol(name: &str) -> Option<String> {
     let (backend, symbol) = dynamic_symbol(name)?;
     // A thaw-js plain function is the same kind of function value: reference parameters become
-    // live `Json` views (see `quickjs_function_value_type`) instead of by-value copies.
+    // live `Json` views (see `js_function_value_type`) instead of by-value copies.
     // ponytail: arity/overload-expanded shims (optional parameters) keep the by-value path.
     (backend == DynamicBackend::ThawJs
         && !symbol.starts_with('$')

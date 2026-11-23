@@ -1,4 +1,4 @@
-// thaw-js (`DynamicBackend::ThawJs`): plain JSON-text calls into `thaw_tjs_*`, never QuickJS.
+// thaw-js (`DynamicBackend::ThawJs`): plain JSON-text calls into `thaw_tjs_*`, never JS engine.
 
 fn compile_thaw_js_program(source: &str) -> (bool, String) {
     let module = thaw_parser::parse_typescript(source).unwrap();
@@ -10,7 +10,7 @@ fn compile_thaw_js_program(source: &str) -> (bool, String) {
 }
 
 #[test]
-fn typed_thaw_js_call_uses_the_tjs_json_abi_and_not_quickjs() {
+fn typed_thaw_js_call_uses_the_tjs_json_abi_and_not_js() {
     // "ms::ms"
     let (uses_thaw_js, ir) = compile_thaw_js_program(
         "declare function __thaw_typed_tjs_6d733a3a6d73(value: string, scale: number): Json;
@@ -57,7 +57,7 @@ fn typed_thaw_js_plain_types_are_numbers_strings_booleans_json_and_their_shapes(
 }
 
 #[test]
-fn typed_thaw_js_callback_parameters_register_with_thaw_js_and_not_quickjs() {
+fn typed_thaw_js_callback_parameters_register_with_thaw_js_and_not_js() {
     use thaw_hir::HirType::*;
     let callback = Function(vec![F64], Box::new(F64));
     assert!(thaw_js_callback_type(&callback) && thaw_js_param_type(&callback));
@@ -98,7 +98,7 @@ fn a_callback_coerced_to_a_json_parameter_registers_with_thaw_js_in_a_routed_bui
 }
 
 #[test]
-fn catching_an_error_in_a_routed_build_does_not_need_quickjs() {
+fn catching_an_error_in_a_routed_build_does_not_need_js() {
     let source = "declare function __thaw_typed_tjs_6d733a3a6d73(value: string): Json;
          function main(): void {
            try { console.log(__thaw_typed_tjs_6d733a3a6d73(\"x\")); }
@@ -191,7 +191,7 @@ fn thaw_js_class_promise_of_a_handle_wraps_the_handle_in_a_resolved_promise() {
 #[test]
 fn thaw_js_class_property_getters_and_static_accessors_compile_to_the_class_call() {
     // Instance getter (receiver handle only), static getter (no arguments) and static setter (value in,
-    // value out) all lower to the same `@thaw_tjs_class_call` as methods: no build refusal, no QuickJS.
+    // value out) all lower to the same `@thaw_tjs_class_call` as methods: no build refusal, no JS engine.
     let getter = "$getter$k::Box$v";
     let static_getter = "$staticgetter$k::Box$w";
     let static_setter = "$staticsetter$k::Box$w";
@@ -221,7 +221,7 @@ fn thaw_js_class_property_getters_and_static_accessors_compile_to_the_class_call
 }
 
 #[test]
-fn routed_graph_retain_uses_the_tjs_symbol_and_not_quickjs() {
+fn routed_graph_retain_uses_the_tjs_symbol_and_not_js() {
     let source = "function main(): void { const object: JsValue = retainDynamicJson({}); }";
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
@@ -522,7 +522,7 @@ fn routed_async_main_drives_thaw_js_and_releases_its_completion_only_once_settle
 }
 
 #[test]
-fn routed_set_process_env_declares_the_thaw_tjs_symbol_and_not_quickjs() {
+fn routed_set_process_env_declares_the_thaw_tjs_symbol_and_not_js() {
     let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();

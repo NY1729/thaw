@@ -1137,8 +1137,8 @@ impl<'a> FnLowerer<'a> {
                 vec![built],
             ))));
             let builder = self.wrap_call_argument_bindings(HirExpr::Block(body), &bindings)?;
-            // The builder block stays the first operand (QuickJS meaning, unchanged); the
-            // members follow so a thaw-js call can build the same object without QuickJS.
+            // The builder block stays the first operand (JS engine meaning, unchanged); the
+            // members follow so a thaw-js call can build the same object without JS engine.
             let mut operands = vec![builder];
             operands.extend(member_operands);
             Ok(HirExpr::Call(
@@ -5249,7 +5249,7 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
-    /// Keep callable result objects live across the QuickJS callback boundary.
+    /// Keep callable result objects live across the JS engine callback boundary.
     /// The projected handle is consumed into Json; callers use graph callbacks
     /// so decode releases the temporary graph lease after rebuilding the value.
     pub(super) fn adapt_callable_result_for_live_projection(
