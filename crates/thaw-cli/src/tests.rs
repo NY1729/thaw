@@ -170,7 +170,7 @@ fn prepared_runtime_variants_have_stable_names() {
 /// outright ("requires a homogeneous array, string, Map, or Set, got
 /// Json") -- two real, general native-compiler gaps in custom-iterable
 /// support, unrelated to `Intl.Segmenter`'s own correctness (already
-/// proven via the interpreted-QuickJS-level cross-check against real
+/// proven via the interpreted-thaw-js-level cross-check against real
 /// Node in `crates/thaw-quickjs/src/tests.rs`'s own test). Not chased
 /// further here, out of scope for this milestone.
 #[test]
@@ -1810,7 +1810,7 @@ fn keeps_a_promise_of_an_opaque_payload_as_a_promise_on_thaw_js() {
     assert!(thaw_js.contains("): Promise<Json> {"), "{thaw_js}");
     assert!(!thaw_js.contains(": Json;"), "{thaw_js}");
 
-    // QuickJS keeps its own opaque-handle return.
+    // thaw-js keeps its own opaque-handle return.
     let (_, quickjs) =
         typed_dynamic_declaration("node:events", &function, false, &arities, None).unwrap();
     assert!(quickjs.contains("): JsValue;"), "{quickjs}");
@@ -1919,44 +1919,6 @@ fn thaw_js_declares_an_object_bearing_union_parameter_as_json() {
 }
 
 #[test]
-fn quickjs_fallback_reasons_include_operation_package_and_location() {
-    let source = "import { parse } from 'dynamic-package';\nfunction main(): void { parse('x'); callDynamic('other', []); }\n";
-    let mut exports = ExternalExports::new();
-    exports.insert(
-        "dynamic-package".into(),
-        [("parse".into(), "__thaw_typed_js_7061727365".into())]
-            .into_iter()
-            .collect(),
-    );
-    let jit_fallback_reasons = [(
-        ("dynamic-package".into(), "parse".into()),
-        "function body uses unsupported control flow".into(),
-    )]
-    .into_iter()
-    .collect();
-    let reasons = quickjs_fallback_reasons(
-        Path::new("main.ts"),
-        source,
-        "declare function __thaw_typed_js_64796e616d69632d7061636b6167653a3a7061727365(): string;",
-        &["dynamic-package".into()],
-        &exports,
-        &jit_fallback_reasons,
-    );
-    assert!(reasons.iter().any(|reason| {
-        reason["kind"] == "dynamic-operation"
-            && reason["operation"] == "callDynamic"
-            && reason["line"] == 2
-    }));
-    assert!(reasons.iter().any(|reason| {
-        reason["kind"] == "registry-fallback"
-            && reason["package"] == "dynamic-package"
-            && reason["function"] == "parse"
-            && reason["detail"] == "function body uses unsupported control flow"
-            && reason["line"] == 2
-    }));
-}
-
-#[test]
 fn jit_rejection_reasons_distinguish_signature_from_body() {
     let mut function = thaw_bridge::DtsFunction {
         param_field_constraints: Vec::new(),
@@ -2021,7 +1983,7 @@ fn intl_host_detection_only_enables_intl_users() {
     assert!(!source_uses_intl("module.exports = value => value + 1"));
     assert!(!source_uses_intl("value.localeCompare(other)"));
     // Every Intl constructor is backed by the icu4x data now (see
-    // `required_runtime_features` and quickjs `intl_list.rs`), so each one
+    // `required_runtime_features` and thaw-js `intl_list.rs`), so each one
     // enables the feature.
     assert!(source_uses_intl("new Intl.DateTimeFormat('ja-JP')"));
     assert!(source_uses_intl("new Intl.NumberFormat('de-DE')"));

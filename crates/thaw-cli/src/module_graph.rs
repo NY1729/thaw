@@ -2194,23 +2194,6 @@ pub fn entry_is_commonjs(entry: &Path, source: &str) -> Result<bool, String> {
     }))
 }
 
-pub fn uses_created_require_live_result(entry: &Path, entry_source: &str) -> Result<bool, String> {
-    let mut modules = Vec::new();
-    load_module(
-        entry
-            .canonicalize()
-            .map_err(|error| format!("failed to resolve `{}`: {error}", entry.display()))?,
-        Some(entry_source),
-        None,
-        &mut modules,
-        &mut HashMap::new(),
-        &mut HashSet::new(),
-    )?;
-    Ok(modules
-        .iter()
-        .any(|module| module.created_require_helper.is_some()))
-}
-
 pub fn external_specifiers(
     entry: &Path,
     entry_source: &str,

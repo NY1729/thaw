@@ -1515,7 +1515,7 @@ fn lambda_trace_header_reaches_warm_quickjs_string_and_json_handlers() {
 }
 
 /// The warm-handler trace header reaches a thaw-js package's `process.env` on every invocation (thaw-js reads the
-/// live environment, so no QuickJS-style snapshot sync is involved) and is dropped when a response has no header.
+/// live environment, so no thaw-js-style snapshot sync is involved) and is dropped when a response has no header.
 #[test]
 fn lambda_trace_header_reaches_warm_thaw_js_package_handlers() {
     let dir = std::env::temp_dir().join(format!("thaw-trace-tjs-{}", std::process::id()));

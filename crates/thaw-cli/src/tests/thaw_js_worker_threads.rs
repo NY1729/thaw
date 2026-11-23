@@ -6,7 +6,7 @@
 #[test]
 fn thaw_js_worker_threads_programs_all_route_to_thaw_js() {
     let import = "import { Worker } from \"node:worker_threads\";\n";
-    // The router judges the thaw-js form of the module (the prelude export), not the QuickJS bundle.
+    // The router judges the thaw-js form of the module (the prelude export), not the thaw-js bundle.
     let bundle = thaw_js::scan::script_as_bundle(THAW_JS_WORKER_THREADS_FORM).into_owned();
     for program in [
         "const w = new Worker(`parentPort.postMessage(1)`, { eval: true, workerData: 1, env: {}, argv: [] });",

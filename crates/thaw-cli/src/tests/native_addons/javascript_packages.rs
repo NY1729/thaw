@@ -79,9 +79,9 @@ function main(): void {
 /// this fix every `hljs.someMethod(...)` failed to build with "call to
 /// unknown function". Also exercises reading `.length` off the *string*
 /// returned by `highlight(...).value` (see
-/// `quickjs_dynamic_property_and_method_box_a_primitive_string`) and the
+/// `thaw-js_dynamic_property_and_method_box_a_primitive_string`) and the
 /// `lang && hljs.getLanguage(lang)` shape (see
-/// `quickjs_dynamic_call_is_a_logical_operand`).
+/// `thaw-js_dynamic_call_is_a_logical_operand`).
 #[test]
 fn registry_add_highlights_code_with_real_highlight_js_when_enabled() {
     if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
@@ -464,7 +464,7 @@ async function main(): Promise<void> {
                 .unwrap();
             let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
             let ok = result.status.success() && stdout == expected;
-            // C2 is a print-only probe (QuickJS auto-settles the Promise, Node and thaw-js do not).
+            // C2 is a print-only probe (thaw-js auto-settles the Promise, Node and thaw-js do not).
             if section != "C2" {
                 all_ok &= ok;
             }
@@ -874,7 +874,7 @@ fn strip_ansi(text: &str) -> String {
 /// bare `Json`, so `Promise.all([limit(fn), limit(fn)])` -- an array of
 /// dynamic thenables, not native `Promise`s -- used to fail lowering
 /// (`Promise.all element 0 must be a Promise, got Json`). It now routes
-/// to QuickJS's own `Promise.all` via `callDynamicMethod`
+/// to thaw-js's own `Promise.all` via `callDynamicMethod`
 /// (`docs/design/dynamic-promise-combinators.md`); `allSettled` /
 /// `race` / `any` too. `limit.activeCount + " "` (a `JsValue` property
 /// read in a string `+`) is covered by the same-session
@@ -2618,7 +2618,7 @@ function main(): void {
 /// common idiom, `let record; while ((record = parser.read()) !==
 /// null))` -- and prints each record via `JSON.stringify` rather than
 /// accumulating them in an array. Found while writing this test: a
-/// `JsValue` (what a Fallback/QuickJS-dispatched method call like
+/// `JsValue` (what a Fallback/thaw-js-dispatched method call like
 /// `.read()` actually returns at runtime, regardless of its own `.d.ts`
 /// return type) doesn't properly widen into an already-`Json`-typed
 /// slot outside of a dynamic-call *argument* (where `compile_dynamic_
@@ -3099,11 +3099,11 @@ function main(): void {
 /// Round 18's npm compat audit. Real yargs's own module graph pulls in
 /// `cliui` -> `string-width`, whose ESM source hits three separate,
 /// general bugs the moment it's actually run through the dynamic
-/// QuickJS-NG bundle path (all fixed the same day, see
+/// thaw-js bundle path (all fixed the same day, see
 /// `[[project_npm_interop_gaps_18]]`):
 /// 1. `import.meta.resolve(...)` (yargs's own unused `.config()`
 ///    "extends" feature) survived the CJS rewrite untouched, and
-///    QuickJS's script-mode parser rejects a literal `import.meta`
+///    thaw-js's script-mode parser rejects a literal `import.meta`
 ///    outright, even on a path never actually reached.
 /// 2. `yargs/lib/platform-shims/esm.mjs`'s own `const __dirname =
 ///    fileURLToPath(dirname(import.meta.url));`/`const require =
@@ -3631,7 +3631,7 @@ async function main(): Promise<void> {{
 /// -- never classifies as `HirType::Bytes` at all (only thaw's own
 /// hand-authored `node:` ambients do), so its result stays a retained
 /// `JsValue`; `Buffer.isBuffer` on that `JsValue` was a static,
-/// always-`false` literal. Fixed by asking the live QuickJS engine
+/// always-`false` literal. Fixed by asking the live thaw-js engine
 /// (`__thaw_is_buffer_dynamic_value`, mirroring the existing
 /// `instanceof Date`-on-`JsValue` check).
 #[test]

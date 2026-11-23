@@ -1,5 +1,5 @@
 // thaw-js routing: which packages the Thaw-native JavaScript runtime can serve for a given program.
-// A package it cannot serve fails the build (`unsupported on thaw-js: ...`); there is no QuickJS fallback.
+// A package it cannot serve fails the build (`unsupported on thaw-js: ...`); there is no thaw-js fallback.
 
 thread_local! {
     /// Why thaw-js refused a package in the current build (`(package, why)`), for `thaw inspect`.
@@ -383,9 +383,9 @@ fn thaw_js_declaration_plain_with(line: &str, callback_options: bool) -> bool {
     let Some(rest) = line.strip_prefix("declare function ") else {
         return false;
     };
-    // A directly declared callback type (`f: (x: number) => number`) stays on QuickJS. (The LLVM side
+    // A directly declared callback type (`f: (x: number) => number`) stays on thaw-js. (The LLVM side
     // can already pass such a parameter to thaw-js, see `thaw_js_callback_type`; accepting it here is
-    // a one-line change that flips `thaw_js_routing_falls_back_to_quickjs_when_a_callback_...`.)
+    // a one-line change that flips `thaw_js_routing_falls_back_to_thaw-js_when_a_callback_...`.)
     // A callback coerced into a `Json` parameter (lodash's `iteratee: Json`) is routed.
     // A callable RESULT (`ejs.compile`, `nanoid.customAlphabet`) is accepted below, see `callable_result_plain`.
     let name_end = rest.find(['<', '(']).unwrap_or(rest.len());
@@ -834,7 +834,7 @@ fn thaw_js_declared_function(line: &str, package: &str) -> Option<String> {
 }
 
 /// Node builtin modules whose registry bundle and typed operations are validated on thaw-js (their
-/// node-compat cases match Node under `THAW_JS_RUNTIME=1`). Any other `node:*` package stays on QuickJS
+/// node-compat cases match Node under `THAW_JS_RUNTIME=1`). Any other `node:*` package stays on thaw-js
 /// until its own cases pass: plan Q2 flips builtin modules one at a time.
 const THAW_JS_BUILTIN_MODULES: &[&str] = &[
     "node:events",
@@ -1081,7 +1081,7 @@ fn thaw_js_package_eligible_in(
         record_thaw_js_blocker(&pkg.name, &why);
         if debug {
             eprintln!(
-                "thaw-js routing: package `{}` stays on QuickJS: {why}",
+                "thaw-js routing: package `{}` cannot run on thaw-js: {why}",
                 pkg.name
             );
         }
@@ -1094,7 +1094,7 @@ fn thaw_js_package_eligible_in(
     // A class the program names is served through thaw-js handles (`new`, instance and static
     // methods); every operation the shim declares for it must be plain data or an instance handle.
     // Anything else the program does with an instance that the typed operations do not cover needs
-    // QuickJS, which sends the whole build back to the QuickJS path.
+    // thaw-js, which sends the whole build back to the thaw-js path.
     for class in pkg
         .classes
         .iter()
@@ -1108,7 +1108,7 @@ fn thaw_js_package_eligible_in(
                     thaw_js_declaration_key(line).is_some_and(|key| key.starts_with("$new$")),
                 )
                 // a method operation is only emitted where the program calls it, and the thaw-js backend
-                // fails the build (which retries on QuickJS) for a signature it cannot serve
+                // fails the build (which retries on thaw-js) for a signature it cannot serve
                 && thaw_js_class_member(line).is_none()
             {
                 return reject(format!("class `{}`: {line}", class.name));
@@ -1186,7 +1186,7 @@ fn thaw_js_package_eligible_in(
                 return reject(format!("`{}` has no declaration", function.name));
             }
             // Overloads the program cannot call (an arity above its calls) are not checked: only a call
-            // reaches a declaration, so one unused callback overload must not send the package to QuickJS.
+            // reaches a declaration, so one unused callback overload must not send the package to thaw-js.
             let max_call_arity = thaw_js_call_arities(user_source, &function.name);
             lines
                 .into_iter()

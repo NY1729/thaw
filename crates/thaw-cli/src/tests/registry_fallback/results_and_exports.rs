@@ -91,7 +91,7 @@ function main(): void {
 /// a raw, mistyped integer), but `build_call_with` (the codegen path an
 /// *ordinary* function call like this one takes) never did any such
 /// recognition at all -- only the JSON-args-array-construction call
-/// sites did (guarded by `compiling_quickjs_dynamic_arguments`, which
+/// sites did (guarded by `compiling_thaw-js_dynamic_arguments`, which
 /// this path never set). Fixed by having `build_call_with` itself detect
 /// the same "expected a pointer (Json/Dictionary's own representation),
 /// got a raw int (actually a `JsValue` handle)" mismatch per argument,
@@ -881,7 +881,7 @@ function main(): void {
 /// as `Joi.object({ name: Joi.string() })`, the exact pattern already
 /// supported for zod's `z.object({ name: z.string() })` -- used to fail
 /// outright with "a dynamic (JsValue) value can only be passed as an
-/// argument to another QuickJS-backed dynamic call". `build_call_with`
+/// argument to another thaw-js-backed dynamic call". `build_call_with`
 /// (an ordinary compiled call to the generated typed wrapper) only
 /// enabled that placeholder mechanism when a parameter's *LLVM* type was
 /// a bare pointer -- but `Optional`/`Nullable`/`Nullish`/`Union` are this
@@ -1023,7 +1023,7 @@ function main(): void {
 /// a native `Date`-shaped receiver.
 ///
 /// Both fixed generally: `instanceof Date` against a confirmed
-/// `JsValue` dispatches into QuickJS via the same `dynamic_value_check`
+/// `JsValue` dispatches into thaw-js via the same `dynamic_value_check`
 /// mechanism `typeof`/`== null` already use for a live value
 /// (`__thaw_instanceof_date_dynamic_value`, `platform_globals/
 /// runtime.js`); a Date-prototype-named method call on a confirmed
@@ -1033,11 +1033,11 @@ function main(): void {
 /// (A `Json`-typed value reaching either of these -- e.g. a real npm
 /// package's Fallback function declared to return bare `unknown`,
 /// classified `Json` by an established heuristic -- stays a scoped-out
-/// gap: the JSON encode/decode boundary between QuickJS and this
+/// gap: the JSON encode/decode boundary between thaw-js and this
 /// codebase's own `Json` representation already collapses a real
 /// `Date` to a plain ISO string, the same way `JSON.stringify` would,
 /// before ever reaching this check -- there's no live identity left by
-/// then to ask QuickJS about. See `[[project_npm_interop_gaps_19]]`.)
+/// then to ask thaw-js about. See `[[project_npm_interop_gaps_19]]`.)
 #[test]
 fn instanceof_date_and_date_methods_work_on_a_dynamic_value() {
     let dir = std::env::temp_dir().join(format!(
@@ -1062,7 +1062,7 @@ fn instanceof_date_and_date_methods_work_on_a_dynamic_value() {
     std::fs::write(
         package.join("bundle.js"),
         // A UTC-anchored literal, not `new Date(year, month, date)` --
-        // the latter is local-time in real JS/QuickJS semantics, which
+        // the latter is local-time in real JS/thaw-js semantics, which
         // would make this test's expected output depend on the
         // machine's own timezone.
         "module.exports = { makeDate: function() { return new Date('2020-01-15T00:00:00.000Z'); } };\n",
@@ -1100,7 +1100,7 @@ function main(): void {
 /// `unknown` (classified `Json`, matching js-yaml's own `load(input):
 /// unknown` -- see `[[project_npm_interop_gaps_19]]`) can still return
 /// a real `Date`/`NaN`/`Infinity` at runtime. All three survive the
-/// QuickJS boundary in a structurally-recognizable way: a `Date` as
+/// thaw-js boundary in a structurally-recognizable way: a `Date` as
 /// `{"timestamp": N}` (`Date.prototype.toJSON` is overridden globally),
 /// `NaN`/`Infinity`/`-Infinity` as the `$__thaw_non_finite$` sentinel
 /// (`platform_globals/dates.js`'s `__thaw_json_safe_stringify`).
@@ -1182,7 +1182,7 @@ function main(): void {
 /// Fixed by asking the engine directly, the same way `typeof` on a
 /// `JsValue` already does (`__thaw_typeof_dynamic_value`): a new
 /// bootstrap-registered `__thaw_is_undefined_dynamic_value = value =>
-/// value === undefined` (`crates/thaw-quickjs/src/quickjs/
+/// value === undefined` (`crates/thaw-quickjs/src/thaw-js/
 /// platform_globals/runtime.js`), invoked through the same
 /// `callDynamicValueWithValue` mechanism.
 ///
@@ -1702,7 +1702,7 @@ function main(): void {
 /// A Fallback function whose real JS implementation genuinely returns
 /// `undefined` used to have that result marshaled back indistinguishably
 /// from a real `null` (`resolve_value_impl`, `crates/thaw-quickjs/src/
-/// quickjs/api.rs`, substituted the literal text `"null"` whenever
+/// thaw-js/api.rs`, substituted the literal text `"null"` whenever
 /// `JSON.stringify` reported the result as unrepresentable -- exactly
 /// what a genuine `undefined` looks like). For an `Optional`-typed
 /// declared return (`T | undefined`), this meant a function's own
@@ -2862,7 +2862,7 @@ fn two_packages_exporting_a_whole_function_under_the_same_name_do_not_collide() 
     // JIT-compiled, which binds its runtime symbol without going through
     // `wrap_as_commonjs_module`'s `globalThis.<name>` staging slot at all,
     // hiding the collision. The real packages at fault (express, cors) are
-    // both rejected by the JIT and take the QuickJS path.
+    // both rejected by the JIT and take the thaw-js path.
     for (package, value) in [("first-kit", "first"), ("second-kit", "second")] {
         let package_dir = registry.join(package);
         std::fs::create_dir_all(&package_dir).unwrap();
@@ -2903,7 +2903,7 @@ function main(): void {
 
 /// A dynamic-call result (`Json`) compared with `===`/`!==` against a
 /// concrete string/number/bool is coerced to that scalar first. Real-world
-/// example: cheerio's `$("p").text() === "W"` -- `text()` is a QuickJS
+/// example: cheerio's `$("p").text() === "W"` -- `text()` is a thaw-js
 /// Fallback method whose result is `Json`, and `coerce_strict_equality_
 /// operands` only handled `JsValue`, so the comparison failed at build
 /// time with "strict equality compares incompatible types Json and Str"

@@ -390,7 +390,7 @@ fn report_thaw_js_mixed(ir: &str) {
         }
     }
     for entry in seen.iter().take(24) {
-        eprintln!("thaw-js routing: QuickJS use in routed build: {entry}");
+        eprintln!("thaw-js routing: unported thaw_js_* call in routed build: {entry}");
     }
 }
 
@@ -464,7 +464,7 @@ fn build_with_thaw_js_routing(
 }
 
 /// Marker error: a program that lowered timers to the native queue also needs a JS engine (or another
-/// event-loop owner), so it is rebuilt with timers served by the build's engine (thaw-js or QuickJS).
+/// event-loop owner), so it is rebuilt with timers served by the build's engine (thaw-js or thaw-js).
 const NATIVE_TIMERS_NEED_ENGINE: &str = "native timers need engine-served timers";
 
 #[cfg(test)]
@@ -473,7 +473,7 @@ thread_local! {
     pub(crate) static NATIVE_TIMER_RETRIES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Whether a routed build's failure falls back to the QuickJS build. A native-timers conflict is not a
+/// Whether a routed build's failure falls back to the thaw-js build. A native-timers conflict is not a
 /// routing failure: the caller rebuilds the same routing with engine-served timers instead.
 fn routed_failure_falls_back(error: &str) -> bool {
     error != NATIVE_TIMERS_NEED_ENGINE
@@ -490,8 +490,8 @@ mod native_timers_retry_tests {
 
     #[test]
     fn native_timers_conflict_retries_without_the_quickjs_fallback() {
-        // the conflict is not a routed failure: the retry keeps the routing (thaw-js or QuickJS by
-        // the program's own needs) instead of recording a "fell back to QuickJS" blocker
+        // the conflict is not a routed failure: the retry keeps the routing (thaw-js or thaw-js by
+        // the program's own needs) instead of recording a "fell back to thaw-js" blocker
         assert!(!routed_failure_falls_back(NATIVE_TIMERS_NEED_ENGINE));
         assert!(routed_failure_falls_back("some other build error"));
     }
@@ -517,7 +517,7 @@ fn build_with_thaw_js_routing_shared(
     clear_thaw_js_blockers();
     // Timers lower to thaw-runtime's queue first (no JS context for timer-only programs); any
     // failure, or a program that also needs a JS engine, is rebuilt with engine-served timers (the
-    // build's routing decides whether that engine is thaw-js or QuickJS).
+    // build's routing decides whether that engine is thaw-js or thaw-js).
     if lib_mode.is_none() && native_timers_enabled() {
         thaw_hir::set_native_timers(true);
         let native = build_with_thaw_js_routing_inner(
@@ -597,7 +597,7 @@ fn build_with_native_mode_routed(
     // offline and reports the existing "run `thaw install`" help instead.
     install_missing: bool,
     // `thaw build --icu4c`: compile the opt-in ICU4C backend into the
-    // QuickJS staticlib for `Intl.Collator usage: 'search'`. ICU4C is
+    // thaw-js staticlib for `Intl.Collator usage: 'search'`. ICU4C is
     // resolved at runtime via `dlopen`, so this only selects the feature
     // (no linker changes, and a program still runs without ICU4C).
     icu4c: bool,
@@ -769,7 +769,6 @@ fn build_with_native_mode_routed(
             external_nested_namespaces,
             mut external_export_assignments,
             external_module_indices,
-            jit_fallback_reasons,
             runtime_features,
             jit_symbol_origins,
         ) = generate_registry_shims(
@@ -824,7 +823,7 @@ fn build_with_native_mode_routed(
         let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
         if let Ok(path) = std::env::var("THAW_DUMP_SHIM") {
             // debugging aid: the generated registry shim (TypeScript) of this build. `path` keeps the LAST pass (the
-            // QuickJS retry of a routed build overwrites the thaw-js pass); `path.passN` keeps every pass in order
+            // thaw-js retry of a routed build overwrites the thaw-js pass); `path.passN` keeps every pass in order
             static DUMP_PASS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let pass = DUMP_PASS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             let _ = std::fs::write(format!("{path}.pass{pass}"), &shim_source);
@@ -842,26 +841,6 @@ fn build_with_native_mode_routed(
                     .into(),
             );
         }
-        // thaw-js serves `node:module` (its createRequire keeps result handles), so no QuickJS forcing there
-        let created_require_live_result =
-            module_graph::uses_created_require_live_result(input, &user_source)?
-                && !(thaw_js_routed_packages(&shim_source).iter().any(|p| p == "node:module"));
-        let mut quickjs_reasons = quickjs_fallback_reasons(
-            input,
-            &user_source,
-            &shim_source,
-            &resolved_packages,
-            &external_exports,
-            &jit_fallback_reasons,
-        );
-        if created_require_live_result {
-            quickjs_reasons.push(serde_json::json!({
-                "kind": "dynamic-operation",
-                "operation": "createRequire result handle",
-                "detail": "created-require calls preserve native JavaScript result identity",
-                "source": input.display().to_string(),
-            }));
-        }
         if let Ok(path) = std::env::var("THAW_JS_RUNTIME_DUMP_SHIM") {
             let _ = std::fs::write(
                 format!("{path}.routed"),
@@ -869,12 +848,9 @@ fn build_with_native_mode_routed(
             );
         }
         #[allow(unused_mut)]
-        // functions that now run as AOT clones are no longer QuickJS fallbacks
-        let quickjs_reasons = js_infer_retain_reasons(quickjs_reasons, &js_infer_aot);
         let mut manifest = serde_json::json!({
             "packages": resolved_packages,
-            "quickjs_reasons": quickjs_reasons,
-            // Packages whose bundles run on the experimental thaw-js runtime instead of QuickJS.
+            // Packages whose bundles run on the thaw-js runtime.
             "thaw_js_routed": thaw_js_routed_packages(&shim_source),
             "napi": shim_source.contains("loadNativeAddonEmbedded(")
                 || shim_source.contains("loadNativeAddon(")
@@ -1020,7 +996,7 @@ fn build_with_native_mode_routed(
     // The last shim pass judged every package: one thaw-js refused has no bundle in the shim, so the build fails here.
     let refusals = take_thaw_js_refusals();
     if !refusals.is_empty() {
-        let why = refusals.iter().map(|(package, why)| format!("package `{package}` stays on QuickJS: {why}")).collect::<Vec<_>>().join("; ");
+        let why = refusals.iter().map(|(package, why)| format!("package `{package}` cannot run on thaw-js: {why}")).collect::<Vec<_>>().join("; ");
         return Err(format!("unsupported on thaw-js: {why}"));
     }
     // `SHARE_ENV` shares the environment table with a worker: `process.env.NAME` must read that table
@@ -1120,8 +1096,8 @@ fn build_with_native_mode_routed(
     // Always link the runtime support crates: thaw-arena backs array/object allocation
     // (Phase 1/2), thaw-runtime backs the Lambda event loop for
     // `handler`-based programs (Phase 2), thaw-std backs `fetch`/`JSON.*`,
-    // thaw-quickjs backs `loadScript`/`callDynamic` (the QuickJS-NG
-    // fallback path, docs/design/bridge.md section 7). It is built and
+    // thaw-js backs `loadScript`/`callDynamic` (docs/design/bridge.md
+    // section 7). It is built and
     // linked only when LLVM found a call into that host.
     let shared_rt_lib = shared_rt_active.then(build_rt_shared_library).transpose()?;
     let static_rt_libs = match shared_rt_lib {
@@ -1239,7 +1215,7 @@ fn build_with_native_mode_routed(
         // Second pass: the napi archive's `thaw_tjs_*` references come after the first thaw-js pass.
         linker.arg(thaw_js_lib);
     }
-    // thaw-quickjs (`thaw_js_dynamic_object_query`) and thaw-napi also call
+    // thaw-js (`thaw_js_dynamic_object_query`) and thaw-napi also call
     // back into thaw-std's `Json` helpers the same "resolved at link time"
     // way -- another trailing pass over `std_lib`/`runtime_lib` after both
     // archives, for the same backward-reference reason as the doubled
@@ -1248,7 +1224,7 @@ fn build_with_native_mode_routed(
         linker.arg(std_lib).arg(runtime_lib);
     }
     linker
-        // QuickJS-NG's C code calls libm math functions directly; `rustc`
+        // thaw-js's C code calls libm math functions directly; `rustc`
         // normally adds `-lm` automatically when it does the final link,
         // but this is a manual `cc` invocation instead.
         .arg("-lm")
@@ -1256,7 +1232,7 @@ fn build_with_native_mode_routed(
         // Every support crate is a static archive. Keep only the runtime
         // sections reached by this particular program, then remove the
         // remaining symbol/debug tables from the final executable. This is
-        // especially important for the optional QuickJS/N-API hosts, whose
+        // especially important for the optional thaw-js/N-API hosts, whose
         // unrelated feature implementations otherwise survive the link.
         .arg("-Wl,--gc-sections")
         .arg("-Wl,--undefined=__thaw_artifact_metadata")
@@ -1271,8 +1247,8 @@ fn build_with_native_mode_routed(
         }
         if compiler.uses_thaw_js() {
             // Promise-valued native callbacks poll these through RTLD_DEFAULT
-            // while they reenter the active QuickJS or thaw-js context.
-            linker.args(quickjs_callback_export_args());
+            // while they reenter the active thaw-js or thaw-js context.
+            linker.args(js_callback_export_args());
         }
         if thaw_js_drain_export_needed(compiler.uses_thaw_js()) {
             // The thaw-js loop drains compiled native continuations through RTLD_DEFAULT (host.rs).
@@ -1600,7 +1576,7 @@ fn napi_export_args() -> [&'static str; 2] {
     ]
 }
 
-fn quickjs_callback_export_args() -> [&'static str; 4] {
+fn js_callback_export_args() -> [&'static str; 4] {
     [
         "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
         "-Wl,--export-dynamic-symbol=thaw_runtime_set_js_job_hooks",
@@ -1610,7 +1586,7 @@ fn quickjs_callback_export_args() -> [&'static str; 4] {
 }
 
 /// The thaw-js loop's native-continuation drain (`drain_native_continuations`, host.rs) looks this symbol up via
-/// RTLD_DEFAULT; it is not in `quickjs_callback_export_args` and must be exported from a thaw-js routed build.
+/// RTLD_DEFAULT; it is not in `thaw-js_callback_export_args` and must be exported from a thaw-js routed build.
 fn thaw_js_extra_export_args() -> [&'static str; 11] {
     [
         "-Wl,--export-dynamic-symbol=thaw_runtime_run_until_idle",
@@ -1705,7 +1681,7 @@ fn zstd_marker_selects_the_zstd_feature_only_for_zstd_users() {
 #[test]
 fn quickjs_callbacks_export_only_their_runtime_poll_symbols() {
     assert_eq!(
-        quickjs_callback_export_args(),
+        js_callback_export_args(),
         [
             "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
             "-Wl,--export-dynamic-symbol=thaw_runtime_set_js_job_hooks",
@@ -1757,7 +1733,7 @@ fn every_thaw_js_dlsym_target_is_a_dynamic_export() {
     let exported: Vec<&str> = thaw_js_extra_export_args()
         .into_iter()
         .chain(thaw_js_ready_export_args())
-        .chain(quickjs_callback_export_args())
+        .chain(js_callback_export_args())
         .filter_map(|arg| arg.strip_prefix("-Wl,--export-dynamic-symbol="))
         .collect();
     let mut looked_up = Vec::new();
@@ -1813,108 +1789,6 @@ fn thaw_js_eligibility(registry_dir: &Path, packages: &[String]) -> serde_json::
         })
     });
     serde_json::Value::Array(entries.collect())
-}
-
-fn quickjs_fallback_reasons(
-    input: &Path,
-    source: &str,
-    shim_source: &str,
-    packages: &[String],
-    exports: &ExternalExports,
-    jit_fallback_reasons: &JitFallbackReasons,
-) -> Vec<serde_json::Value> {
-    let mut reasons = Vec::new();
-    for operation in [
-        "loadScript",
-        "callDynamic",
-        "getDynamicValue",
-        "callDynamicValue",
-        "callDynamicValueHandle",
-        "callDynamicValueWithValue",
-        "releaseDynamicValue",
-        "getDynamicProperty",
-        "setDynamicProperty",
-        "callDynamicMethod",
-        "readDynamicValue",
-        "callDynamicValueMixed",
-        "constructDynamicValue",
-    ] {
-        if let Some(offset) = source.find(&format!("{operation}(")) {
-            let (line, column) = source_line_column(source, offset);
-            reasons.push(serde_json::json!({
-                "kind": "dynamic-operation",
-                "operation": operation,
-                "detail": "explicit dynamic host call",
-                "source": input.display().to_string(),
-                "line": line,
-                "column": column,
-            }));
-        }
-    }
-    let mut seen_targets = std::collections::HashSet::new();
-    for package in packages {
-        let Some(package_exports) = exports.get(package) else {
-            continue;
-        };
-        let mut package_uses_quickjs = false;
-        for (function, target) in package_exports {
-            let key = format!("{package}::{function}");
-            let encoded = key
-                .as_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            if !(target.starts_with("__thaw_typed_js_")
-                || shim_source.contains(&format!("__thaw_typed_js_{encoded}")))
-                || !seen_targets.insert(target)
-            {
-                continue;
-            }
-            package_uses_quickjs = true;
-            let Some(offset) = source
-                .find(&format!("{function}("))
-                .or_else(|| source.find(&format!(".{function}(")))
-            else {
-                continue;
-            };
-            let (line, column) = source_line_column(source, offset);
-            let detail = jit_fallback_reasons
-                .get(&(package.clone(), function.clone()))
-                .map(String::as_str)
-                .unwrap_or("dynamic class/object lifecycle is outside the specialization JIT");
-            reasons.push(serde_json::json!({
-                "kind": "registry-fallback",
-                "package": package,
-                "function": function,
-                "detail": detail,
-                "source": input.display().to_string(),
-                "line": line,
-                "column": column,
-            }));
-        }
-        if package_uses_quickjs
-            && !reasons
-                .iter()
-                .any(|reason| reason["package"].as_str() == Some(package))
-        {
-            reasons.push(serde_json::json!({
-                "kind": "package-runtime",
-                "package": package,
-                "detail": "package initialization requires its JavaScript bundle",
-            }));
-        }
-    }
-    reasons
-}
-
-fn source_line_column(source: &str, offset: usize) -> (usize, usize) {
-    let prefix = &source[..offset];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let column = prefix
-        .rsplit_once('\n')
-        .map_or(prefix.len(), |(_, tail)| tail.len())
-        + 1;
-    (line, column)
 }
 
 #[cfg(test)]
@@ -2028,8 +1902,8 @@ fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
 }
 
 /// Builds a package without its default features. This is used for the N-API
-/// host when the generated program has no QuickJS call sites, so the host's
-/// optional QuickJS bridge is not compiled into the final archive.
+/// host when the generated program has no thaw-js call sites, so the host's
+/// optional thaw-js bridge is not compiled into the final archive.
 fn build_staticlib_without_default_features(pkg: &str) -> Result<PathBuf, String> {
     build_staticlib_with_options(pkg, true, &[])
 }
@@ -2131,7 +2005,7 @@ fn cargo_build_staticlib(
         }
         // Keep feature variants in separate target directories. CLI tests build
         // several artifacts concurrently; sharing target/release would let a
-        // QuickJS-enabled and a QuickJS-free static archive replace each other.
+        // thaw-js-enabled and a thaw-js-free static archive replace each other.
         command
             .arg("--target-dir")
             .arg(feature_target_dir(pkg, features));

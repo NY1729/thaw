@@ -827,7 +827,7 @@ function main(): void {
 /// mechanism (`HirExpr::JsValueAsJson`, `lower/inference/
 /// coercions.rs`'s `HirType::Json`-declared branch): each bare
 /// constructor value becomes a live-handle placeholder object, JSON-
-/// encoded and sent across in one call, and the QuickJS-side reviver
+/// encoded and sent across in one call, and the thaw-js-side reviver
 /// splices the real function references back in before the callee
 /// ever sees them -- confirmed by checking each field's real
 /// `typeof`/`.name` from inside the called function itself, not just

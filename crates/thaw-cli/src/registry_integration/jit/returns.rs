@@ -627,7 +627,7 @@ macro_rules! jit_returns {
 
     /// Infers a JIT dictionary value-kind prefix from a `Map.set` value
     /// expression's syntax (literal or simple arithmetic). Returns `None`
-    /// when it can't be inferred, so the caller falls back to QuickJS.
+    /// when it can't be inferred, so the caller falls back to thaw-js.
     fn infer_map_value_kind(expr: &Expr) -> Option<&'static str> {
         match expr {
             Expr::Paren(parenthesized) => infer_map_value_kind(parenthesized.expr.as_ref()),

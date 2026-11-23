@@ -1,5 +1,5 @@
 // thaw-js routing of native-to-JS callbacks (a TypeScript callback handed to a routed package
-// function) and of `catch` bindings: neither may pull QuickJS into a routed build.
+// function) and of `catch` bindings: neither may pull thaw-js into a routed build.
 
 /// `tjs-cb`: its functions use `Map` (so the specialization JIT cannot take them) and take their
 /// callback as `any` (a `Json` parameter once routed).
@@ -94,7 +94,7 @@ fn thaw_js_routing_catches_a_package_error_without_linking_quickjs() {
 
 #[test]
 fn thaw_js_routing_keeps_an_any_typed_result_of_a_callback_call_working() {
-    // Whether this routes or the compiler rebuilds it on QuickJS, the program prints what Node does.
+    // Whether this routes or the compiler rebuilds it on thaw-js, the program prints what Node does.
     let (dir, registry, entry) = thaw_js_callback_fixture(
         "fallback",
         "import { mapAll } from 'tjs-cb';\n\

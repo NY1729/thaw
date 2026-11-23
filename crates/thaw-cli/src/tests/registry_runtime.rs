@@ -328,7 +328,7 @@ fn node_fs_read_file_sync_without_an_encoding_argument_returns_a_buffer() {
 /// always-`false` literal (only a native `Bytes` receiver or a `Json`
 /// value were ever checked) even when the real runtime value returned
 /// genuinely is a `Buffer` -- found auditing adm-zip's own
-/// `toBuffer(): Buffer`. Fixed by asking the live QuickJS engine
+/// `toBuffer(): Buffer`. Fixed by asking the live thaw-js engine
 /// (`__thaw_is_buffer_dynamic_value`, mirroring the existing
 /// `instanceof Date`-on-`JsValue` dynamic check).
 #[test]

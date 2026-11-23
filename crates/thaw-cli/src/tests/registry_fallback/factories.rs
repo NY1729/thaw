@@ -1,4 +1,4 @@
-/// A Fallback (QuickJS-NG, no native addon) package whose factory
+/// A Fallback (thaw-js, no native addon) package whose factory
 /// function returns an instance of one of its own classes -- real-world
 /// example: dayjs's `declare function dayjs(...): dayjs.Dayjs`, `Dayjs`
 /// declared inside `declare namespace dayjs { class Dayjs {...} }`
@@ -13,7 +13,7 @@
 /// Exercises the whole chain: `thaw_bridge::function_return_named_types`
 /// linking the factory to its class, `parse_dts_classes` now descending
 /// into `declare namespace` blocks to find the class at all, thaw-cli's
-/// shims.rs generating a QuickJS-NG-backed (`__thaw_typed_js_`) instance
+/// shims.rs generating a thaw-js-backed (`__thaw_typed_js_`) instance
 /// method declaration via the same generator a native addon's class
 /// already used, `compile_typed_napi_method` (thaw-llvm) now dispatching
 /// that declaration's backend to `thaw_js_call_method_result` instead of
@@ -415,7 +415,7 @@ function main(): void {
 /// showing a `floor` entry in the executable's own dynamic symbol table.
 /// Since libm is linked dynamically, Linux's default symbol interposition
 /// rule then made *every* reference to `floor` process-wide -- including
-/// the one QuickJS-NG's own `Math.floor` builtin makes internally via the
+/// the one thaw-js's own `Math.floor` builtin makes internally via the
 /// PLT -- resolve to *this* native function instead of libm's real
 /// `floor(double): double`. Called with a `double` argument (in an XMM
 /// register, per the C calling convention) as if it were thaw's own

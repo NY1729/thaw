@@ -1,4 +1,4 @@
-/// Constructing a Fallback (pure-JS, QuickJS-NG-dispatched) class
+/// Constructing a Fallback (pure-JS, thaw-js-dispatched) class
 /// instance via `new Class(...)` -- real-world example: hono's `new
 /// Hono()`. Two bugs, found and fixed together:
 ///
@@ -9,7 +9,7 @@
 ///    Fallback class that's the wrong backend outright, and
 ///    `compile_typed_dynamic_call`'s own construct-a-value branch (LLVM
 ///    codegen) only existed for `DynamicBackend::Napi` at all -- there
-///    was no QuickJS-NG equivalent using `thaw_js_get_global` +
+///    was no thaw-js equivalent using `thaw_js_get_global` +
 ///    `thaw_js_construct_handle_result` (both already existed, wired to
 ///    nothing).
 /// 2. Separately: a package whose *only* export is a class (no
@@ -585,7 +585,7 @@ function main(): void {
 ///    `crates/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs`) is looked
 ///    up via `thaw_js_get_global` against the class's *plain* name --
 ///    nothing had ever bound that bare global for a Fallback
-///    (QuickJS-NG-backed) class before (unlike a real N-API module's
+///    (thaw-js-backed) class before (unlike a real N-API module's
 ///    export lookup, a different, already-working mechanism) -- fixed
 ///    by also capturing the bare name in `generate_module_init`'s glue,
 ///    reusing the exact same read-`module.exports`-with-a-`default`-
@@ -814,7 +814,7 @@ function main(): void {
 /// `compile_dynamic_value_placeholder` (thaw-llvm's `json_bridge.rs`)
 /// fixes this by encoding the handle's own permanent id as
 /// `{"__thaw_js_handle_id__": N}` instead of trying to serialize it, and
-/// the QuickJS-side JSON reviver (see `dates.js`'s doc comment) splices
+/// the thaw-js-side JSON reviver (see `dates.js`'s doc comment) splices
 /// the real value back in the moment that JSON gets parsed on the other
 /// end -- the same mechanism already used to round-trip a `Date`.
 /// Exercises the value being reused twice (proving the handle stays
@@ -892,7 +892,7 @@ function main(): void {
 /// field to omit. Fixed in `coerce_to_declared` (thaw-hir) by encoding it
 /// as the same `{"$__thaw_napi_undefined$": true}` sentinel a NAPI
 /// return value already uses for the identical problem, reviving it back
-/// to the real literal on the QuickJS side (`__thaw_json_date_reviver`,
+/// to the real literal on the thaw-js side (`__thaw_json_date_reviver`,
 /// the same reviver `Date`/`JsValue` already go through). Distinguishes
 /// a real `undefined` from `null` and from any other JSON value to rule
 /// out an accidental "map to null" shortcut, which would be wrong: real
@@ -1037,7 +1037,7 @@ function main(): void {
 /// `compile_dynamic_value_placeholder` call, just reached via
 /// `compile_json_object_set_native_with_undefined`'s and
 /// `compile_json_array_push_native_with_undefined`'s own `HirType::JsValue`
-/// arms rather than the bare-argument catch-all, and the QuickJS-side
+/// arms rather than the bare-argument catch-all, and the thaw-js-side
 /// reviver splices each one back in regardless of depth (it runs
 /// bottom-up over the whole parsed value, exactly like it already does
 /// for a nested `Date`). Real-world shape: zod's own `z.object({ name:
@@ -1195,7 +1195,7 @@ function main(): void {
 /// real zod's own schema-builder return shape) rather than a plain
 /// string -- a `Fallback` function simple enough to synthesize a
 /// numeric/string result gets JIT-compiled directly by thaw itself
-/// (`jit_export`) and so never actually loads `bundle.js` into QuickJS
+/// (`jit_export`) and so never actually loads `bundle.js` into thaw-js
 /// at all, which would silently skip the very code path this test
 /// means to exercise.
 #[test]
@@ -1471,7 +1471,7 @@ function main(): void {
 /// A Fallback function declared to return `Json` (real example: csv-
 /// parse's own `Readable.read(): Json`) whose *real* runtime return
 /// value -- despite the declared type -- is an opaque, live `JsValue`
-/// handle (any Fallback/QuickJS-dispatched call's own actual result,
+/// handle (any Fallback/thaw-js-dispatched call's own actual result,
 /// regardless of what its own `.d.ts` return type says), used in
 /// Node's own documented idiom for draining a value repeatedly:
 /// `let record; while ((record = next()) !== null) { ... }`.

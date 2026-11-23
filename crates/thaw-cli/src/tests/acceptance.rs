@@ -407,8 +407,6 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
     });
     let executable_bytes = std::fs::metadata(&executable).unwrap().len();
     let sidecar_bytes = directory_size(&package.join("board.native"));
-    let artifact_manifest =
-        artifact_manifest_from_bytes(&std::fs::read(&executable).unwrap()).unwrap();
     assert!(package
         .join("board.native")
         .join(native_addon_path_component("@prisma/client"))
@@ -469,16 +467,6 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
         let (hello_cold_ms, prepare_ms, hello_prepared_ms, hello_cached_ms, hello_bytes) =
             hello_metrics.unwrap();
         let cached_build_ms = cached_build_ms.unwrap();
-        let quickjs_reasons = artifact_manifest["quickjs_reasons"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let mut quickjs_reason_counts = std::collections::BTreeMap::<&str, usize>::new();
-        for reason in &quickjs_reasons {
-            *quickjs_reason_counts
-                .entry(reason["kind"].as_str().unwrap_or("unknown"))
-                .or_default() += 1;
-        }
         let metrics = serde_json::json!({
             "hello": {
                 "cold_build_ms": hello_cold_ms,
@@ -493,8 +481,6 @@ fn installs_builds_and_serves_the_react_prisma_board_when_enabled() {
                 "cached_build_ms": cached_build_ms,
                 "executable_bytes": executable_bytes,
                 "sidecar_bytes": sidecar_bytes,
-                "quickjs_reason_counts": quickjs_reason_counts,
-                "quickjs_reasons": quickjs_reasons,
             },
         });
         println!("thaw performance: {metrics}");

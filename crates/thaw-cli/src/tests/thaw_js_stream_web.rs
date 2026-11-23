@@ -35,7 +35,7 @@ fn thaw_js_routing_serves_a_writable_with_a_write_callback_without_linking_quick
 }
 
 // Builds a Writable whose `write` method is `write_method`, routes it on thaw-js, and returns the
-// program's stdout. Checks the program does not link QuickJS.
+// program's stdout. Checks the program does not link thaw-js.
 fn thaw_js_writable_method_output(tag: &str, write_method: &str) -> String {
     let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-writable-{tag}-{}", std::process::id()));
     let registry = dir.join("modules");
@@ -94,7 +94,7 @@ fn thaw_js_routing_writable_write_arrow_property_runs_on_thaw_js() {
 }
 
 // Builds `body` (the statements of `main`, with `imports` above it) on thaw-js and returns its stdout.
-// Checks the program does not link QuickJS.
+// Checks the program does not link thaw-js.
 fn thaw_js_stream_program_output(tag: &str, imports: &str, body: &str) -> String {
     let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-stream-{tag}-{}", std::process::id()));
     let registry = dir.join("modules");
