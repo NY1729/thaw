@@ -1574,13 +1574,27 @@ impl Package {
 }
 
 pub(crate) fn classify(it: &mut Interp, c: Ctl) -> HostError {
+    // the framed form belongs to the error classified last: a later throw of anything else (a string whose text
+    // equals that error's display) must not pick it up
+    LAST_FRAME.with(|f| *f.borrow_mut() = None);
     let packet = match &c {
         Ctl::Throw(v) => carrier_packet(it, v),
         _ => None,
     };
+    // a thrown primitive gets its packet only when an error string is made (`error_string`): a packet parked
+    // in a thread-local would abort the process when its thread ends
+    let primitive = match (&c, &packet) {
+        (Ctl::Throw(v), None) => primitive_throw(v, it),
+        _ => None,
+    };
+    LAST_PRIMITIVE.with(|p| *p.borrow_mut() = primitive);
     LAST_PACKET.with(|p| *p.borrow_mut() = packet);
-    if let Ctl::Throw(v @ Value::Object(_)) = &c {
-        LAST_THROWN.with(|t| *t.borrow_mut() = Some(v.clone()));
+    // A thrown string shaped like a framed Error would be rebuilt as that Error from its text: keep the
+    // original value too, so the native catch gets the string.
+    if let Ctl::Throw(v) = &c {
+        if matches!(v, Value::Object(_)) || matches!(v, Value::Str(s) if s.starts_with('\u{1}')) {
+            LAST_THROWN.with(|t| *t.borrow_mut() = Some(v.clone()));
+        }
     }
     match c {
         Ctl::Unsupported(f) => HostError::Unsupported(f),
@@ -2132,6 +2146,12 @@ pub(crate) fn graph_token(
         return Err("malformed graph token".into());
     };
     match (key.as_str(), payload) {
+        // A well-known symbol crosses as its private `"\u{1f}@@name"` string: re-key it here so a
+        // dynamic `defineProperty`/`fromEntries` key is the real symbol (the QuickJS graph decoder did).
+        ("v", Native::Str(s)) if s.starts_with("\u{1f}@@") => match dynamic_property_key(it, s) {
+            Ok(key) => Ok(it.key_value(&key)),
+            Err(_) => Ok(to_value(it, payload)),
+        },
         ("v", v) => Ok(to_value(it, v)),
         ("u", _) => Ok(Value::Undefined),
         ("nf", Native::Str(s)) => Ok(Value::Number(match s.as_str() {
@@ -2758,6 +2778,27 @@ pub(crate) fn on_handle_strict<T>(
     with_package(owner, |p| f(p, owner, value)).map_err(error_text)
 }
 
+/// A host-supplied property name as the key the interpreter stores it under: Symbol wire text
+/// (`\u{1f}@@name`, `\u{3}<id>`, `__thaw_symbol_<name>`) goes through the prelude's
+/// `__thaw_property_key`, the same decoder the QuickJS host used (`dynamic_property_key`).
+pub(crate) fn dynamic_property_key(it: &mut Interp, name: &str) -> Result<String, HostError> {
+    if !(name.starts_with('\u{1f}')
+        || name.starts_with('\u{3}')
+        || name.starts_with("__thaw_symbol_"))
+    {
+        return Ok(name.to_string());
+    }
+    default_realm_prelude_check(it)?;
+    let global = it.global.clone();
+    let Some(decode) = it.lookup(&global, "__thaw_property_key") else {
+        return Ok(name.to_string());
+    };
+    let key = it
+        .call(&decode, &Value::Undefined, &[Value::str(name)])
+        .map_err(|c| classify(it, c))?;
+    Ok(it.key_of(&key).to_string())
+}
+
 fn property(p: &mut Package, owner: usize, value: &Value, key: &str) -> Result<i64, HostError> {
     let it = &mut p.interp;
     let v = it.get(value, key).map_err(|c| classify(it, c))?;
@@ -2769,7 +2810,11 @@ fn property(p: &mut Package, owner: usize, value: &Value, key: &str) -> Result<i
 pub extern "C" fn thaw_tjs_get_property_result(handle: u64, name: *const c_char) -> HandleResult {
     handle_result((|| {
         let name = cstr(name).ok_or("invalid property name")?;
-        on_handle(handle, |p, owner, v| property(p, owner, &v, &name))
+        // a plain name may be Symbol wire text; the JSON-key form below is user data (a lookalike string key)
+        on_handle(handle, |p, owner, v| {
+            let name = dynamic_property_key(&mut p.interp, &name)?;
+            property(p, owner, &v, &name)
+        })
     })())
 }
 
@@ -2819,6 +2864,7 @@ pub extern "C" fn thaw_tjs_get_property_exact_result(
     };
     let result = on_handle(handle, |p, owner, v| {
         let it = &mut p.interp;
+        let name = dynamic_property_key(it, &name)?;
         Ok(match it.get(&v, &name) {
             Ok(v) => Ok(store_handle(owner, v)),
             Err(Ctl::Throw(t)) => {
@@ -3385,6 +3431,8 @@ pub extern "C" fn thaw_tjs_host_query_result(handle: u64, operation: u8) -> Thaw
             8 => from_value(it, &v, 0)
                 .map(|n| n.to_json())
                 .unwrap_or_else(|_| "null".into()),
+            // the text a user-facing `JSON.stringify` writes for a live value (no handle marker)
+            34 => crate::napi_eval::json_stringify(it, &v)?.unwrap_or_else(|| "null".into()),
             9 => flag(is_object),
             10 => number(it, &v),
             14 => flag(v.is_callable()),
@@ -3663,6 +3711,7 @@ pub extern "C" fn thaw_tjs_call_method_graph_result(
         let (_, args) = decode_wire(&cstr(args_json).ok_or("invalid arguments")?)?;
         on_handle(handle, |p, owner, this| {
             let it = &mut p.interp;
+            let name = dynamic_property_key(it, &name)?;
             let method = it.get(&this, &name).map_err(|c| classify(it, c))?;
             let args = it.array_items(&args);
             let method = native_server_overload(it, &this, &name, &args).unwrap_or(method);
@@ -3698,6 +3747,7 @@ pub extern "C" fn thaw_tjs_set_property_result(
         let value = on_handle(value_handle, |_, _, v| Ok(v))?;
         on_handle(handle, |p, _, target| {
             let it = &mut p.interp;
+            let name = dynamic_property_key(it, &name)?;
             strict_host_set(it, &target, &name, value).map_err(|c| classify(it, c))?;
             Ok(1)
         })
@@ -3709,6 +3759,7 @@ fn property_predicate(handle: u64, name: *const c_char, delete: bool) -> HandleR
         let name = cstr(name).ok_or("invalid property name")?;
         on_handle(handle, |p, _, target| {
             let it = &mut p.interp;
+            let name = dynamic_property_key(it, &name)?;
             let result = if delete {
                 match &target {
                     Value::Object(o) => {
@@ -4615,6 +4666,7 @@ pub extern "C" fn thaw_tjs_call_method_handle_graph_args_result(
         let (_, args) = decode_wire(&cstr(args_json).ok_or("invalid arguments")?)?;
         on_handle(handle, |p, owner, this| {
             let it = &mut p.interp;
+            let name = dynamic_property_key(it, &name)?;
             let method = it.get(&this, &name).map_err(|c| classify(it, c))?;
             let args = it.array_items(&args);
             let method = native_server_overload(it, &this, &name, &args).unwrap_or(method);
@@ -4648,6 +4700,7 @@ pub extern "C" fn thaw_tjs_set_property_json_graph_result(
                 .into_iter()
                 .next()
                 .unwrap_or(Value::Undefined);
+            let name = dynamic_property_key(it, &name)?;
             strict_host_set(it, &target, &name, value.clone()).map_err(|c| classify(it, c))?;
             let mut out = WireOut {
                 owner,
@@ -5804,6 +5857,28 @@ fn primitive_reason(packet: &thaw_arena::exception::ExceptionPacket) -> Option<V
     })
 }
 
+/// The exact value of a thrown primitive of a callback result: `primitive_reason`, plus tag 4 (a string
+/// throw: the result text itself, unless it is a framed native Error), as the QuickJS host rebuilt it.
+fn thrown_primitive(
+    packet: Option<&thaw_arena::exception::ExceptionPacket>,
+    text: &str,
+) -> Option<Value> {
+    let packet = packet?;
+    // a thrown callback result is marked with a leading `\u{2}`
+    let text = text.strip_prefix('\u{2}').unwrap_or(text);
+    if packet.tag == 4
+        && packet.object == 0
+        && packet.native == 0
+        && packet.aggregate == 0
+        && packet.native_text != 0
+        && packet.native_error_identity == 0
+        && !text.starts_with('\u{1}')
+    {
+        return Some(Value::str(text));
+    }
+    primitive_reason(packet)
+}
+
 /// The text of an arena string. A string with an embedded NUL has a recorded length (`owned_string`), which a
 /// C-string read would cut at the NUL; error messages may hold NULs.
 ///
@@ -5833,7 +5908,7 @@ pub(crate) fn take_callback_result(
         retain_restored_packet(it, packet.clone(), &original);
         return Err(Ctl::Throw(original));
     }
-    if let Some(reason) = packet.as_deref().and_then(primitive_reason) {
+    if let Some(reason) = thrown_primitive(packet.as_deref(), &out) {
         return Err(Ctl::Throw(reason));
     }
     if packet.is_some() || out.starts_with('\u{2}') {
@@ -6203,9 +6278,13 @@ fn abort_native_pending_work() {
 fn abort_native_pending_work() {}
 
 /// `drain_native` as a loop turn hook. A listen callback may queue continuations, so servers are polled first.
-pub(crate) fn drain_native_continuations(_: &mut Interp) -> bool {
+pub(crate) fn drain_native_continuations(it: &mut Interp) -> bool {
     let http = poll_native_servers();
     let ran = drain_native();
+    // Node ends the process at the first drain that leaves a rejection unhandled, before a later timer runs
+    if native_unhandled_failure() {
+        it.yielded = true;
+    }
     ran || (http & 2) != 0
 }
 
@@ -6412,6 +6491,9 @@ fn call_compiled(it: &mut Interp, id: usize, this: &Value, args: &[Value]) -> R<
         retain_restored_packet(it, packet.clone(), &original);
         return Err(Ctl::Throw(original));
     }
+    if let Some(reason) = thrown_primitive(packet.as_deref(), &out) {
+        return Err(Ctl::Throw(reason));
+    }
     if packet.is_some() || out.starts_with('\u{2}') {
         return Err(packet_error(it, packet, &out));
     }
@@ -6437,6 +6519,8 @@ thread_local! {
     static LAST_FRAME: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
     /// The native packet of the last carrier `classify` saw; `error_string` binds it to the error text.
     static LAST_PACKET: RefCell<Option<Rc<thaw_arena::exception::ExceptionPacket>>> = const { RefCell::new(None) };
+    /// The thrown primitive `classify` saw last, as plain data; `error_string` turns it into a packet.
+    static LAST_PRIMITIVE: RefCell<Option<PrimitiveThrow>> = const { RefCell::new(None) };
     /// The last object `classify` saw thrown, so a failed typed call can hand the exact object to compiled code.
     static LAST_THROWN: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// The handle of the object the last failed typed call threw (see `thaw_tjs_take_thrown_handle`); 0 for none.
@@ -6449,6 +6533,60 @@ thread_local! {
 #[no_mangle]
 pub extern "C" fn thaw_tjs_take_thrown_handle() -> i64 {
     LAST_THROWN_HANDLE.with(Cell::take)
+}
+
+/// A thrown boolean, number, string, `undefined` or `null`: kept as plain data until an error string is made.
+struct PrimitiveThrow {
+    tag: i64,
+    number: u64,
+    boolean: u64,
+    text: String,
+}
+
+fn primitive_throw(v: &Value, it: &mut Interp) -> Option<PrimitiveThrow> {
+    let (tag, number, boolean) = match v {
+        Value::Bool(b) => (3, 0, u64::from(*b)),
+        Value::Number(n) => (1, n.to_bits(), 0),
+        Value::Str(_) => (4, 0, 0),
+        Value::Undefined => (5, 0, 0),
+        Value::Null => (6, 0, 0),
+        _ => return None,
+    };
+    Some(PrimitiveThrow {
+        tag,
+        number,
+        boolean,
+        text: it.to_str(v).to_string(),
+    })
+}
+
+impl PrimitiveThrow {
+    /// The packet that carries the exact primitive to the native `catch` (the QuickJS host's
+    /// `primitive_exception_packet`).
+    fn into_packet(self) -> Option<Rc<thaw_arena::exception::ExceptionPacket>> {
+        let mut bytes = self.text.as_bytes().to_vec();
+        bytes.push(0);
+        let owned = bytes.into_boxed_slice();
+        let address = owned.as_ptr() as usize;
+        thaw_arena::register_exception_bytes(address as *const c_char, self.text.len());
+        thaw_arena::exception::register_packet(thaw_arena::exception::ExceptionPacket {
+            id: 0,
+            pending: address,
+            native_text: address,
+            native_error_identity: 0,
+            object: 0,
+            native: 0,
+            aggregate: 0,
+            tag: self.tag,
+            number: self.number,
+            bigint: 0,
+            boolean: self.boolean,
+            _roots: Vec::new(),
+            _owned_bytes: vec![owned],
+            _leases: Vec::new(),
+        })
+        .map(|(_, packet)| packet)
+    }
 }
 
 /// The live native packet a thrown carrier names in its hidden `\0pkt`, if any.
@@ -6466,8 +6604,13 @@ fn carrier_packet(
 /// the string, as a callback result does, so the native side resolves the same exception by token.
 pub(crate) fn error_string(e: String) -> *mut c_char {
     let pointer = thaw_arena::owned_string(e);
+    let primitive = LAST_PRIMITIVE.with(|p| p.borrow_mut().take());
     if let Some(packet) = LAST_PACKET.with(|p| p.borrow_mut().take()) {
         thaw_arena::bind_owned_exception(pointer, packet);
+    } else if let Some(primitive) = primitive {
+        if let Some(packet) = primitive.into_packet() {
+            thaw_arena::bind_owned_exception(pointer, packet);
+        }
     }
     pointer
 }
@@ -6549,11 +6692,14 @@ pub(crate) fn frame_error(it: &mut Interp, v: &Value) -> Option<(String, String)
             }
         }
     }
-    let text = it.to_str(v);
-    let display = if text.starts_with(&name) {
-        text.to_string()
+    // `name: message` as the built-in `Error.prototype.toString` writes it: the thrown object's own
+    // `toString` is user code a host error report must not run
+    let display = if message.is_empty() {
+        name
+    } else if name.is_empty() {
+        message.to_string()
     } else {
-        format!("{name}: {text}")
+        format!("{name}: {message}")
     };
     Some((display, framed))
 }
@@ -7624,17 +7770,21 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
     // `beforeExit` re-arm loop and then `exit`, once. A realm with listeners but no work still gets them.
     if !exited && !WATCHES.with(|w| !w.borrow().is_empty()) && !crate::host::native_servers_live() {
         let count = PACKAGES.with(|ps| ps.borrow().len());
+        let mut exit_ran = false;
         for handle in 0..count {
             let ran = with_package(handle, |p| {
                 if p.interp.exit_emitted() || !p.interp.exit_listeners() {
                     return Ok(0);
                 }
+                exit_ran = true;
                 p.interp.turn_hook = Some(drain_native_continuations);
                 let r = p
                     .interp
                     .run_event_loop()
                     .map_err(|c| classify(&mut p.interp, c));
                 p.interp.turn_hook = None;
+                // Node runs nothing after `exit`: a timer or job an exit listener armed never fires
+                p.interp.drop_pending_work();
                 r
             });
             match ran {
@@ -7645,6 +7795,10 @@ pub extern "C" fn thaw_tjs_run_event_loop() -> i32 {
                 Ok(code) if code != 0 => status = code,
                 Ok(_) => {}
             }
+        }
+        // ... nor does the compiled runtime's own queue: a timer an exit listener armed natively must not fire
+        if exit_ran {
+            abort_native_pending_work();
         }
     }
     // a natural end with `process.exitCode = n` and no pending work is the program's status too

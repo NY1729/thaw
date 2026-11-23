@@ -1709,19 +1709,7 @@ impl Interp {
                 Ok(obj)
             });
             self.set_native(o, "defineProperty", |it, _, args| {
-                let key = it.key_of(&arg(args, 1));
-                if let Value::Object(po) = arg(args, 0) {
-                    if let Some((target, handler, trap)) = it.proxy_trap(&po, "defineProperty")? {
-                        it.prop_desc_of(&arg(args, 2))?;
-                        if trap.is_callable() {
-                            it.call(&trap, &handler, &[target, arg(args, 1), arg(args, 2)])?;
-                        } else {
-                            it.define_property(&target, &key, &arg(args, 2))?;
-                        }
-                        return Ok(arg(args, 0));
-                    }
-                }
-                it.define_property(&arg(args, 0), &key, &arg(args, 2))?;
+                it.define_through_proxy(&arg(args, 0), &arg(args, 1), &arg(args, 2))?;
                 Ok(arg(args, 0))
             });
             self.set_native(o, "defineProperties", |it, _, args| {
@@ -1733,7 +1721,8 @@ impl Interp {
                     .collect();
                 for k in keys {
                     let d = it.get(&props, &k)?;
-                    it.define_property(&arg(args, 0), &k, &d)?;
+                    let key = it.key_value(&k);
+                    it.define_through_proxy(&arg(args, 0), &key, &d)?;
                 }
                 Ok(arg(args, 0))
             });
@@ -1751,7 +1740,14 @@ impl Interp {
             self.set_native(o, "setPrototypeOf", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
                     let proto = arg(args, 1);
-                    if it.proxy_set_prototype_of(&o, &proto)?.is_none() {
+                    let by_proxy = it.proxy_set_prototype_of(&o, &proto)?;
+                    if by_proxy == Some(false) {
+                        return it.throw_error(
+                            "TypeError",
+                            "'setPrototypeOf' on proxy: trap returned falsish for property 'undefined'",
+                        );
+                    }
+                    if by_proxy.is_none() {
                         let next = match proto {
                             Value::Object(p) => Some(p),
                             _ => None,
@@ -1765,6 +1761,17 @@ impl Interp {
                             let label = v8_label(it, &o)?;
                             return it
                                 .throw_error("TypeError", &format!("{label} is not extensible"));
+                        }
+                        // a cycle through `o` is refused; a proxy on the new chain ends the walk
+                        let mut q = next.clone();
+                        while let Some(x) = q.take() {
+                            if Rc::ptr_eq(&x, &o) {
+                                return it.throw_error("TypeError", "Cyclic __proto__ value");
+                            }
+                            if matches!(&*x.kind.borrow(), Kind::Proxy(_)) {
+                                break;
+                            }
+                            q = x.proto.borrow().clone();
                         }
                         *o.proto.borrow_mut() = next;
                     }
@@ -2037,6 +2044,21 @@ impl Interp {
             });
             self.set_native(o, "freeze", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
+                    // a Proxy: its `preventExtensions` trap, then the target takes the integrity level
+                    // ponytail: the `defineProperty` / `getOwnPropertyDescriptor` traps of the per-key steps are not run
+                    if let Some(prevented) = it.proxy_prevent_extensions(&o)? {
+                        if !prevented {
+                            return it.throw_error(
+                                "TypeError",
+                                "'preventExtensions' on proxy: trap returned falsish",
+                            );
+                        }
+                        let target = it.proxy_unwrap(&arg(args, 0), "freeze")?;
+                        if let Value::Object(t) = target {
+                            freeze_obj(&t);
+                        }
+                        return Ok(arg(args, 0));
+                    }
                     if matches!(&*o.kind.borrow(), Kind::Typed(t) if t.cur_len() > 0) {
                         return it.throw_error(
                             "TypeError",
@@ -2056,14 +2078,35 @@ impl Interp {
             });
             self.set_native(o, "preventExtensions", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
-                    if it.proxy_prevent_extensions(&o)?.is_none() {
-                        o.ext.set(o.ext.get().max(1));
+                    match it.proxy_prevent_extensions(&o)? {
+                        None => o.ext.set(o.ext.get().max(1)),
+                        Some(true) => {}
+                        Some(false) => {
+                            return it.throw_error(
+                                "TypeError",
+                                "'preventExtensions' on proxy: trap returned falsish",
+                            )
+                        }
                     }
                 }
                 Ok(arg(args, 0))
             });
-            self.set_native(o, "seal", |_, _, args| {
+            self.set_native(o, "seal", |it, _, args| {
                 if let Value::Object(o) = arg(args, 0) {
+                    // a Proxy: as `freeze`, the target takes the integrity level
+                    if let Some(prevented) = it.proxy_prevent_extensions(&o)? {
+                        if !prevented {
+                            return it.throw_error(
+                                "TypeError",
+                                "'preventExtensions' on proxy: trap returned falsish",
+                            );
+                        }
+                        let target = it.proxy_unwrap(&arg(args, 0), "seal")?;
+                        if let Value::Object(t) = target {
+                            seal_obj(&t);
+                        }
+                        return Ok(arg(args, 0));
+                    }
                     seal_obj(&o);
                 }
                 Ok(arg(args, 0))
@@ -3403,6 +3446,13 @@ impl Interp {
         });
         self.install_date_extras(&dp);
         self.set_native(&dp, "toJSON", |it, this, _| {
+            it.require_object_coercible(this)?;
+            // a non-finite time value has no ISO text: `null`, not toISOString's RangeError
+            if let Value::Number(n) = it.primitive_of(this, crate::extras::Hint::Number)? {
+                if !n.is_finite() {
+                    return Ok(Value::Null);
+                }
+            }
             let f = it.get(this, "toISOString")?;
             it.call(&f, this, &[])
         });
@@ -3411,6 +3461,27 @@ impl Interp {
         let json = self.plain();
         self.install_json(&json);
         g.declare("JSON", Value::Object(json), true);
+    }
+}
+
+impl Interp {
+    /// `Object.defineProperty(target, key, desc)`: a Proxy target runs its `defineProperty` trap (or defines on
+    /// its target), anything else defines directly.
+    fn define_through_proxy(&mut self, target: &Value, key: &Value, desc: &Value) -> R<()> {
+        let key_text = self.key_of(key);
+        if let Value::Object(po) = target {
+            if let Some((inner, handler, trap)) = self.proxy_trap(po, "defineProperty")? {
+                self.prop_desc_of(desc)?;
+                if trap.is_callable() {
+                    self.call(&trap, &handler, &[inner, key.clone(), desc.clone()])?;
+                } else {
+                    self.define_through_proxy(&inner, key, desc)?;
+                }
+                return Ok(());
+            }
+        }
+        self.define_property(target, &key_text, desc)?;
+        Ok(())
     }
 }
 
@@ -3906,7 +3977,7 @@ fn redefine_allowed(cur: &Prop, d: &PropDesc) -> bool {
 }
 
 /// `SameValue` (`Object.is`): `===` except NaN equals NaN and `+0` differs from `-0`.
-fn same_value(a: &Value, b: &Value) -> bool {
+pub(crate) fn same_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => {
             (x.is_nan() && y.is_nan()) || (x == y && x.is_sign_negative() == y.is_sign_negative())

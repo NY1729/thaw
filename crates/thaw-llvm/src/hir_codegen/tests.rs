@@ -355,6 +355,9 @@ fn compile_and_run_raw_lane_opt(
     compiler.set_thaw_js_routed(thaw_js);
     compiler.compile_program(&program).unwrap();
     thaw_hir::set_thaw_js_routed(false);
+    if let Some(path) = std::env::var_os("THAW_TEST_IR") {
+        std::fs::write(path, compiler.print_to_string()).unwrap();
+    }
     // thaw-cli rejects a routed build that still needs QuickJS; the blockers are PR2 data.
     assert!(
         !(thaw_js && compiler.uses_quickjs()),
@@ -380,8 +383,10 @@ fn compile_and_run_raw_lane_opt(
     let std_lib = build_staticlib("thaw-std");
     let quickjs_lib = (!thaw_js).then(|| build_staticlib("thaw-quickjs"));
     // thaw-js carries its own thaw-intl copy (feature `intl`), like thaw-cli.
+    // (thaw-cli also enables it when the source names the `Intl` global: `required_runtime_features`.)
+    let wants_intl = compiler.uses_intl() || source.contains("Intl");
     let thaw_js_lib = thaw_js.then(|| {
-        if compiler.uses_intl() {
+        if wants_intl {
             build_staticlib_with_features("thaw-js", &["intl"])
         } else {
             build_staticlib("thaw-js")
@@ -464,7 +469,12 @@ fn compile_and_run_raw_lane_opt(
     if std::os::unix::process::ExitStatusExt::signal(&output.status).is_some() {
         diagnose_crashed_binary(&exe_path, envs);
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    // THAW_TEST_KEEP=1 keeps the built binary for debugging.
+    if std::env::var_os("THAW_TEST_KEEP").is_some() {
+        eprintln!("kept test binary: {}", exe_path.display());
+    } else {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     output
 }
 
@@ -1013,3 +1023,18 @@ include!("tests/thaw_js_stream_ctor_contracts.rs");
 include!("tests/thaw_js_jsvalue_callback_contracts.rs");
 include!("tests/thaw_js_callback_own_param_contracts.rs");
 include!("tests/typeof_json_iteration_contracts.rs");
+
+/// Debug aid: `THAW_TEST_SRC=<file.ts> cargo test ... scratch_run_file -- --ignored --nocapture`
+/// compiles and runs the file on the lane picked by THAW_TEST_LANE and prints stdout/stderr.
+#[test]
+#[ignore]
+fn scratch_run_file() {
+    let Ok(path) = std::env::var("THAW_TEST_SRC") else {
+        return;
+    };
+    let source = std::fs::read_to_string(path).unwrap();
+    let output = compile_and_run_raw(&source, "scratch", &[]);
+    println!("STDOUT:\n{}", String::from_utf8_lossy(&output.stdout));
+    println!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+    println!("STATUS: {:?}", output.status.code());
+}

@@ -2094,6 +2094,41 @@ fn carrier_error_keeps_its_packet_through_frame_error() {
     assert!(text.starts_with("\u{1}Error\u{1}"), "not framed: {text:?}");
 }
 
+/// A native callback that throws a string reaches the engine as that string (tag 4), not as an Error built from
+/// its text; a framed native Error text still becomes an Error.
+#[test]
+fn native_string_throw_through_a_callback_stays_a_string() {
+    let mut packet = primitive_exception_packet(4, 0.0, 0, false, 0);
+    packet.native_text = 1;
+    let (thrown, _) = thrown_through_callback(packet, b"\x02str");
+    assert!(matches!(&thrown, Value::Str(s) if &**s == "str"));
+    let mut framed = primitive_exception_packet(4, 0.0, 0, false, 0);
+    framed.native_text = 1;
+    let (thrown, _) = thrown_through_callback(framed, b"\x02\x01Error\x01boom");
+    assert!(matches!(thrown, Value::Object(_)));
+}
+
+/// A thrown primitive keeps its type through the error string: the packet names the tag and payload, so the
+/// native catch sees the number / string / `undefined` / `null`, not the text of its conversion.
+#[test]
+fn thrown_primitives_bind_a_primitive_packet() {
+    for (value, tag) in [
+        (Value::Number(17.0), 1),
+        (Value::Bool(true), 3),
+        (Value::str("\u{1}Error\u{1}framed lookalike"), 4),
+        (Value::Undefined, 5),
+        (Value::Null, 6),
+    ] {
+        let result = error_result_of(value);
+        // taken, so no packet is left bound when this thread's locals are destroyed
+        let packet = thaw_arena::take_owned_exception(result.error).expect("a primitive packet");
+        assert_eq!(packet.tag, tag);
+    }
+    let result = error_result_of(Value::Number(17.0));
+    let packet = thaw_arena::take_owned_exception(result.error).unwrap();
+    assert_eq!(f64::from_bits(packet.number), 17.0);
+}
+
 /// T3: a plain Error classified after a carrier, with no call in between, binds no stale packet.
 #[test]
 fn plain_error_after_carrier_has_no_packet() {
@@ -2755,6 +2790,40 @@ fn thrown_errors_are_framed_with_name_message_code_and_properties() {
     }
     match p.call("fail2", &[]) {
         Err(HostError::Thrown(m)) => assert_eq!(m, "plain"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_thrown_errors_own_to_string_is_not_run_when_the_host_reports_it() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.fail = function () { globalThis.__toStringCalls = 0; var e = new Error('m'); e.toString = function () { globalThis.__toStringCalls++; return 'wrong'; }; throw e; };\nexports.calls = function () { return globalThis.__toStringCalls; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    match p.call("fail", &[]) {
+        Err(HostError::Thrown(display)) => assert_eq!(display, "Error: m"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(p.call("calls", &[]), Ok(crate::host::Native::Number(n)) if n == 0.0));
+}
+
+#[test]
+fn a_later_string_throw_does_not_pick_up_the_previous_errors_frame() {
+    use crate::host::{HostError, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.failObject = function () { throw { name: 'Error', message: 'fake' }; };\nexports.failString = function () { throw 'Error: fake'; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    // the first error's frame is never taken (a typed call that keeps the original object skips `frame_error`)
+    match p.call("failObject", &[]) {
+        Err(HostError::Thrown(display)) => assert_eq!(display, "Error: fake"),
+        other => panic!("{other:?}"),
+    }
+    match p.call("failString", &[]) {
+        Err(HostError::Thrown(display)) => assert_eq!(frame_text(&display), "Error: fake"),
         other => panic!("{other:?}"),
     }
 }
@@ -10885,6 +10954,42 @@ fn terminal_loop_exits_when_native_unhandled_failure_latched_while_server_live()
     assert!(SERVER_POLLS.load(std::sync::atomic::Ordering::SeqCst) <= 4);
 }
 
+/// Reports a latched unhandled rejection from the first poll on.
+extern "C" fn fake_unhandled_at_once() -> u8 {
+    1
+}
+
+/// An unhandled native rejection ends the loop at the next drain, before a later timer of the realm runs.
+#[test]
+fn terminal_loop_stops_before_a_timer_when_a_native_rejection_is_latched() {
+    use crate::host::{thaw_tjs_run_event_loop, TEST_UNHANDLED_FAILURE};
+    let _guard = SERVER_POLL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_UNHANDLED_FAILURE.lock().unwrap() = Some(fake_unhandled_at_once);
+    // the realm lives on the thread that loads it
+    guarded(|| {
+        let source = std::ffi::CString::new(
+            "globalThis.__late = 0; setTimeout(() => { globalThis.__late = 1; }, 150);",
+        )
+        .unwrap();
+        assert_eq!(crate::host::thaw_tjs_load_script(source.as_ptr()), 1);
+        LOOP_STATUS.store(
+            thaw_tjs_run_event_loop(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let name = std::ffi::CString::new("__late").unwrap();
+        let handle = crate::host::thaw_tjs_get_global(name.as_ptr());
+        assert!(handle > 0);
+        let result = crate::host::thaw_tjs_host_query_result(handle as u64, 2);
+        assert!(result.error.is_null());
+        let text = unsafe { std::ffi::CStr::from_ptr(result.value) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(text, "0", "the timer ran after the failure latched");
+    });
+    *TEST_UNHANDLED_FAILURE.lock().unwrap() = None;
+    assert_eq!(LOOP_STATUS.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[test]
 fn terminal_loop_exits_when_a_realm_throws_while_server_live() {
     use crate::host::{thaw_tjs_register, thaw_tjs_run_event_loop, TEST_SERVER_POLL};
@@ -11222,6 +11327,202 @@ fn iterator_from_and_helpers_match_node() {
     );
 }
 
+/// The compiler's `Iterator.from(nativeGenerator)` hands `__thaw_iterator_from` a projected native iterator:
+/// the wrapper keeps `next(value)` / `return(value)` / `throw(reason)` flowing to the native side.
+#[test]
+fn iterator_from_a_projected_native_generator_forwards_resume_values() {
+    assert_eq!(
+        one("const log = []; const source = { __thawNativeIterator: true, next() { log.push('n'); return { value: 1, done: false }; }, \
+             __thawNext(v) { log.push('n' + v); return { value: v, done: false }; }, return() { return { value: 0, done: true }; }, \
+             __thawReturn(v) { log.push('r' + v); return { value: v, done: true }; }, __thawThrow(v) { log.push('t' + v); return { value: 5, done: false }; } }; \
+             const it = __thaw_iterator_from(source); \
+             console.log(it.next().value, it.next(4).value, it.return(9).value, it.throw('boom').value, log.join(','), it instanceof Iterator)"),
+        "1 4 9 5 n,n4,r9,tboom true"
+    );
+}
+
+/// `JSON.parse` keeps a lone surrogate escape as that code unit (checked with node 22).
+#[test]
+fn json_parse_keeps_lone_surrogates() {
+    assert_eq!(
+        one(
+            r#"console.log(JSON.stringify(JSON.parse('"\\ud800"')), JSON.parse('"a\\udc00b"').length, JSON.parse('"\\ud83d\\ude00"').length, JSON.stringify(JSON.parse('{"\\ud800":1}')))"#
+        ),
+        r#""\ud800" 3 2 {"\ud800":1}"#
+    );
+}
+
+/// `JSON.parse` reviver context (`{ source }` of an unmodified primitive, `{}` otherwise), as node 22 prints it.
+#[test]
+fn json_parse_reviver_receives_the_source_text_of_primitives() {
+    assert_eq!(
+        one("const log = []; JSON.parse('{\"a\":9007199254740993,\"b\":[1.0,\"x\"],\"d\":null}', function (k, v, c) { log.push(k + ':' + JSON.stringify(c)); return k === 'a' ? v + 1 : v; }); console.log(log.join('|'))"),
+        r#"a:{"source":"9007199254740993"}|0:{"source":"1.0"}|1:{"source":"\"x\""}|b:{}|d:{"source":"null"}|:{}"#
+    );
+    assert_eq!(
+        one("console.log(JSON.parse('[1,2]', function (k, v, c) { if (k === '0') this[1] = 5; return k === '1' ? JSON.stringify(c) : v; })[1], JSON.parse(' \"q\" ', (k, v, c) => c.source))"),
+        r#"{} "q""#
+    );
+}
+
+/// ES2025+ library additions absent from Node 22 (spec text, not a node comparison): `RegExp.escape`,
+/// `Iterator.concat` / `zip` / `zipKeyed`, `SuppressedError`, `DisposableStack`, `AsyncDisposableStack`.
+#[test]
+fn es_next_library_additions_follow_the_spec() {
+    assert_eq!(
+        one(
+            r#"console.log(RegExp.escape("foo.bar"), RegExp.escape("foo-bar"), RegExp.escape("(foo)"), RegExp.escape("a b\n\u00a0\u2028_1"))"#
+        ),
+        r#"\x66oo\.bar \x66oo\x2dbar \(foo\) \x61\x20b\n\xa0\u2028_1"#
+    );
+    assert_eq!(
+        one(
+            r#"console.log(Iterator.concat([1, 2], new Set([3])).toArray().join(), JSON.stringify(Iterator.zip([[1, 2], ["a", "b", "c"]]).toArray()), JSON.stringify(Iterator.zip([[1, 2], ["a", "b", "c"]], { mode: "longest", padding: ["x", "y"] }).toArray()), JSON.stringify(Iterator.zipKeyed({ a: [1, 2], b: [3, 4] }).toArray()))"#
+        ),
+        r#"1,2,3 [[1,"a"],[2,"b"]] [[1,"a"],[2,"b"],["x","c"]] [{"a":1,"b":3},{"a":2,"b":4}]"#
+    );
+    assert_eq!(
+        one(
+            r#"try { Iterator.zip([[1], [1, 2]], { mode: "strict" }).toArray(); } catch (e) { console.log(e.constructor.name); }"#
+        ),
+        "TypeError"
+    );
+    assert_eq!(
+        one(r#"const log = []; const s = new DisposableStack();
+          s.use({ [Symbol.dispose]() { log.push("r1"); throw new Error("e1"); } });
+          s.defer(() => { log.push("d"); throw new Error("e2"); });
+          s.adopt(5, v => log.push("adopt" + v));
+          try { s.dispose(); } catch (e) { console.log(e.constructor.name, e.error.message, e.suppressed.message, log.join(), s.disposed, Object.prototype.toString.call(s)); }"#),
+        "SuppressedError e1 e2 adopt5,d,r1 true [object DisposableStack]"
+    );
+    assert_eq!(
+        one(r#"(async () => { const a = new AsyncDisposableStack();
+          a.use({ async [Symbol.asyncDispose]() { console.log("async"); } });
+          a.use({ [Symbol.dispose]() { console.log("sync-fallback"); } });
+          await a.disposeAsync(); })()"#),
+        "sync-fallback|async"
+    );
+}
+
+/// Float16Array, `Math.f16round` and `DataView` half floats (ES2025): values checked against IEEE binary16
+/// (round to nearest, ties to even, straight from the double).
+#[test]
+fn float16_array_math_f16round_and_data_view_round_like_ieee_half() {
+    assert_eq!(
+        one(r#"const v = new Float16Array([1.337, 2.5, 65504, 65520, 1e-8, 2049, 5.960464477539063e-8]);
+          console.log(v.length, v.BYTES_PER_ELEMENT, Array.from(v).join(), Object.prototype.toString.call(v), Float16Array.name);"#),
+        "7 2 1.3369140625,2.5,65504,Infinity,0,2048,5.960464477539063e-8 [object Float16Array] Float16Array"
+    );
+    assert_eq!(
+        one(
+            r#"const dv = new DataView(new ArrayBuffer(4)); dv.setFloat16(0, 1.337, true); dv.setFloat16(2, -2.5);
+          console.log(Math.f16round(0.1), Math.f16round(65519.99), dv.getFloat16(0, true), dv.getFloat16(2), new Uint8Array(dv.buffer).join());"#
+        ),
+        "0.0999755859375 65504 1.3369140625 -2.5 89,61,193,0"
+    );
+}
+
+/// `Date.prototype.toJSON` is `null` for a non-finite time value, so `JSON.stringify` of an Invalid Date is
+/// `null` (checked with node 22).
+#[test]
+fn invalid_date_to_json_is_null() {
+    assert_eq!(
+        one("console.log(new Date(NaN).toJSON(), JSON.stringify(new Date(NaN)), JSON.stringify([new Date(NaN)], (k, v) => v), JSON.stringify({ a: new Date(NaN) }), new Date(0).toJSON(), Date.prototype.toJSON.call({ valueOf() { return Infinity; } }), Date.prototype.toJSON.call({ valueOf() { return 'x'; }, toISOString() { return 'iso'; } }))"),
+        "null null [null] {\"a\":null} 1970-01-01T00:00:00.000Z null iso"
+    );
+}
+
+/// A Proxy in a prototype chain answers `[[Get]]` for keys the objects below it lack (checked with node 22).
+#[test]
+fn a_proxy_in_the_prototype_chain_answers_get() {
+    assert_eq!(
+        one(
+            r#"const object = Proxy.revocable({}, {}).proxy; const prototype = Proxy.revocable({ inherited: 7 }, {}).proxy;
+          Object.setPrototypeOf(object, prototype);
+          const log = []; const traced = new Proxy({ a: 1 }, { get(t, k, r) { log.push(String(k)); return Reflect.get(t, k, r); } });
+          const child = Object.create(traced); child.own = 2;
+          const rev = Proxy.revocable({}, {}); const c3 = Object.create(rev.proxy); rev.revoke();
+          let revoked = 'none'; try { c3.x; } catch (e) { revoked = e.constructor.name; }
+          console.log(object.inherited, child.a, child.own, child.missing, log.join(), revoked);"#
+        ),
+        "7 1 2 undefined a,missing TypeError"
+    );
+}
+
+/// `Object.defineProperties` on a Proxy defines through its `defineProperty` trap or its target (node 22).
+#[test]
+fn define_properties_on_a_proxy_forwards_to_the_target_and_trap() {
+    assert_eq!(
+        one(r#"const object = Proxy.revocable({}, {}).proxy;
+          Object.defineProperties(object, { doubled: { get: () => 18 }, text: { value: "ok" } });
+          const seen = []; const trapped = new Proxy({}, { defineProperty(t, k, d) { seen.push(String(k)); return Reflect.defineProperty(t, k, d); } });
+          Object.defineProperties(trapped, { a: { value: 1 }, [Symbol.iterator]: { value: 2 } });
+          console.log(object.doubled, object.text, seen.join(), trapped.a, trapped[Symbol.iterator]);"#),
+        "18 ok a,Symbol(Symbol.iterator) 1 2"
+    );
+}
+
+/// `Object.freeze` / `seal` of a Proxy reach its target through `preventExtensions` (node 22).
+#[test]
+fn freeze_and_seal_of_a_proxy_reach_the_target() {
+    assert_eq!(
+        one(
+            r#"const f = Proxy.revocable({ a: 1 }, {}).proxy; const s = Proxy.revocable({ a: 1 }, {}).proxy;
+          const log = []; const t = new Proxy({ a: 1 }, { preventExtensions(t) { log.push('pe'); return Reflect.preventExtensions(t); } });
+          Object.freeze(t);
+          let refused = 'none'; try { Object.freeze(new Proxy({}, { preventExtensions() { return false; } })); } catch (e) { refused = e.constructor.name; }
+          console.log(Object.freeze(f) === f, Object.isFrozen(f), Object.isSealed(f), Object.isExtensible(f),
+            Object.seal(s) === s, Object.isSealed(s), Object.isFrozen(s), Object.isExtensible(s), log.join(), Object.isFrozen(t), refused);"#
+        ),
+        "true true true false true true false false pe true TypeError"
+    );
+}
+
+/// A Proxy trap that refuses `preventExtensions` / `setPrototypeOf` makes the `Object.*` form throw (node 22).
+#[test]
+fn object_forms_throw_when_a_proxy_trap_refuses() {
+    assert_eq!(
+        one(r#"const a = Proxy.revocable({}, { preventExtensions: () => false }).proxy;
+          try { Object.preventExtensions(a); } catch (e) { console.log(e.constructor.name, e.message); }
+          const b = Proxy.revocable({}, { setPrototypeOf: () => false }).proxy;
+          try { Object.setPrototypeOf(b, null); } catch (e) { console.log(e.constructor.name, e.message); }
+          console.log(Reflect.preventExtensions(a), Reflect.setPrototypeOf(b, null));"#),
+        "TypeError 'preventExtensions' on proxy: trap returned falsish|TypeError 'setPrototypeOf' on proxy: trap returned falsish for property 'undefined'|false false"
+    );
+}
+
+/// A Proxy's own keys include the target's symbols; an `ownKeys` trap result is validated (node 22).
+#[test]
+fn proxy_own_keys_list_symbols_and_validate_the_trap_result() {
+    assert_eq!(
+        one(r#"const symbolic = Proxy.revocable({ plain: 1 }, {}).proxy;
+          Object.defineProperty(symbolic, Symbol.iterator, { value: 9 });
+          const invalid = Proxy.revocable({ a: 1 }, { ownKeys: () => ["a", "a"] }).proxy;
+          try { Reflect.ownKeys(invalid); } catch (e) { console.log(e.constructor.name, e.message); }
+          const bad = new Proxy({}, { ownKeys: () => [1] });
+          try { Reflect.ownKeys(bad); } catch (e) { console.log(e.constructor.name, e.message); }
+          console.log(Object.getOwnPropertySymbols(symbolic).length, typeof Reflect.ownKeys(symbolic)[1], Reflect.ownKeys(symbolic).length, Object.keys(symbolic).join());"#),
+        "TypeError 'ownKeys' on proxy: trap returned duplicate entries|TypeError 1 is not a valid property name|1 symbol 2 plain"
+    );
+}
+
+/// A prototype cycle is a TypeError; `TypedArray.prototype.set` refuses a negative offset (node 22).
+#[test]
+fn prototype_cycles_and_negative_typed_set_offsets_are_refused() {
+    assert_eq!(
+        one(r#"const a = {}, b = {}; Object.setPrototypeOf(a, b);
+          let r = [];
+          try { Object.setPrototypeOf(b, a); r.push('accepted'); } catch (e) { r.push(e.constructor.name + ' ' + e.message); }
+          try { b.__proto__ = a; r.push('accepted'); } catch (e) { r.push(e.constructor.name); }
+          r.push(Reflect.setPrototypeOf(b, a));
+          const u = new Uint8Array(4);
+          try { u.set([1], -1); r.push('bad'); } catch (e) { r.push(e.constructor.name); }
+          try { u.set([1, 2], 3); r.push('bad'); } catch (e) { r.push(e.constructor.name); }
+          console.log(r.join('|'), u.join());"#),
+        "TypeError Cyclic __proto__ value|TypeError|false|RangeError|RangeError 0,0,0,0"
+    );
+}
+
 /// Helpers stay lazy: `take` ends an infinite generator and nothing runs before a consumer pulls.
 #[test]
 fn iterator_helpers_are_lazy() {
@@ -11492,7 +11793,7 @@ fn host_for_in_keys_walk_prototype_chain_with_shadowing() {
 /// Standard globals that thaw-hir lowers by name (`platform_globals`) must
 /// exist in the thaw-js realm, or be listed here. Shrink-only: an entry is
 /// removed in the PR that implements it, and a stale entry fails this test.
-const ABSENT_IN_THAW_JS: &[&str] = &["DisposableStack", "AsyncDisposableStack"];
+const ABSENT_IN_THAW_JS: &[&str] = &[];
 
 #[test]
 fn platform_globals_exist_in_thaw_js_realm_or_are_ledgered() {

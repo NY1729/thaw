@@ -7155,7 +7155,14 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
             out.push(b'}');
         }
         Value::Host(lease) => {
-            if let Some(serialized) = host_query(lease, 8) {
+            // thaw-js: a user-facing stringify writes the live value's JSON text (query 34); only the
+            // argument serializer (`thaw_json_stringify_tjs`) keeps the handle marker (query 8).
+            let query = if engine_is_thaw_js() && !DATE_WIRE.with(Cell::get) {
+                34
+            } else {
+                8
+            };
+            if let Some(serialized) = host_query(lease, query) {
                 // The host serializes compactly; re-indent through the native writer.
                 match JsonParser::new(serialized.as_bytes())
                     .parse()

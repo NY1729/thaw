@@ -699,6 +699,7 @@ const NODE_GLOBAL_FLAGS: &[(&str, &str)] = &[
     ("Int16Array", "-wc"),
     ("Uint32Array", "-wc"),
     ("Int32Array", "-wc"),
+    ("Float16Array", "-wc"),
     ("Float32Array", "-wc"),
     ("Float64Array", "-wc"),
     ("Uint8ClampedArray", "-wc"),
@@ -3059,6 +3060,9 @@ impl Interp {
             Some(Read::Data(v)) => Ok(v),
             Some(Read::Getter(g)) => self.call(&g, target, &[]),
             Some(Read::NoGetter) => Ok(Value::Undefined),
+            Some(Read::Proxy(p)) => {
+                Ok(self.proxy_get(&p, key, target)?.unwrap_or(Value::Undefined))
+            }
         }
     }
 
@@ -6215,6 +6219,8 @@ enum Read {
     Data(Value),
     Getter(Value),
     NoGetter,
+    /// The lookup reached a Proxy in the prototype chain: its `[[Get]]` answers.
+    Proxy(Obj),
 }
 
 /// Outcome of a `get` special case decided under one kind borrow.
@@ -6263,6 +6269,9 @@ fn read_in_chain(o: &ObjData, key: &str) -> Option<Read> {
     }
     let mut cur: Obj = o.proto.borrow().clone()?;
     loop {
+        if matches!(&*cur.kind.borrow(), Kind::Proxy(_)) {
+            return Some(Read::Proxy(cur));
+        }
         if let Some(r) = read_own(&cur, key) {
             return Some(r);
         }

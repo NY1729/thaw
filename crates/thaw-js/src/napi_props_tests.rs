@@ -794,3 +794,100 @@ fn own_entries_frozen_object_drops_writable_and_configurable() {
     load("globalThis.__c3aFrozen = Object.freeze({ a: 1 });");
     assert_eq!(attr_bits(global("__c3aFrozen"), "a"), 2);
 }
+
+#[test]
+fn a_json_key_that_looks_like_symbol_wire_text_stays_a_string_key() {
+    // the JSON-key read is the compiled `obj["..."]` / `obj[key]` form: user data, never decoded
+    load("globalThis.__lk = { ['\\u001f@@iterator']: 29, ['__thaw_symbol_iterator']: 17, [Symbol.iterator]: 5 };");
+    let object = global("__lk");
+    assert!(is_number(
+        value(thaw_tjs_get_property_json_key_result(
+            object,
+            key("\u{1f}@@iterator").as_ptr()
+        )),
+        29.0
+    ));
+    assert!(is_number(
+        value(thaw_tjs_get_property_json_key_result(
+            object,
+            key("__thaw_symbol_iterator").as_ptr()
+        )),
+        17.0
+    ));
+    // the plain-name form decodes it
+    assert!(is_number(
+        value(thaw_tjs_get_property_result(
+            object,
+            q("\u{1f}@@iterator").as_ptr()
+        )),
+        5.0
+    ));
+}
+
+#[test]
+fn well_known_symbol_wire_text_names_the_symbol_keyed_property() {
+    // The compiler addresses `obj[Symbol.dispose]` on a dynamic object as `\u{1f}@@dispose` text.
+    load(
+        "globalThis.__wk = { [Symbol.dispose]: 5, [Symbol.iterator]: 6 };\
+         globalThis.__wkf = () => 9;",
+    );
+    let object = global("__wk");
+    assert!(is_number(
+        value(thaw_tjs_get_property_result(
+            object,
+            q("\u{1f}@@dispose").as_ptr()
+        )),
+        5.0
+    ));
+    assert_eq!(
+        value(thaw_tjs_has_property_result(
+            object,
+            q("\u{1f}@@iterator").as_ptr()
+        )),
+        1
+    );
+    value(thaw_tjs_set_property_result(
+        object,
+        q("\u{1f}@@asyncDispose").as_ptr(),
+        global("__wkf"),
+    ));
+    load("globalThis.__wkok = __wk[Symbol.asyncDispose] === __wkf && !('\\u001f@@asyncDispose' in __wk) ? 1 : 0;");
+    assert!(is_number(global("__wkok"), 1.0));
+}
+
+#[test]
+fn well_known_symbol_wire_text_as_a_graph_value_decodes_to_the_symbol() {
+    load("globalThis.__wv = {};");
+    let wire = q(r#"{"root":{"v":"\u001f@@iterator"},"nodes":[]}"#);
+    ok_value(thaw_tjs_set_property_graph_with_exception_result(
+        global("__wv"),
+        key("slot").as_ptr(),
+        wire.as_ptr(),
+    ));
+    load("globalThis.__wvok = __wv.slot === Symbol.iterator ? 1 : 0;");
+    assert!(is_number(global("__wvok"), 1.0));
+}
+
+#[test]
+fn host_query_34_writes_the_json_text_of_a_live_value_where_query_8_keeps_the_handle_marker() {
+    // an accessor makes the object a live (prototype stand-in) value
+    load("globalThis.__lv = { a: 1, get b() { return 2; } };");
+    let object = global("__lv");
+    let marker = query(object, 8).unwrap();
+    assert!(marker.contains("__thaw_tjs_handle__"), "{marker}");
+    assert_eq!(query(object, 34).unwrap(), r#"{"a":1,"b":2}"#);
+}
+
+#[test]
+fn nothing_runs_after_exit_even_a_timer_an_exit_listener_armed() {
+    load(
+        "globalThis.__ex = [];\
+         process.on('exit', () => { __ex.push('exit'); setTimeout(() => __ex.push('never'), 0); });",
+    );
+    // a routed program passes the loop several times (native idle, thaw-js, native idle again)
+    thaw_tjs_run_event_loop();
+    thaw_tjs_run_event_loop();
+    thaw_tjs_run_event_loop();
+    load("globalThis.__exn = __ex.join() === 'exit' ? 1 : 0;");
+    assert!(is_number(global("__exn"), 1.0));
+}

@@ -24,7 +24,12 @@ impl Interp {
                 && !edge_ws(b[0])
                 && !edge_ws(b[b.len() - 1])
                 && !matches!(b[0], b'{' | b'[');
-            let mut p = Parser { s: b, i: 0 };
+            let mut p = Parser {
+                s: b,
+                i: 0,
+                track: None,
+                last_src: None,
+            };
             if !primitive || p.top(it).is_err() {
                 return it.throw_error("SyntaxError", "Invalid value for JSON.rawJSON");
             }
@@ -86,32 +91,45 @@ impl Interp {
         });
         self.set_native(json, "parse", |it, _, args| {
             let text = it.to_str(&arg(args, 0));
+            let reviver = arg(args, 1);
             let mut p = Parser {
                 s: text.as_bytes(),
                 i: 0,
+                track: reviver.is_callable().then(Sources::new),
+                last_src: None,
             };
             let v = match p.top(it) {
                 Ok(v) => v,
                 Err(msg) if msg == STACK_OVERFLOW => return it.throw_error("RangeError", &msg),
                 Err(msg) => return it.throw_error("SyntaxError", &msg),
             };
-            let reviver = arg(args, 1);
             if reviver.is_callable() {
                 let root = it.plain();
+                let root_value = Value::Object(root.clone());
+                let mut sources = p.track.take().unwrap_or_default();
+                if let Some(src) = p.last_src.take() {
+                    sources.insert((holder_id(&root_value), String::new()), (src, v.clone()));
+                }
                 put(&root, "", v);
-                return it.revive(&Value::Object(root), "", &reviver);
+                return it.revive(&root_value, "", &reviver, &sources);
             }
             Ok(v)
         });
     }
 
-    fn revive(&mut self, holder: &Value, key: &str, reviver: &Value) -> R<Value> {
+    fn revive(
+        &mut self,
+        holder: &Value,
+        key: &str,
+        reviver: &Value,
+        sources: &Sources,
+    ) -> R<Value> {
         let val = self.get(holder, key)?;
         if let Value::Object(o) = &val {
             let is_arr = matches!(&*o.kind.borrow(), Kind::Array(_));
             let keys: Vec<Rc<str>> = self.own_keys(&val);
             for k in keys {
-                let nv = self.revive(&val, &k, reviver)?;
+                let nv = self.revive(&val, &k, reviver, sources)?;
                 if matches!(nv, Value::Undefined) {
                     if !is_arr {
                         o.remove_prop(&k);
@@ -121,7 +139,20 @@ impl Interp {
                 }
             }
         }
-        self.call(reviver, holder, &[Value::Str(key.into()), val])
+        // the context argument: `{ source }` for a primitive the reviver has not replaced, `{}` otherwise
+        let context = self.plain();
+        if !matches!(val, Value::Object(_)) {
+            if let Some((text, parsed)) = sources.get(&(holder_id(holder), key.to_string())) {
+                if crate::builtins::same_value(parsed, &val) {
+                    put(&context, "source", Value::str(text));
+                }
+            }
+        }
+        self.call(
+            reviver,
+            holder,
+            &[Value::Str(key.into()), val, Value::Object(context)],
+        )
     }
 
     fn ctor_name(&mut self, o: &Obj) -> String {
@@ -321,6 +352,21 @@ impl Interp {
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    /// Reviver source text access: `Some` while parsing for a reviver. Maps (holder identity, key) of each
+    /// primitive property to its raw source text and parsed value.
+    track: Option<Sources>,
+    /// Raw source text of the primitive `value` just parsed (`track` only).
+    last_src: Option<String>,
+}
+
+/// Source text of every primitive a reviver can see: `(holder pointer, key) -> (text, parsed value)`.
+type Sources = std::collections::HashMap<(usize, String), (String, Value)>;
+
+fn holder_id(v: &Value) -> usize {
+    match v {
+        Value::Object(o) => Rc::as_ptr(o) as usize,
+        _ => 0,
+    }
 }
 
 impl Parser<'_> {
@@ -420,8 +466,13 @@ impl Parser<'_> {
                                     self.i += 6;
                                 }
                             }
-                            // ponytail: lone surrogates become U+FFFD
-                            let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
+                            // a lone surrogate unit is the private-use char the engine's strings keep it as
+                            let ch = if (0xD800..0xE000).contains(&code) {
+                                char::from_u32(crate::builtins::LONE + code - 0xD800)
+                            } else {
+                                char::from_u32(code)
+                            }
+                            .unwrap_or('\u{FFFD}');
                             let mut buf = [0u8; 4];
                             out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
                         }
@@ -443,6 +494,19 @@ impl Parser<'_> {
     }
 
     fn value(&mut self, it: &mut Interp, depth: usize) -> Result<Value, String> {
+        if self.track.is_none() {
+            return self.value_inner(it, depth);
+        }
+        self.ws();
+        let start = self.i;
+        let v = self.value_inner(it, depth)?;
+        // only a primitive has a source text; an object or array reviver context is `{}`
+        self.last_src = (!matches!(v, Value::Object(_)))
+            .then(|| String::from_utf8_lossy(&self.s[start..self.i]).into_owned());
+        Ok(v)
+    }
+
+    fn value_inner(&mut self, it: &mut Interp, depth: usize) -> Result<Value, String> {
         // the depth cap is fixed (Node parses deeper: a documented gap); the stack guard covers a shallow parse
         // that starts close to the end of a configured stack
         if depth > 5000 || it.too_deep() {
@@ -483,6 +547,9 @@ impl Parser<'_> {
                     }
                     self.i += 1;
                     let v = self.value(it, depth + 1)?;
+                    if let (Some(track), Some(src)) = (self.track.as_mut(), self.last_src.take()) {
+                        track.insert((Rc::as_ptr(&obj) as usize, k.clone()), (src, v.clone()));
+                    }
                     put(&obj, &k, v);
                     self.ws();
                     match self.s.get(self.i).copied() {
@@ -503,19 +570,33 @@ impl Parser<'_> {
             Some(b'[') => {
                 self.i += 1;
                 let mut items = Vec::new();
+                let mut item_sources: Vec<(usize, String, Value)> = Vec::new();
                 self.ws();
                 if self.s.get(self.i) == Some(&b']') {
                     self.i += 1;
                     return Ok(it.array(items));
                 }
                 loop {
-                    items.push(self.value(it, depth + 1)?);
+                    let item = self.value(it, depth + 1)?;
+                    if let Some(src) = self.last_src.take() {
+                        item_sources.push((items.len(), src, item.clone()));
+                    }
+                    items.push(item);
                     self.ws();
                     match self.s.get(self.i).copied() {
                         Some(b',') => self.i += 1,
                         Some(b']') => {
                             self.i += 1;
-                            return Ok(it.array(items));
+                            let array = it.array(items);
+                            if let Some(track) = self.track.as_mut() {
+                                for (index, src, value) in item_sources {
+                                    track.insert(
+                                        (holder_id(&array), index.to_string()),
+                                        (src, value),
+                                    );
+                                }
+                            }
+                            return Ok(array);
                         }
                         None => return Err("Unexpected end of JSON input".into()),
                         _ => {
@@ -696,6 +777,8 @@ pub(crate) fn parse_native(text: &str) -> Result<Native, String> {
     let mut p = Parser {
         s: text.as_bytes(),
         i: 0,
+        track: None,
+        last_src: None,
     };
     let v = p.native(0)?;
     p.ws();

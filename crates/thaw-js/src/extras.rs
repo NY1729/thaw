@@ -397,6 +397,7 @@ pub(crate) const EXTRAS: &str = r#"
     return m[1] + '0.' + '0'.repeat(-e - 1) + digits;
   });
   def(Math, 'fround', function (x) { return new Float32Array([x])[0]; });
+  def(Math, 'f16round', function f16round(x) { return new Float16Array([x])[0]; });
   def(Map, 'groupBy', function (items, f) {
     var out = new Map(), i = 0;
     for (var x of items) { var k = f(x, i++); if (out.has(k)) out.get(k).push(x); else out.set(k, [x]); }
@@ -521,7 +522,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   var scratch = new Uint8Array(8);
   var kinds = {
     Int8: [1, Int8Array], Uint8: [1, Uint8Array], Int16: [2, Int16Array], Uint16: [2, Uint16Array],
-    Int32: [4, Int32Array], Uint32: [4, Uint32Array], Float32: [4, Float32Array], Float64: [8, Float64Array]
+    Int32: [4, Int32Array], Uint32: [4, Uint32Array], Float16: [2, Float16Array], Float32: [4, Float32Array], Float64: [8, Float64Array]
   };
   function check(dv, index, size) {
     index = Math.trunc(index) || 0;
@@ -695,7 +696,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   var brand = __thaw_brand;
   function one(name) { return function (v) { return brand(v) === name; }; }
   function any(names) { return function (v) { return names.indexOf(brand(v)) !== -1; }; }
-  var TYPED = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'];
+  var TYPED = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'];
   var never = function () { return false; };
   var utilTypes = {
     isDate: one('Date'),
@@ -984,7 +985,27 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     return w;
   });
   // the native lowering of `Iterator.from` calls this platform global (thaw-hir static_builtins.rs)
-  globalThis.__thaw_iterator_from = function (source) { return Iterator.from(source); };
+  globalThis.__thaw_iterator_from = function (source) {
+    // a projected native generator keeps its `next(value)` / `return(value)` / `throw(reason)` protocol
+    if (source && source.__thawNativeIterator) {
+      return Object.assign(Object.create(Iterator.prototype), source, {
+        next: function () { return arguments.length ? source.__thawNext(arguments[0]) : source.next(); },
+        return: function () { return arguments.length ? source.__thawReturn(arguments[0]) : source.return(); },
+        throw: function (value) { return source.__thawThrow(String(value)); }
+      });
+    }
+    var method = source[Symbol.iterator];
+    var iterator = method == null ? undefined : method.call(source);
+    if (iterator == null) iterator = source;
+    if (typeof iterator.return !== 'function') {
+      var sourceIterator = iterator;
+      iterator = Object.assign(Object.create(Iterator.prototype), {
+        next: sourceIterator.next.bind(sourceIterator),
+        return: function (value) { return { value: value, done: true }; }
+      });
+    }
+    return Iterator.from(iterator);
+  };
 
   // ----- Atomics. A SharedArrayBuffer goes to the natives (`__thaw_atomic`, `__thaw_atomics_wait/notify`, atomics.rs):
   // real atomic ops on the shared block, with waiters parked across threads. Any other buffer is one agent, so the
@@ -1102,5 +1123,282 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   });
   Object.defineProperty(Atomics, Symbol.toStringTag, { value: 'Atomics', configurable: true });
   def(globalThis, 'Atomics', Atomics);
+  // ----- ES2025+ library additions (absent from Node 22, present in the QuickJS lane this engine replaces):
+  // RegExp.escape, SuppressedError, DisposableStack, AsyncDisposableStack, Iterator.concat / zip / zipKeyed. -----
+  (function () {
+    var isObject = function (v) { return v !== null && (typeof v === 'object' || typeof v === 'function'); };
+    var callable = function (v) { return typeof v === 'function'; };
+    var hex = function (n, width) { var h = n.toString(16); while (h.length < width) h = '0' + h; return h; };
+    // RegExp.escape(string): a string safe to embed in a pattern (leading alphanumerics as \xHH).
+    def(RegExp, 'escape', function escape(S) {
+      if (typeof S !== 'string') throw new TypeError('RegExp.escape requires a string');
+      var out = '', first = true;
+      var syntax = '^$\\.*+?()[]{}|/', punct = ',-=<>#&!%:;@~\'`"';
+      var controls = { '\t': '\\t', '\n': '\\n', '\v': '\\v', '\f': '\\f', '\r': '\\r' };
+      for (var i = 0; i < S.length; i++) {
+        var unit = S.charCodeAt(i), c = S.charAt(i);
+        if (first && ((unit >= 48 && unit <= 57) || (unit >= 65 && unit <= 90) || (unit >= 97 && unit <= 122))) {
+          out += '\\x' + hex(unit, 2);
+        } else if (syntax.indexOf(c) >= 0) {
+          out += '\\' + c;
+        } else if (controls[c] !== undefined) {
+          out += controls[c];
+        } else if (punct.indexOf(c) >= 0 || /[\s﻿]/.test(c) || (unit >= 0xd800 && unit <= 0xdfff &&
+            !(unit <= 0xdbff && i + 1 < S.length && S.charCodeAt(i + 1) >= 0xdc00 && S.charCodeAt(i + 1) <= 0xdfff) &&
+            !(unit >= 0xdc00 && i > 0 && S.charCodeAt(i - 1) >= 0xd800 && S.charCodeAt(i - 1) <= 0xdbff))) {
+          out += unit <= 0xff ? '\\x' + hex(unit, 2) : '\\u' + hex(unit, 4);
+        } else {
+          out += c;
+        }
+        first = false;
+      }
+      return out;
+    });
+
+    // SuppressedError(error, suppressed, message): the error a disposal failure is wrapped in.
+    function SuppressedError(error, suppressed, message) {
+      var target = new.target === undefined ? SuppressedError : new.target;
+      var o = Reflect.construct(Error, message === undefined ? [] : [message], target);
+      Object.defineProperty(o, 'error', { value: error, writable: true, enumerable: false, configurable: true });
+      Object.defineProperty(o, 'suppressed', { value: suppressed, writable: true, enumerable: false, configurable: true });
+      return o;
+    }
+    Object.setPrototypeOf(SuppressedError, Error);
+    SuppressedError.prototype = Object.create(Error.prototype);
+    def(SuppressedError.prototype, 'constructor', SuppressedError);
+    def(SuppressedError.prototype, 'name', 'SuppressedError');
+    def(SuppressedError.prototype, 'message', '');
+    Object.defineProperty(SuppressedError, 'prototype', { writable: false, enumerable: false, configurable: false });
+    if (typeof globalThis.SuppressedError === 'undefined') def(globalThis, 'SuppressedError', SuppressedError);
+    var SuppressedErrorCtor = globalThis.SuppressedError;
+
+    // The disposal bookkeeping shared by both stacks: the first failure is thrown, later ones wrap it.
+    function combine(failure, error) {
+      return failure.has ? { has: true, error: new SuppressedErrorCtor(error, failure.error) } : { has: true, error: error };
+    }
+    function stackClass(name, isAsync) {
+      var states = new WeakMap();
+      function state(self) {
+        var s = isObject(self) ? states.get(self) : undefined;
+        if (s === undefined) throw new TypeError('Method ' + name + '.prototype method called on incompatible receiver');
+        return s;
+      }
+      function alive(self) {
+        var s = state(self);
+        if (s.disposed) throw new ReferenceError(name + ' already disposed');
+        return s;
+      }
+      function Stack() {
+        if (new.target === undefined) throw new TypeError("Constructor " + name + " requires 'new'");
+        var self = Reflect.construct(Object, [], new.target);
+        states.set(self, { disposed: false, resources: [] });
+        return self;
+      }
+      Object.defineProperty(Stack, 'name', { value: name, configurable: true });
+      var P = Stack.prototype;
+      def(P, 'use', function use(value) {
+        var s = alive(this);
+        if (value === null || value === undefined) return value;
+        if (!isObject(value)) throw new TypeError('The value is not an object');
+        var method = isAsync ? value[Symbol.asyncDispose] : value[Symbol.dispose];
+        var asyncFromSync = false;
+        if (isAsync && (method === undefined || method === null)) { method = value[Symbol.dispose]; asyncFromSync = true; }
+        if (!callable(method)) throw new TypeError('The value is not disposable');
+        s.resources.push({ value: value, method: method, sync: asyncFromSync });
+        return value;
+      });
+      def(P, 'adopt', function adopt(value, onDispose) {
+        var s = alive(this);
+        if (!callable(onDispose)) throw new TypeError('The dispose callback is not a function');
+        s.resources.push({ value: undefined, method: function () { return onDispose(value); }, sync: false });
+        return value;
+      });
+      def(P, 'defer', function defer(onDispose) {
+        var s = alive(this);
+        if (!callable(onDispose)) throw new TypeError('The dispose callback is not a function');
+        s.resources.push({ value: undefined, method: onDispose, sync: false });
+        return undefined;
+      });
+      def(P, 'move', function move() {
+        var s = alive(this);
+        var moved = Reflect.construct(Stack, [], Stack);
+        var t = states.get(moved);
+        t.resources = s.resources; s.resources = []; s.disposed = true;
+        return moved;
+      });
+      Object.defineProperty(P, 'disposed', {
+        get: function () { return state(this).disposed; }, enumerable: false, configurable: true,
+      });
+      var dispose = isAsync ? function disposeAsync() {
+        var self = this, s;
+        try { s = state(self); } catch (e) { return Promise.reject(e); }
+        if (s.disposed) return Promise.resolve(undefined);
+        s.disposed = true;
+        var failure = { has: false };
+        var resources = s.resources; s.resources = [];
+        var run = function (i) {
+          if (i < 0) return failure.has ? Promise.reject(failure.error) : Promise.resolve(undefined);
+          var r = resources[i];
+          var done = function () { return run(i - 1); };
+          var fail = function (e) { failure = combine(failure, e); return run(i - 1); };
+          try {
+            var result = r.method.call(r.value);
+            return r.sync ? done() : Promise.resolve(result).then(done, fail);
+          } catch (e) { return fail(e); }
+        };
+        return run(resources.length - 1);
+      } : function dispose() {
+        var s = state(this);
+        if (s.disposed) return undefined;
+        s.disposed = true;
+        var failure = { has: false };
+        var resources = s.resources; s.resources = [];
+        for (var i = resources.length - 1; i >= 0; i--) {
+          try { resources[i].method.call(resources[i].value); } catch (e) { failure = combine(failure, e); }
+        }
+        if (failure.has) throw failure.error;
+        return undefined;
+      };
+      def(P, isAsync ? 'disposeAsync' : 'dispose', dispose);
+      def(P, isAsync ? Symbol.asyncDispose : Symbol.dispose, dispose);
+      Object.defineProperty(P, Symbol.toStringTag, { value: name, configurable: true });
+      Object.defineProperty(Stack, 'prototype', { writable: false, enumerable: false, configurable: false });
+      def(globalThis, name, Stack);
+    }
+    if (typeof globalThis.DisposableStack === 'undefined') stackClass('DisposableStack', false);
+    if (typeof globalThis.AsyncDisposableStack === 'undefined') stackClass('AsyncDisposableStack', true);
+
+    // Iterator sequencing / joint iteration: helper objects inherit Iterator.prototype.
+    var ITPr = Iterator.prototype;
+    var HelperProto = Object.create(ITPr);
+    Object.defineProperty(HelperProto, Symbol.toStringTag, { value: 'Iterator Helper', configurable: true });
+    function helper(step, close) {
+      var o = Object.create(HelperProto), running = false, finished = false;
+      def(o, 'next', function next() {
+        if (running) throw new TypeError('Generator is already running');
+        if (finished) return { value: undefined, done: true };
+        running = true;
+        try {
+          var r = step();
+          if (r.done) finished = true;
+          return r;
+        } catch (e) { finished = true; throw e; } finally { running = false; }
+      });
+      def(o, 'return', function () {
+        if (running) throw new TypeError('Generator is already running');
+        if (!finished) { finished = true; close(); }
+        return { value: undefined, done: true };
+      });
+      return o;
+    }
+    function closeQuietly(it) { try { var r = it.return; if (r !== undefined && r !== null) r.call(it); } catch (e) {} }
+    def(Iterator, 'concat', function concat() {
+      var items = [];
+      for (var i = 0; i < arguments.length; i++) {
+        var item = arguments[i];
+        if (!isObject(item)) throw new TypeError(String(item) + ' is not an object');
+        var method = item[Symbol.iterator];
+        if (!callable(method)) throw new TypeError(String(item) + ' is not iterable');
+        items.push({ iterable: item, method: method });
+      }
+      var index = 0, current = null;
+      return helper(function () {
+        for (;;) {
+          if (current === null) {
+            if (index >= items.length) return { value: undefined, done: true };
+            var entry = items[index++];
+            var it = entry.method.call(entry.iterable);
+            if (!isObject(it)) throw new TypeError('Result of the Symbol.iterator method is not an object');
+            current = { it: it, next: it.next };
+          }
+          var r = current.next.call(current.it);
+          if (!isObject(r)) throw new TypeError('Iterator result is not an object');
+          if (r.done) { current = null; continue; }
+          return { value: r.value, done: false };
+        }
+      }, function () { if (current !== null) { var it = current.it; current = null; var r = it.return; if (r !== undefined && r !== null) r.call(it); } });
+    });
+    function zipImpl(sources, keys, options) {
+      if (options !== undefined && !isObject(options)) throw new TypeError('The options argument is not an object');
+      var mode = options === undefined ? undefined : options.mode;
+      if (mode === undefined) mode = 'shortest';
+      if (mode !== 'shortest' && mode !== 'longest' && mode !== 'strict') throw new TypeError('Invalid mode');
+      var padding = mode === 'longest' && options !== undefined ? options.padding : undefined;
+      if (mode === 'longest' && padding !== undefined && !isObject(padding)) throw new TypeError('The padding option is not an object');
+      var iters = [];
+      var fail = function (e) { for (var k = iters.length - 1; k >= 0; k--) closeQuietly(iters[k].it); throw e; };
+      try {
+        for (var i = 0; i < sources.length; i++) {
+          var src = sources[i];
+          if (!isObject(src) && typeof src !== 'string') throw new TypeError(String(src) + ' is not iterable');
+          var m = src[Symbol.iterator];
+          var it = callable(m) ? m.call(src) : src;
+          if (!isObject(it)) throw new TypeError('Result of the Symbol.iterator method is not an object');
+          iters.push({ it: it, next: it.next, done: false });
+        }
+      } catch (e) { fail(e); }
+      var pads = [];
+      if (mode === 'longest') {
+        try {
+          if (padding === undefined) { for (var p = 0; p < iters.length; p++) pads.push(undefined); }
+          else {
+            var pit = padding[Symbol.iterator]();
+            for (var q = 0; q < iters.length; q++) {
+              var pr = pit.next();
+              if (pr.done) { for (; q < iters.length; q++) pads.push(undefined); break; }
+              pads.push(pr.value);
+            }
+            closeQuietly(pit);
+          }
+        } catch (e) { fail(e); }
+      }
+      var build = function (values) {
+        if (keys === null) return values;
+        var obj = Object.create(null);
+        for (var k = 0; k < keys.length; k++) obj[keys[k]] = values[k];
+        return obj;
+      };
+      var finishedAll = false;
+      return helper(function () {
+        if (iters.length === 0) return { value: undefined, done: true };
+        var values = [];
+        for (var i = 0; i < iters.length; i++) {
+          var s = iters[i];
+          if (s.done) { values.push(pads[i]); continue; }
+          var r;
+          try { r = s.next.call(s.it); if (!isObject(r)) throw new TypeError('Iterator result is not an object'); }
+          catch (e) { s.done = true; for (var j = 0; j < iters.length; j++) if (j !== i && !iters[j].done) closeQuietly(iters[j].it); throw e; }
+          if (r.done) {
+            s.done = true;
+            if (mode === 'shortest') { for (var j2 = 0; j2 < iters.length; j2++) if (!iters[j2].done) closeQuietly(iters[j2].it); return { value: undefined, done: true }; }
+            if (mode === 'strict') {
+              if (i !== 0) { for (var j3 = 0; j3 < iters.length; j3++) if (!iters[j3].done) closeQuietly(iters[j3].it); throw new TypeError('Iterators have different lengths'); }
+              for (var j4 = 1; j4 < iters.length; j4++) {
+                var r4 = iters[j4].next.call(iters[j4].it);
+                if (!r4.done) { for (var j5 = j4; j5 < iters.length; j5++) closeQuietly(iters[j5].it); throw new TypeError('Iterators have different lengths'); }
+                iters[j4].done = true;
+              }
+              return { value: undefined, done: true };
+            }
+            if (iters.every(function (x) { return x.done; })) return { value: undefined, done: true };
+            values.push(pads[i]);
+          } else values.push(r.value);
+        }
+        return { value: build(values), done: false };
+      }, function () { for (var k = iters.length - 1; k >= 0; k--) if (!iters[k].done) closeQuietly(iters[k].it); });
+    }
+    def(Iterator, 'zip', function zip(iterables, options) {
+      if (!isObject(iterables)) throw new TypeError(String(iterables) + ' is not an object');
+      return zipImpl(Array.from(iterables), null, options);
+    });
+    def(Iterator, 'zipKeyed', function zipKeyed(iterables, options) {
+      if (!isObject(iterables)) throw new TypeError(String(iterables) + ' is not an object');
+      var keys = Reflect.ownKeys(iterables).filter(function (k) {
+        var d = Object.getOwnPropertyDescriptor(iterables, k);
+        return d !== undefined && d.enumerable;
+      });
+      return zipImpl(keys.map(function (k) { return iterables[k]; }), keys, options);
+    });
+  })();
 })();
 "#;
