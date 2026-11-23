@@ -5,7 +5,7 @@
 // (under `ulimit -v 8388608`, `RUST_MIN_STACK=16777216`, one process, as with the other thaw-cli builds).
 
 /// A thaw-js routed package (`tjs-kit`) mixed with a native-eligible `setTimeout`: the native attempt
-/// conflicts, the retry stays on thaw-js (no QuickJS, no "fell back" blocker) and prints the Node order.
+/// conflicts, the retry stays on thaw-js (no thaw-js, no "fell back" blocker) and prints the Node order.
 #[test]
 fn native_timers_mixed_thaw_js_package_retry_stays_on_thaw_js() {
     let (dir, registry, entry) = thaw_js_fixture(

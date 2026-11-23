@@ -5,7 +5,7 @@
 /// Function([F64], Bool), expected Json`). `coerce_to_declared` (thaw-hir)
 /// wraps it in a manual `registerNativeCallback` call, which thaw-llvm's
 /// `compile_register_native_callback` turns into a live, retained
-/// QuickJS-NG function value: reuses the existing (N-API-oriented but
+/// thaw-js function value: reuses the existing (N-API-oriented but
 /// backend-agnostic) `compile_napi_value_callback` adapter, then bridges
 /// it into a real callable via a new `thaw_js_register_native_callback`
 /// (thaw-quickjs).
@@ -19,10 +19,10 @@
 /// Also confirms a `JsValue` nested inside a *method* call's own argument
 /// array works, not just a top-level function call's (`compile_call_
 /// dynamic_method`/`compile_call_dynamic_method_handle` previously never
-/// set `compiling_quickjs_dynamic_arguments` around their own args
+/// set `compiling_thaw-js_dynamic_arguments` around their own args
 /// marshaling at all, unlike the typed ambient-declaration dispatch path
 /// -- confirmed to reproduce the pre-fix "a dynamic (JsValue) value can
-/// only be passed as an argument to another QuickJS-backed dynamic call"
+/// only be passed as an argument to another thaw-js-backed dynamic call"
 /// error via a temporary revert).
 #[test]
 fn a_native_closure_can_be_passed_as_an_argument_to_a_dynamic_method_call() {
@@ -257,7 +257,7 @@ function main(): void {
 /// to JSON"`.
 ///
 /// Root cause: `compile_napi_value_callback` (the callback bridge, reused
-/// for both real N-API addons and this QuickJS Fallback path) pushes the
+/// for both real N-API addons and this thaw-js Fallback path) pushes the
 /// callback's raw return value into its JSON result array using the
 /// callback's *declared* return type verbatim -- for an `async` callback
 /// that's `HirType::Promise(inner)`, but nothing ever stripped the
@@ -481,7 +481,7 @@ function main(): void {
 /// at all (`compile_typed_dynamic_call`, thaw-llvm's `dynamic_host.rs`,
 /// only marshals a typed function argument for the `napi` backend with a
 /// `JsValue` return; every other combination -- including any
-/// Fallback/QuickJS call -- has a deliberate `continue` that skips the
+/// Fallback/thaw-js call -- has a deliberate `continue` that skips the
 /// argument's slot instead of erroring, so the real JS side saw `args[0]
 /// === undefined`).
 ///
@@ -490,7 +490,7 @@ function main(): void {
 /// 1. `typed_dynamic_declaration` (thaw-cli's `shims.rs`) rendered a
 ///    `Function`/`CallableFunction`-classified parameter as a real
 ///    callback type in the generated shim for *both* `napi` and
-///    Fallback/QuickJS functions alike -- unlike its sibling
+///    Fallback/thaw-js functions alike -- unlike its sibling
 ///    `supported_class_method_param` (used for class methods), which
 ///    already restricts this to the `napi` backend. Fixed by applying the
 ///    same restriction here: for a non-`napi` function, a
@@ -1609,7 +1609,7 @@ function main(): void {
 /// argument is itself a JS function the user must call). The package
 /// invoked a native callback and handed it an inner JS function.
 ///
-/// The QuickJS-side wrapper for a registered native callback only retained
+/// The thaw-js-side wrapper for a registered native callback only retained
 /// arguments at `JsValue`/callable-masked positions; every other argument
 /// went through `JSON.stringify`, which silently drops a function. The
 /// inner function reached the compiled closure as `undefined`, so calling

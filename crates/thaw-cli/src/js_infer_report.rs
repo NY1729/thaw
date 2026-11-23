@@ -201,21 +201,6 @@ mod js_infer_report_tests {
     }
 
     #[test]
-    fn retargeted_functions_stop_being_quickjs_fallback_reasons() {
-        let aot = JsInferAot {
-            retargets: vec![("pkg".into(), "twice".into(), "f".into())],
-            ..Default::default()
-        };
-        let reasons = vec![
-            serde_json::json!({"kind": "registry-fallback", "package": "pkg", "operation": "twice"}),
-            serde_json::json!({"kind": "registry-fallback", "package": "pkg", "operation": "other"}),
-        ];
-        let kept = js_infer_retain_reasons(reasons, &aot);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0]["operation"], "other");
-    }
-
-    #[test]
     fn inspect_lines_summarise_the_census() {
         let manifest = serde_json::json!({ "js_infer": [
             { "package": "ms", "typed_functions": 2, "summary": {
@@ -245,7 +230,7 @@ mod js_infer_report_tests {
 //     function f(argsArray: Json): Json { return callDynamic("f", argsArray); }
 //
 // into a guarded dispatcher: when the arguments have the contracted types the typed clone runs,
-// otherwise the original QuickJS call runs unchanged.
+// otherwise the original thaw-js call runs unchanged.
 
 /// What was compiled ahead of time, for the manifest / `thaw inspect`.
 #[derive(Default)]
@@ -459,7 +444,7 @@ fn js_infer_apply(
                 // The program's static types prove the contract: call the clone directly. Otherwise
                 // (an argument of unknown static type, an escaping reference, several files) the
                 // symbol moves to a wrapper that takes `Json`, checks the contract at run time and
-                // falls back to the original typed QuickJS call - the dynamic path - when it fails.
+                // falls back to the original typed thaw-js call - the dynamic path - when it fails.
                 let proven = js_infer_proven(report, package, clone);
                 let target = if proven {
                     report.retargets.push((package.clone(), export.clone(), clone.fn_name.clone()));
@@ -622,24 +607,3 @@ fn js_infer_aot_manifest(report: &JsInferAot) -> serde_json::Value {
     })
 }
 
-/// Drop the `registry-fallback` reasons of functions that were retargeted to an AOT clone.
-fn js_infer_retain_reasons(
-    reasons: Vec<serde_json::Value>,
-    aot: &JsInferAot,
-) -> Vec<serde_json::Value> {
-    if aot.retargets.is_empty() {
-        return reasons;
-    }
-    reasons
-        .into_iter()
-        .filter(|reason| {
-            let package = reason["package"].as_str().unwrap_or("");
-            let operation = reason["function"]
-                .as_str()
-                .or_else(|| reason["operation"].as_str())
-                .unwrap_or("");
-            !(reason["kind"].as_str() == Some("registry-fallback")
-                && aot.retargets.iter().any(|(p, n, _)| p == package && n == operation))
-        })
-        .collect()
-}

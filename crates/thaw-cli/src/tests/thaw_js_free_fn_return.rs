@@ -58,15 +58,9 @@ fn thaw_js_free_function_jsvalue_return_stays_a_handle_and_params_flatten() {
 }
 
 #[test]
-fn thaw_js_retarget_keeps_only_the_return_of_a_multi_line_wrapper() {
-    let wrapper = "declare function __thaw_typed_js_6d73(\n  inner: JsValue,\n  name: string\n): JsValue {\n";
-    let (symbol, declaration) = thaw_js_retarget(
-        "__thaw_typed_js_6d73".into(),
-        wrapper.into(),
-        false,
-        true,
-    );
-    assert_eq!(symbol, "__thaw_typed_tjs_6d73");
+fn thaw_js_flatten_keeps_only_the_return_of_a_multi_line_wrapper() {
+    let wrapper = "declare function __thaw_typed_tjs_6d73(\n  inner: JsValue,\n  name: string\n): JsValue {\n";
+    let declaration = thaw_js_flatten_js_value(wrapper.into(), false, true);
     assert_eq!(
         declaration,
         "declare function __thaw_typed_tjs_6d73(\n  inner: Json,\n  name: string\n): JsValue {\n"

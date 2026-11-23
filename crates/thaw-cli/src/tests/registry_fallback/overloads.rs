@@ -804,9 +804,9 @@ function main(): void {
 /// formatStr: string): string` and `addDays<DateType extends Date>(date:
 /// ..., amount: number): DateType`. Exercises the whole round trip: a
 /// Thaw-native `Date` (an object with a `timestamp` field) argument must
-/// arrive on the QuickJS-NG side as a real `instanceof Date` (this fake
+/// arrive on the thaw-js side as a real `instanceof Date` (this fake
 /// package's `format`/`addDays` both throw/misbehave otherwise), and a
-/// real `Date` returned from QuickJS-NG must come back as that same
+/// real `Date` returned from thaw-js must come back as that same
 /// native shape, usable as a plain `Date` argument to a later call. Only
 /// UTC-based formatting is asserted (never a local-time token like `HH`)
 /// so this doesn't depend on the host's time zone.

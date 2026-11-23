@@ -166,7 +166,7 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
 /// `dynamic_symbol`, the same convention `generate_napi_class_method_
 /// overloads` already uses. The `$new$Class$arityN` runtime-key scheme
 /// itself is identical either way; `napi_constructor_export_name`/its
-/// QuickJS-NG counterpart both strip the same prefix back off.
+/// thaw-js counterpart both strip the same prefix back off.
 fn generate_napi_class_constructors(
     class: &thaw_bridge::DtsClass,
     napi: bool,
@@ -588,9 +588,9 @@ fn generate_class_accessor_declarations(
 /// $name$overloadN$arityM`, read back by `compile_typed_napi_method`,
 /// which despite the name now serves both backends) is identical either
 /// way, so this one generator covers a native addon's class (`napi:
-/// true`) and a Fallback/QuickJS-NG one (`napi: false`, real example:
+/// true`) and a Fallback/thaw-js one (`napi: false`, real example:
 /// dayjs's `Dayjs`) alike. A trailing callback parameter is excluded for
-/// the QuickJS-NG backend, which doesn't marshal one yet (see
+/// the thaw-js backend, which doesn't marshal one yet (see
 /// `compile_typed_napi_method`'s explicit guard).
 #[cfg(test)]
 fn generate_napi_class_method_overloads(
@@ -618,7 +618,7 @@ fn generate_napi_class_method_overloads(
 
 /// `thaw_js` marks a thaw-js-routed class: a method whose declared return is a union with a
 /// `Promise<T>` member (`Response | Promise<Response>`) gets a `$await` runtime-key suffix there, which
-/// makes thaw-js settle the returned Promise (`class_call` flag bit 2). QuickJS keys are unchanged.
+/// makes thaw-js settle the returned Promise (`class_call` flag bit 2). thaw-js keys are unchanged.
 fn generate_napi_class_method_overloads_with_callback_instances(
     class: &thaw_bridge::DtsClass,
     is_static: bool,
@@ -860,14 +860,12 @@ type RegistryShims = (
     ExternalNestedNamespaces,
     ExternalExportAssignments,
     std::collections::HashMap<String, usize>,
-    JitFallbackReasons,
     std::collections::BTreeSet<&'static str>,
     JitSymbolOrigins,
 );
 /// `package -> the symbol its own `export = X;` assignment names`, for a
 /// bare `import * as X from "pkg"` (`module_graph.rs`).
 type ExternalExportAssignments = std::collections::HashMap<String, String>;
-type JitFallbackReasons = std::collections::HashMap<(String, String), String>;
 type JitSymbolOrigins = std::collections::HashMap<String, (String, String)>;
 
 /// `(package-qualified factory function, package-qualified class)` -- a Fallback factory function

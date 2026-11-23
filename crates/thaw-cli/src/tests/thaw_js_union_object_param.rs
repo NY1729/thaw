@@ -1,5 +1,5 @@
 // A package function overloaded by arity whose optional parameter is a union with an object member
-// (validator's `isIP`) must route to thaw-js: no QuickJS fallback, and the program prints what Node prints.
+// (validator's `isIP`) must route to thaw-js: no thaw-js fallback, and the program prints what Node prints.
 
 #[test]
 fn thaw_js_routes_an_arity_overload_with_an_object_bearing_union_parameter() {

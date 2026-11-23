@@ -168,7 +168,7 @@ fn registry_add_runs_real_p_limit_promise_workload_when_enabled() {
 
 /// `p-queue`'s whole export is `export default class PQueue extends
 /// EventEmitter<EventName> { ... }`. Constructing a `Fallback`
-/// (QuickJS) class resolves its constructor as a JS *global* named
+/// (thaw-js) class resolves its constructor as a JS *global* named
 /// after the class (`thaw_js_get_global`) -- populated, for a *named*
 /// export, by the generic `module.exports` -> `globalThis` copy loop.
 /// A default-exported class's `module.exports` instead *is* the class
@@ -470,7 +470,7 @@ fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
         &["@parcel/watcher".into()],
     )
     .unwrap();
-    // @parcel/watcher routes to thaw-js (old: `true`, kept on QuickJS by the subscription-events blocker)
+    // @parcel/watcher routes to thaw-js (old: `true`, kept on thaw-js by the subscription-events blocker)
     let event_file = watched.join("event.txt");
     let callback_file = watched.join("callback.txt");
     let callback_literal = serde_json::to_string(&callback_file.to_string_lossy()).unwrap();

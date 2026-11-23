@@ -600,43 +600,6 @@ fn elf_section<'a>(bytes: &'a [u8], name: &[u8]) -> Result<&'a [u8], String> {
     found.ok_or_else(|| "executable does not contain a Thaw artifact section".into())
 }
 
-/// The `quickjs-reason:` lines `thaw inspect` prints, one per reason in the manifest.
-fn quickjs_reason_lines(manifest: &serde_json::Value) -> Vec<String> {
-    let mut lines = Vec::new();
-    if let Some(reasons) = manifest["quickjs_reasons"].as_array() {
-        for reason in reasons {
-            let kind = reason["kind"].as_str().unwrap_or("unknown");
-            let package = reason["package"]
-                .as_str()
-                .map(|value| format!(" package={value}"))
-                .unwrap_or_default();
-            let operation = reason["function"]
-                .as_str()
-                .or_else(|| reason["operation"].as_str())
-                .map(|value| format!(" operation={value}"))
-                .unwrap_or_default();
-            let detail = reason["detail"]
-                .as_str()
-                .map(|value| format!(" reason={value}"))
-                .unwrap_or_default();
-            let location = match (
-                reason["source"].as_str(),
-                reason["line"].as_u64(),
-                reason["column"].as_u64(),
-            ) {
-                (Some(source), Some(line), Some(column)) if line > 0 => {
-                    format!(" at {source}:{line}:{column}")
-                }
-                _ => String::new(),
-            };
-            lines.push(format!(
-                "quickjs-reason: {kind}{package}{operation}{location}{detail}"
-            ));
-        }
-    }
-    lines
-}
-
 /// The `thaw-js-blocker:` lines `thaw inspect` prints, one per blocker in the manifest.
 fn thaw_js_blocker_lines(manifest: &serde_json::Value) -> Vec<String> {
     manifest["thaw_js_blockers"]
@@ -690,9 +653,6 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
                 .join(", "))
             .unwrap_or_default()
     );
-    for line in quickjs_reason_lines(&manifest) {
-        println!("{line}");
-    }
     if let Some(routed) = manifest["thaw_js_routed"]
         .as_array()
         .filter(|routed| !routed.is_empty())

@@ -1,6 +1,6 @@
 // thaw-js class methods whose declared return is a union with a Promise member (`Response |
 // Promise<Response>`) get a `$await` runtime-key suffix, which makes thaw-js settle the Promise.
-// QuickJS keys and every other method keep their exact keys.
+// thaw-js keys and every other method keep their exact keys.
 
 fn union_promise_key(symbol: &str) -> String {
     let hex = symbol.strip_prefix("__thaw_typed_js_").unwrap();

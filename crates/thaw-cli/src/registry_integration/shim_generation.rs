@@ -45,7 +45,7 @@ fn jit_type_needs_live_json_adaptation(ty: &thaw_hir::HirType) -> bool {
         | HirType::Promise(inner) => jit_type_needs_live_json_adaptation(inner),
         HirType::Union(types) => types.iter().any(jit_type_needs_live_json_adaptation),
         // These already have a direct scalar, dynamic, or opaque-handle ABI.
-        // In particular, JsValue is a live QuickJS handle rather than a
+        // In particular, JsValue is a live thaw-js handle rather than a
         // native aggregate that needs a JSON adapter.
         HirType::F64
         | HirType::I64
@@ -426,7 +426,7 @@ fn generate_registry_shims_pass(
             .extend(arities);
     }
     let mut resolved = Vec::new();
-    // thaw-js form of builtin bundles whose QuickJS form is a script wrapper (see `thaw_js_bundle_form`)
+    // thaw-js form of builtin bundles whose thaw-js form is a script wrapper (see `thaw_js_bundle_form`)
     let mut thaw_js_bundles = std::collections::HashMap::<String, String>::new();
     for name in use_packages {
         // Scopes `Buffer`/`Uint8Array` -> `HirType::Bytes` classification
@@ -499,7 +499,7 @@ fn generate_registry_shims_pass(
             ));
         }
         // `createRequire` in thaw-js needs `node:path` as a factory inside the node:module realm (see
-        // thaw-js install_module_loader); the QuickJS bundle is unchanged
+        // thaw-js install_module_loader); the thaw-js bundle is unchanged
         if name == "node:module" {
             thaw_js_bundles.insert(
                 name.clone(),
@@ -769,7 +769,7 @@ fn generate_registry_shims_pass(
 
     // Every generated top-level name -- FastPath ambient declaration or
     // Fallback wrapper alike -- would otherwise land in the *same* flat
-    // global scope (QuickJS-NG globals for Fallback, the LLVM module's
+    // global scope (thaw-js globals for Fallback, the LLVM module's
     // own symbol table for FastPath). Two different packages exporting
     // the same name (e.g. `qs` and `@hapi/hoek` both export `stringify`)
     // used to silently collide: whichever package's shim/binding ran
@@ -873,14 +873,13 @@ fn generate_registry_shims_pass(
     let mut value_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     // `(package, function)` pairs compiled to a native JIT declaration by
-    // the first-wins loop below. These never touch QuickJS-NG, so they must
+    // the first-wins loop below. These never touch thaw-js, so they must
     // stay out of `fallback_names`: a package whose every Fallback function
     // is JIT-targeted needs no `bundle.js`/`loadScript` at all, and counting
-    // one here would link the whole QuickJS runtime back into an otherwise
-    // pure-JIT build (a real regression: every `*_use_jit_without_quickjs`
-    // test started linking QuickJS).
+    // one here would link the whole thaw-js runtime back into an otherwise
+    // pure-JIT build (a real regression: every `*_use_jit_without_thaw-js`
+    // test started linking thaw-js).
     let mut jit_targets = std::collections::HashSet::new();
-    let mut jit_fallback_reasons = JitFallbackReasons::new();
     let mut jit_symbol_origins = JitSymbolOrigins::new();
     // Names `union_overload_dispatch_declaration` already claims with a
     // runtime `typeof`-based dispatcher. The argument-shape-scoring loop
@@ -1146,7 +1145,7 @@ fn generate_registry_shims_pass(
                 }
             }
         } else {
-            // A Fallback (QuickJS-NG) package's classes never went
+            // A Fallback (thaw-js) package's classes never went
             // through any of this before -- `pkg.classes` was parsed but
             // simply never consulted here, so a class instance (real
             // example: dayjs's factory function returning its own
@@ -1154,7 +1153,7 @@ fn generate_registry_shims_pass(
             // to call its methods. Reuses the exact same declaration
             // generator and `class_method_rewrites` consumer as the
             // native-addon branch above (`napi: false` picks the
-            // QuickJS-NG symbol/backend instead) -- only instance
+            // thaw-js symbol/backend instead) -- only instance
             // methods and (see `generate_napi_class_constructors`'s own
             // `napi` parameter) constructors and static methods. Property
             // Property reads still remain on the dynamic-value path;
@@ -1164,7 +1163,7 @@ fn generate_registry_shims_pass(
             // function, mime's `Mime` instance is a ready-made package
             // export), but hono's `Hono` -- constructed directly via
             // `new Hono()` -- does.
-            // A thaw-js package's classes are generated exactly like QuickJS ones, then retargeted at
+            // A thaw-js package's classes are generated exactly like thaw-js ones, then retargeted at
             // thaw-js below (instances stay `JsValue` handles into the thaw-js heap).
             let class_marks = (
                 shim.len(),
@@ -1179,7 +1178,7 @@ fn generate_registry_shims_pass(
                 .cloned()
                 .collect::<std::collections::HashSet<_>>();
             // (Only the classes the program names: an unreferenced class's multi-arity constructor
-            // dispatcher would pull QuickJS into every routed build.)
+            // dispatcher would pull thaw-js into every routed build.)
             for class in pkg.classes.iter() {
                 // A class reached only through a namespace member alias
                 // (`new ns.Alias(..)`) is named by the alias, not by its own
@@ -1457,29 +1456,6 @@ fn generate_registry_shims_pass(
                             function,
                         )
                     });
-                if jit_operation.is_none() {
-                    jit_fallback_reasons
-                        .entry((pkg.name.clone(), function.name.clone()))
-                        .or_insert_with(|| {
-                            if forced_jit_fallbacks
-                                .contains(&(pkg.name.clone(), function.name.clone()))
-                            {
-                                "live dynamic storage requires the JavaScript boundary".into()
-                            } else if pkg.native_addon.is_some() {
-                                "native addon call requires its N-API/JavaScript wrapper boundary"
-                                    .into()
-                            } else {
-                                jit_rejection_reason_named(
-                                    pkg.bundle_js.as_deref().unwrap_or_default(),
-                                    &registry_bundle_js_source_name(
-                                        &pkg.name,
-                                        pkg.bundle_js.is_some(),
-                                    ),
-                                    function,
-                                )
-                            }
-                        });
-                }
                 let declaration = jit_operation
                     .as_ref()
                     .map(|operation| jit_numeric_declaration(&pkg.name, function, operation))
@@ -1865,7 +1841,7 @@ fn generate_registry_shims_pass(
                 &bare_aliased,
             ));
         } else {
-            // (A thaw-js package has no untyped QuickJS `callDynamic` wrappers: every function the
+            // (A thaw-js package has no untyped thaw-js `callDynamic` wrappers: every function the
             // program mentions is either a native FastPath function, declared below, or has a typed
             // target, see `thaw_js_package_eligible`.)
             let functions: Vec<_> = if thaw_js_package {
@@ -2188,14 +2164,14 @@ fn generate_registry_shims_pass(
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
-            // QuickJS-NG at all.
+            // thaw-js at all.
             let fallback_names: Vec<String> = pkg
                 .classifications
                 .iter()
                 .filter_map(|(name, classification)| match classification {
                     // A JIT-targeted function is compiled to a native
                     // declaration and never reaches the loaded script, so
-                    // it must not force `bundle.js`/QuickJS in for the
+                    // it must not force `bundle.js`/thaw-js in for the
                     // package (see `jit_targets`'s own comment). Every
                     // other Fallback function still needs its binding.
                     thaw_bridge::Classification::Fallback { .. }
@@ -2659,7 +2635,6 @@ fn generate_registry_shims_pass(
             external_nested_namespaces,
             external_export_assignments,
             external_module_indices,
-            jit_fallback_reasons,
             runtime_features,
             jit_symbol_origins,
         ),

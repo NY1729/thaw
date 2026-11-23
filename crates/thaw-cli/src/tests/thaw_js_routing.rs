@@ -119,7 +119,7 @@ fn thaw_js_routed_packages_are_read_from_the_generated_shim() {
 }
 
 /// `tjs-kit`: functions whose bodies the specialization JIT cannot take (they use `Map`), so the
-/// QuickJS path is the baseline and thaw-js is the replacement.
+/// thaw-js path is the baseline and thaw-js is the replacement.
 fn thaw_js_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-{name}-{}", std::process::id()));
     let registry = dir.join("modules");
@@ -137,7 +137,7 @@ fn thaw_js_fixture(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
     )
     .unwrap();
     // The registry's bundle layout (one factory per module, a require map and the entry key), plus
-    // the evaluation tail that makes the same text runnable as a plain QuickJS script.
+    // the evaluation tail that makes the same text runnable as a plain thaw-js script.
     std::fs::write(
         package.join("bundle.js"),
         "module.exports = (function(require){\n\
@@ -291,7 +291,7 @@ fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
 
 #[test]
 fn package_embedding_quickjs_worker_threads_routes_to_thaw_js() {
-    // The registry's real QuickJS `node:worker_threads` factory (builtins/system/workers.rs), embedded in a package
+    // The registry's real thaw-js `node:worker_threads` factory (builtins/system/workers.rs), embedded in a package
     // bundle the way bundle/render.rs embeds a builtin the package requires: an entry `pkg/index.js` requires it.
     let qjs = thaw_registry::builtin_bundle_with("node:worker_threads", &[]).unwrap();
     let entry = "var __thaw_bundle_entry_key = \"node:worker_threads\";";
@@ -330,7 +330,7 @@ fn thaw_js_wasi_bundle_routes_without_a_wasm_mention_in_the_program() {
 #[test]
 fn thaw_js_bundle_only_webassembly_routes_without_a_user_mention() {
     // a package bundle that uses WebAssembly routes although the user source never names it.
-    // old: rejected by `thaw_js_wasm_blocker` (stayed on QuickJS); new: routed, the build adds the `wasm` feature
+    // old: rejected by `thaw_js_wasm_blocker` (stayed on thaw-js); new: routed, the build adds the `wasm` feature
     let bundle = "module.exports = { check: function () { return String(new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])) instanceof WebAssembly.Module); } };";
     let pkg = builtin_routing_package("wasm-kit");
     let user = "import { check } from 'wasm-kit';\nconsole.log(check());\n";
@@ -384,7 +384,7 @@ fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
         thaw_js_run(&output),
         "{ label: 'X', counts: { a: 2, b: 1 } }\n5\n{ label: 'NONE', counts: {} }\n"
     );
-    // The linked binary carries no QuickJS engine at all.
+    // The linked binary carries no thaw-js engine at all.
     let bytes = std::fs::read(&output).unwrap();
     assert!(
         !bytes.windows(8).any(|window| window == b"rquickjs"),
@@ -414,7 +414,7 @@ fn thaw_js_routing_carries_dates_both_ways_without_linking_quickjs() {
 #[test]
 fn thaw_js_routing_decodes_a_nested_array_result_without_linking_quickjs() {
     // A typed `string[][]` result is decoded from plain JSON: no interned-native-owner query (which
-    // would need the QuickJS realm) may be compiled into a thaw-js build.
+    // would need the thaw-js realm) may be compiled into a thaw-js build.
     let main = "import { pairs } from 'tjs-kit';\nfunction main(): void { const p = pairs(['a', 'b', 'c']); console.log(p.length, p[0][1], p[1][0]); }\n";
     let (dir, registry, entry) = thaw_js_fixture("nested-array", main);
     let output = dir.join("app");
@@ -776,7 +776,7 @@ fn thaw_js_blockers_are_recorded_once_and_reported_as_package_and_why() {
 
 #[test]
 fn thaw_js_refused_package_fails_the_build_and_records_the_blockers_key() {
-    // A package whose bundle calls `process.dlopen` is refused: the build fails (no QuickJS rebuild) and the
+    // A package whose bundle calls `process.dlopen` is refused: the build fails (no thaw-js rebuild) and the
     // blockers of the failed build name the refused package.
     let (dir, registry, entry) = thaw_js_package_fixture("blockers-fallback", TJS_DLOPEN_MAIN, &[TJS_DLOPEN_PACKAGE]);
     let error = build_on_thaw_js(&entry, &dir.join("app"), &registry).unwrap_err();
@@ -823,7 +823,7 @@ fn thaw_js_create_hook_with_finally_and_promise_combinators_stays_on_thaw_js() {
 #[test]
 fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal() {
     let (dir, registry, entry) = thaw_js_package_fixture("fallback-modes", TJS_DLOPEN_MAIN, &[TJS_DLOPEN_PACKAGE]);
-    // the refused package fails the build, named with its reason, and no QuickJS rebuild runs
+    // the refused package fails the build, named with its reason, and no thaw-js rebuild runs
     let error = build_on_thaw_js(&entry, &dir.join("app-error"), &registry).unwrap_err();
     assert!(error.starts_with("unsupported on thaw-js: "), "{error}");
     assert!(error.contains("package `tjs-dl` refused"), "{error}");
@@ -833,7 +833,7 @@ fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal() {
 #[test]
 fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_quickjs() {
     // node:crypto's typed `randomFillSync` declaration is refused per function, yet the program still ends up
-    // on thaw-js: an `error` build must succeed, since nothing links QuickJS.
+    // on thaw-js: an `error` build must succeed, since nothing links thaw-js.
     let (dir, registry, entry) = thaw_js_class_fixture(
         "fallback-final-pass",
         "import { randomFillSync } from 'node:crypto';\n\
@@ -1247,7 +1247,7 @@ fn thaw_js_export_equals_object_default_import_builds_under_error_mode() {
 }
 
 /// An ES package's `import.meta.url` (rewritten by `module_transform` to `'file://' + __filename`) must be an
-/// absolute `file:///thaw_modules/<pkg>/...` URL, so its directory is `/thaw_modules/<pkg>`, as in the QuickJS
+/// absolute `file:///thaw_modules/<pkg>/...` URL, so its directory is `/thaw_modules/<pkg>`, as in the thaw-js
 /// lane. Plain string ops keep the package inside the scanner's accepted shape (`node:path` method calls are
 /// refused); `fileURLToPath` itself is covered by the real yargs test.
 #[test]
@@ -1439,7 +1439,7 @@ fn node_perf_hooks_thaw_js_bundle_scans_clean() {
 
 #[test]
 fn random_fill_sync_declaration_keeps_bytes_only_when_thaw_js_routes_node_crypto() {
-    // The QuickJS-lane override declares randomFillSync as JsValue; thaw-js keeps the Bytes signature.
+    // The thaw-js-lane override declares randomFillSync as JsValue; thaw-js keeps the Bytes signature.
     let dir = std::env::temp_dir().join(format!("thaw-cli-random-fill-decl-{}", std::process::id()));
     let registry = dir.join("modules");
     let packages = ["node:crypto".to_string()];
@@ -1712,7 +1712,7 @@ fn thaw_js_ctor_option_callback_declaration_is_plain_only_for_constructors() {
     assert!(!thaw_js_declaration_plain_with(method, false));
 }
 
-// old: `@parcel/watcher` was blocked by `thaw_js_unready_addon_blocker` (kept on QuickJS); new: routes to thaw-js like argon2.
+// old: `@parcel/watcher` was blocked by `thaw_js_unready_addon_blocker` (kept on thaw-js); new: routes to thaw-js like argon2.
 #[test]
 fn parcel_watcher_and_argon2_native_addon_programs_route_to_thaw_js() {
     let bundle = "module.exports = (function(require){ var __thaw_bundle_factories = { \"pkg/index.js\": function(module, exports, require) { exports.subscribe = function () {}; } }; var __thaw_bundle_require_maps = { \"pkg/index.js\": {} }; var __thaw_bundle_entry_key = \"pkg/index.js\"; })(globalThis.require);";
@@ -1790,7 +1790,7 @@ fn routed_process_ids_and_kill_match_node() {
 #[test]
 fn thaw_js_route_all_builds_a_plain_any_program_on_thaw_js() {
     // Route-all is the only mode: this program has no routed package and no dynamic-code marker, yet it
-    // builds on thaw-js without linking QuickJS (a program that needed QuickJS would fail the build).
+    // builds on thaw-js without linking thaw-js (a program that needed thaw-js would fail the build).
     let dir = std::env::temp_dir().join(format!("thaw-cli-route-all-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -2196,7 +2196,7 @@ fn wasm_in_bundle_only_routes_to_thaw_js_and_runs() {
 #[test]
 fn thaw_js_nested_namespace_class_is_not_a_routing_blocker() {
     // `kdf.OpenSSL` is a dotted class path: thaw-js resolves it through its own class operations (exports_member),
-    // so a program naming it routes to thaw-js. Old: the nested-alias blocker kept the package on QuickJS.
+    // so a program naming it routes to thaw-js. Old: the nested-alias blocker kept the package on thaw-js.
     let mut pkg = builtin_routing_package("tjs-nested");
     pkg.classes.push(thaw_bridge::DtsClass {
         name: "kdf.OpenSSL".into(),
@@ -2308,7 +2308,7 @@ fn builtin_defined_methods_make_graphql_and_socket_io_shaped_packages_eligible()
 fn unmapped_require_of_an_installed_peer_keeps_a_package_on_quickjs() {
     // drizzle-orm's neon driver requires its peer `@neondatabase/serverless`, which the bundle does not map. While the
     // peer is not installed the require is a MODULE_NOT_FOUND at run time, as on Node: the package is served. Once the
-    // peer is installed (a bundler gap or a peer added after the bundle) thaw-js could not serve it: QuickJS keeps it.
+    // peer is installed (a bundler gap or a peer added after the bundle) thaw-js could not serve it: thaw-js keeps it.
     let bundle = one_package_bundle(
         "exports.connect = function () { return require('@neondatabase/serverless'); };",
     );
@@ -2344,7 +2344,7 @@ const TJS_PEER_B: (&str, &str, &str) = (
     "class B {}\nexports.B = B;\nexports.isB = function (x) { return x instanceof B; };\n",
 );
 
-/// Builds `entry` over `registry` on thaw-js (a QuickJS link is a build error).
+/// Builds `entry` over `registry` on thaw-js (a thaw-js link is a build error).
 fn thaw_js_peer_build(entry: &Path, output: &Path, registry: &Path) -> Result<(), String> {
     build_with_thaw_js_routing(
         entry, output, &[], &[], &[], registry, &[], false, None, true, false, false,

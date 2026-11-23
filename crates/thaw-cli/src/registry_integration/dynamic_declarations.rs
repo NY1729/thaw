@@ -1010,7 +1010,7 @@ fn typed_dynamic_bare_alias(
         return None;
     }
     // Same restriction `typed_dynamic_declaration` itself applies to a
-    // `Function`/`CallableFunction`-classified parameter: no QuickJS-NG
+    // `Function`/`CallableFunction`-classified parameter: no thaw-js
     // side marshaling exists for a typed function argument outside the
     // `napi` backend. This wrapper forwards to `symbol` (`typed_dynamic_
     // declaration`'s own, already-correctly-widened declaration) -- if
@@ -1190,64 +1190,54 @@ fn contains_callable_type(ty: &thaw_hir::HirType) -> bool {
 }
 
 /// Prefix a package name with this to have its typed declarations target the experimental thaw-js
-/// runtime (`__thaw_typed_tjs_*`, `DynamicBackend::ThawJs`) instead of QuickJS. Stripped before the
+/// runtime (`__thaw_typed_tjs_*`, `DynamicBackend::ThawJs`) instead of thaw-js. Stripped before the
 /// package name is used as the runtime key.
 const THAW_JS_PACKAGE_MARK: &str = "tjs!";
 
-/// Retargets a QuickJS typed declaration to thaw-js: symbols get the `tjs` prefix and an opaque
-/// `JsValue` result (an `any`-typed return, never a class instance: the routing scan rules those
-/// out) becomes plain `Json`, since thaw-js returns plain data by value. Packages in
-/// `thaw_js_keeps_js_value` keep `JsValue`, so their objects stay live handles. `keep_ret_js_value`
-/// keeps the return type of a `JsValue` result (the parameters still flatten), so the caller gets a
-/// live handle back; the body lines of such a multi-line adapter keep `JsValue` too, since they hold
-/// that handle (`const callable: JsValue = wrapper(..)`).
-fn thaw_js_retarget(
-    symbol: String,
+/// Flattens the `JsValue` of a thaw-js typed declaration: an opaque `JsValue` result (an `any`-typed
+/// return, never a class instance: the routing scan rules those out) becomes plain `Json`, since
+/// thaw-js returns plain data by value. Packages in `thaw_js_keeps_js_value` keep `JsValue`, so their
+/// objects stay live handles. `keep_ret_js_value` keeps the return type of a `JsValue` result (the
+/// parameters still flatten), so the caller gets a live handle back; the body lines of such a
+/// multi-line adapter keep `JsValue` too, since they hold that handle (`const callable: JsValue = wrapper(..)`).
+fn thaw_js_flatten_js_value(
     declaration: String,
     keep_js_value: bool,
     keep_ret_js_value: bool,
-) -> (String, String) {
-    let declaration = declaration.replace("__thaw_typed_js_", "__thaw_typed_tjs_");
-    let declaration = if keep_js_value {
-        declaration
-    } else {
-        // Brace depth before each line: lines inside a function body are not parameters.
-        let mut depth = 0usize;
-        declaration
-            .split_inclusive('\n')
-            .map(|line| {
-                let in_body = depth > 0;
-                depth = (depth + line.matches('{').count())
-                    .saturating_sub(line.matches('}').count());
-                match line.rfind("): ") {
-                    // A body line of a live-handle adapter (`const callable: JsValue = wrapper(..)`) holds
-                    // that handle, so its `JsValue` stays.
-                    _ if in_body && keep_ret_js_value => line.to_string(),
-                    Some(split) if keep_ret_js_value => {
-                        let (head, tail) = line.split_at(split + "): ".len());
-                        format!("{}{tail}", head.replace("JsValue", "Json"))
-                    }
-                    _ => line.replace("JsValue", "Json"),
+) -> String {
+    if keep_js_value {
+        return declaration;
+    }
+    // Brace depth before each line: lines inside a function body are not parameters.
+    let mut depth = 0usize;
+    declaration
+        .split_inclusive('\n')
+        .map(|line| {
+            let in_body = depth > 0;
+            depth = (depth + line.matches('{').count()).saturating_sub(line.matches('}').count());
+            match line.rfind("): ") {
+                // A body line of a live-handle adapter (`const callable: JsValue = wrapper(..)`) holds
+                // that handle, so its `JsValue` stays.
+                _ if in_body && keep_ret_js_value => line.to_string(),
+                Some(split) if keep_ret_js_value => {
+                    let (head, tail) = line.split_at(split + "): ".len());
+                    format!("{}{tail}", head.replace("JsValue", "Json"))
                 }
-            })
-            .collect()
-    };
-    (
-        // (Generated wrapper names keep `__thaw_typed_wrapper_js_`: thaw-hir recognizes them by it.)
-        symbol.replace("__thaw_typed_js_", "__thaw_typed_tjs_"),
-        declaration,
-    )
+                _ => line.replace("JsValue", "Json"),
+            }
+        })
+        .collect()
 }
 
 /// thaw-js awaits a `Promise<Json>` result later instead of settling it synchronously, so an
 /// opaque `Promise<...>` payload (`Promise<any[]>`, `Promise<Buffer>`, ...) must stay a promise
-/// rather than erase to a bare `Json`. Only the thaw-js declarations are rewritten; QuickJS keeps
+/// rather than erase to a bare `Json`. Only the thaw-js declarations are rewritten; thaw-js keeps
 /// its own `JsValue` text.
 /// A parameter whose declared union has an `Object` member (validator's `isIP`'s
 /// `versionOrOptions?: string | number | { version: ... }`) cannot take a `Json` argument on thaw-js:
 /// thaw-hir coerces `Json` only into a union of primitives. thaw-js marshals by value anyway, so such a
 /// parameter is declared `Json` (its `Optional` wrapper kept), and the arity declarations and their
-/// wrapper agree. QuickJS keeps the literal text; call-site overload scoring reads the original function.
+/// wrapper agree. thaw-js keeps the literal text; call-site overload scoring reads the original function.
 fn thaw_js_object_union_params_as_json(function: &thaw_bridge::DtsFunction) -> thaw_bridge::DtsFunction {
     fn json_for_object_union(ty: &thaw_hir::HirType) -> Option<thaw_hir::HirType> {
         match ty {
@@ -1407,28 +1397,33 @@ fn typed_dynamic_declaration(
                     std::borrow::Cow::Borrowed(_) => thaw_js_promise_ret(&object_params),
                 }
             };
-            typed_dynamic_declaration_for_quickjs(
-                real, &function, napi, observed_call_arities, overload_suffix,
+            typed_dynamic_declaration_inner(
+                real, &function, napi, true, observed_call_arities, overload_suffix,
             )
             .map(|(symbol, declaration)| {
-                thaw_js_retarget(
+                (
                     symbol,
-                    declaration,
-                    thaw_js_keeps_js_value(real),
-                    keep_ret_js_value,
+                    thaw_js_flatten_js_value(
+                        declaration,
+                        thaw_js_keeps_js_value(real),
+                        keep_ret_js_value,
+                    ),
                 )
             })
         }
-        None => typed_dynamic_declaration_for_quickjs(
-            package, function, napi, observed_call_arities, overload_suffix,
+        None => typed_dynamic_declaration_inner(
+            package, function, napi, false, observed_call_arities, overload_suffix,
         ),
     }
 }
 
-fn typed_dynamic_declaration_for_quickjs(
+/// `thaw_js` picks the `tjs` symbol spelling; the unrouted `js` spelling is only what the routing
+/// eligibility scan reads in the first shim pass.
+fn typed_dynamic_declaration_inner(
     package: &str,
     function: &thaw_bridge::DtsFunction,
     napi: bool,
+    thaw_js: bool,
     observed_call_arities: &std::collections::BTreeSet<usize>,
     overload_suffix: Option<usize>,
 ) -> Option<(String, String)> {
@@ -1459,7 +1454,13 @@ fn typed_dynamic_declaration_for_quickjs(
     };
     let base_symbol = format!(
         "__thaw_typed_{}_{}",
-        if napi { "napi" } else { "js" },
+        if napi {
+            "napi"
+        } else if thaw_js {
+            "tjs"
+        } else {
+            "js"
+        },
         encoded
     );
     // `argsArray` is this codebase's reserved spelling for an untyped
@@ -1510,7 +1511,7 @@ fn typed_dynamic_declaration_for_quickjs(
                 if generic.type_params.iter().any(|(name, _)| name == ty)
                     // Same restriction as the non-generic branch below and
                     // `supported_class_method_param` for methods: a
-                    // callback-shaped parameter has no QuickJS-side
+                    // callback-shaped parameter has no thaw-js-side
                     // marshaling at all (`compile_typed_dynamic_call`
                     // silently drops it for any non-`napi` backend), so
                     // it's only safe to keep as a real callback type when
@@ -1687,17 +1688,17 @@ fn typed_dynamic_declaration_for_quickjs(
         .iter()
         .map(|(name, ty)| match ty {
             // A `Function`/`CallableFunction`-classified parameter has no
-            // QuickJS-NG-side marshaling at all (`compile_typed_dynamic_
+            // thaw-js-side marshaling at all (`compile_typed_dynamic_
             // call`, thaw-llvm's `dynamic_host.rs`, only wires a typed
             // function argument through for the `napi` backend with a
             // `JsValue` return -- for every other combination, including
-            // every Fallback/QuickJS call, it silently drops the argument
+            // every Fallback/thaw-js call, it silently drops the argument
             // from the JSON args array instead of erroring). Widened to
             // `Json` here the same way `Unsupported` already is, so the
             // closure instead reaches `coerce_to_declared`'s `Json`-gated
             // `registerNativeCallback` wrapping -- the mechanism that
             // already correctly bridges a native closure into a real,
-            // callable QuickJS value elsewhere (a dynamic method-call
+            // callable thaw-js value elsewhere (a dynamic method-call
             // argument, or a Promise-returning callback's own return).
             // Real example: drizzle-orm's `sqlite-proxy` driver,
             // `drizzle(callback: (sql, params, method) => Promise<{rows}>)`

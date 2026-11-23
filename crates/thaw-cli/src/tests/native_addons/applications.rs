@@ -94,7 +94,7 @@ function main(): void {
 /// the test above. Every `.select()`/`.from()`/`.where()` link is a
 /// "thenable" (drizzle's `QueryPromise` base class implements `.then` by
 /// calling `execute()`), and `resolve_promise_value`
-/// (`crates/thaw-quickjs/src/quickjs/api.rs`) used to call
+/// (`crates/thaw-quickjs/src/thaw-js/api.rs`) used to call
 /// `Promise.resolve()` unconditionally on every dynamic method call's
 /// result -- which, per real JS semantics, eagerly invokes any thenable's
 /// `.then`. This executed the query as soon as `.from(t)` returned, with
