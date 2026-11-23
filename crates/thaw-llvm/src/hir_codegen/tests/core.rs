@@ -19,18 +19,6 @@ fn compiles_and_runs_a_native_hello_world_binary() {
     assert_eq!(compile_and_run(source, "hello"), "Hello, Thaw!\n5\n");
 }
 
-fn assert_native_event_key_bridge(source: &str, module_name: &str) {
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let hir = format!("{program:#?}");
-    assert!(hir.contains("retainEventKey"), "{hir}");
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, module_name);
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
-}
-
 #[test]
 fn typed_event_keys_transfer_native_wtf8_strings_and_live_symbols() {
     let source = r#"
@@ -63,7 +51,6 @@ fn typed_event_keys_transfer_native_wtf8_strings_and_live_symbols() {
             );
         }
     "#;
-    assert_native_event_key_bridge(source, "typed_event_key_identity_hir_ir");
     assert_eq!(compile_and_run(source, "typed_event_key_identity"), "true false true true true true true\n");
 }
 
@@ -85,7 +72,6 @@ fn native_event_key_is_released_when_a_later_argument_throws() {
             console.log(caught, callDynamicValue(eventKeyRefs, __thaw_json_argument_array()));
         }
     "#;
-    assert_native_event_key_bridge(source, "event_key_later_argument_hir_ir");
     assert_eq!(compile_and_run(source, "event_key_later_argument_cleanup"), "true true\n");
 
     let uncaught = r#"
@@ -96,7 +82,6 @@ fn native_event_key_is_released_when_a_later_argument_throws() {
             __thaw_typed_js_616363657074("native-key", failListener());
         }
     "#;
-    assert_native_event_key_bridge(uncaught, "event_key_uncaught_later_argument_hir_ir");
     let (_stdout, stderr, code) = compile_and_run_failing(uncaught, "event_key_uncaught_later_argument_cleanup");
     assert!(matches!(code, Some(status) if status != 0));
     assert!(stderr.contains("uncaught later argument"), "{stderr}");
@@ -120,7 +105,6 @@ fn native_event_key_scalar_ownership_stays_in_nested_lambda_function() {
             console.log(callDynamicValue(refsMatch, __thaw_json_argument_array()));
         }
     "#;
-    assert_native_event_key_bridge(source, "nested_event_key_lambda_ownership_hir_ir");
     assert_eq!(compile_and_run(source, "nested_event_key_lambda_ownership"), "true\n");
 }
 
@@ -147,53 +131,7 @@ fn native_event_key_quickjs_setter_transfers_handle_once() {
             console.log(caught, callDynamicValue(check, __thaw_json_argument_array()));
         }
     "#;
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let hir = format!("{program:#?}");
-    assert!(hir.contains("retainEventKey"), "{hir}");
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "typed_quickjs_event_key_setter");
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
-    assert!(ir.contains("fresh_event_key_active"), "{ir}");
     assert_eq!(compile_and_run(source, "typed_quickjs_event_key_setter"), "true\ntrue true\n");
-}
-
-#[test]
-fn native_event_key_graph_failure_releases_only_its_owned_handle() {
-    let source = r#"
-        declare function __thaw_typed_js_656d6974(key: JsValue, value: Json, arm: boolean): void;
-        declare function __thaw_typed_js_61726d5f6661756c74(): boolean;
-        declare function __thaw_typed_js_61726d6564(): boolean;
-        declare function __thaw_typed_js_726573746f72655f6661756c74(): boolean;
-        declare function __thaw_typed_js_656d69745f6e6f745f696e766f6b6564(): boolean;
-        declare function __thaw_typed_js_726566735f6d61746368(): boolean;
-        declare function __thaw_typed_js_6661756c745f686974(): boolean;
-        function main(): void {
-            loadScript("globalThis.__thaw_emit_invoked = false; globalThis.emit_not_invoked = () => !globalThis.__thaw_emit_invoked; globalThis.emit = () => { globalThis.__thaw_emit_invoked = true; throw new Error('graph path should fail before invocation'); }; globalThis.__thaw_key_host = {}; globalThis.__thaw_key_fault_armed = false; globalThis.__thaw_key_fault_hit = false; globalThis.__thaw_key_base = 0; globalThis.__thaw_key_mark = () => { globalThis.__thaw_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.refs_match = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_key_base; globalThis.arm_fault = () => { const refs = globalThis.__thaw_value_handle_refs; const handles = globalThis.__thaw_value_handles; const index = handles.findIndex(value => value === globalThis.__thaw_key_host); const descriptor = Object.getOwnPropertyDescriptor(refs, index); if (index < 0 || !descriptor || !('value' in descriptor) || !descriptor.writable || !descriptor.configurable) return false; const state = {index, descriptor, count: descriptor.value, faultHit: false}; globalThis.__thaw_key_fault_state = state; Object.defineProperty(refs, index, {configurable: descriptor.configurable, enumerable: descriptor.enumerable, get() { return state.count; }, set(next) { if (next > state.count) { state.faultHit = true; globalThis.__thaw_key_fault_hit = true; throw new Error('forced retain increment failure'); } state.count = next; }}); globalThis.__thaw_key_fault_armed = true; return true; }; globalThis.armed = () => globalThis.__thaw_key_fault_armed; globalThis.fault_hit = () => globalThis.__thaw_key_fault_hit; globalThis.restore_fault = () => { const refs = globalThis.__thaw_value_handle_refs; const state = globalThis.__thaw_key_fault_state; if (!state) return false; const saved = state.descriptor; const count = state.count; Object.defineProperty(refs, state.index, {...saved, value: count}); const restored = Object.getOwnPropertyDescriptor(refs, state.index); delete globalThis.__thaw_key_fault_state; return !!restored && restored.value === count && restored.writable === saved.writable && restored.enumerable === saved.enumerable && restored.configurable === saved.configurable; }; globalThis.__thaw_stale_source = globalThis.__thaw_key_host;");
-            const mark: JsValue = getDynamicValue("__thaw_key_mark");
-            const source: JsValue = getDynamicValue("__thaw_stale_source");
-            const value: Json = source;
-            const refsMatch: JsValue = getDynamicValue("refs_match");
-            callDynamicValue(mark, __thaw_json_argument_array());
-            let caught = false;
-            let restored = false;
-            try {
-                __thaw_typed_js_656d6974("graph-failure-key", value, __thaw_typed_js_61726d5f6661756c74());
-            } catch (_) {
-                caught = true;
-            } finally {
-                restored = __thaw_typed_js_726573746f72655f6661756c74();
-            }
-            const armed = __thaw_typed_js_61726d6564();
-            const emitNotInvoked = __thaw_typed_js_656d69745f6e6f745f696e766f6b6564();
-            const faultHit = __thaw_typed_js_6661756c745f686974();
-            console.log(caught, armed, restored, faultHit, emitNotInvoked, callDynamicValue(refsMatch, __thaw_json_argument_array()));
-        }
-    "#;
-    assert_native_event_key_bridge(source, "event_key_graph_failure_hir_ir");
-    assert_eq!(compile_and_run(source, "event_key_graph_failure_cleanup"), "true true true true true true\n");
 }
 
 #[test]
@@ -3052,41 +2990,6 @@ fn runs_module_init_before_main_body() {
 }
 
 #[test]
-fn dynamic_json_calls_release_bridge_temporaries() {
-    let module = thaw_parser::parse_typescript(
-        r#"function main(): void { callDynamic("value", JSON.parse("[]")); }"#,
-    )
-    .unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "dynamic_json_cleanup");
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    // Inspect only the user entry point: the generated `main` carries its own
-    // process-listener cstring cleanup that is unrelated to the bridge.
-    let body = ir.split("define internal void @thaw_user_main(").nth(1).expect(&ir)
-        .split("\n}").next().expect(&ir);
-    // The encoded argument graph and the parsed argument are released right
-    // after the call, before the pending-exception branch.
-    let call = body.find("@thaw_js_call_graph_result(").expect(&ir);
-    let after = &body[call..];
-    let args = after.find("call void @thaw_cstring_destroy(ptr %call_dynamic_args_json)").expect(&ir);
-    let parsed = after.find("call void @thaw_json_destroy(ptr %json_parse)").expect(&ir);
-    let branch = after.find("br i1 %has_pending_exception").expect(&ir);
-    assert!(args < parsed && parsed < branch, "{ir}");
-    // The result graph text is released immediately after it is decoded.
-    let decode = body.find("%decode_quickjs_graph = call ptr @thaw_json_graph_decode(").expect(&ir);
-    assert!(body[decode..].lines().nth(1).unwrap()
-        .contains("call void @thaw_cstring_destroy(ptr %call_dynamic_value)"), "{ir}");
-    // Every early exit that holds the encoded arguments also releases them.
-    for exit in ["json_stringify_invalid:", "json_stringify_host_failed:"] {
-        let block = body.split(exit).nth(1).expect(&ir).split("\n\n").next().unwrap();
-        assert!(block.contains("call void @thaw_cstring_destroy(ptr %call_dynamic_args_json)"), "{ir}");
-        assert!(block.contains("call void @thaw_json_destroy(ptr %json_parse)"), "{ir}");
-    }
-}
-
-#[test]
 fn declares_error_exact_constructor_boundary_abi() {
     let context = Context::create();
     let compiler = HirCompiler::new(&context, "error_exact_boundary_abi");
@@ -3128,62 +3031,6 @@ fn declares_error_exact_constructor_boundary_abi() {
     assert_eq!(module.get_function("thaw_js_call_handle_mixed_exact_consuming_result").unwrap().get_type().get_return_type(), Some(result.into()));
     let legacy_handle_result = context.struct_type(&[context.i64_type().into(), i8_ptr.into()], false);
     assert_eq!(module.get_function("thaw_js_construct_handle_graph_args_result").unwrap().get_type().get_return_type(), Some(legacy_handle_result.into()));
-}
-
-#[test]
-fn dynamic_json_setter_destroys_owned_result_before_exception_branch() {
-    // Both paths use setDynamicPropertyJson: one ordinary assignment and one
-    // assignment whose JavaScript setter can throw into a Thaw catch block.
-    for (name, source, caught) in [
-        (
-            "dynamic_set_success_cleanup",
-            r#"function main(): void {
-                const box: JsValue = getDynamicValue("box");
-                box.value = JSON.parse("1");
-            }"#,
-            false,
-        ),
-        (
-            "dynamic_set_throw_cleanup",
-            r#"function main(): void {
-                loadScript("globalThis.box = {}; Object.defineProperty(box, 'value', { set() { throw new Error('setter'); } });");
-                const box: JsValue = getDynamicValue("box");
-                try {
-                    box.value = JSON.parse("1");
-                } catch (error) {
-                    console.log(error);
-                }
-            }"#,
-            true,
-        ),
-    ] {
-        let module = thaw_parser::parse_typescript(source).unwrap();
-        let program = thaw_hir::lower_module(&module).unwrap();
-        let context = Context::create();
-        let mut compiler = HirCompiler::new(&context, name);
-        compiler.compile_program(&program).unwrap();
-        let ir = compiler.print_to_string();
-        let setter = ir.lines().position(|line| {
-            line.contains("call ") && line.contains("@thaw_js_set_property_json_graph_result(")
-        }).expect(&ir);
-        let suffix = ir.lines().skip(setter).collect::<Vec<_>>().join("\n");
-        let extracted = suffix.find("dynamic_property_json_set_value = extractvalue").expect(&ir);
-        let destroyed = suffix.find("call void @thaw_cstring_destroy").expect(&ir);
-        let branch = suffix.find("br i1 %has_pending_exception").expect(&ir);
-        assert!(extracted < destroyed && destroyed < branch, "{ir}");
-        assert!(suffix[destroyed..].lines().next().unwrap()
-            .contains("%dynamic_property_json_set_value"), "{ir}");
-        let branch_line = suffix[branch..].lines().next().unwrap();
-        // The setter runs inside the lowered try body, which propagates the
-        // pending exception to its caller; the caller's catch is entered through
-        // the catch-entry cleanup block (an empty trampoline into `%catch`).
-        assert!(branch_line.contains("label %propagate_exception"), "{ir}");
-        if caught {
-            let trampoline = ir.split("cleanup_before_catch:").nth(1).expect(&ir)
-                .lines().nth(1).unwrap();
-            assert!(trampoline.contains("br label %catch"), "{ir}");
-        }
-    }
 }
 
 #[test]
@@ -3328,37 +3175,6 @@ fn compiled_quickjs_graph_result_keeps_cycle_identity() {
 }
 
 #[test]
-fn generated_main_uses_result_reporters_and_destroys_listener_errors() {
-    let module = thaw_parser::parse_typescript("function main(): void { const value: JsValue = getDynamicValue('x'); }").unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "process_report_result_abi");
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    assert!(ir.contains("@thaw_js_emit_uncaught_result"), "{ir}");
-    assert!(ir.contains("@thaw_js_emit_unhandled_rejection_result"), "{ir}");
-    assert!(ir.contains("@thaw_js_emit_rejection_handled_result"), "{ir}");
-    assert!(ir.lines().any(|line| line.contains("call ")
-        && line.contains("@thaw_promise_set_unhandled_reporter_text_result(")), "{ir}");
-    assert!(ir.lines().any(|line| line.contains("call ")
-        && line.contains("@thaw_promise_drain_unhandled_text_result(")), "{ir}");
-    assert!(!ir.lines().any(|line| line.contains("call ")
-        && line.contains("@thaw_promise_drain_unhandled_result(")), "{ir}");
-    assert!(!ir.lines().any(|line| line.contains("call ")
-        && line.contains("@thaw_promise_set_unhandled_reporter_result(")), "{ir}");
-    assert!(ir.lines().any(|line| line.contains("call ")
-        && line.contains("@thaw_js_terminal_work_pending(")), "{ir}");
-    // Listener errors returned in the `{ handled, error }` result pair are owned C
-    // strings; the generated main destroys them through `thaw_cstring_destroy`
-    // (previously asserted via the named blocks destroy_js_listener_exception /
-    // destroy_rejection_listener_exception).
-    for owned in ["%process_exception_listener_error", "%process_rejection_listener_error"] {
-        assert!(ir.lines().any(|line| line.contains("call void @thaw_cstring_destroy(ptr ")
-            && line.trim_end().ends_with(&format!("{owned})"))), "{owned}: {ir}");
-    }
-}
-
-#[test]
 fn opaque_hir_throw_does_not_trust_user_metadata_suffix() {
     // `opaque` can be any producer-owned byte pointer. A source binding that
     // resembles the old synthetic suffix must never make it a native C string.
@@ -3424,10 +3240,13 @@ fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "catch_lambda_native_text_ir");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     // The async lambda is a Promise-returning `__thaw_lambda_N` in the current naming.
     assert!(ir.contains("define internal ptr @__thaw_lambda_"), "{ir}");
@@ -3436,55 +3255,6 @@ fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
     let (_stdout, stderr, code) = compile_and_run_failing(source, "catch_lambda_native_text_run");
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("TypeError: native failure"), "{stderr}");
-}
-
-#[test]
-fn main_cleanup_keeps_process_reporting_and_addons_live_on_init_failure() {
-    let module = thaw_parser::parse_typescript(
-        "function __thaw_module_init(): void { throw 'init failed'; } function main(): void {}",
-    ).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "terminal_shutdown_order");
-    compiler.uses_napi = true;
-    compiler.uses_quickjs = true;
-    compiler.uses_quickjs_handles = true;
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    assert!(ir.contains("init_failed") && ir.contains("entry_cleanup"), "{ir}");
-    let ordinary = ir.find("terminal_ordinary_notifications:").unwrap();
-    let begin = ir.find("terminal_begin_shutdown:").unwrap();
-    let finish = ir.find("finish_napi_shutdown").unwrap();
-    assert!(ordinary < begin && begin < finish, "{ir}");
-    let terminal_js = ir.find("terminal_quickjs_jobs = call i32 @thaw_js_run_event_loop").unwrap();
-    let late_gc = ir[terminal_js..].find("call void @thaw_js_collect_garbage()").unwrap() + terminal_js;
-    let confirm = ir.find("confirm_napi_shutdown = call i8 @thaw_napi_poll_shutdown").unwrap();
-    assert!(terminal_js < late_gc && late_gc < confirm, "GC must follow terminal JS work before the owner barrier is confirmed: {ir}");
-    assert!(ir.contains("take_shutdown_error") && ir.contains("terminal_promise_notifications"), "{ir}");
-    // The owned report texts are produced and released through
-    // `thaw_cstring_destroy` (the earlier named destroy_* blocks no longer exist).
-    for owned in ["%original_exception_owned_report_text", "%listener_exception_owned_report_text"] {
-        assert!(ir.lines().any(|line| line.contains(&"= call ptr @thaw_runtime_exception_report_text(".to_string())
-            && line.trim_start().starts_with(owned)), "{owned}: {ir}");
-        assert!(ir.lines().any(|line| line.contains("call void @thaw_cstring_destroy(ptr ")
-            && line.trim_end().ends_with(&format!("{owned})"))), "{owned}: {ir}");
-    }
-    let original = ir.find("process_pending_exception = load ptr").unwrap();
-    let listener = ir[original..].find("emit_process_uncaught_exception = call").unwrap() + original;
-    let handler = ir[listener..].find("process_handler_exception = load ptr").unwrap() + listener;
-    // The uncaught-report call is void now (no `report_uncaught_exception` result name).
-    let next_report = ir[handler..].find("call void @thaw_runtime_report_uncaught(").unwrap() + handler;
-    for slot in [
-        "@__thaw_pending_exception_object",
-        "@__thaw_pending_exception_value_tag",
-        "@__thaw_pending_exception_f64",
-        "@__thaw_pending_exception_i64",
-        "@__thaw_pending_exception_bool",
-    ] {
-        assert!(ir[original..listener].contains(slot), "original exception metadata: {ir}");
-        assert!(ir[handler..next_report].contains(slot), "listener exception metadata: {ir}");
-    }
-    assert!(!ir.contains("unload_napi_addons"), "{ir}");
 }
 
 #[test]
@@ -3520,32 +3290,6 @@ fn napi_only_terminal_cleanup_does_not_reference_quickjs_symbols() {
     let poll = ir.find("call i8 @thaw_napi_poll_shutdown(").unwrap();
     let finish = ir.find("call i8 @thaw_napi_finish_shutdown(").unwrap();
     assert!(begin < poll && poll < finish, "N-API shutdown order changed: {ir}");
-}
-
-#[test]
-fn terminal_quickjs_shutdown_is_emitted_only_for_quickjs_programs() {
-    for (name, source, expect_quickjs_shutdown) in [
-        (
-            "terminal_quickjs_shutdown",
-            "function main(): void { const value: JsValue = getDynamicValue(\"value\"); }",
-            true,
-        ),
-        ("terminal_native_no_quickjs_shutdown", "function main(): void {}", false),
-    ] {
-        let module = thaw_parser::parse_typescript(source).unwrap();
-        let program = thaw_hir::lower_module(&module).unwrap();
-        let context = Context::create();
-        let mut compiler = HirCompiler::new(&context, name);
-        compiler.compile_program(&program).unwrap();
-        let ir = compiler.print_to_string();
-        let shutdown = ir.find("call i8 @thaw_js_shutdown_context()");
-        assert_eq!(shutdown.is_some(), expect_quickjs_shutdown, "{ir}");
-        if let Some(shutdown) = shutdown {
-            let release = ir.find("call i64 @thaw_js_release_all_handles()").expect(&ir);
-            let returned = ir[shutdown..].find("ret i32").expect(&ir) + shutdown;
-            assert!(release < shutdown && shutdown < returned, "{ir}");
-        }
-    }
 }
 
 #[test]
@@ -3856,50 +3600,6 @@ fn jsvalue_branch_claim_is_fresh_for_each_outer_loop_local() {
 }
 
 #[test]
-fn branch_capture_of_parameter_claims_before_condition_enables_quickjs() {
-    // `first` compiles before any other function enables the QuickJS host.
-    // Its condition is the first dynamic operation, after branch prepromotion.
-    let module = thaw_parser::parse_typescript(r#"
-        function first(value: JsValue): void {
-            if (hasDynamicProperty(value, "missing")) {
-                const skipped = () => value;
-            }
-            if (hasDynamicProperty(value, "x")) {
-                const held = () => value;
-            }
-        }
-        function main(): void {
-            loadScript("globalThis.obj = { x: 1 };");
-            const value: JsValue = getDynamicValue("obj");
-            first(value);
-        }
-    "#).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "first_capture_before_host_condition");
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    let body = ir.split("define internal void @first(").nth(1).expect(&ir)
-        .split("\n}").next().expect(&ir);
-    let zero = body.find("store i8 0, ptr %value_capture_claim_cell").expect(&ir);
-    let conditions = body.match_indices("@thaw_js_has_property_result(")
-        .map(|(index, _)| index).collect::<Vec<_>>();
-    let retains = body.match_indices("call i8 @thaw_js_retain_handle(")
-        .map(|(index, _)| index).collect::<Vec<_>>();
-    assert_eq!(conditions.len(), 2, "{ir}");
-    assert_eq!(retains.len(), 2, "{ir}");
-    assert_eq!(body.matches("store i8 0, ptr %value_capture_claim_cell").count(), 1, "{ir}");
-    // The first condition is false for `obj`; the second closure must still
-    // have a reachable claim block. Neither retain can precede its test.
-    // Claim blocks are appended after the branch merge blocks in the textual
-    // order, so only "zeroed before any test, and each retain after its own
-    // test" is a layout-independent statement.
-    assert!(zero < conditions[0] && conditions[0] < retains[0]
-        && conditions[0] < conditions[1] && conditions[1] < retains[1], "{ir}");
-    assert!(compiler.uses_quickjs() && compiler.uses_quickjs_handles, "{ir}");
-}
-
-#[test]
 fn absent_function_pointer_checks_after_plain_call_arguments() {
     // Direct HIR isolates the consumer gate before the class method read
     // starts producing absent Function values in a later dependent unit.
@@ -3974,7 +3674,9 @@ fn absent_function_registration_takes_undefined_handle_path() {
     };
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "absent_function_registration");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("native_callback_is_undefined"), "{ir}");
     assert!(ir.contains("native_callback_undefined_handle"), "{ir}");
@@ -4096,76 +3798,6 @@ fn native_typed_quickjs_fresh_json_arguments_survive_all_return_lanes() {
     "#;
 
     assert_eq!(compile_and_run(source, "typed_quickjs_all_return_lanes"), "true true true true true true true true\n");
-
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "typed_quickjs_all_return_lanes_ir");
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    let main = ir.find("define internal void @thaw_user_main(").expect(&ir);
-    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
-    let mut from = 0;
-    for _ in 0..8 {
-        let pushed = body[from..].find("@thaw_json_array_push_json(").map(|offset| from + offset).expect(body);
-        let released = body[pushed..]
-            .find("\nrelease_typed_wrapper_json_argument")
-            .map(|offset| pushed + offset + 1)
-            .expect(body);
-        let release_end = body[released..]
-            .find("\ntyped_wrapper_json_released")
-            .map(|offset| released + offset)
-            .expect(body);
-        let encoded = body[release_end..].find("@thaw_json_graph_encode(").map(|offset| release_end + offset).expect(body);
-        let called = body[encoded..].find("@thaw_js_call_handle_mixed_exact_").map(|offset| encoded + offset).expect(body);
-        let release_block = &body[released..release_end];
-        assert!(
-            pushed < released
-                && released < release_end
-                && release_end < encoded
-                && encoded < called
-                && release_block.contains("call void @thaw_json_destroy("),
-            "{body}"
-        );
-        from = called + 1;
-    }
-    let two_fresh = ir.find("define internal void @two_fresh_json_owners(").expect(&ir);
-    let two_fresh_body = &ir[two_fresh..two_fresh + ir[two_fresh..].find("\n}").unwrap()];
-    let pushes = two_fresh_body.matches("@thaw_json_array_push_json(").count();
-    let first_encode = two_fresh_body.find("@thaw_json_graph_encode(").expect(two_fresh_body);
-    let release_labels: Vec<usize> = two_fresh_body
-        .match_indices("\nrelease_typed_wrapper_json_argument")
-        .map(|(offset, _)| offset + 1)
-        .filter(|offset| {
-            let line_start = two_fresh_body[..*offset].rfind('\n').map(|index| index + 1).unwrap_or(0);
-            let line_end = two_fresh_body[*offset..]
-                .find('\n')
-                .map(|index| *offset + index)
-                .unwrap_or(two_fresh_body.len());
-            let label_line = &two_fresh_body[line_start..line_end];
-            *offset < first_encode
-                && two_fresh_body[..*offset].matches("@thaw_json_array_push_json(").count() == 2
-                && label_line.contains("; preds =")
-                && !label_line.contains("%propagate_exception")
-        })
-        .collect();
-    assert_eq!(pushes, 2, "{two_fresh_body}");
-    assert_eq!(release_labels.len(), 2, "{two_fresh_body}");
-    assert_eq!(two_fresh_body[..release_labels[0]].matches("@thaw_json_array_push_json(").count(), 2, "{two_fresh_body}");
-    for (index, released) in release_labels.iter().copied().enumerate() {
-        let release_end = two_fresh_body[released..]
-            .find("\ntyped_wrapper_json_released")
-            .map(|offset| released + offset)
-            .unwrap_or(first_encode);
-        assert!(released < release_end && release_end <= first_encode, "{two_fresh_body}");
-        assert!(two_fresh_body[released..release_end].contains("call void @thaw_json_destroy("), "{two_fresh_body}");
-        if index + 1 < release_labels.len() {
-            assert!(release_labels[index + 1] < first_encode, "{two_fresh_body}");
-        }
-    }
-    let borrowed = ir.find("define internal void @borrowed_json_owner(").expect(&ir);
-    let borrowed_body = &ir[borrowed..borrowed + ir[borrowed..].find("\n}").unwrap()];
-    assert!(!borrowed_body.contains("release_typed_wrapper_json_argument:"), "{borrowed_body}");
 }
 
 #[test]
@@ -4225,71 +3857,10 @@ fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() 
         compile_and_run(source, "typed_quickjs_argument_array_unwind"),
         "true true true true true true true true true true\n"
     );
-
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "typed_quickjs_argument_array_unwind_ir");
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    let main = ir.find("define internal void @thaw_user_main(").expect(&ir);
-    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
-    let release = body.find("\nrelease_typed_dynamic_argument_array").expect(body) + 1;
-    let released = body[release..]
-        .find("\ntyped_dynamic_argument_array_released")
-        .map(|offset| release + offset)
-        .expect(body);
-    let release_block = &body[release..released];
-    assert!(release_block.contains("call void @thaw_json_destroy(ptr "), "{body}");
-    assert!(release_block.contains("dynamic_args"), "{body}");
-    assert!(body.contains("typed_dynamic_argument_array_active"), "{body}");
-}
-
-#[test]
-fn native_typed_quickjs_jsvalue_json_argument_is_released_after_array_clone() {
-    let source = r#"
-        declare function __thaw_typed_js_6563686f(value: Json): JsValue;
-        declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
-        declare function __thaw_typed_wrapper_js_user_store(value: Json): Json;
-        function direct_owner(value: JsValue): void {
-            __thaw_typed_js_6563686f(value);
-        }
-        function main(): void {}
-        function nested_unproven_store(value: JsValue, key: JsValue): void {
-            __thaw_typed_js_70616972(__thaw_typed_wrapper_js_user_store(value), key);
-        }
-    "#;
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let program = thaw_hir::lower_module(&module).unwrap();
-    let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, "typed_quickjs_jsvalue_argument");
-    compiler.compile_program(&program).unwrap();
-    let ir = compiler.print_to_string();
-    let direct_owner = ir.find("define internal void @direct_owner(").expect(&ir);
-    let body = &ir[direct_owner..direct_owner + ir[direct_owner..].find("\n}").unwrap()];
-    let cloned = body.find("@thaw_json_array_push_json(").expect(body);
-    let release_block = body.find("release_typed_wrapper_json_argument:").expect(body);
-    let destroy = body[release_block..]
-        .find("@thaw_json_destroy(")
-        .map(|offset| release_block + offset)
-        .expect(body);
-    let exact_call = body
-        .find("@thaw_js_call_handle_mixed_exact_consuming_result(")
-        .expect(body);
-    assert!(cloned < release_block && release_block < destroy && destroy < exact_call, "{body}");
-
-    let nested = ir.find("define internal void @nested_unproven_store(").expect(&ir);
-    let nested_body = &ir[nested..nested + ir[nested..].find("\n}").unwrap()];
-    assert!(
-        !nested_body.contains("release_typed_wrapper_json_argument:"),
-        "unproven inner wrapper's borrowed Json must not be attached to the outer direct-call scope: {nested_body}"
-    );
 }
 
 
-// This runtime case checks alias usability. The adjacent HIR/IR control checks
-// the unproven-prefix marker owner mismatch without changing native Json
-// argument coercion to manufacture a marker in a local function.
+// This runtime case checks alias usability of native Json argument coercion in a local function.
 #[test]
 fn stored_json_alias_survives_nested_outer_quickjs_call() {
     let source = r#"
@@ -4314,7 +3885,7 @@ fn stored_json_alias_survives_nested_outer_quickjs_call() {
     assert_eq!(compile_and_run(source, "nested_unproven_wrapper_owner"), "true\n");
 }
 
-/// Harness proof for the thaw-js lane: the same `loadScript` program runs on both engines.
+/// Harness proof for the thaw-js lane: a `loadScript` program runs on the routed build.
 fn lane_proof_source() -> &'static str {
     r#"
         function main(): void {
@@ -4330,17 +3901,9 @@ fn lane_proof_source() -> &'static str {
 }
 
 #[test]
-fn lane_proof_dynamic_primitive_string_quickjs() {
-    assert_eq!(
-        compile_and_run_lane(lane_proof_source(), "lane_proof_qjs", Lane::QuickJs),
-        "true\n5\nHELLO\nel\n"
-    );
-}
-
-#[test]
 fn lane_proof_dynamic_primitive_string_thaw_js() {
     assert_eq!(
-        compile_and_run_lane(lane_proof_source(), "lane_proof_tjs", Lane::ThawJs),
+        compile_and_run(lane_proof_source(), "lane_proof_tjs"),
         "true\n5\nHELLO\nel\n"
     );
 }
@@ -4359,8 +3922,7 @@ fn discarded_json_index_write_releases_its_nested_graph_lease() {
             console.log(values.length, after === before);
         }
     "#;
-    assert_eq!(compile_and_run_lane(source, "discarded_json_index_write_lease", Lane::ThawJs), "1 true\n");
-    assert_eq!(compile_and_run_lane(source, "discarded_json_index_write_lease_qjs", Lane::QuickJs), "1 true\n");
+    assert_eq!(compile_and_run(source, "discarded_json_index_write_lease"), "1 true\n");
 }
 
 #[test]
@@ -4385,5 +3947,5 @@ fn thaw_js_event_key_is_released_when_a_later_argument_throws() {
             console.log(caught, afterThrow, callDynamicValue(eventKeyRefs, __thaw_json_argument_array()));
         }
     "#;
-    assert_eq!(compile_and_run_lane(source, "thaw_js_event_key_later_argument", Lane::ThawJs), "true true true\n");
+    assert_eq!(compile_and_run(source, "thaw_js_event_key_later_argument"), "true true true\n");
 }

@@ -21,10 +21,3 @@ fn thaw_js_routed_dynamic_code_names_only_thaw_tjs_symbols() {
     assert!(!thaw_js_dynamic_has_call(&ir, "thaw_js_call_graph_result"), "{ir}");
 }
 
-#[test]
-fn thaw_js_unrouted_dynamic_code_keeps_the_quickjs_symbols() {
-    let (_, uses_quickjs, ir) = thaw_js_routed_ir(THAW_JS_DYNAMIC_PROGRAM, false);
-    assert!(uses_quickjs, "{ir}");
-    assert!(thaw_js_dynamic_has_call(&ir, "thaw_js_new_function"), "{ir}");
-    assert!(!thaw_js_dynamic_has_call(&ir, "thaw_tjs_new_function"), "{ir}");
-}

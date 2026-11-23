@@ -1,13 +1,17 @@
-// Audit-2 performance rows: native `new Uint8Array(..)`, in-place immediately-invoked
-// argument bindings, and ASCII string fast paths. Expected output is from node 22.
-
-fn compile_to_ir_and_quickjs_use(source: &str, module_name: &str) -> (String, bool) {
+/// Compiles routed (the only lane) and reports whether the program needs a JS engine at all.
+fn compile_to_ir_and_js_engine_use(source: &str, module_name: &str) -> (String, bool) {
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, module_name);
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    (compiler.print_to_string(), compiler.uses_quickjs())
+    thaw_hir::set_thaw_js_routed(false);
+    (
+        compiler.print_to_string(),
+        compiler.uses_thaw_js() || compiler.uses_quickjs(),
+    )
 }
 
 fn function_ir<'a>(ir: &'a str, name: &str) -> &'a str {
@@ -29,8 +33,8 @@ function main(): void {
   console.log(total, f instanceof Uint8Array, s.length, t.length);
 }
 "#;
-    let (_, uses_quickjs) = compile_to_ir_and_quickjs_use(source, "perf_audit2_u8_native");
-    assert!(!uses_quickjs, "new Uint8Array(n) must not need the JS realm");
+    let (_, uses_js_engine) = compile_to_ir_and_js_engine_use(source, "perf_audit2_u8_native");
+    assert!(!uses_js_engine, "new Uint8Array(n) must not need the JS realm");
     assert_eq!(compile_and_run(source, "perf_audit2_u8_native_run"), "124716 true 1000 3\n");
 }
 
@@ -60,7 +64,7 @@ function main(): void {
   console.log(h);
 }
 "#;
-    let (ir, _) = compile_to_ir_and_quickjs_use(source, "perf_audit2_iife");
+    let (ir, _) = compile_to_ir_and_js_engine_use(source, "perf_audit2_iife");
     let body = function_ir(&ir, "thaw_user_main");
     assert!(!body.contains("closure_alloc"), "bindings must be compiled in place: {body}");
     assert!(!body.contains("closure_code"), "no indirect closure call expected: {body}");

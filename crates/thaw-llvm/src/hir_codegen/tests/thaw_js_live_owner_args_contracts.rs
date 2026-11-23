@@ -44,9 +44,3 @@ fn thaw_js_function_literal_and_array_args_keep_the_by_value_ir() {
     assert!(!calls_owner_pointer(&array), "{array}");
 }
 
-#[test]
-fn quickjs_twin_named_object_arg_gets_no_live_owner_ir() {
-    let ir = live_owner_ir("js", "const source = { n: 1 }; const back = SYM(source);", false);
-    assert!(!ir.contains("__thaw_tjs_handle__"), "{ir}");
-    assert!(!calls_owner_pointer(&ir), "{ir}");
-}

@@ -147,10 +147,13 @@ fn blocking_await_preserves_typed_rejection_reason_in_short_circuit_expressions(
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "blocking_await_typed_ir");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("blocking_await_failed"), "expected blocking fallback: {ir}");
     assert!(ir.contains("@thaw_promise_exception_tag"), "{ir}");
@@ -173,11 +176,14 @@ fn native_callback_void_blocking_await_preserves_boolean_rejection() {
             );
         }
     "#;
-    let module = thaw_parser::parse_typescript(source).unwrap();
+    let module = thaw_parser::parse_typescript(&source.replace("__thaw_typed_js_", "__thaw_typed_tjs_")).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "blocking_await_void_ir");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("blocking_await_void_failed"), "expected void blocking fallback: {ir}");
     // Real Node (22.x) does not throw synchronously from the callback: the rejected promise it
@@ -538,10 +544,13 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         addon.display()
     );
     let module = thaw_parser::parse_typescript(&source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "napi_addon");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let obj = dir.join("out.o");
     let exe = dir.join("out");
     compiler.write_object_file(&obj).unwrap();
@@ -555,6 +564,7 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         .arg(&std)
         .arg(&runtime)
         .arg(&napi)
+        .args(thaw_js_link_args(&std, &runtime, false))
         .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"])
         .arg(&exe)
         .status()
@@ -587,10 +597,13 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         }}
     "#, addon.display());
     let pending_module = thaw_parser::parse_typescript(&pending_source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let pending_program = thaw_hir::lower_module(&pending_module).unwrap();
     let pending_context = Context::create();
     let mut pending_compiler = HirCompiler::new(&pending_context, "napi_prior_pending");
+    pending_compiler.set_thaw_js_routed(true);
     pending_compiler.compile_program(&pending_program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let pending_obj = dir.join("pending.o");
     let pending_exe = dir.join("pending");
     pending_compiler.write_object_file(&pending_obj).unwrap();
@@ -600,6 +613,7 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         .arg(&std)
         .arg(&runtime)
         .arg(&napi)
+        .args(thaw_js_link_args(&std, &runtime, false))
         .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"])
         .arg(&pending_exe)
         .status().unwrap().success());
@@ -628,11 +642,14 @@ fn runs_module_init_before_lambda_handler() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "module_init_lambda");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
 
     let dir = std::env::temp_dir().join(format!(
         "thaw-hir-codegen-test-module_init_lambda-{}",
@@ -646,15 +663,13 @@ fn runs_module_init_before_lambda_handler() {
     let arena_lib = build_staticlib("thaw-arena");
     let runtime_lib = build_staticlib("thaw-runtime");
     let std_lib = build_staticlib("thaw-std");
-    let quickjs_lib = build_staticlib("thaw-quickjs");
 
     let link_status = cc_command()
         .arg(&obj_path)
         .arg(&arena_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
-        .arg(&quickjs_lib)
-        .arg("-lm")
+        .args(thaw_js_link_args(&std_lib, &runtime_lib, false))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -893,7 +908,10 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
             releaseDynamicValue(sourceUsable);
         }}
     "#, addon.display());
+    // A routed build's shim declares typed calls into script globals as `__thaw_typed_tjs_*`.
+    let source = source.replace("__thaw_typed_js_", "__thaw_typed_tjs_");
     let module = thaw_parser::parse_typescript(&source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let hir = format!("{program:#?}");
     assert!(hir.contains("retainEventKey"), "{hir}");
@@ -901,9 +919,10 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
     assert!(hir.contains("$new$Outer.Client$arity2"), "{hir}");
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "napi_constructor_lookup_owned_scalar_cleanup");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
-    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
     let user_main = ir.find("define internal void @thaw_user_main(").expect(&ir);
     let body = &ir[user_main..user_main + ir[user_main..].find("\n}").unwrap()];
     let source_release = body.find("\nrelease_typed_wrapper_json_argument").expect(body);
@@ -939,10 +958,9 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
     let std = build_staticlib("thaw-std");
     let runtime = build_staticlib("thaw-runtime");
     let napi = build_staticlib("thaw-napi");
-    let quickjs = build_staticlib("thaw-quickjs");
     // Match the mixed runtime link order: QuickJS/N-API refer back to std and runtime.
     assert!(cc_command().arg(&obj).arg(&arena).arg(&std).arg(&runtime)
-        .arg(&std).arg(&runtime).arg(&napi).arg(&quickjs).arg(&std).arg(&runtime)
+        .arg(&std).arg(&runtime).arg(&napi).args(thaw_js_link_args(&std, &runtime, false))
         .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"]).arg(&exe)
         .status().unwrap().success());
     let output = Command::new(&exe).output().unwrap();

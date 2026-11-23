@@ -87,21 +87,6 @@ fn thaw_js_jsvalue_plain_handle_argument_keeps_its_marker() {
 }
 
 #[test]
-fn quickjs_lane_jsvalue_object_literal_keeps_the_native_projection() {
-    // Unrouted, the literal is typed as a native object: it is built by the QuickJS-side
-    // `__thaw_object_with_native_getters` builder and projected (`thaw_object_register_field_offsets`),
-    // then sent as a handle marker. The Json literal path (`%thaw_js_object_literal`) does not apply.
-    let source = thaw_js_jsvalue_literal_program("{ init(a: number) {}, n: 1 }");
-    let (_, uses_quickjs, ir) = thaw_js_routed_ir(&source, false);
-    assert!(uses_quickjs, "{ir}");
-    assert!(ir.contains("__thaw_object_with_native_getters"), "{ir}");
-    assert!(ir_calls(&ir, "thaw_js_get_global"), "{ir}");
-    assert!(ir_calls(&ir, "thaw_object_register_field_offsets"), "{ir}");
-    assert!(ir.contains("%thaw_js_handle_marker = call"), "{ir}");
-    assert!(!ir.contains("%thaw_js_object_literal"), "{ir}");
-}
-
-#[test]
 fn thaw_js_jsvalue_literal_peel_matches_only_the_literal_coercion() {
     let literal = HirExpr::Call(
         Box::new(HirExpr::Var("__thaw_dynamic_object_literal".into())),

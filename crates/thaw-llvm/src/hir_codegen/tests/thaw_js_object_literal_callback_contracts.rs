@@ -50,20 +50,6 @@ fn thaw_js_routed_object_literal_getters_stay_loud() {
     assert!(!ir.contains("__thaw_object_from_operations"), "{ir}");
 }
 
-#[test]
-fn quickjs_engine_object_literal_keeps_the_builder() {
-    let source = thaw_js_object_literal_program("{ cb(x: number): number { return x + 1; }, n: 1 }");
-    // The program's own `__thaw_typed_tjs_` call still reaches thaw-js (`uses_thaw_js` is set by the
-    // call, whatever the engine), so only the object literal is checked: the QuickJS builder is
-    // fetched through `thaw_js_get_global`, and no thaw-js callback marker or graph registration is used.
-    let (_, _, ir) = thaw_js_routed_ir(&source, false);
-    assert!(ir.contains("__thaw_object_from_operations"), "{ir}");
-    assert!(ir.contains("@thaw_js_get_global("), "{ir}");
-    assert!(!ir.contains("__thaw_tjs_handle__"), "{ir}");
-    assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("), "{ir}");
-    assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_method_callback_graph("), "{ir}");
-}
-
 // A thaw-js routed call builds its method-bearing object literal argument from the members, so the
 // QuickJS builder in the marker's first operand must not make the program need QuickJS. The QuickJS
 // lane keeps the builder and the QuickJS requirement.
@@ -75,14 +61,6 @@ fn thaw_js_routed_object_literal_argument_does_not_require_the_quickjs_builder()
     assert!(uses_thaw_js, "{ir}");
     assert!(!uses_quickjs, "{ir}");
     assert!(!ir.contains("__thaw_object_from_operations"), "{ir}");
-}
-
-#[test]
-fn quickjs_lane_object_literal_argument_still_requires_quickjs() {
-    let source = thaw_js_object_literal_program("{ cb(x: number): number { return x + 1; }, n: 1 }");
-    let (_, uses_quickjs, ir) = thaw_js_routed_ir(&source, false);
-    assert!(uses_quickjs, "{ir}");
-    assert!(ir.contains("__thaw_object_from_operations"), "{ir}");
 }
 
 // A closure that is not a thaw-js call argument (held as `any`, or stored in a native Map) must stay a

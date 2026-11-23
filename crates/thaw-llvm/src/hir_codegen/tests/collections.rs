@@ -1799,10 +1799,13 @@ fn array_from_length_literal_ir_has_no_json_iteration_when_result_is_dynamic() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
+    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "array_from_length_dynamic_result");
+    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
+    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.module.print_to_string().to_string();
     // The runtime symbol is declared unconditionally, so look for an actual call site only.
     assert!(

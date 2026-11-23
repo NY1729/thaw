@@ -30,7 +30,7 @@ function main(): void {
   console.log(b[0].vx.toFixed(6), b[1].vx.toFixed(6), e.toFixed(6));
 }
 "#;
-    let (ir, _) = compile_to_ir_and_quickjs_use(source, "perf_audit2_compound_ir");
+    let (ir, _) = compile_to_ir_and_js_engine_use(source, "perf_audit2_compound_ir");
     let body = function_ir(&ir, "thaw_user_main");
     // `d` is read by in-place compound-write bindings only, so it stays a stack slot.
     assert!(
@@ -58,8 +58,8 @@ fn process_hrtime_is_native_and_does_not_create_the_js_realm() {
   console.log(r[1] >= 0 && r[1] < 1e9);
 }
 "#;
-    let (_, uses_quickjs) = compile_to_ir_and_quickjs_use(source, "perf_audit2_hrtime_ir");
-    assert!(!uses_quickjs, "process.hrtime* must not need the JS realm");
+    let (_, uses_js_engine) = compile_to_ir_and_js_engine_use(source, "perf_audit2_hrtime_ir");
+    assert!(!uses_js_engine, "process.hrtime* must not need the JS realm");
     assert_eq!(
         compile_and_run(source, "perf_audit2_hrtime_run"),
         "bigint true true 2 2 true true true 4999950000\ntrue\n"
