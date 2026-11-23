@@ -2450,7 +2450,19 @@ impl FnLowerer<'_> {
                     } else {
                         None
                     }
-                }).or_else(|| self.json_narrowings.get(&name).cloned());
+                }).or_else(|| self.json_narrowings.get(&name).cloned())
+                // An active optional/nullable/nullish guard (`v != undefined`) proves the payload;
+                // an undefined-only exclusion on a Nullish value still leaves `null`.
+                .or_else(|| {
+                    self.narrowings.get(&name)
+                        .or_else(|| self.nullable_narrowings.get(&name))
+                        .or_else(|| self.nullish_narrowings.get(&name))
+                        .cloned()
+                })
+                .or_else(|| {
+                    self.partial_nullable_narrowings.get(&name)
+                        .map(|payload| HirType::Nullable(Box::new(payload.clone())))
+                });
                 narrowed.or_else(|| self.source_contract_type_for_expression(expression)).map(source_typed)
                     .or_else(|| {
                         let signature = self.signatures.get(&name)?;

@@ -10,6 +10,13 @@ fn expected_object_fields(expected: &HirType) -> Option<&[(Symbol, HirType)]> {
         // A `T | T[]` parameter (for example hapi's route overload) gives a
         // literal one unambiguous contextual object shape. Keep ambiguous
         // unions of multiple object shapes on their normal inference path.
+        // A `Record<string, T>` member accepts any key, so its sibling's
+        // fixed fields cannot be treated as the literal's exclusive shape.
+        HirType::Union(elements)
+            if elements.iter().any(|element| matches!(element, HirType::Dictionary(_))) =>
+        {
+            None
+        }
         HirType::Union(elements) => {
             let mut objects = elements.iter().filter_map(|element| match element {
                 HirType::Object(fields) => Some(fields.as_slice()),

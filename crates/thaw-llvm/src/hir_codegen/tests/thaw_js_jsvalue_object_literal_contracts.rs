@@ -131,3 +131,75 @@ fn every_thaw_js_json_argument_backend_takes_the_marker_serializer() {
     }
     assert_eq!(json_argument_stringifier("thaw_js_new_function"), "thaw_json_stringify");
 }
+
+// Node 22: a getter literal handed to JS is an accessor property whose getter runs on every read.
+#[test]
+fn thaw_js_jsvalue_object_literal_getter_is_a_live_accessor_handle() {
+    let source = thaw_js_jsvalue_literal_program("{ get x(): number { return 1; }, n: 1 }");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
+    assert!(ir.contains("__thaw_dynamic_accessor_object"), "{ir}");
+    assert!(!ir.contains("%thaw_js_object_literal"), "{ir}");
+}
+
+#[test]
+fn thaw_js_jsvalue_object_literal_getter_runs_on_every_read_program() {
+    let probe = hex("probe");
+    let source = format!(
+        r#"declare function __thaw_typed_tjs_{probe}(o: JsValue): string;
+function main(): void {{
+  loadScript("globalThis.probe = o => {{ const d = Object.getOwnPropertyDescriptor(o, 'x'); return [typeof d.get, d.set === undefined, d.enumerable, o.x, o.x, o.n].join('|'); }};");
+  let reads = 0;
+  console.log(__thaw_typed_tjs_{probe}({{ get x(): number {{ reads++; return reads; }}, n: 7 }}));
+  console.log(reads);
+}}
+"#
+    );
+    // Expected output recorded from node v22: the getter is a function, runs once per read.
+    assert_eq!(
+        compile_and_run(&source, "jsvalue_literal_getter_live"),
+        "function|true|true|1|2|7\n2\n"
+    );
+}
+
+// Narrowing a `number | undefined | null` by loose/strict equality (and `&&`, ternary, early return)
+// lets the value cross a typed thaw-js call as a plain number. Expected output recorded from node v22.
+#[test]
+fn thaw_js_typed_call_accepts_a_value_narrowed_by_nullish_equality_program() {
+    let take = hex("take");
+    let source = format!(
+        r#"declare function __thaw_typed_tjs_{take}(value: number): string;
+function loose(v?: number | null): string {{ if (v != undefined) return __thaw_typed_tjs_{take}(v); return "none"; }}
+function looseNull(v?: number | null): string {{ if (v == null) return "none"; return __thaw_typed_tjs_{take}(v); }}
+function both(v?: number | null): string {{ if (v !== undefined && v !== null) return __thaw_typed_tjs_{take}(v); return "none"; }}
+function early(v?: number | null): string {{ if (v === undefined || v === null) return "none"; return __thaw_typed_tjs_{take}(v); }}
+function ternary(v?: number | null): string {{ return v != null ? __thaw_typed_tjs_{take}(v) : "none"; }}
+function main(): void {{
+  loadScript("globalThis.take = v => typeof v + ':' + (v * 2);");
+  for (const f of [loose, looseNull, both, early, ternary]) console.log(f(4), f(null), f());
+}}
+"#
+    );
+    let line = "number:8 none none\n";
+    assert_eq!(compile_and_run(&source, "nullish_equality_typed_call"), line.repeat(5));
+}
+
+// Node 22: `{ a: 1 }` is assignable to `Record<string, number>`, so the union parameter accepts it and
+// the callee sees the plain object.
+#[test]
+fn thaw_js_typed_call_accepts_an_object_literal_for_a_record_or_object_union_program() {
+    let show = hex("show");
+    let source = format!(
+        r#"declare function __thaw_typed_tjs_{show}(value: Record<string, number> | {{ tag: string }}): string;
+function main(): void {{
+  loadScript("globalThis.show = v => JSON.stringify(v);");
+  console.log(__thaw_typed_tjs_{show}({{ a: 1, b: 2 }}));
+  console.log(__thaw_typed_tjs_{show}({{ tag: "t" }}));
+}}
+"#
+    );
+    assert_eq!(
+        compile_and_run(&source, "record_or_object_union_literal"),
+        "{\"a\":1,\"b\":2}\n{\"tag\":\"t\"}\n"
+    );
+}

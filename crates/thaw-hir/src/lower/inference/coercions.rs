@@ -2089,7 +2089,11 @@ impl<'a> FnLowerer<'a> {
                             if self.fresh_object_bindings.contains(name)));
                     // A fresh literal handed to a thaw-js package is a plain-data copy: no QuickJS-hosted
                     // projection is needed (a live reference to an existing owner keeps the projection).
-                    if !live {
+                    // A literal with accessors is not plain data: a copy would freeze the getter's
+                    // result, so it crosses as a live accessor projection (a getter runs per read).
+                    let has_accessor = fields.iter().any(|(name, _)|
+                        name.starts_with("__thaw_getter_") || name.starts_with("__thaw_setter_"));
+                    if !live && !has_accessor {
                         return self.wrap_native_value_as_json(value, actual.clone());
                     }
                     let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live, false)?;
@@ -2324,10 +2328,13 @@ impl<'a> FnLowerer<'a> {
                 return Ok(retagged);
             }
             if matches!(value, HirExpr::ObjectLit(_)) || Self::is_wrapped_object_literal(&value) {
-                for (index, member) in elements.iter().enumerate() {
-                    if !matches!(member, HirType::Object(_)) {
-                        continue;
-                    }
+                // A fixed-shape member is preferred; a `Record<string, T>`
+                // member (any key) accepts the literal when no object fits.
+                let fixed = |member: &HirType| matches!(member, HirType::Object(_));
+                let ordered = elements.iter().enumerate().filter(|(_, member)| fixed(member)).chain(
+                    elements.iter().enumerate().filter(|(_, member)| matches!(member, HirType::Dictionary(_))),
+                );
+                for (index, member) in ordered {
                     if let Ok(adapted) = self.coerce_to_declared(member, value.clone()) {
                         return Ok(HirExpr::UnionInject(
                             Box::new(adapted),

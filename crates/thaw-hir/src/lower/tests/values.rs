@@ -3802,7 +3802,8 @@ fn external_structural_argument_recurses_through_nested_arrays_and_optional_fiel
 fn external_dictionary_source_contract_preserves_object_literal_coercion() {
     for (target, argument, succeeds) in [
         ("Record<string, number>", "{ a: 1 }", true),
-        // known thaw-js gap (the QuickJS lane accepted it): `{ a: 1 }` against `Record<string, number> | { tag: string }`
+        ("Record<string, number> | { tag: string }", "{ a: 1 }", true),
+        ("Record<string, number> | { tag: string }", "{ tag: 'x' }", true),
         ("Record<string, number> | undefined", "{ a: 1 }", true),
         ("Record<string, number> | null", "{ a: 1 }", true),
         ("Record<string, number> | null | undefined", "{ a: 1 }", true),
