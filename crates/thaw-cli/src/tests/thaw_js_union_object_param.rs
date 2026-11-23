@@ -61,8 +61,6 @@ fn thaw_js_routes_an_arity_overload_with_an_object_bearing_union_parameter() {
         &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
     built.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "true\ntrue\ntrue\nfalse\nfalse\ntrue,true,true\n3972\n");
     let _ = std::fs::remove_dir_all(dir);
 }

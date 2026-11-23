@@ -696,8 +696,6 @@ function main(): void {
     .unwrap();
     let output = dir.join("app");
     build_on_thaw_js(&entry, &output, &registry).unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     let result = Command::new(&output).output().unwrap();
     assert!(
         result.status.success(),

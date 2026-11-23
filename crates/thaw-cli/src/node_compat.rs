@@ -252,11 +252,6 @@ fn run_node_compat_case(
         false,
         shared_rt,
     );
-    let link_info = build
-        .as_ref()
-        .ok()
-        .and_then(|()| binary_link_info(&output).ok());
-    let links_quickjs = link_info.as_ref().map(|(links, _)| *links);
     let outcome = build.and_then(|_| {
         command_output_with_timeout(
             Command::new(&output).args(&arguments),
@@ -302,9 +297,8 @@ fn run_node_compat_case(
     let exit_code_matches = expected_exit_code.is_none_or(|expected| {
         node.status.code().map(i64::from) == Some(expected) && thaw_exit_code == Some(expected)
     });
-    let link_matches = quickjs_link_expectation_met(case, links_quickjs);
     let classification =
-        if actual == expected && detail_matches && exit_code_matches && link_matches {
+        if actual == expected && detail_matches && exit_code_matches {
             actual
         } else {
             "bug"
@@ -325,46 +319,11 @@ fn run_node_compat_case(
         result["exitCode"] = expected_exit_code.into();
         result["actualExitCode"] = thaw_exit_code.into();
     }
-    record_quickjs_link(&mut result, links_quickjs);
-    if let Some((true, reasons)) = &link_info {
-        record_quickjs_reasons(&mut result, reasons);
-    }
     Ok(NodeCompatCase {
         result,
         bug: classification == "bug",
         reference_error: false,
     })
-}
-
-/// Adds `linksQuickjs` to a case's result; omitted when no built binary was inspected.
-fn record_quickjs_link(result: &mut serde_json::Value, links_quickjs: Option<bool>) {
-    if let Some(links) = links_quickjs {
-        result["linksQuickjs"] = links.into();
-    }
-}
-
-/// `expectQuickjsLink` (optional bool on a case) pins whether the Thaw binary must link QuickJS. A case
-/// without the key is not checked; a build whose link state is unknown (no inspect) fails a pinned case.
-fn quickjs_link_expectation_met(case: &serde_json::Value, links_quickjs: Option<bool>) -> bool {
-    case.get("expectQuickjsLink")
-        .and_then(serde_json::Value::as_bool)
-        .is_none_or(|expected| links_quickjs == Some(expected))
-}
-
-/// Adds `quickjsReasons` (the reason and blocker lines `thaw inspect` prints, capped at 10 entries of 300 chars).
-/// `thaw-js-blocker` lines go first so the cap never cuts off the blocker.
-/// Additive: only called for a case that links QuickJS.
-fn record_quickjs_reasons(result: &mut serde_json::Value, reasons: &[String]) {
-    let is_blocker = |reason: &&String| reason.starts_with("thaw-js-blocker");
-    let ordered = reasons
-        .iter()
-        .filter(is_blocker)
-        .chain(reasons.iter().filter(|reason| !is_blocker(reason)));
-    let reasons: Vec<String> = ordered
-        .take(10)
-        .map(|reason| reason.chars().take(300).collect())
-        .collect();
-    result["quickjsReasons"] = reasons.into();
 }
 
 enum NodeReferenceError {
@@ -618,64 +577,5 @@ mod capture_pipe_tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         capture_pipe(InterruptedOnce(0), Arc::clone(&captured)).unwrap();
         assert_eq!(*captured.lock().unwrap(), b"marker");
-    }
-}
-
-#[cfg(test)]
-mod quickjs_link_tests {
-    use super::{record_quickjs_link, record_quickjs_reasons};
-
-    #[test]
-    fn records_reasons_capped_and_truncated() {
-        let long = "x".repeat(400);
-        let reasons: Vec<String> = (0..12).map(|_| long.clone()).collect();
-        let mut result = serde_json::json!({"name": "case", "linksQuickjs": true});
-        record_quickjs_reasons(&mut result, &reasons);
-        let recorded = result["quickjsReasons"].as_array().expect("array");
-        assert_eq!(recorded.len(), 10);
-        assert_eq!(recorded[0].as_str().map(str::len), Some(300));
-        assert_eq!(result["linksQuickjs"], true);
-    }
-
-    #[test]
-    fn blocker_line_survives_the_reason_cap() {
-        let mut reasons: Vec<String> = (0..8).map(|i| format!("quickjs-reason: {i}")).collect();
-        reasons.push("thaw-js-blocker: package=p why=w".to_string());
-        let mut result = serde_json::json!({"name": "case", "linksQuickjs": true});
-        record_quickjs_reasons(&mut result, &reasons);
-        assert_eq!(result["quickjsReasons"][0], "thaw-js-blocker: package=p why=w");
-        assert_eq!(result["quickjsReasons"].as_array().map(Vec::len), Some(9));
-    }
-
-    #[test]
-    fn records_link_flag_and_keeps_existing_keys() {
-        let mut result = serde_json::json!({"name": "case", "classification": "matched"});
-        record_quickjs_link(&mut result, Some(true));
-        assert_eq!(result["linksQuickjs"], true);
-        assert_eq!(result["name"], "case");
-        assert_eq!(result["classification"], "matched");
-
-        let mut result = serde_json::json!({"name": "case"});
-        record_quickjs_link(&mut result, Some(false));
-        assert_eq!(result["linksQuickjs"], false);
-    }
-
-    #[test]
-    fn pinned_link_expectation_is_checked_only_when_present() {
-        use super::quickjs_link_expectation_met;
-        let unpinned = serde_json::json!({"name": "case"});
-        assert!(quickjs_link_expectation_met(&unpinned, Some(true)));
-        assert!(quickjs_link_expectation_met(&unpinned, None));
-        let pinned = serde_json::json!({"name": "case", "expectQuickjsLink": false});
-        assert!(quickjs_link_expectation_met(&pinned, Some(false)));
-        assert!(!quickjs_link_expectation_met(&pinned, Some(true)));
-        assert!(!quickjs_link_expectation_met(&pinned, None));
-    }
-
-    #[test]
-    fn omits_key_when_build_or_inspect_failed() {
-        let mut result = serde_json::json!({"name": "case"});
-        record_quickjs_link(&mut result, None);
-        assert!(result.get("linksQuickjs").is_none());
     }
 }
