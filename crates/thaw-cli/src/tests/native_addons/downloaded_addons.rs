@@ -222,8 +222,6 @@ fn registry_add_fetches_and_runs_bcrypt_when_enabled() {
         &["bcrypt".into()],
     )
     .unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -281,8 +279,6 @@ async function main(): Promise<void> {
         &["argon2".into()],
     )
     .unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     let result = Command::new(&output).output().unwrap();
     assert!(

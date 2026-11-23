@@ -2,7 +2,7 @@
 # QuickJS removal stage Q-1: measurement harness.
 #
 # Builds the 24-program npm corpus under both JS engines and records, per program and engine:
-#   build_ok, build_s, F (QuickJS-routed entries from `thaw inspect`), links_quickjs,
+#   build_ok, build_s, F (QuickJS-routed entries from `thaw inspect`),
 #   stdout_eq_node, run_ms, rss_kb, binary size.
 # Also records: thaw-js-scan eligibility over the bundle corpus, and `thaw node-compat` pass/fail
 # for tests/node-compat.json and tests/builtins-compat.json under both engines, plus the number of
@@ -153,17 +153,14 @@ measure_program() {
       # Visible skip: the corpus ratio table prints this program as SKIP and excludes it from geomean/OVER.
       echo "[measure] SKIP $name/$engine: build failed (no run_ms; excluded from ratio)" >&2
       row program "$name" "$engine" F ""
-      row program "$name" "$engine" links_quickjs ""
       row program "$name" "$engine" why ""
       row program "$name" "$engine" stdout_eq_node 0
       diagnose "$name" "$engine" "$log" 0 na 0
       continue
     fi
     "$THAW" inspect "$bin" > "$log.inspect" 2>&1
-    local links F
-    links=$(awk -F': ' '/^quickjs: /{print ($2=="true")?1:0}' "$log.inspect")
+    local F
     F=$(grep -c '^quickjs-reason:' "$log.inspect")
-    row program "$name" "$engine" links_quickjs "${links:-0}"
     row program "$name" "$engine" F "$F"
     # Reason lines from `thaw inspect` (quickjs-reason / thaw-js-blocker), tabs flattened, cut to 400 chars.
     local why

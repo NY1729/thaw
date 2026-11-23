@@ -1882,8 +1882,6 @@ fn thaw_js_routed_static_factory_with_optional_object_fields_builds_without_quic
         &entry, &output, &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
     built.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "PT1H30M\n");
     let _ = std::fs::remove_dir_all(dir);
 }

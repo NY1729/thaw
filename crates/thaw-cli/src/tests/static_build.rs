@@ -65,8 +65,6 @@ fn specialized_jit_runs_without_quickjs() {
         &[],
     )
     .unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
     let result = Command::new(&output).output().unwrap();
     assert!(
         result.status.success(),
@@ -109,8 +107,6 @@ fn tagged_jit_union_runs_without_quickjs() {
         &[],
     )
     .unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
     let result = Command::new(&output).output().unwrap();
     assert!(
         result.status.success(),
@@ -157,8 +153,6 @@ fn mixed_scalar_array_jit_union_normalizes_only_the_array_tag() {
         &[],
     )
     .unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false);
     let result = Command::new(&output).output().unwrap();
     assert!(
         result.status.success(),
@@ -194,7 +188,6 @@ fn builds_and_runs_a_fully_static_elf() {
     assert!(!elf_has_program_interpreter(&output).unwrap());
     let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(manifest["packages"], serde_json::json!([]));
-    assert_eq!(manifest["quickjs"], false);
     assert_eq!(manifest["napi"], false);
     let result = Command::new(&output).output().unwrap();
     assert!(
@@ -397,7 +390,6 @@ fn built_artifact_ignores_a_user_literal_containing_the_metadata_marker() {
     build(&source, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
     let bytes = std::fs::read(&output).unwrap();
     let manifest = artifact_manifest_from_bytes(&bytes).unwrap();
-    assert_eq!(manifest["quickjs"], false);
     assert!(manifest.get("wrong").is_none());
     run_inspect(&[output.display().to_string()]).unwrap();
     let _ = std::fs::remove_dir_all(dir);

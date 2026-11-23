@@ -879,18 +879,6 @@ fn build_with_native_mode_routed(
         let quickjs_reasons = js_infer_retain_reasons(quickjs_reasons, &js_infer_aot);
         let mut manifest = serde_json::json!({
             "packages": resolved_packages,
-            // Registry fallback wrappers contain `callDynamic(...)` even when a
-            // JIT declaration shadows them, so only count the generated shim's
-            // module initializer here. User-authored dynamic calls and explicit
-            // QuickJS typed symbols are checked separately below.
-            "quickjs": shim_source.contains("loadScript(")
-                || source_uses_quickjs(&user_source)
-                || created_require_live_result
-                || shim_source.contains("__thaw_typed_js_"),
-            // Cleared again below when thaw-js serves the program's own dynamic code.
-            "quickjs_without_user_source": shim_source.contains("loadScript(")
-                || created_require_live_result
-                || shim_source.contains("__thaw_typed_js_"),
             "quickjs_reasons": quickjs_reasons,
             // Packages whose bundles run on the experimental thaw-js runtime instead of QuickJS.
             "thaw_js_routed": thaw_js_routed_packages(&shim_source),
@@ -1100,7 +1088,7 @@ fn build_with_native_mode_routed(
             report_thaw_js_mixed(&compiler.print_to_string());
         }
         if uses_quickjs {
-            // The reasons ride the error into the `<build>` blocker (`thaw inspect`, node-compat's quickjsReasons).
+            // The reasons ride the error into the `<build>` blocker (`thaw inspect`).
             let blockers = compiler.quickjs_blockers().join(",");
             let blockers: String = blockers.chars().take(600).collect();
             return Err(format!("{THAW_JS_MIXED}: {blockers}"));
@@ -1110,12 +1098,6 @@ fn build_with_native_mode_routed(
     // trigger the mixed-build error above) is refused.
     if uses_quickjs {
         return Err("unsupported on thaw-js: the program links QuickJS".to_string());
-    }
-    if let Some(object) = manifest.as_object_mut() {
-        // The flag must name the archive this build links. The pre-compile guess above misses
-        // JsValue dynamic operations (e.g. `(globalThis as any).fetch`), which link QuickJS anyway.
-        object.remove("quickjs_without_user_source");
-        object.insert("quickjs".into(), uses_quickjs.into());
     }
     runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
     runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
@@ -1836,33 +1818,6 @@ fn lld_is_preferred_only_for_dynamic_builds_when_installed() {
     assert_eq!(preferred_linker_arg(false, true), Some("-fuse-ld=lld"));
     assert_eq!(preferred_linker_arg(false, false), None);
     assert_eq!(preferred_linker_arg(true, true), None);
-}
-
-/// Returns whether generated or user source explicitly requires the dynamic
-/// JavaScript host. QuickJS typed symbols are intentionally included here:
-/// unlike ordinary extracted functions, they are direct calls into that host
-/// ABI and therefore determine whether the QuickJS archive must be retained.
-fn source_uses_quickjs(source: &str) -> bool {
-    [
-        "loadScript(",
-        "callDynamic(",
-        "eval(",
-        "new Function(",
-        "getDynamicValue(",
-        "callDynamicValue(",
-        "callDynamicValueHandle(",
-        "callDynamicValueWithValue(",
-        "releaseDynamicValue(",
-        "getDynamicProperty(",
-        "setDynamicProperty(",
-        "callDynamicMethod(",
-        "readDynamicValue(",
-        "callDynamicValueMixed(",
-        "constructDynamicValue(",
-        "__thaw_typed_js_",
-    ]
-    .iter()
-    .any(|marker| source.contains(marker))
 }
 
 /// Experimental, opt-in (`THAW_JS_ENGINE=thaw-js`): for every resolved

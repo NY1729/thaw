@@ -376,7 +376,6 @@ fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     // `apply` (a callback parameter) is declared but never mentioned, so it does not block routing.
     std::fs::remove_dir_all(&registry).unwrap();
@@ -403,7 +402,6 @@ fn thaw_js_routing_carries_dates_both_ways_without_linking_quickjs() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(
@@ -421,7 +419,6 @@ fn thaw_js_routing_decodes_a_nested_array_result_without_linking_quickjs() {
     let (dir, registry, entry) = thaw_js_fixture("nested-array", main);
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     assert_eq!(thaw_js_run(&output), "2 b c\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -434,8 +431,7 @@ fn thaw_js_prints_a_plain_object_result_like_node() {
     let main = "import { describe } from 'tjs-kit';\nfunction main(): void { console.log(describe(['a', 'b', 'a'], 'x')); }\n";
     let (dir, registry, entry) = thaw_js_fixture("quickjs-print", main);
     let output = dir.join("plain");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     assert_eq!(
         thaw_js_run(&output),
         "{ label: 'X', counts: { a: 2, b: 1 } }\n"
@@ -451,7 +447,6 @@ fn thaw_js_routing_serves_a_callback_through_thaw_js_without_quickjs() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     assert_eq!(thaw_js_run(&output), "2,4,6\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -511,7 +506,6 @@ fn thaw_js_routing_serves_real_leaf_packages_like_node_when_enabled() {
         )
         .unwrap();
         let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-        assert_eq!(manifest["quickjs"], false, "{package}: {manifest}");
         assert_eq!(
             manifest["thaw_js_routed"],
             serde_json::json!([package]),
@@ -821,8 +815,7 @@ fn thaw_js_create_hook_with_finally_and_promise_combinators_stays_on_thaw_js() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     assert_eq!(thaw_js_run_guarded(&output), "7\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -854,8 +847,6 @@ fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_quickjs() {
         &entry, &dir.join("app"), &[], &[], &[], &registry, &[], false, None, true, false, false,
     );
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("app")).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -878,8 +869,6 @@ fn native_timer_program_builds(name: &str, main: &str, expect_retry: bool) -> (P
     result.unwrap();
     let retries = NATIVE_TIMER_RETRIES.with(|retries| retries.borrow().clone());
     assert_eq!(retries.is_empty(), !expect_retry, "native timer retries: {retries:?}");
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     (dir, output)
 }
 
@@ -1019,8 +1008,6 @@ fn thaw_js_union_callable_result_ejs_shape_builds_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "hello ada!\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1069,8 +1056,6 @@ fn thaw_js_class_callback_returning_any_builds_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     // Same text real Node prints for the equivalent JavaScript.
     assert_eq!(thaw_js_run(&output), "end: hello\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1099,8 +1084,6 @@ fn thaw_js_single_arg_bare_callable_builds_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     // Same text real Node prints for the equivalent JavaScript.
     assert_eq!(thaw_js_run(&output), "true\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1157,8 +1140,6 @@ fn thaw_js_union_callable_result_real_ejs_overloads_build_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "Hello Alice\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1204,8 +1185,6 @@ fn thaw_js_object_literal_route_handler_on_dynamic_server_builds_under_error_mod
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     // Same text real Node prints for the equivalent JavaScript.
     assert_eq!(thaw_js_run(&output), "200\n/\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1232,8 +1211,6 @@ fn thaw_js_callable_results_are_live_handles_and_build_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     // Same text real Node prints for the equivalent JavaScript.
     assert_eq!(thaw_js_run(&output), ">> hi\nhello ada!\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1265,8 +1242,6 @@ fn thaw_js_export_equals_object_default_import_builds_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "<x>[y]\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1320,8 +1295,6 @@ fn thaw_js_import_meta_url_dirname_is_absolute_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "/thaw_modules/tjs-url true\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1364,8 +1337,6 @@ fn thaw_js_export_equals_callable_default_import_builds_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run(&output), "true\nfalse\ndone\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1405,8 +1376,6 @@ fn thaw_js_class_value_for_static_constant_builds_under_error_mode() {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     // Same text real Node prints for the equivalent JavaScript.
     assert_eq!(
         thaw_js_run(&output),
@@ -1592,8 +1561,7 @@ fn thaw_js_routed_node_http_server_only_links_no_quickjs() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "listening number\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1610,8 +1578,7 @@ fn thaw_js_routed_node_http_get_refused_without_a_server() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1631,9 +1598,8 @@ fn thaw_js_routed_node_http_fetch_from_listen_callback_runs_on_thaw_js() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
+    thaw_js_build(&entry, &output, &registry);
     // A native createServer next to the fetch client runs on thaw-js (the blocker is lifted).
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1658,8 +1624,7 @@ fn thaw_js_routed_fetch_without_node_http_import_runs_on_thaw_js() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "rejected\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1684,8 +1649,7 @@ fn thaw_js_routed_native_server_with_own_fetch_builds_and_matches_node() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "200 ok\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1705,8 +1669,7 @@ fn thaw_js_routed_node_http_get_from_listen_callback_refused() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "err ECONNREFUSED\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1731,8 +1694,7 @@ fn thaw_js_routed_node_http_get_from_listen_callback_does_not_segv() {
          }\n",
     );
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "R 201\n");
     let _ = std::fs::remove_dir_all(dir);
@@ -1840,8 +1802,7 @@ fn thaw_js_route_all_builds_a_plain_any_program_on_thaw_js() {
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     assert_eq!(thaw_js_run_guarded(&output).trim(), "1");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1892,8 +1853,7 @@ fn routed_tick_timer_and_lifecycle_order_matches_node() {
         let slug = name.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
         let (_dir, registry, entry) = thaw_js_fixture(&format!("route-tick-{slug}"), body);
         let output = entry.with_file_name("app");
-        let manifest = thaw_js_build(&entry, &output, &registry);
-        assert_eq!(manifest["quickjs"], false, "{name} linked QuickJS: {manifest}");
+        thaw_js_build(&entry, &output, &registry);
         let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
         assert_eq!((stdout.as_str(), status), (expected, code), "{name}: {stderr}");
     }
@@ -2194,8 +2154,7 @@ fn routed_worker_resource_limits_stop_a_runaway_worker() {
         }";
     let (_dir, registry, entry) = thaw_js_fixture("route-worker-limits", body);
     let output = entry.with_file_name("app");
-    let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &registry);
     let (stdout, stderr, status) = thaw_js_run_guarded_status(&output);
     assert_eq!((stdout.as_str(), status), ("error ERR_WORKER_OUT_OF_MEMORY\n", Some(0)), "{stderr}");
 }
@@ -2228,7 +2187,6 @@ fn wasm_in_bundle_only_routes_to_thaw_js_and_runs() {
     .unwrap();
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["wasm-kit"]));
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run_guarded(&output), "true\n");
@@ -2297,7 +2255,6 @@ fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_quickjs() {
     .unwrap();
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-nested"]));
     std::fs::remove_dir_all(&registry).unwrap();
     assert_eq!(thaw_js_run(&output), "x3\n");
@@ -2408,8 +2365,6 @@ fn thaw_js_peer_package_builds_under_error_mode_and_reaches_its_peer() {
     );
     let output = dir.join("app");
     thaw_js_peer_build(&entry, &output, &registry).unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run_guarded(&output), "true\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2428,8 +2383,6 @@ fn thaw_js_implicit_peer_is_compiled_in_for_a_program_that_only_imports_its_user
     );
     let output = dir.join("app");
     thaw_js_peer_build(&entry, &output, &registry).unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(thaw_js_run_guarded(&output), "made\n");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2541,8 +2494,7 @@ function main(): void {
     )
     .unwrap();
     let output = dir.join("app");
-    let manifest = thaw_js_build(&entry, &output, &dir.join("registry"));
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
+    thaw_js_build(&entry, &output, &dir.join("registry"));
     // SQLite is linked because the program imports node:sqlite (its file-header string is in the archive)
     let bytes = std::fs::read(&output).unwrap();
     assert!(bytes.windows(15).any(|window| window == b"SQLite format 3"), "SQLite not linked");
@@ -2580,8 +2532,6 @@ fn thaw_js_tagged_rest_fixture(name: &str, main_body: &str) -> String {
         eprintln!("build error: {error}");
     }
     result.unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     let stdout = thaw_js_run(&output);
     let _ = std::fs::remove_dir_all(dir);
     stdout

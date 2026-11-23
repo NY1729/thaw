@@ -1846,8 +1846,6 @@ async function main(): Promise<void> {
     );
     built.unwrap();
     std::fs::remove_dir_all(&registry).unwrap();
-    let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     let result = Command::new(&output)
         .env("DATABASE_URL", database_url)
         .output()

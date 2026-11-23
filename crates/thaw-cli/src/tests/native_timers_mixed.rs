@@ -14,7 +14,6 @@ fn native_timers_mixed_thaw_js_package_retry_stays_on_thaw_js() {
     );
     let output = dir.join("app");
     let manifest = thaw_js_build(&entry, &output, &registry);
-    assert_eq!(manifest["quickjs"], false, "{manifest}");
     assert_eq!(manifest["thaw_js_routed"], serde_json::json!(["tjs-kit"]));
     assert!(!manifest.to_string().contains("fell back to QuickJS"), "{manifest}");
     assert_eq!(thaw_js_run_guarded(&output), "2,4,6\nsync\ntimer\n");
