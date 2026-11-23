@@ -9175,7 +9175,7 @@ fn napi_caught_json_console_does_not_enable_quickjs() {
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
     assert!(compiler.uses_napi(), "{ir}");
-    assert!(!compiler.uses_quickjs(), "{ir}");
+    assert!(!compiler.uses_thaw_js(), "{ir}");
     assert!(ir.contains("thaw_json_is_host_error_family"), "{ir}");
     assert!(
         !ir.lines().any(|line| {
@@ -11625,9 +11625,7 @@ fn decoded_native_method_forwarder_uses_actual_receiver_projection_ir() {
     };
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "decoded_native_method_forwarder_ir");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     let name = ir.rfind("@__thaw_js_method_forwarder_")
         .expect("decoded private-receiver callback should generate a method forwarder");
@@ -11654,15 +11652,12 @@ fn native_object_nonprefix_alias_remains_native_only() {
         "7 9 3\n"
     );
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "native_object_nonprefix_native_only_features");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     assert!(
-        !(compiler.uses_thaw_js() || compiler.uses_quickjs()),
+        !compiler.uses_thaw_js(),
         "{}",
         compiler.print_to_string()
     );

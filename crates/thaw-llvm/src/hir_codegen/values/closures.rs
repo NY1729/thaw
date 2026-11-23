@@ -137,21 +137,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
         }
         if defer_js_retain && *hir_ty == HirType::JsValue {
-            // The condition may be this function's first QuickJS operation.
+            // The condition may be this function's first thaw-js operation.
             // Establish the handle dependency before it is compiled, since an
             // arena-promoted cell skips reactive promotion at closure creation.
             // (field-level: `builder` is borrowed here)
-            if self.thaw_js_routed {
-                self.uses_thaw_js = true;
-                self.uses_thaw_js_handles = true;
-            } else {
-                // Field-level on purpose: `builder` is borrowed here, so `note_quickjs` (a `&mut self` call) cannot be used.
-                self.uses_quickjs = true;
-                if !self.quickjs_blockers.iter().any(|b| b == "site:closures:handle_cell") {
-                    self.quickjs_blockers.push("site:closures:handle_cell".to_string());
-                }
-                self.uses_quickjs_handles = true;
-            }
+            self.uses_thaw_js = true;
+            self.uses_thaw_js_handles = true;
+        
         }
         let pending_claim = if self.js_handles_used() && *hir_ty == HirType::JsValue {
             if defer_js_retain {
@@ -176,7 +168,7 @@ impl<'ctx> HirCompiler<'ctx> {
             } else {
                 builder
                     .build_call(
-                        self.module.get_function("thaw_js_retain_handle").unwrap(),
+                        self.module.get_function("thaw_tjs_retain_handle").unwrap(),
                         &[value.into()],
                         "retain_captured_js_handle",
                     )
@@ -337,7 +329,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let did_retain = self
                 .builder
                 .build_call(
-                    self.module.get_function("thaw_js_retain_handle").unwrap(),
+                    self.module.get_function("thaw_tjs_retain_handle").unwrap(),
                     &[handle.into()],
                     "claim_captured_js_handle",
                 )
@@ -574,7 +566,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 self.builder
                     .build_call(
-                        self.module.get_function("thaw_js_get_global").unwrap(),
+                        self.module.get_function("thaw_tjs_get_global").unwrap(),
                         &[name.as_pointer_value().into()],
                         "ordinary_this_handle",
                     )
@@ -740,9 +732,8 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<(IntValue<'ctx>, IntValue<'ctx>), String> {
         // A routed build asks thaw-js the same question: a receiver that is a live handle to an interned
         // wrapper answers with its owner. Plain `Json` receivers have no handle and answer "no".
-        if self.thaw_js_routed {
-            self.js_mark_handles_used();
-        }
+        self.js_mark_handles_used();
+    
         let expected = self.intern_string(expected, "native_receiver_layout")
             .map_err(|error| error.to_string())?;
         let handle = self
@@ -763,7 +754,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_native_object_pointer")
+                    .get_function("thaw_tjs_native_object_pointer")
                     .unwrap(),
                 &[handle.into(), expected.as_pointer_value().into()],
                 "native_receiver_pointer",
@@ -1869,34 +1860,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         .build_int_to_ptr(word, pointer, "receiver_json_symbol")
                         .map_err(|error| error.to_string())?;
                     // a thaw-js handle needs no placeholder object to be read back as its id
-                    let handle: BasicValueEnum<'ctx> = if self.thaw_js_routed {
-                        self.compile_live_symbol_handle(symbol, ledger)?.into()
-                    } else {
-                        let placeholder = self
-                            .compile_live_symbol_json_placeholder(symbol, ledger)?
-                            .into_pointer_value();
-                        let handle = self
-                            .builder
-                            .build_call(
-                                self.module
-                                    .get_function("thaw_json_borrowed_handle_id")
-                                    .unwrap(),
-                                &[placeholder.into()],
-                                "receiver_symbol_handle_id",
-                            )
-                            .map_err(|error| error.to_string())?
-                            .try_as_basic_value()
-                            .basic()
-                            .ok_or("symbol receiver placeholder has no borrowed handle")?;
-                        self.builder
-                            .build_call(
-                                self.module.get_function("thaw_json_destroy").unwrap(),
-                                &[placeholder.into()],
-                                "destroy_receiver_symbol_placeholder",
-                            )
-                            .map_err(|error| error.to_string())?;
-                        handle
-                    };
+                    let handle: BasicValueEnum<'ctx> =
+                        self.compile_live_symbol_handle(symbol, ledger)?.into();
                     let converted = self
                         .builder
                         .build_call(

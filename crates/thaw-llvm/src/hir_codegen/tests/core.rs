@@ -2990,50 +2990,6 @@ fn runs_module_init_before_main_body() {
 }
 
 #[test]
-fn declares_error_exact_constructor_boundary_abi() {
-    let context = Context::create();
-    let compiler = HirCompiler::new(&context, "error_exact_boundary_abi");
-    compiler.declare_runtime_builtins();
-    let module = &compiler.module;
-    let i8_ptr = context.ptr_type(AddressSpace::default());
-    let result = context.struct_type(&[
-        context.i64_type().into(),
-        context.i64_type().into(),
-        context.i8_type().into(),
-        i8_ptr.into(),
-    ], false);
-    let lookup = module.get_function("thaw_js_get_error_constructor_exact_result").unwrap();
-    let invoke = module.get_function("thaw_js_invoke_handle_graph_exact_result").unwrap();
-    for (function, params) in [
-        (lookup, vec![i8_ptr.into()]),
-        (invoke, vec![context.i64_type().into(), i8_ptr.into(), context.i8_type().into()]),
-    ] {
-        let ty = function.get_type();
-        assert_eq!(ty.get_return_type(), Some(result.into()));
-        assert_eq!(ty.get_param_types(), params);
-        assert!(!ty.is_var_arg());
-        assert_eq!(function.get_linkage(), Linkage::External);
-    }
-
-    // Adding siblings must not change the existing consumers' ABI.
-    let legacy = [
-        ("thaw_js_get_property_exact_result", vec![context.i64_type().into(), i8_ptr.into()]),
-        ("thaw_js_call_handle_mixed_exact_consuming_result", vec![context.i64_type().into(), i8_ptr.into(), i8_ptr.into()]),
-        ("thaw_js_construct_handle_graph_args_result", vec![context.i64_type().into(), i8_ptr.into()]),
-    ];
-    for (name, params) in legacy {
-        let function = module.get_function(name).unwrap();
-        assert_eq!(function.get_type().get_param_types(), params, "{name}");
-        assert!(!function.get_type().is_var_arg(), "{name}");
-        assert_eq!(function.get_linkage(), Linkage::External, "{name}");
-    }
-    assert_eq!(module.get_function("thaw_js_get_property_exact_result").unwrap().get_type().get_return_type(), Some(result.into()));
-    assert_eq!(module.get_function("thaw_js_call_handle_mixed_exact_consuming_result").unwrap().get_type().get_return_type(), Some(result.into()));
-    let legacy_handle_result = context.struct_type(&[context.i64_type().into(), i8_ptr.into()], false);
-    assert_eq!(module.get_function("thaw_js_construct_handle_graph_args_result").unwrap().get_type().get_return_type(), Some(legacy_handle_result.into()));
-}
-
-#[test]
 fn initializes_top_level_bindings_in_source_order_and_shares_mutation() {
     let source = r#"
         const base = 40;
@@ -3240,13 +3196,10 @@ fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "catch_lambda_native_text_ir");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     // The async lambda is a Promise-returning `__thaw_lambda_N` in the current naming.
     assert!(ir.contains("define internal ptr @__thaw_lambda_"), "{ir}");
@@ -3258,25 +3211,18 @@ fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
 }
 
 #[test]
-fn napi_only_terminal_cleanup_does_not_reference_quickjs_symbols() {
+fn napi_only_terminal_cleanup_does_not_reference_js_engine_symbols() {
     let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "napi_only_terminal_cleanup");
     compiler.uses_napi = true;
-    compiler.uses_quickjs = false;
-    compiler.uses_quickjs_handles = false;
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
 
     assert!(
-        !ir.lines().any(|line| line.contains("call void @thaw_js_collect_garbage(")),
-        "N-API-only code must not require the QuickJS archive for terminal GC: {ir}"
-    );
-    assert!(
-        !ir.lines()
-            .any(|line| line.contains("call i8 @thaw_js_terminal_work_pending(")),
-        "N-API-only code must not require the QuickJS terminal-work query: {ir}"
+        !ir.lines().any(|line| line.contains("call ") && (line.contains("@thaw_tjs_") || line.contains("@thaw_js_"))),
+        "N-API-only code must not name a JS engine symbol in its terminal cleanup: {ir}"
     );
     for call in [
         "call i8 @thaw_napi_begin_shutdown(",
@@ -3301,7 +3247,6 @@ fn thaw_js_routed_terminal_shutdown_releases_all_handles() {
     compiler.uses_napi = true;
     compiler.uses_thaw_js = true;
     compiler.uses_thaw_js_handles = true;
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
 
@@ -3322,7 +3267,6 @@ fn thaw_js_routed_terminal_shutdown_releases_handles_before_napi_ready() {
     compiler.uses_napi = true;
     compiler.uses_thaw_js = true;
     compiler.uses_thaw_js_handles = true;
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
 
@@ -3674,9 +3618,7 @@ fn absent_function_registration_takes_undefined_handle_path() {
     };
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "absent_function_registration");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     assert!(ir.contains("native_callback_is_undefined"), "{ir}");
     assert!(ir.contains("native_callback_undefined_handle"), "{ir}");

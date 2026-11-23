@@ -68,10 +68,10 @@ type SharedArray = Rc<SharedValue<Vec<Value>>>;
 /// `ordered_object_fields`; WTF-8 keys retain UTF-16 property identity.
 type SharedObject = Rc<SharedValue<indexmap::IndexMap<Vec<u8>, Value>>>;
 
-/// A native lease on one QuickJS value. The bridge installs the release
+/// A native lease on one JS value. The bridge installs the release
 /// operation before decoding a callback graph; cloning a Json value shares
 /// this lease, so only its final owner releases the handle. The handle ID is
-/// canonical in the QuickJS registry (Object.is) and is stable for aliases.
+/// canonical in the JS engine's registry (Object.is) and is stable for aliases.
 pub(crate) struct HostLease {
     handle: u64,
     release: extern "C" fn(u64) -> u8,
@@ -152,7 +152,7 @@ type GraphOriginSerials = (u64, HashMap<usize, (u64, GraphOriginRef)>);
 thread_local! {
     static HOST_OPERATIONS: Cell<Option<HostOperations>> = const { Cell::new(None) };
     static ERROR_FACTORY_OPERATIONS: Cell<Option<ErrorFactoryOperations>> = const { Cell::new(None) };
-    // Which JS engine backs this program's JS handles: 0 = QuickJS (default), 1 = thaw-js.
+    // Which JS engine backs this program's JS handles: 0 = no JS engine (default), 1 = thaw-js.
     static JS_ENGINE: Cell<u8> = const { Cell::new(0) };
     static HOST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     // `None` is a boundary while a trusted Host/NAPI callback executes.
@@ -539,7 +539,7 @@ fn set_host_error(message: String) {
     });
 }
 
-/// Registration is scoped to the thread running the reentrant QuickJS
+/// Registration is scoped to the thread running the reentrant JS-engine
 /// callback. `thaw-std` has no link dependency on the optional JS runtime.
 #[no_mangle]
 pub extern "C" fn thaw_json_register_host_operations(
@@ -567,7 +567,7 @@ pub extern "C" fn thaw_json_register_host_operations(
 }
 
 /// Registers the optional JS Error factory and native-object identity bridge. The standard
-/// library stays usable without QuickJS; when absent, framed errors keep the native JSON fallback.
+/// library stays usable without a JS engine; when absent, framed errors keep the native JSON fallback.
 #[no_mangle]
 pub extern "C" fn thaw_json_register_error_factory(
     create: extern "C" fn(*const c_char) -> HostHandleResult,
@@ -2819,7 +2819,7 @@ fn number_value(value: f64) -> Value {
     // the main native f64-to-`Json` conversion path. Only
     // `platform_globals/dates.js`'s `__thaw_json_safe_stringify`
     // replacer (a JS-side `JSON.stringify` round-trip) tagged it,
-    // covering values crossing the QuickJS boundary but not an
+    // covering values crossing the JS boundary but not an
     // ordinary `any`-typed `NaN`/`Infinity` constructed in compiled
     // code. Tag it here too, the exact same shape, so both paths agree.
     napi_non_finite_value(value)
@@ -2923,7 +2923,7 @@ fn ordered_object_fields_shared(fields: &SharedObject) -> Vec<(&Vec<u8>, &Value)
 // to serialize a value (often nested inside a fresh single-element
 // array, e.g. `compile_set_dynamic_property_json`,
 // `crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs`)
-// before handing it to the live QuickJS engine, whose own deserializer
+// before handing it to the live JS engine, whose own deserializer
 // specifically looks for the sentinel's exact shape to revive a real
 // `undefined` argument. Omitting/nulling it here would silently corrupt
 // that unrelated, pervasive mechanism instead -- confirmed by a real
@@ -3591,7 +3591,7 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
     let value = JsonParser::new(bytes).parse();
     PARSE_ERROR.with(|error| error.set(value.is_none()));
     let value = value.unwrap_or(Value::Null);
-    // Only text carrying the marker pays for the walk (QuickJS-path results never do).
+    // Only text carrying the marker pays for the walk (plain results never do).
     if bytes
         .windows(NULL_PROTO_WIRE_KEY.len())
         .any(|window| window == NULL_PROTO_WIRE_KEY)
@@ -3758,7 +3758,7 @@ fn release_isolated_json_cycles(root: &Value) {
             continue;
         }
         // Detach every edge before dropping a HostLease: its release callback
-        // enters QuickJS and may run user-observable code. No side-table borrow
+        // enters the JS engine and may run user-observable code. No side-table borrow
         // or partly-cleared graph remains when the callbacks run.
         detached.extend(PROTOTYPES.with(|table| table.borrow_mut().remove(identity)));
         detached.extend(node.take_values());
@@ -5078,7 +5078,7 @@ pub unsafe extern "C" fn thaw_json_callback_error(message: *const c_char) -> *co
 }
 
 /// Like `thaw_json_callback_error`, but binds the complete thrown-value packet to this exact
-/// owned result pointer. The packet has no public token or text representation; the QuickJS
+/// owned result pointer. The packet has no public token or text representation; the JS engine
 /// callback transfers it directly to a private Error guardian before consuming the string.
 ///
 /// # Safety
@@ -5314,7 +5314,7 @@ fn callback_exception_packet_uses_exact_owned_pointer_and_keeps_all_channels() {
 
 #[cfg(test)]
 #[test]
-fn callback_exception_packet_keeps_original_quickjs_value_without_reading_it_as_text() {
+fn callback_exception_packet_keeps_original_js_value_without_reading_it_as_text() {
     // Use the real tracked Box<Value> owner shape. Its pointer is deliberately
     // opaque: the callback producer must never interpret it as a C string.
     std::thread::spawn(|| {
@@ -5632,7 +5632,7 @@ pub extern "C" fn thaw_exception_token_is_live(id: u64) -> u8 {
 /// 5 native descriptor, 6 pending text bytes, 7 native-text bytes, 8 aggregate errors.
 /// Materializes the packet into a native catch's ordinary traced ownership.
 /// This is deliberately one operation so aliases between pointer channels
-/// stay exact, while the packet itself remains owned by its QuickJS guardian.
+/// stay exact, while the packet itself remains owned by its JS guardian.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_exception_native_snapshot(id: u64, output: *mut u64) -> u8 {
     if output.is_null() {
@@ -6442,7 +6442,7 @@ unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
                         })
                 })
     });
-    // A frameless error (a foreign/QuickJS one) keeps the plain `Name: message` line.
+    // A frameless error (a foreign one) keeps the plain `Name: message` line.
     let framed = console && unsafe { *value } == 1 && {
         let frames = unsafe { CStr::from_ptr(thaw_error_frames(value)) }.to_bytes();
         !frames.is_empty() && frames != b"\n    at <anonymous>"
@@ -8417,7 +8417,7 @@ pub extern "C" fn thaw_json_is_error_instance(value: *const Value, class: *const
     u8::from(unsafe { thaw_error_is_instance(error, class) })
 }
 
-/// `instanceof` for a live thaw-js Error lease, gated on the Error factory (the QuickJS lane has
+/// `instanceof` for a live thaw-js Error lease, gated on the Error factory (a program with no JS engine has
 /// no such lease). The host only reports the Error family (query 22), so the class is the Error
 /// itself or the lease's own `name` (a native subclass's name); deeper user subclasses are not
 /// matched.
@@ -8777,7 +8777,7 @@ pub unsafe extern "C" fn thaw_function_name_set(closure: *const u8, label: *cons
 }
 
 /// The label registered for the function at `closure` (`"<kind><name>"`, owned by the compiled
-/// program), or null. Lets the QuickJS wrapper of a function stored in a `Json`/`any` value
+/// program), or null. Lets the JS wrapper of a function stored in a `Json`/`any` value
 /// carry the same name and kind.
 ///
 /// # Safety
@@ -9286,7 +9286,7 @@ pub unsafe extern "C" fn thaw_any_array_flat(
 #[no_mangle]
 /// `Buffer.isBuffer(value)` for a `Json`-typed operand -- recognizes
 /// the same `{"type":"Buffer","data":[...]}` shape `__thaw_json_
-/// binary_replacer` (thaw-quickjs) produces for a live Buffer/
+/// binary_replacer` (thaw-js) produces for a live Buffer/
 /// TypedArray crossing into JSON, mirroring `json_array_or_buffer_
 /// data`'s own check below (kept separate rather than shared, since
 /// that one also needs to unwrap a plain array, which this doesn't).
@@ -9312,7 +9312,7 @@ pub unsafe extern "C" fn thaw_json_is_buffer(value: *const Value) -> u8 {
 
 /// Whether a number[] request for `value` reads an ArrayBuffer's bytes (`thaw_json_to_number_array`)
 /// rather than the per-element loop: thaw-js only, a host lease that is neither an array nor a Buffer
-/// and whose op 31 answers its bytes. Any other value (the QuickJS lane included) answers 0.
+/// and whose op 31 answers its bytes. Any other value (a program with no JS engine included) answers 0.
 ///
 /// # Safety
 ///
@@ -10837,7 +10837,7 @@ pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
 
 /// `value` as a plain JSON array, *or* -- if it's shaped
 /// `{"type":"Buffer","data":[...]}` (`Buffer.prototype.toJSON()`'s own
-/// real shape, and what `__thaw_json_binary_replacer`, thaw-quickjs,
+/// real shape, and what `__thaw_json_binary_replacer`, thaw-js,
 /// produces whenever a live Buffer/TypedArray crosses into a native
 /// callback's JSON-encoded arguments) -- its `data` field instead. A
 /// native callback parameter declared `Buffer`/`Uint8Array` has already
@@ -10845,7 +10845,7 @@ pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
 /// (`HirType::Bytes` is a lowering-only distinction, gone by the time
 /// any of this runs), so nothing here can tell from the *declared* type
 /// alone that the real value is a Buffer -- only the JSON shape itself
-/// says so, the same way `__thaw_json_date_reviver` (thaw-quickjs, the
+/// says so, the same way `__thaw_json_date_reviver` (thaw-js, the
 /// JS-side counterpart for a value flowing the *other* direction)
 /// recognizes it purely structurally too. Without this, a real Buffer
 /// argument reaching a native callback silently decoded as an empty
@@ -10858,9 +10858,9 @@ pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
 /// `is_thaw_internal_wrapper` recognizes for `JSON.stringify` also
 /// makes every other read of the value opaque, since nothing else in
 /// the codebase unwraps `__thaw_regexp__` outside the one place that
-/// crosses back into real QuickJS (`__thaw_json_date_reviver`,
+/// crosses back into the real JS engine (`__thaw_json_date_reviver`,
 /// `platform_globals/dates.js`) -- direct native-compiled property
-/// access on an `any`-typed regex never reaches QuickJS at all, so it
+/// access on an `any`-typed regex never reaches the JS engine at all, so it
 /// previously read straight off the wrapper object and got `undefined`
 /// for every real regex property. `global`/`ignoreCase`/etc. aren't
 /// stored fields on the inner `{source, flags, lastIndex}` object --
@@ -11784,7 +11784,7 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn engine_defaults_to_quickjs_and_set_one_selects_thaw_js() {
+    fn engine_defaults_to_none_and_set_one_selects_thaw_js() {
         assert!(!super::engine_is_thaw_js());
         super::thaw_json_set_js_engine(1);
         assert!(super::engine_is_thaw_js());
@@ -11954,7 +11954,7 @@ mod tests {
         .unwrap();
     }
 
-    // Gate pin: under the default (QuickJS) engine the marker is never resolved, so the text is unchanged.
+    // Gate pin: under the default (no engine) the marker is never resolved, so the text is unchanged.
     #[test]
     fn a_marker_cause_under_the_default_engine_prints_the_marker_text() {
         std::thread::spawn(|| {
@@ -12242,7 +12242,7 @@ mod tests {
                 handle: 5,
                 release: factory_test_release,
             })));
-            // Without the Error factory (QuickJS lane) the text stays as it was.
+            // Without the Error factory (no JS engine) the text stays as it was.
             let unfactored = thaw_json_as_string_value(lease);
             let unfactored = unsafe { CStr::from_ptr(unfactored) }
                 .to_str()
@@ -12410,7 +12410,7 @@ mod tests {
         .unwrap();
     }
 
-    // Gate pin: under QuickJS (engine 0) the value entry stores the encoded text and takes no reference.
+    // Gate pin: with no JS engine (engine 0) the value entry stores the encoded text and takes no reference.
     #[test]
     fn error_prop_value_under_the_default_engine_stores_the_encoded_text() {
         std::thread::spawn(|| {
@@ -12436,7 +12436,7 @@ mod tests {
         .unwrap();
     }
 
-    // Under QuickJS (engine 0) a Host value is not a thaw-js handle: it keeps the
+    // With no JS engine (engine 0) a Host value is not a thaw-js handle: it keeps the
     // pre-existing text form, takes no reference, and reads back as before.
     #[test]
     fn a_host_cause_under_the_default_engine_stores_text_without_a_retain() {
@@ -12527,7 +12527,7 @@ mod tests {
         .unwrap();
     }
 
-    // Gate pin: under QuickJS (engine 0) a marker prop takes no reference and reads back as text.
+    // Gate pin: with no JS engine (engine 0) a marker prop takes no reference and reads back as text.
     #[test]
     fn a_marker_prop_under_the_default_engine_takes_no_reference() {
         std::thread::spawn(|| {
@@ -12633,7 +12633,7 @@ mod tests {
             })));
             let text =
                 |ptr: *const c_char| unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
-            // Without the factory the host's handle marker is kept (QuickJS lane).
+            // Without the factory the host's handle marker is kept (no JS engine).
             assert!(text(thaw_json_stringify_public(root)).contains("__thaw_tjs_handle__"));
 
             thaw_json_register_error_factory(
@@ -14163,7 +14163,7 @@ mod tests {
             assert_eq!(unsafe { (native as *const i64).read() }, 0);
             unsafe { thaw_json_destroy(value) };
 
-            // the QuickJS lane (engine 0) never asks op 31
+            // a program with no JS engine (engine 0) never asks op 31
             thaw_json_set_js_engine(0);
             let value = host_array_test_value(21);
             let native = thaw_json_to_number_array(value);
@@ -14223,7 +14223,7 @@ mod tests {
             let number = leak(Value::Null);
             assert_eq!(unsafe { thaw_json_is_host_arraybuffer(number) }, 0);
 
-            // the QuickJS lane (engine 0) never reads the bytes
+            // a program with no JS engine (engine 0) never reads the bytes
             thaw_json_set_js_engine(0);
             assert_eq!(unsafe { thaw_json_is_host_arraybuffer(arraybuffer) }, 0);
             for value in [arraybuffer, array, plain, number] {
@@ -14716,7 +14716,7 @@ mod tests {
     #[test]
     fn buffer_shaped_object_length_is_the_data_array_length() {
         // `{"type":"Buffer","data":[...]}` -- the shape `__thaw_json_
-        // binary_replacer` (thaw-quickjs) produces for a real Buffer/
+        // binary_replacer` (thaw-js) produces for a real Buffer/
         // TypedArray crossing into a `Json`-typed native callback
         // parameter (an untyped/`any` chunk, e.g. `fs.createReadStream(
         // ...).on('data', chunk => ...)`). `.length` must resolve to the

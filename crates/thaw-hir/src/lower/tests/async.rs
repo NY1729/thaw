@@ -156,29 +156,6 @@ fn lowers_queue_microtask_with_a_promise_resolve_callback() {
 }
 
 #[test]
-fn typed_quickjs_calls_are_resolved_at_the_dynamic_await_boundary() {
-    let program = lower(
-        r#"declare function __thaw_typed_js_66(): JsValue;
-        async function main(): Promise<void> {
-            const value: JsValue = await __thaw_typed_js_66();
-            console.log(value);
-        }"#,
-    );
-    assert!(matches!(
-        &program.functions[0].body[0],
-        HirStmt::Let(
-            _,
-            HirType::JsValue,
-            HirExpr::Call(callee, arguments)
-        )
-            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "resolveDynamicValue")
-                && matches!(arguments.as_slice(), [HirExpr::DynamicCall(
-                    DynamicSignature { backend: DynamicBackend::QuickJs, .. }, _
-                )])
-    ));
-}
-
-#[test]
 fn keeps_unannotated_dynamic_method_promises_raw_until_awaited() {
     let program = lower(
         r#"declare function loader(): JsValue;

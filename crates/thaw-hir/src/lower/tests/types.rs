@@ -1629,12 +1629,12 @@ fn diagnoses_uninferable_and_unsupported_generic_layouts() {
 fn generic_class_identity_keeps_physical_json_layout_without_opening_json_objects() {
     let class_value = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_7368617065(value: { value: number }): number;
+        declare function __thaw_typed_tjs_7368617065(value: { value: number }): number;
         class Item { value: number = 5; }
         function identity<T>(value: T): T { return value; }
         function main(): void {
             const item = new Item();
-            __thaw_typed_js_7368617065(item);
+            __thaw_typed_tjs_7368617065(item);
             const returned = identity(item);
             returned.value = 13;
             console.log(item.value);
@@ -2909,9 +2909,9 @@ fn arrow_assigned_to_local_callback_keeps_native_scalar_return() {
 #[test]
 fn named_function_assigned_to_quickjs_function_alias_keeps_boundary_mapping() {
     let program = lower(
-        r#"declare function __thaw_typed_js_6563686f(values: number[]): number[];
+        r#"declare function __thaw_typed_tjs_6563686f(values: number[]): number[];
         function main(): void {
-            let alias: (values: number[]) => number[] = __thaw_typed_js_6563686f;
+            let alias: (values: number[]) => number[] = __thaw_typed_tjs_6563686f;
             alias = function echoValues(values: number[]): number[] { return values; };
             const input: any = JSON.parse('[1]');
             const result: any = alias(input);
@@ -3550,7 +3550,7 @@ fn rewritten_external_type_name_resolves_to_jsvalue_bare_and_generic() {
     // dynamic member call; a failed resolution would abort lowering.
     lower(
         r#"
-        function bare(value: __thaw_typed_js_abc123): string {
+        function bare(value: __thaw_typed_tjs_abc123): string {
             return value.text("hi");
         }
         function generic(value: __thaw_type_pkg_Ctx<number, string>): string {
@@ -3669,10 +3669,10 @@ fn unannotated_buffer_binding_still_dispatches_byte_specific_methods() {
 fn direct_and_bound_buffer_to_string_keep_byte_dispatch() {
     let program = lower(
         r#"
-        declare function __thaw_typed_js_627566666572(): Buffer;
+        declare function __thaw_typed_tjs_627566666572(): Buffer;
         function main(): void {
-            const direct = __thaw_typed_js_627566666572().toString();
-            const buffer: Buffer = __thaw_typed_js_627566666572();
+            const direct = __thaw_typed_tjs_627566666572().toString();
+            const buffer: Buffer = __thaw_typed_tjs_627566666572();
             const bound = buffer.toString();
             const numbers = [72, 105].toString();
             console.log(direct, bound, numbers);
@@ -4505,23 +4505,21 @@ fn function_dynamic_conversion_keeps_raw_undefined_before_registration() {
 
 #[test]
 fn dynamic_symbol_rejects_nonascii_hex_without_slicing_codepoints() {
-    assert!(dynamic_symbol("__thaw_typed_js_aéa").is_none());
+    assert!(dynamic_symbol("__thaw_typed_tjs_aéa").is_none());
     assert!(dynamic_symbol("__thaw_typed_napi_zz").is_none());
-    assert_eq!(dynamic_symbol("__thaw_typed_js_666f6f__arity_1"),
-        Some((DynamicBackend::QuickJs, "foo".into())));
+    assert_eq!(dynamic_symbol("__thaw_typed_tjs_666f6f__arity_1"),
+        Some((DynamicBackend::ThawJs, "foo".into())));
+    // the QuickJS prefix no longer decodes
+    assert!(dynamic_symbol("__thaw_typed_js_666f6f").is_none());
 }
 
 #[test]
-fn dynamic_symbol_decodes_the_thaw_js_backend_and_keeps_quickjs_untouched() {
+fn dynamic_symbol_decodes_the_thaw_js_backend() {
     assert_eq!(dynamic_symbol("__thaw_typed_tjs_6d733a3a6d73"),
         Some((DynamicBackend::ThawJs, "ms::ms".into())));
     assert_eq!(dynamic_symbol("__thaw_typed_tjs_6d733a3a6d73__arity_2"),
         Some((DynamicBackend::ThawJs, "ms::ms".into())));
-    assert_eq!(dynamic_symbol("__thaw_typed_js_6d733a3a6d73"),
-        Some((DynamicBackend::QuickJs, "ms::ms".into())));
-    // A thaw-js plain function is a function value like a QuickJS one (live reference slots), but
-    // a thaw-js method symbol is not.
-    assert!(ordinary_quickjs_typed_symbol("__thaw_typed_js_6d733a3a6d73").is_some());
+    // A thaw-js plain function is a function value (live reference slots), but a thaw-js method symbol is not.
     assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_6d733a3a6d73").is_some());
     assert!(ordinary_quickjs_typed_symbol("__thaw_typed_tjs_246d6574686f6424782424").is_none());
 }
@@ -4628,11 +4626,9 @@ fn ambient_js_export_passed_to_promisify_is_fetched_by_registry_key_on_both_back
             .expect("main is lowered");
         format!("{:?}", main.body)
     }
-    for backend in ["tjs", "js"] {
-        let body = main_body(backend, "child_process::execFile");
-        assert!(body.contains("getDynamicValue"), "{backend}: {body}");
-        assert!(body.contains(r#"Str("child_process::execFile")"#), "{backend}: {body}");
-    }
+    let body = main_body("tjs", "child_process::execFile");
+    assert!(body.contains("getDynamicValue"), "{body}");
+    assert!(body.contains(r#"Str("child_process::execFile")"#), "{body}");
     // thaw-js method symbols keep the typed stub: no registry-key fetch.
     let method = main_body("tjs", "$method$k::Emitter$emit$overload0$arity0");
     assert!(!method.contains("getDynamicValue"), "{method}");

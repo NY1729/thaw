@@ -5,7 +5,7 @@
 //!
 //! Generates native functions, closures, collections, tagged values, exception
 //! propagation, and resumable async frames from typed HIR. Runtime calls provide
-//! strings, promises, platform APIs, and dynamic QuickJS/N-API interoperation.
+//! strings, promises, platform APIs, and dynamic thaw-js/N-API interoperation.
 //! Entrypoints support both `main` programs and Lambda `handler` programs.
 //! Generated globals are registered as arena roots before Lambda initialization.
 
@@ -334,7 +334,6 @@ pub(crate) struct NativeHandleLedger<'ctx> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TypedJsonArgumentOwner {
     ProvenWrapper(String),
-    DirectQuickJs(String),
     NapiConstructor(String),
 }
 
@@ -488,7 +487,6 @@ pub struct HirCompiler<'ctx> {
     function_ref_closures: HashMap<String, Vec<(FunctionType<'ctx>, PointerValue<'ctx>)>>,
     module_exception_roots: Vec<PointerValue<'ctx>>,
     function_return_types: HashMap<String, HirType>,
-    proven_typed_quickjs_wrappers: HashSet<String>,
     ffi_signatures: HashMap<String, FfiSignature>,
     /// Stack of enclosing `try` targets. `throw` and a failed nested Thaw
     /// call target the innermost entry; an empty stack propagates by returning
@@ -529,26 +527,18 @@ pub struct HirCompiler<'ctx> {
     uses_intl: bool,
     /// The module imports `async_hooks`: a plain `await <literal>` reports its outer promise as the trigger.
     uses_async_hooks: bool,
-    /// The program is a thaw-js routed build (it falls back to an unrouted one if it needs QuickJS), so
-    /// a plain callback coerced to a dynamic value is a thaw-js callback.
-    thaw_js_routed: bool,
     /// Compiling the arguments of a thaw-js call (reset inside nested closure bodies): a `JsValue`
     /// converted to `Json` there is a thaw-js handle or callback marker.
     thaw_js_call_arguments: bool,
-    uses_quickjs: bool,
-    /// Why `uses_quickjs` was set: `site:<name>` for a lowering site, `unported:<symbol>` for a thaw-js
-    /// symbol that has no thaw-js twin. Diagnostic only; deduplicated, in the order found.
-    quickjs_blockers: Vec<String>,
     /// Entry is a CommonJS program: `process.nextTick` callbacks run before the promise jobs
     /// the main script queued (an ES module's body runs inside a microtask, so they run after).
     commonjs_entry: bool,
-    uses_quickjs_handles: bool,
     uses_thaw_js_handles: bool,
     /// Compile full-layout native projection adapters only in modules whose
-    /// completed HIR actually crosses a fixed object into QuickJS.
+    /// completed HIR actually crosses a fixed object into thaw-js.
     projects_native_objects: bool,
     /// Nonprefix structural aliases need tracked owner identities even in
-    /// modules that never start QuickJS.
+    /// modules that never start thaw-js.
     tracks_physical_object_layouts: bool,
     /// The program calls `Object.freeze`/`seal`/`preventExtensions`, so native-array
     /// mutations consult the object-state table (otherwise no array can be locked).
@@ -558,7 +548,7 @@ pub struct HirCompiler<'ctx> {
     tracks_owned_json_roots: bool,
     /// Emit the stack-overflow prologue guard; whole-program (`compile_program`) builds only.
     stack_guard: bool,
-    /// True while compiling a QuickJS-backed dynamic call's own JSON-shaped
+    /// True while compiling a thaw-js-backed dynamic call's own JSON-shaped
     /// arguments (set/restored around that one argument-marshaling loop in
     /// `compile_typed_dynamic_call`, so a nested dynamic call compiled
     /// while marshaling an outer one's arguments doesn't see this as
@@ -566,7 +556,7 @@ pub struct HirCompiler<'ctx> {
     /// tell that context apart from one where embedding a live JS value
     /// handle has no meaning and should be rejected instead (console.log
     /// formatting, a `Dictionary` literal, an N-API call).
-    compiling_quickjs_dynamic_arguments: bool,
+    compiling_js_dynamic_arguments: bool,
     validating_native_argument: bool,
     /// Fresh native scalar handles and projection ledgers owned by active typed
     /// dynamic-call argument scopes.
@@ -586,99 +576,17 @@ pub struct HirCompiler<'ctx> {
     pic: bool,
 }
 
-// Prove that a generated typed QuickJS wrapper returns a newly retained
+// Prove that a generated typed thaw-js wrapper returns a newly retained
 // dynamic result on every normal path. A matching prefix alone does not
 // authorize releasing its arguments after the call.
-fn is_pure_wrapper_argument(expr: &HirExpr) -> bool {
-    match expr {
-        HirExpr::Var(_) | HirExpr::Lit(_) => true,
-        HirExpr::OptionalValue(value, _) => matches!(value.as_ref(), HirExpr::Var(_)),
-        _ => false,
-    }
-}
-
-fn is_pure_optional_wrapper_guard(expr: &HirExpr) -> bool {
-    matches!(
-        expr,
-        HirExpr::BinOp(
-            BinOp::EqEqEq,
-            absence,
-            literal,
-        ) if matches!(absence.as_ref(), HirExpr::OptionalIsNone(value, _) if matches!(value.as_ref(), HirExpr::Var(_)))
-            && matches!(literal.as_ref(), HirExpr::Lit(HirLit::Bool(false)))
-    )
-}
-
-fn returns_direct_quickjs_jsvalue(expr: &HirExpr) -> bool {
-    match expr {
-        HirExpr::DynamicCall(signature, args) => {
-            signature.backend == DynamicBackend::QuickJs
-                && signature.ret == HirType::JsValue
-                && args.iter().all(is_pure_wrapper_argument)
-        }
-        HirExpr::Conditional(test, yes, no, HirType::JsValue) => {
-            is_pure_optional_wrapper_guard(test)
-                && returns_direct_quickjs_jsvalue(yes)
-                && returns_direct_quickjs_jsvalue(no)
-        }
-        _ => false,
-    }
-}
-
-fn is_proven_typed_quickjs_wrapper(function: &HirFunction) -> bool {
-    if !function.name.starts_with("__thaw_typed_wrapper_js_") || function.ret != HirType::JsValue {
-        return false;
-    }
-
-    fn statements_return_quickjs_jsvalue(statements: &[HirStmt]) -> (bool, bool) {
-        let mut falls_through = true;
-        for statement in statements {
-            if !falls_through {
-                break;
-            }
-            match statement {
-                HirStmt::Return(Some(value)) => {
-                    if !returns_direct_quickjs_jsvalue(value) {
-                        return (false, false);
-                    }
-                    falls_through = false;
-                }
-                HirStmt::If(test, then_body, else_body) => {
-                    if !is_pure_optional_wrapper_guard(test) {
-                        return (false, true);
-                    }
-                    let (then_valid, then_falls) = statements_return_quickjs_jsvalue(then_body);
-                    let (else_valid, else_falls) = statements_return_quickjs_jsvalue(else_body);
-                    if !then_valid || !else_valid {
-                        return (false, true);
-                    }
-                    falls_through = then_falls || else_falls;
-                }
-                // Generated wrappers are straight-line pure forwarders. Even
-                // an unused expression or local can escape an input value.
-                _ => return (false, true),
-            }
-        }
-        (true, falls_through)
-    }
-
-    let (valid, falls_through) = statements_return_quickjs_jsvalue(&function.body);
-    valid && !falls_through
-}
-
 #[derive(Clone, Copy)]
 enum HirPreflightQuery<'a> {
-    /// `thaw_js_routed` is the codegen flag: a thaw-js routed call's object-literal argument
-    /// skips its QuickJS builder (see `thaw_js_object_literal_bypasses_builder`).
-    NamedCall {
-        name: &'a str,
-        thaw_js_routed: bool,
-    },
+    NamedCall { name: &'a str },
     NonArrowThisValue,
 }
 
 /// The `__thaw_dynamic_object_literal` members (five operands each) that a thaw-js routed call
-/// builds without the QuickJS builder: `compile_dynamic_object_literal_call` returns before it
+/// builds without the thaw-js builder: `compile_dynamic_object_literal_call` returns before it
 /// when a getter/setter/`__proto__`/spread stub is emitted, or builds the Json object itself
 /// when every key is a plain string. Must match that function.
 fn thaw_js_object_literal_bypasses_builder(members: &[HirExpr]) -> bool {
@@ -750,7 +658,7 @@ fn hir_contains_preflight_query(program: &HirProgram, query: HirPreflightQuery<'
                         .is_some_and(|owner| expr_has_call(owner, query));
                 }
                 matches!((callee.as_ref(), query),
-                    (HirExpr::Var(target), HirPreflightQuery::NamedCall { name, .. }) if target == name)
+                    (HirExpr::Var(target), HirPreflightQuery::NamedCall { name }) if target == name)
                     || expr_has_call(callee, query)
                     || args.iter().any(|arg| expr_has_call(arg, query))
             }
@@ -783,16 +691,11 @@ fn hir_contains_preflight_query(program: &HirProgram, query: HirPreflightQuery<'
                     || expr_has_call(receiver, query)
                     || args.iter().any(|arg| expr_has_call(arg, query))
             }
-            // A thaw-js routed call's object-literal argument is built from its members, so the
-            // QuickJS builder in the marker's first operand is never emitted: skip it.
+            // A thaw-js call's object-literal argument is built from its members, so the
+            // builder in the marker's first operand is never emitted: skip it.
             HirExpr::DynamicCall(signature, args)
-                if matches!(
-                    query,
-                    HirPreflightQuery::NamedCall {
-                        thaw_js_routed: true,
-                        ..
-                    }
-                ) && signature.backend == DynamicBackend::ThawJs =>
+                if matches!(query, HirPreflightQuery::NamedCall { .. })
+                    && signature.backend == DynamicBackend::ThawJs =>
             {
                 args.iter().any(|arg| match arg {
                     HirExpr::Call(callee, operands)
@@ -911,14 +814,8 @@ fn hir_contains_preflight_query(program: &HirProgram, query: HirPreflightQuery<'
             .any(|function| stmts(&function.body, query))
 }
 
-fn hir_contains_named_call(program: &HirProgram, name: &str, thaw_js_routed: bool) -> bool {
-    hir_contains_preflight_query(
-        program,
-        HirPreflightQuery::NamedCall {
-            name,
-            thaw_js_routed,
-        },
-    )
+fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
+    hir_contains_preflight_query(program, HirPreflightQuery::NamedCall { name })
 }
 
 fn hir_contains_non_arrow_this_value(program: &HirProgram) -> bool {
@@ -958,7 +855,6 @@ impl<'ctx> HirCompiler<'ctx> {
             function_ref_closures: HashMap::new(),
             module_exception_roots: Vec::new(),
             function_return_types: HashMap::new(),
-            proven_typed_quickjs_wrappers: HashSet::new(),
             ffi_signatures: HashMap::new(),
             catch_stack: Vec::new(),
             loop_scopes: Vec::new(),
@@ -980,19 +876,15 @@ impl<'ctx> HirCompiler<'ctx> {
             uses_thaw_js: false,
             uses_intl: false,
             uses_async_hooks: false,
-            thaw_js_routed: false,
             thaw_js_call_arguments: false,
-            uses_quickjs: false,
-            quickjs_blockers: Vec::new(),
             commonjs_entry: false,
-            uses_quickjs_handles: false,
             uses_thaw_js_handles: false,
             projects_native_objects: false,
             tracks_physical_object_layouts: false,
             tracks_object_integrity: false,
             tracks_owned_json_roots: false,
             stack_guard: false,
-            compiling_quickjs_dynamic_arguments: false,
+            compiling_js_dynamic_arguments: false,
             validating_native_argument: false,
             fresh_event_key_argument_scopes: Vec::new(),
             live_native_projection: None,
@@ -1004,30 +896,18 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
-    fn is_proven_typed_quickjs_wrapper(&self, name: &str) -> bool {
-        self.proven_typed_quickjs_wrappers.contains(name)
-    }
-
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
         self.share_error_setter = true;
         self.stack_guard = true;
         self.fn_locs = program.fn_locs.0.clone();
         self.class_layouts = program.class_layouts.clone();
-        self.projects_native_objects = hir_contains_named_call(
-            program,
-            "__thaw_build_native_object_wrapper",
-            self.thaw_js_routed,
-        ) || hir_contains_non_arrow_this_value(program);
-        self.tracks_physical_object_layouts = hir_contains_named_call(
-            program,
-            "__thaw_register_native_object_layout",
-            self.thaw_js_routed,
-        );
-        self.tracks_object_integrity = hir_contains_named_call(
-            program,
-            "__thaw_object_set_state_and_return",
-            self.thaw_js_routed,
-        );
+        self.projects_native_objects =
+            hir_contains_named_call(program, "__thaw_build_native_object_wrapper")
+                || hir_contains_non_arrow_this_value(program);
+        self.tracks_physical_object_layouts =
+            hir_contains_named_call(program, "__thaw_register_native_object_layout");
+        self.tracks_object_integrity =
+            hir_contains_named_call(program, "__thaw_object_set_state_and_return");
         self.declare_runtime_builtins();
         self.declare_exception_state();
         self.declare_globals(program)?;
@@ -1036,12 +916,6 @@ impl<'ctx> HirCompiler<'ctx> {
             .functions
             .iter()
             .map(|function| (function.name.clone(), function.ret.clone()))
-            .collect();
-        self.proven_typed_quickjs_wrappers = program
-            .functions
-            .iter()
-            .filter(|function| is_proven_typed_quickjs_wrapper(function))
-            .map(|function| function.name.clone())
             .collect();
 
         self.ffi_signatures = program
@@ -1070,14 +944,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map(|name| name.to_string())
                 .collect(),
         );
-        let quickjs_before_init = self.uses_quickjs;
         self.emit_top_level_init(program)?;
-        if !quickjs_before_init
-            && self.uses_quickjs
-            && std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
-        {
-            eprintln!("thaw-js routing: the top-level initializer needs QuickJS");
-        }
         for func in &program.functions {
             if func.name.starts_with("__thaw_lazy_module_")
                 && func.name["__thaw_lazy_module_".len()..]
@@ -1089,17 +956,7 @@ impl<'ctx> HirCompiler<'ctx> {
             {
                 continue;
             }
-            let quickjs_before = self.uses_quickjs;
             self.compile_function_body(func)?;
-            if !quickjs_before
-                && self.uses_quickjs
-                && std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
-            {
-                eprintln!(
-                    "thaw-js routing: `{}` is the first function that needs QuickJS",
-                    func.name
-                );
-            }
         }
 
         let has_main = self.module.get_function(USER_MAIN_SYMBOL).is_some();
@@ -1121,241 +978,23 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
 
-        // A routed build holds no QuickJS values: its `JsValue` handles live in the thaw-js heap, whose
-        // retain/release the thaw-js archive provides under its own names.
-        if self.thaw_js_routed && self.uses_thaw_js && !self.uses_quickjs {
-            for (quickjs, thaw_js) in [
-                ("thaw_js_retain_handle", "thaw_tjs_retain_handle"),
-                ("thaw_js_release_handle", "thaw_tjs_release_handle"),
-                (
-                    "thaw_js_release_all_handles",
-                    "thaw_tjs_release_all_handles",
-                ),
-                (
-                    "thaw_js_get_property_result",
-                    "thaw_tjs_get_property_result",
-                ),
-                (
-                    "thaw_js_get_property_json_key_result",
-                    "thaw_tjs_get_property_json_key_result",
-                ),
-                (
-                    "thaw_js_get_property_exact_result",
-                    "thaw_tjs_get_property_exact_result",
-                ),
-                (
-                    "thaw_js_capture_handle_graph_result",
-                    "thaw_tjs_capture_handle_graph_result",
-                ),
-                (
-                    "thaw_js_call_selected_method_graph_result",
-                    "thaw_tjs_call_selected_method_graph_result",
-                ),
-                (
-                    "thaw_js_call_selected_method_handle_graph_args_result",
-                    "thaw_tjs_call_selected_method_handle_graph_args_result",
-                ),
-                (
-                    "thaw_js_resolve_handle_graph_result",
-                    "thaw_tjs_resolve_handle_graph_result",
-                ),
-                ("thaw_js_handle_to_string", "thaw_tjs_handle_to_string"),
-                (
-                    "thaw_js_handle_to_console_string",
-                    "thaw_tjs_handle_to_console_string",
-                ),
-                (
-                    "thaw_js_handle_is_plain_data",
-                    "thaw_tjs_handle_is_plain_data",
-                ),
-                (
-                    "thaw_js_handle_typed_array_probe",
-                    "thaw_tjs_handle_typed_array_probe",
-                ),
-                (
-                    "thaw_js_exception_native_token",
-                    "thaw_tjs_exception_native_token",
-                ),
-                ("thaw_js_host_query_result", "thaw_tjs_host_query_result"),
-                (
-                    "thaw_js_host_date_set_result",
-                    "thaw_tjs_host_date_set_result",
-                ),
-                (
-                    "thaw_js_host_enumerate_result",
-                    "thaw_tjs_host_enumerate_result",
-                ),
-                (
-                    "thaw_js_set_property_graph_result",
-                    "thaw_tjs_set_property_graph_result",
-                ),
-                (
-                    "thaw_js_property_predicate_json_key_result",
-                    "thaw_tjs_property_predicate_json_key_result",
-                ),
-                (
-                    "thaw_js_error_from_tagged_handle",
-                    "thaw_tjs_error_from_tagged_handle",
-                ),
-                ("thaw_js_origin_serial", "thaw_tjs_origin_serial"),
-                ("thaw_js_engine_id", "thaw_tjs_engine_id"),
-                (
-                    "thaw_js_lookup_native_object",
-                    "thaw_tjs_lookup_native_object",
-                ),
-                (
-                    "thaw_js_intern_native_object",
-                    "thaw_tjs_intern_native_object",
-                ),
-                (
-                    "thaw_js_native_object_pointer",
-                    "thaw_tjs_native_object_pointer",
-                ),
-                ("thaw_js_get_global", "thaw_tjs_get_global"),
-                ("thaw_js_new_function", "thaw_tjs_new_function"),
-                (
-                    "thaw_js_call_handle_mixed_handle_graph_args_result",
-                    "thaw_tjs_call_handle_mixed_handle_graph_args_result",
-                ),
-                (
-                    "thaw_js_call_handle_mixed_handle_graph_args_consuming_result",
-                    "thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result",
-                ),
-                (
-                    "thaw_js_call_method_handle_graph_args_result",
-                    "thaw_tjs_call_method_handle_graph_args_result",
-                ),
-                (
-                    "thaw_js_set_property_json_graph_result",
-                    "thaw_tjs_set_property_json_graph_result",
-                ),
-                (
-                    "thaw_js_to_iterator_exact_result",
-                    "thaw_tjs_to_iterator_exact_result",
-                ),
-                (
-                    "thaw_js_to_async_iterator_exact_result",
-                    "thaw_tjs_to_async_iterator_exact_result",
-                ),
-                (
-                    "thaw_js_iterator_step_exact_result",
-                    "thaw_tjs_iterator_step_exact_result",
-                ),
-                (
-                    "thaw_js_register_native_method_callback_graph",
-                    "thaw_tjs_register_native_method_callback_graph",
-                ),
-                ("thaw_js_call_graph_result", "thaw_tjs_call_graph_result"),
-                (
-                    "thaw_js_release_native_handle_array",
-                    "thaw_tjs_release_native_handle_array",
-                ),
-                (
-                    "thaw_js_call_handle_value_graph_result",
-                    "thaw_tjs_call_handle_value_graph_result",
-                ),
-                (
-                    "thaw_js_construct_handle_graph_args_result",
-                    "thaw_tjs_construct_handle_graph_args_result",
-                ),
-                (
-                    "thaw_js_call_handle_handle_graph_args_result",
-                    "thaw_tjs_call_handle_handle_graph_args_result",
-                ),
-                (
-                    "thaw_js_call_handle_graph_result",
-                    "thaw_tjs_call_handle_graph_result",
-                ),
-                (
-                    "thaw_js_set_property_result",
-                    "thaw_tjs_set_property_result",
-                ),
-                (
-                    "thaw_js_delete_property_result",
-                    "thaw_tjs_delete_property_result",
-                ),
-                (
-                    "thaw_js_has_property_result",
-                    "thaw_tjs_has_property_result",
-                ),
-                (
-                    "thaw_js_resolve_handle_handle_result",
-                    "thaw_tjs_resolve_handle_handle_result",
-                ),
-                (
-                    "thaw_js_call_method_graph_result",
-                    "thaw_tjs_call_method_graph_result",
-                ),
-                (
-                    "thaw_js_call_handle_mixed_graph_result",
-                    "thaw_tjs_call_handle_mixed_graph_result",
-                ),
-                (
-                    "thaw_js_call_handle_mixed_exact_consuming_result",
-                    "thaw_tjs_call_handle_mixed_exact_consuming_result",
-                ),
-                (
-                    "thaw_js_call_handle_mixed_exact_resolved_consuming_result",
-                    "thaw_tjs_call_handle_mixed_exact_resolved_consuming_result",
-                ),
-                (
-                    "thaw_js_register_native_callback_graph",
-                    "thaw_tjs_register_native_callback_graph",
-                ),
-                (
-                    "thaw_js_register_native_method_callback_graph",
-                    "thaw_tjs_register_native_method_callback_graph",
-                ),
-                (
-                    "thaw_js_call_handle_mixed_handle_graph_args_result",
-                    "thaw_tjs_call_handle_mixed_handle_graph_args_result",
-                ),
-                (
-                    "thaw_js_call_handle_mixed_handle_graph_args_consuming_result",
-                    "thaw_tjs_call_handle_mixed_handle_graph_args_consuming_result",
-                ),
-                (
-                    "thaw_js_call_handle_with_this_graph_wire_result",
-                    "thaw_tjs_call_handle_with_this_graph_wire_result",
-                ),
-                (
-                    "thaw_js_event_key_handle_result",
-                    "thaw_tjs_event_key_handle_result",
-                ),
-                ("thaw_js_run_event_loop", "thaw_tjs_run_event_loop"),
-                ("thaw_js_drain_next_ticks", "thaw_tjs_drain_next_ticks"),
-                ("thaw_js_fatal_exit", "thaw_tjs_fatal_exit"),
-                ("thaw_js_run_cli", "thaw_tjs_run_cli"),
-                ("thaw_js_set_process_env", "thaw_tjs_set_process_env"),
-                (
-                    "thaw_js_terminal_work_pending",
-                    "thaw_tjs_terminal_work_pending",
-                ),
-                (
-                    "thaw_js_dynamic_object_query",
-                    "thaw_tjs_dynamic_object_query",
-                ),
-                (
-                    "thaw_js_emit_uncaught_result",
-                    "thaw_tjs_emit_uncaught_result",
-                ),
-                (
-                    "thaw_js_emit_unhandled_rejection_result",
-                    "thaw_tjs_emit_unhandled_rejection_result",
-                ),
-                (
-                    "thaw_js_emit_rejection_handled_result",
-                    "thaw_tjs_emit_rejection_handled_result",
-                ),
+        // These four are declared weak so a pure-native program (no JS engine) links without the thaw-js
+        // archive; once the program uses thaw-js, a weak reference would not pull their definitions out
+        // of the static archive, so they become strong.
+        if self.uses_thaw_js {
+            for name in [
+                "thaw_tjs_handle_is_plain_data",
+                "thaw_tjs_handle_to_console_string",
+                "thaw_tjs_handle_typed_array_probe",
+                "thaw_tjs_native_object_pointer",
             ] {
-                if let Some(function) = self.module.get_function(quickjs) {
-                    function.as_global_value().set_name(thaw_js);
-                    // A weak reference would not pull its definition out of the static thaw-js archive.
+                if let Some(function) = self.module.get_function(name) {
                     function.set_linkage(Linkage::External);
                 }
             }
-            self.js_unported_symbols_used();
         }
+        // thaw-js is gone: a `thaw_js_*` runtime symbol still referenced here has no thaw-js definition.
+        self.reject_unported_js_symbols()?;
         self.hoist_static_allocas();
         // Verification costs real time on large modules; debug builds (tests, CI's `cargo run`)
         // always verify, release builds only with `THAW_VERIFY_IR` set.
@@ -1440,24 +1079,6 @@ impl<'ctx> HirCompiler<'ctx> {
         self.codegen_opt = level;
     }
 
-    /// Whether the generated module actually calls the QuickJS fallback host.
-    /// Callers can omit that archive when every operation was lowered to the
-    /// native/JIT paths.
-    pub fn uses_quickjs(&self) -> bool {
-        self.uses_quickjs
-    }
-
-    /// The reasons `uses_quickjs` is set (see the field); empty when QuickJS is not needed.
-    pub fn quickjs_blockers(&self) -> &[String] {
-        &self.quickjs_blockers
-    }
-
-    /// Whether the generated module calls the N-API addon host.
-    /// Whether the program calls into the experimental thaw-js runtime (`DynamicBackend::ThawJs`).
-    pub fn set_thaw_js_routed(&mut self, routed: bool) {
-        self.thaw_js_routed = routed;
-    }
-
     /// Whether the program calls the native locale runtime (thaw-intl), which the
     /// linker must then be given.
     pub fn uses_intl(&self) -> bool {
@@ -1477,9 +1098,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// caller must rebuild without native timers.
     pub fn native_timers_conflict(&self) -> bool {
         self.uses_native_timers
-            && (self.uses_quickjs
-                || self.uses_quickjs_handles
-                || self.uses_thaw_js
+            && (self.uses_thaw_js
                 || self.uses_napi
                 || self.has_lambda_handler
                 || self.module.get_function("createServer").is_some())
@@ -2858,7 +2477,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// exactly this kind of downstream detection to thread the real
     /// handle through instead of a raw, mistyped integer. Previously
     /// only the JSON-args-array-construction call sites did this
-    /// (guarded by `compiling_quickjs_dynamic_arguments`); an *ordinary*
+    /// (guarded by `compiling_js_dynamic_arguments`); an *ordinary*
     /// function call reaching this path never did, so a real npm
     /// function's own generated Fallback wrapper receiving another such
     /// wrapper's `JsValue`-ish return value as an argument (real
@@ -2869,10 +2488,10 @@ impl<'ctx> HirCompiler<'ctx> {
     /// ("Call parameter type does not match function signature!") --
     /// passing a raw `i64` where the callee's declared parameter is a
     /// pointer. Uses the *unchecked* placeholder builder (no
-    /// `compiling_quickjs_dynamic_arguments` gate) since this path is
+    /// `compiling_js_dynamic_arguments` gate) since this path is
     /// never reached for an N-API/native-addon target (those have their
     /// own separate, dedicated call-compilation code, not this one) --
-    /// safe to assume a QuickJS-side reviver always exists downstream
+    /// safe to assume a thaw-js-side reviver always exists downstream
     /// wherever this specific mismatch can occur at all.
     fn build_call_with(
         &mut self,
@@ -2885,7 +2504,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .iter()
             .enumerate()
             .map(|(index, arg)| {
-                let outer = self.compiling_quickjs_dynamic_arguments;
+                let outer = self.compiling_js_dynamic_arguments;
                 // A bare pointer-typed parameter slot (`Json`/`Dictionary`/
                 // `Object`/`Array`/`Tuple`) can carry a nested `JsValue`
                 // needing this same placeholder mechanism, so those
@@ -2910,10 +2529,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .get(index)
                     .is_some_and(|ty| ty.is_pointer_type() || ty.is_struct_type())
                 {
-                    self.compiling_quickjs_dynamic_arguments = true;
+                    self.compiling_js_dynamic_arguments = true;
                 }
                 let value = self.compile_expr(arg);
-                self.compiling_quickjs_dynamic_arguments = outer;
+                self.compiling_js_dynamic_arguments = outer;
                 let value = value?;
                 let value = if value.is_int_value()
                     && param_types

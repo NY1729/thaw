@@ -2592,7 +2592,6 @@ fn json_discard_candidates_are_revoked_by_field_index_and_json_writes() {
     let context = inkwell::context::Context::create();
     let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_discard_write_sites");
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let function_ir = |name: &str| {
         inkwell::values::AnyValue::print_to_string(&compiler.module.get_function(name).unwrap()).to_string()
     };
@@ -2735,7 +2734,6 @@ fn json_to_f64_array_decode_reads_arraybuffer_leases_through_op_31_ir() {
     let context = inkwell::context::Context::create();
     let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_f64_array_arraybuffer_ir");
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string().to_string();
     let predicate = ir.find("call i8 @thaw_json_is_host_arraybuffer(").expect("ArrayBuffer predicate not called");
     let bytes = ir.find("call ptr @thaw_json_to_number_array(").expect("number[] byte conversion not called");

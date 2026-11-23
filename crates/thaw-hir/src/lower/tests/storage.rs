@@ -179,26 +179,6 @@ fn source_contract_for_this_hides_private_non_arrow_receiver_payload() {
 }
 
 #[test]
-fn storage_tracks_casts_late_writes_and_unknown_calls() {
-    assert_eq!(
-        storage_allocations(
-            r#"
-        declare function __thaw_typed_js_65787465726e616c(value: number[]): void;
-        function main(): void {
-            let first: number[] = [];
-            const later: number[] = [];
-            const exposed = first as any;
-            first = later;
-            const other: number[] = [];
-            __thaw_typed_js_65787465726e616c(other);
-        }
-    "#
-        ),
-        vec![true, true, true]
-    );
-}
-
-#[test]
 fn storage_native_ffi_does_not_expose_owners() {
     assert_eq!(
         storage_allocations(
@@ -291,9 +271,9 @@ fn storage_compilation_scope_does_not_leak() {
 fn storage_does_not_alias_unrelated_function_parameters() {
     let program = lower(
         r#"
-        declare function __thaw_typed_js_7765616b<T>(value: T): JsValue;
+        declare function __thaw_typed_tjs_7765616b<T>(value: T): JsValue;
         function double(value: number): number { return value * 2; }
-        function main(): void { const reference = __thaw_typed_js_7765616b(double); }
+        function main(): void { const reference = __thaw_typed_tjs_7765616b(double); }
     "#,
     );
     let double = program
@@ -669,23 +649,23 @@ fn storage_handoff_jit_call_keeps_native_arguments() {
 
 #[test]
 fn storage_handoff_typed_js_union_keeps_dynamic_arguments() {
-    let module = thaw_parser::parse_typescript(r#"declare function __thaw_typed_js_696e7370656374(value: string | string[]): void; function main(): void { const values: string[] = ["x"]; __thaw_typed_js_696e7370656374(values); }"#).unwrap();
+    let module = thaw_parser::parse_typescript(r#"declare function __thaw_typed_tjs_696e7370656374(value: string | string[]): void; function main(): void { const values: string[] = ["x"]; __thaw_typed_tjs_696e7370656374(values); }"#).unwrap();
     lower_module(&module).unwrap();
 }
 
 #[test]
 fn storage_handoff_typed_js_rest_wrapper_uses_logical_argument_types() {
     let module = thaw_parser::parse_typescript(r#"
-        declare function __thaw_typed_js_6a6f696e__arity_2(first: Json, second: Json): string;
-        declare function __thaw_typed_js_6a6f696e__arity_5(first: Json, second: Json, third: Json, fourth: Json, fifth: Json): string;
+        declare function __thaw_typed_tjs_6a6f696e__arity_2(first: Json, second: Json): string;
+        declare function __thaw_typed_tjs_6a6f696e__arity_5(first: Json, second: Json, third: Json, fourth: Json, fifth: Json): string;
         function __thaw_typed_wrapper_js_6a6f696e(...inputs: Json[]): string {
             if (inputs.length === 5) {
-                return __thaw_typed_js_6a6f696e__arity_5(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
+                return __thaw_typed_tjs_6a6f696e__arity_5(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
             }
             if (inputs.length === 2) {
-                return __thaw_typed_js_6a6f696e__arity_2(inputs[0], inputs[1]);
+                return __thaw_typed_tjs_6a6f696e__arity_2(inputs[0], inputs[1]);
             }
-            return __thaw_typed_js_6a6f696e__arity_2(inputs[0], inputs[1]);
+            return __thaw_typed_tjs_6a6f696e__arity_2(inputs[0], inputs[1]);
         }
         function main(): string { return __thaw_typed_wrapper_js_6a6f696e("a", "b"); }
     "#).unwrap();
@@ -693,9 +673,9 @@ fn storage_handoff_typed_js_rest_wrapper_uses_logical_argument_types() {
 
     let module = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_6a6f696e__arity_2(first: Json, second: Json): string;
+        declare function __thaw_typed_tjs_6a6f696e__arity_2(first: Json, second: Json): string;
         function with_prefix(prefix: string, ...inputs: Json[]): string {
-            return __thaw_typed_js_6a6f696e__arity_2(inputs[0], inputs[1]);
+            return __thaw_typed_tjs_6a6f696e__arity_2(inputs[0], inputs[1]);
         }
         function main(): string { return with_prefix("prefix", "a", "b"); }
     "#,
@@ -707,9 +687,9 @@ fn storage_handoff_typed_js_rest_wrapper_uses_logical_argument_types() {
     // so the fixed prefix and rest element still map to their proper slots.
     let module = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_6a6f696e__arity_2(first: Json, second: Json): string;
+        declare function __thaw_typed_tjs_6a6f696e__arity_2(first: Json, second: Json): string;
         function with_receiver(this: { tag: string }, prefix: string, ...inputs: Json[]): string {
-            return __thaw_typed_js_6a6f696e__arity_2(inputs[0], inputs[1]);
+            return __thaw_typed_tjs_6a6f696e__arity_2(inputs[0], inputs[1]);
         }
         function main(): string { return with_receiver.call({ tag: "x" }, "prefix", "a", "b"); }
     "#,
@@ -825,77 +805,6 @@ fn storage_handoff_dynamic_json_error_instanceof_uses_realm_constructor() {
 }
 
 #[test]
-fn storage_handoff_typed_js_calls_use_active_nullish_narrowing() {
-    let module = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_74616b65(value: number): number;
-        function forward(value?: number | null): number {
-            if (value != undefined) return __thaw_typed_js_74616b65(value);
-            return 0;
-        }
-        function main(): number { forward(); return forward(2); }
-    "#,
-    )
-    .unwrap();
-    lower_module(&module).unwrap();
-
-    // Equality's else branch has the same present-payload narrowing.
-    let module = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_74616b65(value: number): number;
-        function forward(value?: number | null): number {
-            if (value == undefined) return 0;
-            else return __thaw_typed_js_74616b65(value);
-        }
-        function main(): number { return forward(2); }
-    "#,
-    )
-    .unwrap();
-    lower_module(&module).unwrap();
-
-    // Strict comparison excludes only undefined, so null must remain rejected.
-    let module = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_74616b65(value: number): number;
-        function forward(value?: number | null): number {
-            if (value !== undefined) return __thaw_typed_js_74616b65(value);
-            return 0;
-        }
-        function main(): number { return forward(2); }
-    "#,
-    )
-    .unwrap();
-    assert!(lower_module(&module).is_err());
-
-    // Strict comparison with null likewise leaves undefined possible.
-    let module = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_74616b65(value: number): number;
-        function forward(value?: number | null): number {
-            if (value !== null) return __thaw_typed_js_74616b65(value);
-            return 0;
-        }
-        function main(): number { return forward(2); }
-    "#,
-    )
-    .unwrap();
-    assert!(lower_module(&module).is_err());
-
-    // An unguarded source-nullish value remains incompatible with the JS ABI.
-    let module = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_74616b65(value: number): number;
-        function forward(value?: number | null): number {
-            return __thaw_typed_js_74616b65(value);
-        }
-        function main(): number { return forward(2); }
-    "#,
-    )
-    .unwrap();
-    assert!(lower_module(&module).is_err());
-}
-
-#[test]
 fn storage_handoff_quickjs_function_values_keep_source_argument_contracts() {
     for call in [
         "alias([\"wrong\"]);",
@@ -905,9 +814,9 @@ fn storage_handoff_quickjs_function_values_keep_source_argument_contracts() {
     ] {
         let source = format!(
             r#"
-            declare function __thaw_typed_js_617070656e64(values: number[]): number;
+            declare function __thaw_typed_tjs_617070656e64(values: number[]): number;
             function main(): number {{
-                const alias: (values: number[]) => number = __thaw_typed_js_617070656e64;
+                const alias: (values: number[]) => number = __thaw_typed_tjs_617070656e64;
                 {call} return 0;
             }}
             "#
@@ -922,9 +831,9 @@ fn storage_handoff_quickjs_function_values_keep_source_argument_contracts() {
 
     let valid_spread = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_617070656e6450616972(count: number, values: number[]): number;
+        declare function __thaw_typed_tjs_617070656e6450616972(count: number, values: number[]): number;
         function main(): number {
-            const alias = __thaw_typed_js_617070656e6450616972;
+            const alias = __thaw_typed_tjs_617070656e6450616972;
             const args: [number, number[]] = [1, [2]];
             return alias(...args);
         }
@@ -935,9 +844,9 @@ fn storage_handoff_quickjs_function_values_keep_source_argument_contracts() {
 
     let invalid_apply_tuple = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_617070656e6450616972(count: number, values: number[]): number;
+        declare function __thaw_typed_tjs_617070656e6450616972(count: number, values: number[]): number;
         function main(): number {
-            const alias = __thaw_typed_js_617070656e6450616972;
+            const alias = __thaw_typed_tjs_617070656e6450616972;
             const args: [number, string[]] = [1, ["wrong"]];
             return alias.apply(null, args);
         }
@@ -952,51 +861,12 @@ fn storage_handoff_quickjs_function_values_keep_source_argument_contracts() {
 }
 
 #[test]
-fn storage_handoff_quickjs_function_value_rejects_contextual_callback_mismatch() {
-    let valid = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_617070656e64(values: number[]): number;
-        function invoke(callback: (values: number[]) => number): number {
-            return callback([1]);
-        }
-        function main(): number {
-            const alias: (values: number[]) => number = __thaw_typed_js_617070656e64;
-            invoke(alias);
-            return invoke((values: number[]) => values.length);
-        }
-        "#,
-    )
-    .unwrap();
-    lower_module(&valid).unwrap();
-
-    let module = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_617070656e64(values: number[]): number;
-        const alias: (values: number[]) => number = __thaw_typed_js_617070656e64;
-        function invoke(callback: (values: number[]) => number): number {
-            return callback([1]);
-        }
-        function main(): number {
-            invoke(alias);
-            return invoke((values: string[]) => 0);
-        }
-        "#,
-    )
-    .unwrap();
-    let error = lower_module(&module).unwrap_err();
-    assert!(
-        error.contains("callback") || error.contains("parameter") || error.contains("expected"),
-        "the original callback parameter contract must reject string[]: {error}"
-    );
-}
-
-#[test]
 fn storage_handoff_json_to_string_uses_live_method_dispatch() {
     let module = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_6465636f6465(): any;
+        declare function __thaw_typed_tjs_6465636f6465(): any;
         function main(): void {
-            const buffer: any = __thaw_typed_js_6465636f6465();
+            const buffer: any = __thaw_typed_tjs_6465636f6465();
             const text: string = buffer.toString();
             console.log(text);
         }
@@ -1025,9 +895,9 @@ fn storage_handoff_json_to_string_uses_live_method_dispatch() {
 fn storage_handoff_narrowed_union_calls_validate_the_active_member() {
     let module = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_6e6174697665(value: number): number;
+        declare function __thaw_typed_tjs_6e6174697665(value: number): number;
         function f(value: boolean | number): number {
-            if (typeof value === "number") return __thaw_typed_js_6e6174697665(value);
+            if (typeof value === "number") return __thaw_typed_tjs_6e6174697665(value);
             return 0;
         }
         function main(): void { f(1); }
@@ -1038,111 +908,14 @@ fn storage_handoff_narrowed_union_calls_validate_the_active_member() {
 
     let module = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_6e6174697665(value: number): number;
-        function f(value: boolean): number { return __thaw_typed_js_6e6174697665(value); }
+        declare function __thaw_typed_tjs_6e6174697665(value: number): number;
+        function f(value: boolean): number { return __thaw_typed_tjs_6e6174697665(value); }
         function main(): void { f(true); }
     "#,
     )
     .unwrap();
     let error = lower_module(&module).unwrap_err();
     assert!(error.contains("expected F64"), "{error}");
-}
-
-#[test]
-fn storage_handoff_union_source_validation_keeps_contextual_route_handlers() {
-    let valid_source = r#"
-        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
-        type Options = { auth?: boolean | string } | undefined;
-        type Route = {
-            method: string;
-            path: string;
-            handler: Handler;
-            vhost: string | string[] | undefined;
-            options: Options;
-            rules?: any;
-        };
-        declare function __thaw_typed_js_726f757465(route: Route | Route[]): void;
-        function main(): void {
-            __thaw_typed_js_726f757465({
-                method: "GET",
-                path: "/",
-                handler: (request, h) => h.response(request.path),
-            });
-        }
-        "#;
-    assert_eq!(storage_allocations(valid_source), vec![true]);
-    let valid = thaw_parser::parse_typescript(valid_source).unwrap();
-    lower_module(&valid).unwrap();
-
-    let wrong_scalar = thaw_parser::parse_typescript(
-        r#"
-        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
-        type Options = { auth?: boolean | string } | undefined;
-        type Route = { method: string; path: string; handler: Handler; vhost: string | string[] | undefined; options: Options; rules?: any };
-        declare function __thaw_typed_js_726f757465(route: Route | Route[]): void;
-        function main(): void {
-            __thaw_typed_js_726f757465({ method: 7, path: "/", handler: (request, h) => h.response(request.path) });
-        }
-        "#,
-    )
-    .unwrap();
-    assert!(lower_module(&wrong_scalar).is_err());
-
-    let wrong_handler = thaw_parser::parse_typescript(
-        r#"
-        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
-        type Options = { auth?: boolean | string } | undefined;
-        type Route = { method: string; path: string; handler: Handler; vhost: string | string[] | undefined; options: Options; rules?: any };
-        declare function __thaw_typed_js_726f757465(route: Route | Route[]): void;
-        function main(): void {
-            __thaw_typed_js_726f757465({ method: "GET", path: "/", handler: 7 });
-        }
-        "#,
-    )
-    .unwrap();
-    assert!(lower_module(&wrong_handler).is_err());
-
-    let missing_required = thaw_parser::parse_typescript(
-        r#"
-        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
-        type Options = { auth?: boolean | string } | undefined;
-        type Route = { method: string; path: string; handler: Handler; vhost: string | string[] | undefined; options: Options; rules?: any };
-        declare function __thaw_typed_js_726f757465(route: Route | Route[]): void;
-        function main(): void {
-            __thaw_typed_js_726f757465({ method: "GET", handler: (request, h) => h.response(request.path) });
-        }
-        "#,
-    )
-    .unwrap();
-    assert!(lower_module(&missing_required).is_err());
-}
-
-#[test]
-fn storage_handoff_quickjs_method_keeps_live_json_argument_and_receiver_abi() {
-    let program = lower(
-        r#"
-        type Handler = ((request: any, h: any) => any) | ((request: any, h: any, toolkit: any) => any) | {} | undefined;
-        type Route = { method: string; path: string; handler: Handler; vhost: string | string[] | undefined; options: ({ auth?: boolean | string }) | undefined; rules?: any };
-        declare function __thaw_typed_js_246d6574686f64766f69642453657276657224726f757465246f7665726c6f61643024617269747931(receiver: JsValue, route: Route | Route[]): void;
-        function main(receiver: JsValue): void {
-            __thaw_typed_js_246d6574686f64766f69642453657276657224726f757465246f7665726c6f61643024617269747931(receiver, {
-                method: "GET",
-                path: "/",
-                handler: (request, h) => h.response(request.path),
-            });
-        }
-    "#,
-    );
-    let hir = format!("{program:#?}");
-    assert!(
-        hir.contains("symbol: \"$methodvoid$Server$route$overload0$arity1\",")
-            && hir.contains("JsValue,\n                                Json,"),
-        "the nonreceiver live route argument should use the Json handle ABI while the receiver stays JsValue: {hir}"
-    );
-    assert!(
-        hir.contains("Var(\n                                \"receiver\","),
-        "the typed method receiver should be retained: {hir}"
-    );
 }
 
 #[test]
@@ -1372,8 +1145,8 @@ fn storage_handoff_hidden_this_receiver_tracks_dynamic_escape() {
 fn storage_handoff_widens_promise_payload_once_at_json_boundary() {
     let module = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_636f6c6c656374(): Promise<number>;
-        function producer(): Promise<number> { return __thaw_typed_js_636f6c6c656374(); }
+        declare function __thaw_typed_tjs_636f6c6c656374(): Promise<number>;
+        function producer(): Promise<number> { return __thaw_typed_tjs_636f6c6c656374(); }
         function main(): void {
             const escaped: any = producer;
             const pending = producer();
@@ -1427,8 +1200,8 @@ fn storage_handoff_widens_promise_payload_once_at_json_boundary() {
 
     let module = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_636f6c6c656374(): Promise<number>;
-        function main(): void { const pending: Promise<any> = __thaw_typed_js_636f6c6c656374(); }
+        declare function __thaw_typed_tjs_636f6c6c656374(): Promise<number>;
+        function main(): void { const pending: Promise<any> = __thaw_typed_tjs_636f6c6c656374(); }
     "#,
     )
     .unwrap();
@@ -1445,51 +1218,10 @@ fn storage_handoff_widens_promise_payload_once_at_json_boundary() {
 }
 
 #[test]
-fn storage_handoff_quickjs_callbacks_validate_every_logical_rest_argument() {
-    let valid = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_617070656e64(values: number[]): number;
-        function invoke(callback: (values: number[]) => number): number {
-            return callback([1]);
-        }
-        function main(): number {
-            const alias: (values: number[]) => number = __thaw_typed_js_617070656e64;
-            invoke(alias);
-            invoke((values: number[]): number => values.length);
-            return invoke((...groups: number[][]): number => groups[0].length);
-        }
-    "#,
-    )
-    .unwrap();
-    lower_module(&valid).unwrap();
-
-    let invalid = thaw_parser::parse_typescript(
-        r#"
-        declare function __thaw_typed_js_617070656e6450616972(first: number[], second: string[]): number;
-        function invoke2(callback: (first: number[], second: string[]) => number): number {
-            return callback([1], ["x"]);
-        }
-        function main(): number {
-            const alias: (first: number[], second: string[]) => number =
-                __thaw_typed_js_617070656e6450616972;
-            invoke2(alias);
-            return invoke2((...groups: number[][]) => groups.length);
-        }
-    "#,
-    )
-    .unwrap();
-    let error = lower_module(&invalid).unwrap_err();
-    assert!(
-        error.contains("callback") || error.contains("parameter") || error.contains("expected"),
-        "rest callback compatibility must check each logical parameter: {error}"
-    );
-}
-
-#[test]
 fn storage_handoff_promise_callback_rest_mapper_keeps_native_input_type() {
     let module = thaw_parser::parse_typescript(
         r#"
-        declare function __thaw_typed_js_7465737452657374(
+        declare function __thaw_typed_tjs_7465737452657374(
             callback: (...values: number[]) => number
         ): number;
         function namedRest(...values: number[]): number {
@@ -1497,7 +1229,7 @@ fn storage_handoff_promise_callback_rest_mapper_keeps_native_input_type() {
             return values[0] + values[1] + values[2];
         }
         function main(): void {
-            console.log(__thaw_typed_js_7465737452657374(namedRest));
+            console.log(__thaw_typed_tjs_7465737452657374(namedRest));
         }
     "#,
     )

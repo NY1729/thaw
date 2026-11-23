@@ -190,9 +190,9 @@ fn resolves_namespace_scoped_types_used_by_flattened_ambient_functions() {
 fn generated_dynamic_wrappers_preserve_json_callback_boundaries() {
     let program = lower(
         r#"
-        declare function __thaw_typed_js_66(value: Json): JsValue;
+        declare function __thaw_typed_tjs_66(value: Json): JsValue;
         function __thaw_typed_wrapper_js_66(value: Json): JsValue {
-            return __thaw_typed_js_66(value);
+            return __thaw_typed_tjs_66(value);
         }
         function forward(value: Json): JsValue {
             return __thaw_typed_wrapper_js_66(value);
@@ -345,73 +345,6 @@ fn coerces_arguments_of_a_generic_ambient_call_to_the_substituted_type() {
     );
 }
 
-
-#[test]
-fn marks_fresh_json_arguments_for_ordinary_quickjs_returns_only() {
-    let program = lower(
-        r#"
-        declare function __thaw_typed_wrapper_js_66(value: Json): JsValue;
-        declare function __thaw_typed_js_6563686f(value: Json): JsValue;
-        declare function __thaw_typed_js_67656e65726963<T>(value: Json, key: T): JsValue;
-        declare function __thaw_typed_js_69735265616479(value: Json): boolean;
-        declare function __thaw_typed_js_766f6964(value: Json): void;
-        declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
-        declare function __thaw_typed_wrapper_js_user_store(value: Json): Json;
-        declare function consume_json(value: Json): void;
-        function main(live: JsValue): void {
-            __thaw_typed_js_6563686f(live);
-        }
-        function generated_wrapper(live: JsValue): void {
-            __thaw_typed_wrapper_js_66(live);
-        }
-        function generic(live: JsValue): void {
-            __thaw_typed_js_67656e65726963<string>(live, "key");
-        }
-        function boolean_result(live: JsValue): void {
-            __thaw_typed_js_69735265616479(live);
-        }
-        function void_result(live: JsValue): void {
-            __thaw_typed_js_766f6964(live);
-        }
-        function nested_unproven_store(live: JsValue, key: JsValue): void {
-            __thaw_typed_js_70616972(__thaw_typed_wrapper_js_user_store(live), key);
-        }
-        function borrowed(value: Json): void {
-            __thaw_typed_js_6563686f(value);
-            consume_json(value);
-        }
-        "#,
-    );
-    let function_body = |name: &str| {
-        format!(
-            "{:?}",
-            program.functions.iter().find(|function| function.name == name).unwrap().body
-        )
-    };
-    for name in ["main", "generated_wrapper", "generic", "boolean_result", "void_result"] {
-        let body = function_body(name);
-        assert!(
-            body.contains("__thaw_mark_typed_wrapper_json_argument"),
-            "{name}: {body}"
-        );
-    }
-    {
-        let name = "borrowed";
-        let body = function_body(name);
-        assert!(
-            !body.contains("__thaw_mark_typed_wrapper_json_argument"),
-            "{name}: {body}"
-        );
-    }
-    assert!(function_body("borrowed").contains("consume_json"));
-    let nested = function_body("nested_unproven_store");
-    assert!(nested.contains("backend: QuickJs"), "{nested}");
-    assert!(nested.contains("symbol: \"pair\""), "{nested}");
-    assert!(nested.contains("ret: JsValue"), "{nested}");
-    assert!(nested.contains("__thaw_mark_typed_wrapper_json_argument"), "{nested}");
-    assert!(nested.contains("Str(\"wrapper\")"), "{nested}");
-    assert!(nested.contains("__thaw_typed_wrapper_js_user_store"), "{nested}");
-}
 
 #[test]
 fn marks_only_live_json_coercions_to_napi_constructors() {

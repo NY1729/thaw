@@ -27,9 +27,9 @@ const NATIVE_RECEIVER_FIELD_SOURCE: &str =
 
 #[test]
 fn native_receiver_routed_query_uses_the_thaw_js_owner_symbol() {
-    let (uses_thaw_js, uses_quickjs, ir) =
+    let (uses_thaw_js, ir) =
         compile_routed(NATIVE_RECEIVER_MAP_SOURCE, "native_receiver_map");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(uses_thaw_js, "{ir}");
     assert!(
         native_receiver_call_line(&ir, "@thaw_tjs_native_object_pointer(").is_some(),
         "{ir}"
@@ -47,9 +47,9 @@ fn native_receiver_routed_query_uses_the_thaw_js_owner_symbol() {
 
 #[test]
 fn native_receiver_routed_field_write_on_a_class_wrapper_uses_the_thaw_js_owner_symbol() {
-    let (uses_thaw_js, uses_quickjs, ir) =
+    let (uses_thaw_js, ir) =
         compile_routed(NATIVE_RECEIVER_FIELD_SOURCE, "native_receiver_field");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(uses_thaw_js, "{ir}");
     assert!(
         native_receiver_call_line(&ir, "@thaw_tjs_native_object_pointer(").is_some(),
         "{ir}"

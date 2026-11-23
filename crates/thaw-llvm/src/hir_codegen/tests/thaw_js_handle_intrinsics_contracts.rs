@@ -1,18 +1,13 @@
-// thaw-js (`JsEngine::ThawJs`): the live-handle intrinsics (property reads, selected method calls,
+// thaw-js (`DynamicBackend::ThawJs`): the live-handle intrinsics (property reads, selected method calls,
 // exception capture, console probes) resolve to `thaw_tjs_*` and the build links no QuickJS.
 
-fn thaw_js_routed_ir(source: &str, routed: bool) -> (bool, bool, String) {
+fn thaw_js_routed_ir(source: &str) -> (bool, String) {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "thaw_js_handles");
-    compiler.set_thaw_js_routed(routed);
     compiler.compile_program(&program).unwrap();
-    (
-        compiler.uses_thaw_js(),
-        compiler.uses_quickjs(),
-        compiler.print_to_string(),
-    )
+    (compiler.uses_thaw_js(), compiler.print_to_string())
 }
 
 const THAW_JS_HANDLE_PROGRAM: &str =
@@ -27,8 +22,8 @@ const THAW_JS_HANDLE_PROGRAM: &str =
 
 #[test]
 fn thaw_js_routed_handle_intrinsics_name_only_thaw_tjs_symbols() {
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(THAW_JS_HANDLE_PROGRAM, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(THAW_JS_HANDLE_PROGRAM);
+    assert!(uses_thaw_js, "{ir}");
     for symbol in [
         "thaw_tjs_get_property_result",
         "thaw_tjs_retain_handle",
@@ -62,7 +57,7 @@ fn routed_absent_global_reads_through_the_handle_lane() {
        const truthy = navigator ? 1 : 0;
        console.log(kind, missing, truthy, String(navigator));
      }";
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(source);
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("thaw_tjs_get_global"), "{ir}");
 }

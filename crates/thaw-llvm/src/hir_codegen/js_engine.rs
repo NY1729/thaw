@@ -1,45 +1,14 @@
-/// The engine behind live `JsValue` handles in this build, chosen once from the routing. Each
-/// handle intrinsic maps to one method here, so a thaw-js build never names a QuickJS symbol;
-/// add the remaining intrinsics (get_property, call_selected_method_graph, ...) the same way.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum JsEngine {
-    QuickJs,
-    ThawJs,
-}
-
 impl<'ctx> HirCompiler<'ctx> {
-    fn js_engine(&self) -> JsEngine {
-        if self.thaw_js_routed {
-            JsEngine::ThawJs
-        } else {
-            JsEngine::QuickJs
-        }
-    }
-
-    /// Record that the program holds live JS handles (QuickJS: starts the runtime; thaw-js: loads the archive).
+    /// Record that the program holds live JS handles: the thaw-js archive must be linked.
     fn js_mark_handles_used(&mut self) {
-        match self.js_engine() {
-            JsEngine::QuickJs => {
-                self.note_quickjs("handles");
-                self.uses_quickjs_handles = true;
-            }
-            JsEngine::ThawJs => {
-                self.uses_thaw_js = true;
-                self.uses_thaw_js_handles = true;
-            }
-        }
+        self.uses_thaw_js = true;
+        self.uses_thaw_js_handles = true;
     }
 
-    /// Mark the build as needing QuickJS and record why (`site:<name>`), so a routed build that falls
-    /// back says which lowering demanded it (`quickjs_blockers`).
-    pub(crate) fn note_quickjs(&mut self, site: &'static str) {
-        self.note_quickjs_blocker(format!("site:{site}"));
-    }
-
-    /// After the thaw-js renames: a routed build still calling a QuickJS symbol needs QuickJS, so
-    /// the build falls back to it instead of failing to link. Every such symbol is recorded
-    /// (`unported:<name>`), not only the first.
-    pub(crate) fn js_unported_symbols_used(&mut self) {
+    /// A `thaw_js_*` runtime symbol still called after codegen has no thaw-js definition (every
+    /// ported symbol is declared under its `thaw_tjs_*` name), so the program cannot link: report
+    /// every such symbol instead of failing in the linker.
+    pub(crate) fn reject_unported_js_symbols(&self) -> Result<(), String> {
         let mut called: Vec<String> = self
             .module
             .get_functions()
@@ -49,22 +18,19 @@ impl<'ctx> HirCompiler<'ctx> {
             })
             .map(|function| function.get_name().to_string_lossy().into_owned())
             .collect();
+        if called.is_empty() {
+            return Ok(());
+        }
         called.sort();
-        for name in called {
-            self.note_quickjs_blocker(format!("unported:{name}"));
-        }
+        Err(format!(
+            "no thaw-js implementation of the runtime symbol(s) {}",
+            called.join(", ")
+        ))
     }
 
-    fn note_quickjs_blocker(&mut self, blocker: String) {
-        self.uses_quickjs = true;
-        if !self.quickjs_blockers.contains(&blocker) {
-            self.quickjs_blockers.push(blocker);
-        }
-    }
-
-    /// Whether the program holds live JS handles under either engine.
+    /// Whether the program holds live JS handles.
     fn js_handles_used(&self) -> bool {
-        self.uses_quickjs_handles || self.uses_thaw_js_handles
+        self.uses_thaw_js_handles
     }
 
     /// Retain the value graph wire `wire` as a handle: `{ handle: i64, error: ptr }`.
@@ -73,14 +39,10 @@ impl<'ctx> HirCompiler<'ctx> {
         wire: BasicValueEnum<'ctx>,
         name: &str,
     ) -> Result<inkwell::values::StructValue<'ctx>, String> {
-        let symbol = match self.js_engine() {
-            JsEngine::QuickJs => "thaw_js_retain_graph_result",
-            JsEngine::ThawJs => "thaw_tjs_retain_graph_result",
-        };
         Ok(self
             .builder
             .build_call(
-                self.module.get_function(symbol).unwrap(),
+                self.module.get_function("thaw_tjs_retain_graph_result").unwrap(),
                 &[wire.into()],
                 name,
             )

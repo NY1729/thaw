@@ -1,4 +1,4 @@
-// thaw-js (`JsEngine::ThawJs`): a value export served as a handle (`$value$pkg::name$arity0`) and
+// thaw-js (`DynamicBackend::ThawJs`): a value export served as a handle (`$value$pkg::name$arity0`) and
 // calls of it (`chalk.red("x")`, `marked.parse(..)`) name only `thaw_tjs_*` symbols.
 
 fn thaw_js_value_export_program(statement: &str) -> String {
@@ -16,8 +16,8 @@ fn thaw_js_value_export_program(statement: &str) -> String {
 fn thaw_js_routed_value_export_handle_calls_link_no_quickjs() {
     for statement in ["const text: JsValue = chalk.red(\"x\"); console.log(text);"] {
         let source = thaw_js_value_export_program(statement);
-        let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-        assert!(uses_thaw_js && !uses_quickjs, "{statement}\n{ir}");
+        let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+        assert!(uses_thaw_js, "{statement}\n{ir}");
         assert!(ir.contains("@thaw_tjs_class_call("), "{statement}\n{ir}");
         assert!(
             !ir.lines().any(|line| {

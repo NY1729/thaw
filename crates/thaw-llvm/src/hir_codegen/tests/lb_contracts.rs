@@ -50,13 +50,10 @@ fn lb_contract_ffi_map_copyin_failing_at_third_entry_is_clean() {
     "#
     );
     let module = thaw_parser::parse_typescript(&source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "lb_ffi_map_copyin_failure");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     if let Ok(path) = std::env::var("LB_DUMP_IR") {
         std::fs::write(path, compiler.module.print_to_string().to_string()).unwrap();
     }

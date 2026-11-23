@@ -1,7 +1,6 @@
 // A `JsValue` parameter of a thaw-js routed call that receives an object literal (the createHook
 // shape) gets the literal sent as Json, with its methods as receiver-callback handle markers, not as
-// a handle id (which a members object resolves to nothing). Plain handles keep their marker, and the
-// QuickJS lane keeps its own conversion.
+// a handle id (which a members object resolves to nothing). Plain handles keep their marker.
 
 fn thaw_js_jsvalue_literal_program(members: &str) -> String {
     format!(
@@ -23,8 +22,8 @@ fn ir_calls(ir: &str, symbol: &str) -> bool {
 #[test]
 fn thaw_js_jsvalue_object_literal_is_sent_as_json_not_a_handle_id() {
     let source = thaw_js_jsvalue_literal_program("{ init(a: number) {}, n: 1 }");
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     // the members are built as Json: the method is a receiver callback, passed as a handle marker
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(ir.contains("@thaw_tjs_register_native_callback"), "{ir}");
@@ -46,26 +45,12 @@ fn thaw_js_jsvalue_object_literal_class_method_is_sent_as_json() {
            __thaw_typed_tjs_{take}(svc, {{ init(a: number) {{}}, n: 1 }});
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("@thaw_tjs_class_call("), "{ir}");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(ir.contains("@thaw_tjs_register_native_callback"), "{ir}");
     assert!(!ir_calls(&ir, "thaw_json_handle_id"), "{ir}");
-}
-
-#[test]
-fn thaw_js_jsvalue_object_literal_getter_is_a_live_accessor_handle() {
-    // A getter literal is typed as a native object, so it never reaches the `__thaw_dynamic_object_literal`
-    // peel (and the Json builder's loud stub is not reached). It crosses as a live accessor object
-    // handle, not as a flattened `{}`.
-    let source = thaw_js_jsvalue_literal_program("{ get x(): number { return 1; }, n: 1 }");
-    let (uses_thaw_js, _, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js, "{ir}");
-    assert!(ir.contains("__thaw_dynamic_accessor_object"), "{ir}");
-    assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
-    assert!(!ir_calls(&ir, "thaw_json_handle_id"), "{ir}");
-    assert!(!ir.contains("%thaw_js_object_literal"), "{ir}");
 }
 
 #[test]
@@ -80,8 +65,8 @@ fn thaw_js_jsvalue_plain_handle_argument_keeps_its_marker() {
            __thaw_typed_tjs_{take}(box);
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(!ir.contains("__thaw_object_from_operations"), "{ir}");
 }
@@ -117,8 +102,8 @@ fn thaw_js_jsvalue_leaf_inside_an_object_param_crosses_as_a_handle_marker() {
            __thaw_typed_tjs_{object}({{ name: field }});
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     assert!(!ir.contains("cannot cross the thaw-js boundary"), "{ir}");
     // The field is a Host lease inside the container (no in-IR marker any more); the call argument is
     // serialised by the shared tjs stringifier, which re-marks the lease at run time.

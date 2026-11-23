@@ -12,7 +12,7 @@ fn native_timer_run(source: &str, name: &str) -> (String, String, Option<i32>) {
     let mut compiler = HirCompiler::new(&context, name);
     compiler.compile_program(&program).unwrap();
     assert!(compiler.uses_native_timers(), "timers must lower natively");
-    assert!(!compiler.uses_quickjs(), "native timers must not create the JS realm");
+    assert!(!compiler.uses_thaw_js(), "native timers must not create the JS realm");
     assert!(!compiler.native_timers_conflict());
     drop(compiler);
     thaw_hir::set_native_timers(true);

@@ -2597,7 +2597,7 @@ impl<'a> FnLowerer<'a> {
                                 // Json copy of a caught Error (e.g. after `e.code = ...`) can be a
                                 // live Error lease: ask its identity too (same helper as the
                                 // direct Json arm). Non-routed lowering is unchanged.
-                                let identity = if extends_error_family && crate::lower::thaw_js_routed() {
+                                let identity = if extends_error_family {
                                     let native = HirExpr::Call(
                                         Box::new(HirExpr::Var("__thaw_json_is_error_instance".into())),
                                         vec![
@@ -5092,10 +5092,6 @@ impl<'a> FnLowerer<'a> {
                                         | "callDynamicValueMixed"
                                         | "callDynamicValueMixedExact"
                                         | "callDynamicValueWithValue"))
-                    ) || matches!(
-                        &value,
-                        HirExpr::DynamicCall(signature, _)
-                            if signature.backend == DynamicBackend::QuickJs
                     );
                     // A Json result may still be a thenable (the host awaits Promises, not user thenables).
                     if value_type == HirType::Json {

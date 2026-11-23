@@ -2,7 +2,17 @@
 /// The one serializer for a JSON argument that crosses into a host backend. A `_graph_result` backend takes
 /// the graph wire (a lease is an `hdl` token). Every other `thaw_tjs_*` backend takes
 /// `thaw_json_stringify_tjs`, which re-marks each Host lease as `{"__thaw_tjs_handle__": id}`; thaw-js
-/// `to_value` maps the marker back to the live value. Anything else is a QuickJS/N-API plain stringify.
+/// `to_value` maps the marker back to the live value. Anything else is a thaw-js/N-API plain stringify.
+/// The `callDynamic` / `callDynamicValue` intrinsics: the two thaw-js host calls that take their arguments
+/// as a plain graph and report errors as plain text (the typed `thaw_tjs_*` calls use handle markers and
+/// framed errors instead).
+fn is_host_intrinsic_call(backend_symbol: &str) -> bool {
+    matches!(
+        backend_symbol,
+        "thaw_tjs_call_graph_result" | "thaw_tjs_call_handle_graph_result"
+    )
+}
+
 pub(crate) fn json_argument_stringifier(backend_symbol: &str) -> &'static str {
     if backend_symbol.ends_with("_graph_result") {
         "thaw_json_graph_encode"
@@ -20,11 +30,8 @@ impl<'ctx> HirCompiler<'ctx> {
         backend_symbol: &str,
         source_name: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if backend_symbol.starts_with("thaw_js_") && self.js_engine() == JsEngine::ThawJs {
-            // Symbols without a `thaw_tjs_*` twin are caught after the renames (`js_unported_symbols_used`).
+        if is_host_intrinsic_call(backend_symbol) {
             self.js_mark_handles_used();
-        } else if backend_symbol.starts_with("thaw_js_") {
-            self.note_quickjs("encoding:thaw_js_symbol");
         }
         if backend_symbol.starts_with("thaw_napi_") {
             self.uses_napi = true;
@@ -34,7 +41,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "{source_name} expects exactly two arguments (name, args)"
             ));
         };
-        if backend_symbol.starts_with("thaw_js_") {
+        if is_host_intrinsic_call(backend_symbol) {
             return self.compile_with_owned_inline_dynamic_callee(
                 name,
                 "json_backend_callee_cleanup",
@@ -59,14 +66,14 @@ impl<'ctx> HirCompiler<'ctx> {
         // `JsValue`-typed element nested in `call_args` (e.g. a
         // `registerNativeCallback` result) needs this flag set while it's
         // being marshaled, same as the method-call and typed-ambient-
-        // declaration paths -- only meaningful for the QuickJS-NG backend,
+        // declaration paths -- only meaningful for the thaw-js backend,
         // N-API has no such reviver.
-        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
-        if backend_symbol.starts_with("thaw_js_") {
-            self.compiling_quickjs_dynamic_arguments = true;
+        let outer_compiling_js_dynamic_arguments = self.compiling_js_dynamic_arguments;
+        if is_host_intrinsic_call(backend_symbol) {
+            self.compiling_js_dynamic_arguments = true;
         }
         let args_json_val = self.compile_expr(call_args);
-        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = outer_compiling_js_dynamic_arguments;
         let args_json_val = args_json_val?;
 
         self.compile_json_backend_values(name_val, args_json_val, backend_symbol)
@@ -109,7 +116,8 @@ impl<'ctx> HirCompiler<'ctx> {
             args_json_str, &[args_json_val], &[], &[], &raw_owned_handles,
         )?;
         // A thaw-js call carries handle markers as text, so its fresh handles must outlive the call.
-        let release_after_call = backend_symbol.starts_with("thaw_tjs_");
+        let release_after_call =
+            backend_symbol.starts_with("thaw_tjs_") && !is_host_intrinsic_call(backend_symbol);
         if !release_after_call {
             self.release_fresh_event_key_handles(owned_handles)?;
         }
@@ -143,8 +151,8 @@ impl<'ctx> HirCompiler<'ctx> {
             self.release_fresh_event_key_handles(owned_handles)?;
         }
         // A typed thaw-js call that threw a JS object hands that exact object over (identity, own properties,
-        // later mutation), as the QuickJS lane's exact call does; the framed text below stays the fallback.
-        if backend_symbol == "thaw_tjs_call_typed_result" && self.js_engine() == JsEngine::ThawJs {
+        // later mutation), as the thaw-js lane's exact call does; the framed text below stays the fallback.
+        if backend_symbol == "thaw_tjs_call_typed_result" {
             let thrown = self
                 .builder
                 .build_call(
@@ -182,14 +190,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_call(self.module.get_function(symbol).unwrap(), &[value.into()], name)
                     .map_err(|e| e.to_string())?;
             }
-            self.compile_throw_original_quickjs_exception_handle(thrown.into(), true)?;
+            self.compile_throw_original_js_exception_handle(thrown.into(), true)?;
             self.builder
                 .build_unconditional_branch(plain)
                 .map_err(|e| e.to_string())?;
             self.builder.position_at_end(plain);
         }
         // A thaw-js error string becomes the framed `Error` (name, message, code, properties) it was.
-        let error = if backend_symbol.starts_with("thaw_tjs_") {
+        let error = if backend_symbol.starts_with("thaw_tjs_") && !is_host_intrinsic_call(backend_symbol) {
             self.compile_thaw_js_frame_error(error)?
         } else {
             error
@@ -216,7 +224,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.branch_on_pending_exception()?;
 
         let parsed = if backend_symbol.ends_with("_graph_result") {
-            self.compile_decode_quickjs_graph(result_json_str.into())?
+            self.compile_decode_js_graph(result_json_str.into())?
         } else {
             let parse_fn = self.module.get_function("thaw_json_parse").unwrap();
             let parsed = self.builder.build_call(parse_fn, &[result_json_str.into()], "call_dynamic_result")
@@ -1287,7 +1295,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(invalid_capacity);
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_handle").unwrap(), &[handle.into()],
+            self.module.get_function("thaw_tjs_release_handle").unwrap(), &[handle.into()],
             "release_unappended_native_symbol_overflow",
         ).map_err(|error| error.to_string())?;
         self.release_native_handle_ledger(ledger)?;
@@ -1312,7 +1320,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(allocation_failed);
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_handle").unwrap(), &[handle.into()],
+            self.module.get_function("thaw_tjs_release_handle").unwrap(), &[handle.into()],
             "release_unappended_native_symbol_allocation_failure",
         ).map_err(|error| error.to_string())?;
         self.release_native_handle_ledger(ledger)?;
@@ -1401,7 +1409,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("symbol projection stringifier returned no value")?;
         let encoded = self.compile_check_json_stringify_error_with_cleanup(encoded, &[wire])?;
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_event_key_handle_result").unwrap(),
+            self.module.get_function("thaw_tjs_event_key_handle_result").unwrap(),
             &[encoded.into(), self.context.i8_type().const_int(1, false).into()],
             "native_symbol_projection_handle_result",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
@@ -1438,7 +1446,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_object_set_native_with_undefined(json, key, value, field_type, false, false)
     }
 
-    /// A `Str` handed to a QuickJS dynamic call: a framed `Error` string must reach JS as a real
+    /// A `Str` handed to a thaw-js dynamic call: a framed `Error` string must reach JS as a real
     /// Error, so it is converted through `thaw_json_receiver_string` (owned Json) instead of a plain
     /// string field/element. Native-only marshaling (console, N-API) keeps the plain string.
     fn compile_dynamic_argument_string(
@@ -1521,7 +1529,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Null => value = self.compile_json_null()?,
             _ => {}
         }
-        let dynamic_string = matches!(field_type, HirType::Str) && self.compiling_quickjs_dynamic_arguments;
+        let dynamic_string = matches!(field_type, HirType::Str) && self.compiling_js_dynamic_arguments;
         let owned = owned
             || dynamic_string
             || matches!(field_type, HirType::Null | HirType::Undefined | HirType::I64 | HirType::BigInt
@@ -1692,19 +1700,19 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
-    /// Encodes a `JsValue` (an opaque, permanent id into QuickJS's own
+    /// Encodes a `JsValue` (an opaque, permanent id into thaw-js's own
     /// retained-value table -- there is no JSON representation of "a live
     /// JS object") as a `{"__thaw_js_handle_id__": <id>}` placeholder
-    /// object, which the QuickJS-side JSON reviver (see its doc comment in
+    /// object, which the thaw-js-side JSON reviver (see its doc comment in
     /// `dates.js`) splices back into the real value the moment the args
     /// JSON this placeholder sits in gets parsed on the other end -- bare,
     /// or nested inside an object/array literal at any depth, the same way
     /// that reviver already reconstructs a `Date`. Unlike a per-call
     /// index into a side channel, the handle's own id is permanent and
     /// meaningful on its own, so no extra plumbing back to the call site
-    /// is needed here. Only meaningful while compiling a QuickJS-backed
+    /// is needed here. Only meaningful while compiling a thaw-js-backed
     /// dynamic call's own arguments (`compile_typed_dynamic_call` sets
-    /// `compiling_quickjs_dynamic_arguments` before marshaling them);
+    /// `compiling_js_dynamic_arguments` before marshaling them);
     /// anywhere else -- console.log formatting, a `Dictionary` literal, an
     /// N-API call (which has no such reviver) -- there is no receiving end
     /// for this placeholder, so this fails clearly instead of silently
@@ -1719,8 +1727,8 @@ impl<'ctx> HirCompiler<'ctx> {
         // thaw-js keeps a JsValue outside call arguments as a Host lease too, so console, String(), equality
         // and the rest read it through the host queries. A thaw-js call argument is serialised by
         // `json_argument_stringifier`, which re-marks every lease as `{"__thaw_tjs_handle__": id}`.
-        if !self.compiling_quickjs_dynamic_arguments && !self.thaw_js_call_arguments {
-            // No QuickJS reviver downstream: embed the live value itself (a Json Host lease).
+        if !self.compiling_js_dynamic_arguments && !self.thaw_js_call_arguments {
+            // No thaw-js reviver downstream: embed the live value itself (a Json Host lease).
             self.js_mark_handles_used();
             self.tracks_owned_json_roots = true;
             let json = self
@@ -1741,7 +1749,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// The gate-free core of `compile_dynamic_value_placeholder`, for a
     /// call site that already knows (by construction, not by the
-    /// per-compilation `compiling_quickjs_dynamic_arguments` flag) that a
+    /// per-compilation `compiling_js_dynamic_arguments` flag) that a
     /// reviver exists downstream -- see `build_call_with`'s own use of
     /// this, which reaches it only for an *ordinary* function call
     /// (never N-API, which rejects a `JsValue` argument outright well
@@ -1750,10 +1758,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         handle: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if self.js_engine() == JsEngine::ThawJs {
-            return self.compile_thaw_js_handle_marker(handle.into_int_value());
-        }
-        self.compile_branded_dynamic_value_placeholder(handle)
+        self.compile_thaw_js_handle_marker(handle.into_int_value())
     }
 
     /// The branded `__thaw_js_handle_id__` wrapper that `thaw_json_graph_encode` turns into a lease on every
@@ -2446,7 +2451,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             _ => {}
         }
-        let dynamic_string = matches!(element_type, HirType::Str) && self.compiling_quickjs_dynamic_arguments;
+        let dynamic_string = matches!(element_type, HirType::Str) && self.compiling_js_dynamic_arguments;
         let generated_owned = dynamic_string || matches!(element_type,
             HirType::Null | HirType::Undefined | HirType::Void | HirType::I64 | HirType::BigInt
             | HirType::Map(..) | HirType::Set(_)
@@ -2487,7 +2492,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 // `compile_typed_dynamic_argument` (a dynamic call's own
                 // argument list, where the reviver exists) as well as from
                 // `compile_json_array_push_owned`, both of which are
-                // already inside a QuickJS-backed dynamic-call argument
+                // already inside a thaw-js-backed dynamic-call argument
                 // marshaling context -- the same reason that sibling uses
                 // the gate-free variant.
                 if value.is_int_value() {

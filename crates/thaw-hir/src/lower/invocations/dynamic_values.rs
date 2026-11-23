@@ -1056,10 +1056,6 @@ impl<'a> FnLowerer<'a> {
             return None;
         }
         match crate::lower::dynamic_symbol(&name) {
-            Some((DynamicBackend::QuickJs, symbol)) => Some(HirExpr::Call(
-                Box::new(HirExpr::Var("getDynamicValue".into())),
-                vec![HirExpr::Lit(HirLit::Str(symbol))],
-            )),
             Some((DynamicBackend::ThawJs, symbol)) if !symbol.starts_with('$') => {
                 Some(HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".into())),

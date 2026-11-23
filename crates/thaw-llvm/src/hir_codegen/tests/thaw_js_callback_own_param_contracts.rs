@@ -28,8 +28,8 @@ fn thaw_js_callback_returning_own_jsvalue_param_brands_and_orders_release_after_
            const r: any = o.list.map((x: JsValue): JsValue => x);
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = compile_routed(&source, "thaw_js_callback_own_param");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = compile_routed(&source, "thaw_js_callback_own_param");
+    assert!(uses_thaw_js, "{ir}");
     let adapter = callback_adapter_with_graph_encode(&ir)
         .unwrap_or_else(|| panic!("no callback result encoder in IR:\n{ir}"));
     let line_of = |needle: &str| adapter.iter().position(|line| line.contains(needle));

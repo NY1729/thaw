@@ -15,12 +15,12 @@ impl<'ctx> HirCompiler<'ctx> {
             "iterator_step_mode").map_err(|error| error.to_string())?;
         let error_text = self.compile_expr(error_text)?.into_pointer_value();
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_iterator_step_exact_result").unwrap(),
+            self.module.get_function("thaw_tjs_iterator_step_exact_result").unwrap(),
             &[iterator.into(), mode.into(), error_text.into()], "iterator_step_exact",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("exact iterator step returned no result")?.into_struct_value();
         let value = self.compile_exact_iterator_handle_result(result, "iterator_step")?;
-        self.compile_original_quickjs_exception_handle(value, true)
+        self.compile_original_js_exception_handle(value, true)
     }
 
     fn compile_dynamic_property_exact(
@@ -36,7 +36,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let receiver = self.compile_expr(receiver)?.into_int_value();
         let key = self.compile_expr(key)?.into_pointer_value();
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_get_property_exact_result").unwrap(),
+            self.module.get_function("thaw_tjs_get_property_exact_result").unwrap(),
             &[receiver.into(), key.into()], "dynamic_property_exact",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("exact property read returned no result")?.into_struct_value();
@@ -53,9 +53,9 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_register_js_callback_host_operations()?;
         let source = self.compile_expr(source)?.into_int_value();
         let function = if asynchronous {
-            "thaw_js_to_async_iterator_exact_result"
+            "thaw_tjs_to_async_iterator_exact_result"
         } else {
-            "thaw_js_to_iterator_exact_result"
+            "thaw_tjs_to_iterator_exact_result"
         };
         let result = self.builder.build_call(
             self.module.get_function(function).unwrap(),
@@ -83,7 +83,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(has_thrown, exact_throw, native_check)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(exact_throw);
-        self.compile_throw_original_quickjs_exception_handle(thrown.into(), true)?;
+        self.compile_throw_original_js_exception_handle(thrown.into(), true)?;
         self.builder.build_unconditional_branch(native_check)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(native_check);
@@ -115,11 +115,11 @@ impl<'ctx> HirCompiler<'ctx> {
             "releaseDynamicValue" => self.compile_release_dynamic_value(args),
             "getDynamicProperty" => self.compile_dynamic_property_exact(args),
             "deleteDynamicProperty" => self.compile_dynamic_property_predicate(
-                "thaw_js_delete_property_result",
+                "thaw_tjs_delete_property_result",
                 args,
             ),
             "hasDynamicProperty" => {
-                self.compile_dynamic_property_predicate("thaw_js_has_property_result", args)
+                self.compile_dynamic_property_predicate("thaw_tjs_has_property_result", args)
             }
             "setDynamicProperty" => self.compile_set_dynamic_property(args),
             "setDynamicPropertyJson" => self.compile_set_dynamic_property_json(args),
@@ -141,7 +141,6 @@ impl<'ctx> HirCompiler<'ctx> {
                     (HirExpr::Lit(HirLit::Str(kind)), HirExpr::Lit(HirLit::Str(key))) => {
                         match kind.as_str() {
                             "wrapper" => TypedJsonArgumentOwner::ProvenWrapper(key.clone()),
-                            "direct-quickjs" => TypedJsonArgumentOwner::DirectQuickJs(key.clone()),
                             "napi-constructor" => TypedJsonArgumentOwner::NapiConstructor(key.clone()),
                             _ => return Some(Err("typed-wrapper JSON ownership marker has unknown owner kind".into())),
                         }
@@ -213,7 +212,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_release_native_projection_callbacks(args),
             "__thaw_intern_native_object" => self.compile_intern_native_object(args),
             "resolveDynamicValue" => self.compile_dynamic_handle_operation(
-                "thaw_js_resolve_handle_handle_result",
+                "thaw_tjs_resolve_handle_handle_result",
                 args,
             ),
             "callDynamicValueMixed" => self.compile_call_dynamic_value_mixed(args),
@@ -268,7 +267,7 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let value = self
-            .compile_dynamic_handle_operation("thaw_js_set_property_result", args)?
+            .compile_dynamic_handle_operation("thaw_tjs_set_property_result", args)?
             .into_int_value();
         self.builder
             .build_int_compare(
@@ -282,7 +281,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// A thaw-js routed build converts a live handle to `Json` by capturing it as a graph (the thaw-js
-    /// twin of the QuickJS host conversion): the capture owns its leases, `consume_handle` releases the input.
+    /// twin of the thaw-js host conversion): the capture owns its leases, `consume_handle` releases the input.
     fn compile_routed_host_json(
         &mut self,
         source: &HirExpr,
@@ -291,7 +290,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.js_mark_handles_used();
         self.tracks_owned_json_roots = true;
         let handle = self.compile_expr(source)?;
-        let json = self.compile_original_quickjs_exception_handle(handle, consume_handle)?;
+        let json = self.compile_original_js_exception_handle(handle, consume_handle)?;
         self.mark_fresh_owned_json_result(json)?;
         Ok(json)
     }
@@ -303,25 +302,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source] = args else {
             return Err("live JSON host conversion expects one handle".into());
         };
-        if self.thaw_js_routed {
-            return self.compile_routed_host_json(source, true);
-        }
-        self.js_mark_handles_used();
-        self.tracks_owned_json_roots = true;
-        let handle = self.compile_expr(source)?.into_int_value();
-        let json = self.builder.build_call(
-            self.module.get_function("thaw_json_host_from_borrowed_handle").unwrap(),
-            &[handle.into()], "live_json_host",
-        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-            .ok_or("live JSON host conversion returned no value")?;
-        // The Host lease retained its own reference. Discard the temporary
-        // handle even when the host conversion reported an error.
-        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
-            &[handle.into()], "release_live_json_builder_handle")
-            .map_err(|error| error.to_string())?;
-        let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
-        self.mark_fresh_owned_json_result(json)?;
-        Ok(json)
+        self.compile_routed_host_json(source, true)
     }
 
     /// Consumes the freshly projected handle after the generic Json
@@ -347,7 +328,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // conversion owns an independent copy/lease, so release the temporary
         // on both success and HostError paths.
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[handle.into()], "release_consumed_dynamic_projection",
         ).map_err(|error| error.to_string())?;
         let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
@@ -362,22 +343,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let [source] = args else {
             return Err("borrowed live JSON host conversion expects one handle".into());
         };
-        if self.thaw_js_routed {
-            return self.compile_routed_host_json(source, false);
-        }
-        self.js_mark_handles_used();
-        self.tracks_owned_json_roots = true;
-        let handle = self.compile_expr(source)?.into_int_value();
-        let json = self.builder.build_call(
-            self.module.get_function("thaw_json_host_from_borrowed_handle").unwrap(),
-            &[handle.into()], "borrowed_live_json_host",
-        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-            .ok_or("borrowed live JSON host conversion returned no value")?;
-        // The source JsValue is borrowed. The std helper retained an
-        // independent host lease; the lexical catch carrier keeps its own.
-        let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
-        self.mark_fresh_owned_json_result(json)?;
-        Ok(json)
+        self.compile_routed_host_json(source, false)
     }
 
     /// The exact mixed call consumes each direct handle. A source JsValue is
@@ -392,7 +358,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.js_mark_handles_used();
         let handle = self.compile_expr(value)?.into_int_value();
         let retained = self.builder.build_call(
-            self.module.get_function("thaw_js_retain_handle").unwrap(),
+            self.module.get_function("thaw_tjs_retain_handle").unwrap(),
             &[handle.into()], "retain_exact_mixed_borrowed_handle",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("thaw_js_retain_handle returned no status")?.into_int_value();
@@ -419,8 +385,8 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("retainDynamicJson expects exactly one argument".into());
         };
         self.js_mark_handles_used();
-        let compiling_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
-        self.compiling_quickjs_dynamic_arguments = true;
+        let compiling_dynamic_arguments = self.compiling_js_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = true;
         // A caller may reach this intrinsic with a bare native object
         // literal (`retainDynamicJson({})`, an internal-builtin call some
         // tests exercise directly) rather than the already-`Json`-coerced
@@ -431,7 +397,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::ObjectLit(fields) => self.compile_json_object_lit(fields, &HirType::Json),
             _ => self.compile_expr(value),
         };
-        self.compiling_quickjs_dynamic_arguments = compiling_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = compiling_dynamic_arguments;
         let value = value?.into_pointer_value();
         let json = self
             .builder
@@ -506,8 +472,8 @@ impl<'ctx> HirCompiler<'ctx> {
 
         let projection_function = self.current_function().get_name().to_string_lossy().into_owned();
         let previous_projection = self.live_native_projection.replace((projection_function, ledger));
-        let previous_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
-        self.compiling_quickjs_dynamic_arguments = true;
+        let previous_dynamic_arguments = self.compiling_js_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = true;
         let projection = match &source_type {
             HirType::Array(element) => self.compile_native_array_to_json_with_undefined(
                 native.into_pointer_value(), element, true,
@@ -520,7 +486,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             _ => unreachable!(),
         };
-        self.compiling_quickjs_dynamic_arguments = previous_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = previous_dynamic_arguments;
         self.live_native_projection = previous_projection;
         let projected = projection?;
         let wire = self.builder.build_call(
@@ -550,7 +516,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // Success transfers all nested values into the retained JS graph.
         self.release_native_handle_ledger(ledger)?;
         self.finish_live_native_projection_scope()?;
-        // If this projection occurs while evaluating a typed QuickJS call
+        // If this projection occurs while evaluating a typed thaw-js call
         // argument, the returned object handle belongs to that outer call's
         // lease scope. This makes a later argument exception release it.
         self.track_fresh_event_key_handle(retained.into_int_value())?;
@@ -589,7 +555,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("thaw_json_stringify returned no native scalar JSON")?;
         let json = self.compile_check_json_stringify_error_with_cleanup(json, &[array])?;
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_event_key_handle_result").unwrap(),
+            self.module.get_function("thaw_tjs_event_key_handle_result").unwrap(),
             &[json.into(), is_symbol.into()], "native_scalar_handle_result",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("native scalar bridge returned no result")?.into_struct_value();
@@ -662,7 +628,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_set_property_json_graph_result")
+                    .get_function("thaw_tjs_set_property_json_graph_result")
                     .unwrap(),
                 &[receiver.into(), name.into(), args_json.into()],
                 "dynamic_property_json_set",
@@ -716,7 +682,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let layout = self.intern_string(layout, "cached_native_object_layout")
             .map_err(|error| error.to_string())?;
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_lookup_native_object").unwrap(),
+            self.module.get_function("thaw_tjs_lookup_native_object").unwrap(),
             &[source.into(), layout.as_pointer_value().into()], "lookup_native_object",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("native object lookup returned no result")?.into_struct_value();
@@ -751,7 +717,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let handle = self.compile_expr(item)?.into_int_value();
         let native = self.compile_expr(native)?.into_pointer_value();
         let serial = self.builder.build_call(
-            self.module.get_function("thaw_js_origin_serial").unwrap(), &[handle.into()], "origin_serial",
+            self.module.get_function("thaw_tjs_origin_serial").unwrap(), &[handle.into()], "origin_serial",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("origin serial returned no value")?;
         let (function, detail): (&str, BasicMetadataValueEnum<'ctx>) = match (name, detail) {
@@ -792,7 +758,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let layout = self.intern_string(layout, "native_view_target_layout")
             .map_err(|error| error.to_string())?;
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_native_object_pointer").unwrap(),
+            self.module.get_function("thaw_tjs_native_object_pointer").unwrap(),
             &[handle.into(), layout.as_pointer_value().into()], "native_view_target_pointer",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("native view target returned no result")?.into_struct_value();
@@ -932,7 +898,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let callbacks = self.compile_expr(callbacks)?.into_pointer_value();
         let callbacks = self.compile_array_data(callbacks)?;
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_native_handle_array").unwrap(),
+            self.module.get_function("thaw_tjs_release_native_handle_array").unwrap(),
             &[callbacks.into()], "release_unbuilt_native_projection",
         ).map_err(|error| error.to_string())?;
         Ok(self.context.i8_type().const_zero().into())
@@ -1012,7 +978,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         let candidate = self.compile_expr(candidate)?.into_int_value();
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_intern_native_object").unwrap(),
+            self.module.get_function("thaw_tjs_intern_native_object").unwrap(),
             &[source.into(), layout.as_pointer_value().into(), candidate.into()],
             "intern_native_object",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()

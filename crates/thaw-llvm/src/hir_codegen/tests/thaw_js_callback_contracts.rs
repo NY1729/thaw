@@ -1,4 +1,4 @@
-// thaw-js (`JsEngine::ThawJs`): a compiled callback that takes a live JS value is a graph callback
+// thaw-js (`DynamicBackend::ThawJs`): a compiled callback that takes a live JS value is a graph callback
 // registered with `thaw_tjs_register_native_callback_graph`, and the Promise-awaiting handle
 // operations resolve to their `thaw_tjs_*` twins, so the build links no QuickJS.
 
@@ -12,8 +12,8 @@ const THAW_JS_CALLBACK_PROGRAM: &str = "function main(): void {
 
 #[test]
 fn thaw_js_routed_live_value_callbacks_use_the_graph_registration() {
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(THAW_JS_CALLBACK_PROGRAM, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(THAW_JS_CALLBACK_PROGRAM);
+    assert!(uses_thaw_js, "{ir}");
     for symbol in [
         "thaw_tjs_register_native_callback_graph",
         "thaw_tjs_resolve_handle_handle_result",

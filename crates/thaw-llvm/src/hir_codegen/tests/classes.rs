@@ -4005,13 +4005,10 @@ fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
         }
     "#;
     let module = thaw_parser::parse_typescript(source).unwrap();
-    thaw_hir::set_thaw_js_routed(true);
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "json_receiver_arena_tracing");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    thaw_hir::set_thaw_js_routed(false);
     let ir = compiler.print_to_string();
     let main = ir.find("define i32 @main(").expect(&ir);
     let body = &ir[main..main + ir[main..].find("\n}").unwrap()];

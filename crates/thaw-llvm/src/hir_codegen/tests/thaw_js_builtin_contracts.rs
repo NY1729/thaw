@@ -5,18 +5,13 @@ fn hex(key: &str) -> String {
     key.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
-fn compile_routed(source: &str, name: &str) -> (bool, bool, String) {
+fn compile_routed(source: &str, name: &str) -> (bool, String) {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, name);
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
-    (
-        compiler.uses_thaw_js(),
-        compiler.uses_quickjs(),
-        compiler.print_to_string(),
-    )
+    (compiler.uses_thaw_js(), compiler.print_to_string())
 }
 
 #[test]
@@ -59,8 +54,8 @@ fn routed_class_method_takes_a_rest_callback_and_registers_a_closure_identity() 
            __thaw_typed_tjs_{on}(emitter, \"x\", (...args: Json[]): void => {{ console.log(args.length); }});
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = compile_routed(&source, "thaw_js_class_rest_callback");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = compile_routed(&source, "thaw_js_class_rest_callback");
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("@thaw_tjs_class_call("), "{ir}");
     assert!(ir.contains("__thaw_tjs_cb__"), "{ir}");
     // the same closure registered for `on` and `off` is one callback
@@ -76,8 +71,8 @@ fn routed_plain_value_export_is_a_class_call_returning_plain_data() {
          let eol: string = __thaw_typed_tjs_{eol}();
          function main(): void {{ console.log(eol.length); }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = compile_routed(&source, "thaw_js_plain_value");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = compile_routed(&source, "thaw_js_plain_value");
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("@thaw_tjs_class_call("), "{ir}");
 }
 
@@ -88,8 +83,8 @@ fn routed_live_handle_to_json_conversion_captures_the_graph_instead_of_an_empty_
            const copy: Json = __thaw_json_host_from_dynamic(handle);
            console.log(copy);
          }";
-    let (uses_thaw_js, uses_quickjs, ir) = compile_routed(source, "thaw_js_host_json");
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = compile_routed(source, "thaw_js_host_json");
+    assert!(uses_thaw_js, "{ir}");
     assert!(
         ir.contains("@thaw_tjs_capture_handle_graph_result("),
         "{ir}"
@@ -158,7 +153,6 @@ fn date_call_and_bare_date_value_read_the_realm_date() {
     let program = thaw_hir::lower_module(&module).unwrap();
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "date_call_realm_routed");
-    compiler.set_thaw_js_routed(true);
     compiler.compile_program(&program).unwrap();
     assert!(compiler.uses_thaw_js());
 }

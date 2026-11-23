@@ -253,23 +253,6 @@ pub(crate) fn thaw_js_object_literal_for_jsvalue(arg: &HirExpr) -> Option<&HirEx
     }
 }
 
-fn ordinary_quickjs_typed_call(signature: &DynamicSignature) -> bool {
-    signature.backend == DynamicBackend::QuickJs
-        && ![
-            "$getter$",
-            "$setter$",
-            "$method$",
-            "$methodvoid$",
-            "$staticgetter$",
-            "$staticsetter$",
-            "$staticmethod$",
-            "$staticmethodvoid$",
-            "$new$",
-        ]
-        .iter()
-        .any(|prefix| signature.symbol.starts_with(prefix))
-}
-
 impl<'ctx> HirCompiler<'ctx> {
     fn begin_fresh_event_key_argument_scope(&mut self) {
         self.begin_fresh_event_key_argument_scope_with_owner(None);
@@ -503,30 +486,6 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok((scope.handles, scope.json_values, Some(array)))
     }
 
-    fn with_typed_wrapper_argument_scope<F>(
-        &mut self,
-        owner: TypedJsonArgumentOwner,
-        invoke: F,
-    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, String>
-    where
-        F: FnOnce(&mut Self) -> Result<inkwell::values::BasicValueEnum<'ctx>, String>,
-    {
-        self.begin_fresh_event_key_argument_scope_with_owner(Some(owner.clone()));
-        let result = invoke(self);
-        let scope = self.finish_typed_wrapper_argument_scope(&owner);
-        match (result, scope) {
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-            (Ok(value), Ok((handles, json_values))) => {
-                for json in &json_values {
-                    self.release_fresh_json_argument_if_active(json)?;
-                }
-                self.release_fresh_event_key_handles(&handles)?;
-                Ok(value)
-            }
-        }
-    }
-
     fn finish_typed_wrapper_argument_scope(
         &mut self,
         expected_owner: &TypedJsonArgumentOwner,
@@ -563,7 +522,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(release);
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_handle").unwrap(),
+            self.module.get_function("thaw_tjs_release_handle").unwrap(),
             &[owned.handle.into()], "release_transferred_event_key",
         ).map_err(|error| error.to_string())?;
         self.builder.build_store(owned.active, self.context.i8_type().const_zero())
@@ -614,7 +573,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(release);
         self.builder.build_call(
-            self.module.get_function("thaw_js_release_native_handle_array").unwrap(),
+            self.module.get_function("thaw_tjs_release_native_handle_array").unwrap(),
             &[buffer.into()], "release_native_projection_handles",
         ).map_err(|error| error.to_string())?;
         self.builder.build_store(ledger.buffer, ptr_ty.const_null())
@@ -702,9 +661,6 @@ impl<'ctx> HirCompiler<'ctx> {
         if signature.backend == DynamicBackend::ThawJs {
             return self.compile_typed_thaw_js_call(signature, args);
         }
-        if signature.backend == DynamicBackend::QuickJs {
-            self.note_quickjs("typed_calls:quickjs_backend");
-        }
         if signature.backend == DynamicBackend::Napi {
             self.uses_napi = true;
         }
@@ -720,12 +676,7 @@ impl<'ctx> HirCompiler<'ctx> {
         {
             return self.compile_typed_napi_setter(signature, args);
         }
-        if signature.backend == DynamicBackend::QuickJs
-            && signature.symbol.starts_with("$setter$")
-        {
-            return self.compile_typed_quickjs_setter(signature, args);
-        }
-        if (signature.backend == DynamicBackend::Napi || signature.backend == DynamicBackend::QuickJs)
+        if signature.backend == DynamicBackend::Napi
             && (signature.symbol.starts_with("$method$")
                 || signature.symbol.starts_with("$methodvoid$")
                 || signature.symbol.starts_with("$staticmethod$")
@@ -922,7 +873,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             let dynamic_object_query = if signature.params.contains(&HirType::JsValue) {
                 self.module
-                    .get_function("thaw_js_dynamic_object_query")
+                    .get_function("thaw_tjs_dynamic_object_query")
                     .unwrap()
                     .as_global_value()
                     .as_pointer_value()
@@ -1533,13 +1484,11 @@ impl<'ctx> HirCompiler<'ctx> {
         // whatever state its own call left it, rather than this call's.
         // See `compile_dynamic_value_placeholder` (json_bridge.rs), which
         // reads the flag while marshaling each argument below.
-        let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
-        self.compiling_quickjs_dynamic_arguments = signature.backend == DynamicBackend::QuickJs;
+        let outer_compiling_js_dynamic_arguments = self.compiling_js_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = false;
         let mut returned_bytes_argument = None;
         let mut callback_values = Vec::with_capacity(function_argument.len());
-        let typed_json_owner = if ordinary_quickjs_typed_call(signature) {
-            Some(TypedJsonArgumentOwner::DirectQuickJs(signature.symbol.clone()))
-        } else if signature.backend == DynamicBackend::Napi
+        let typed_json_owner = if signature.backend == DynamicBackend::Napi
             && signature.ret == HirType::JsValue
             && napi_constructor_export_name(&signature.symbol).is_some()
         {
@@ -1556,10 +1505,6 @@ impl<'ctx> HirCompiler<'ctx> {
                     .any(|(function_index, ..)| *function_index == index)
             {
                 callback_values.push(self.compile_expr(arg)?);
-                continue;
-            }
-            if signature.backend == DynamicBackend::QuickJs && quickjs_callback_type(ty) {
-                self.compile_quickjs_callback_argument(array, arg)?;
                 continue;
             }
             let (value, marshalled_type) = {
@@ -1596,7 +1541,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     format!("typed dynamic argument {} ({ty:?}): {error}", index + 1)
                 })?;
         }
-        self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        self.compiling_js_dynamic_arguments = outer_compiling_js_dynamic_arguments;
         let preserves_array_for_constructor_lookup =
             signature.backend == DynamicBackend::Napi
                 && signature.ret == HirType::JsValue
@@ -1745,81 +1690,6 @@ impl<'ctx> HirCompiler<'ctx> {
             self.branch_on_pending_exception()?;
             return Ok(value);
         }
-        if signature.backend == DynamicBackend::QuickJs && signature.ret == HirType::JsValue {
-            // The constructor route below predates the exact-call helper and needs
-            // QuickJS handle support even though it does not enter that helper.
-            self.uses_quickjs_handles = true;
-            if let Some(constructor_name) = napi_constructor_export_name(&signature.symbol) {
-                let constructor_name = self.intern_string(constructor_name, "typed_dynamic_constructor_name")
-                    .map_err(|error| error.to_string())?;
-                let constructor = self
-                    .builder
-                    .build_call(
-                        self.module.get_function("thaw_js_get_global").unwrap(),
-                        &[constructor_name.as_pointer_value().into()],
-                        "typed_dynamic_constructor",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap();
-                let args_json = self
-                    .builder
-                    .build_call(
-                        self.module.get_function("thaw_json_graph_encode").unwrap(),
-                        &[array.into()],
-                        "typed_dynamic_construct_args",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap();
-                let raw_fresh_handles = Self::fresh_event_key_raw_handles(&fresh_argument_handles);
-                let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
-                    args_json, &[array], &[], &[], &raw_fresh_handles,
-                )?;
-                self.release_fresh_event_key_handles(&fresh_argument_handles)?;
-                let result = self
-                    .builder
-                    .build_call(
-                        self.module
-                            .get_function("thaw_js_construct_handle_graph_args_result")
-                            .unwrap(),
-                        &[constructor.into(), args_json.into()],
-                        "typed_dynamic_construct_result",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap()
-                    .into_struct_value();
-                let value = self
-                    .builder
-                    .build_extract_value(result, 0, "typed_dynamic_constructed_value")
-                    .map_err(|error| error.to_string())?;
-                let error = self
-                    .builder
-                    .build_extract_value(result, 1, "typed_dynamic_construct_error")
-                    .map_err(|error| error.to_string())?;
-                self.destroy_typed_host_arguments(array, args_json)?;
-                self.builder.build_call(
-                    self.module.get_function("thaw_js_release_handle").unwrap(),
-                    &[constructor.into()],
-                    "release_typed_dynamic_constructor",
-                ).map_err(|error| error.to_string())?;
-                self.builder
-                    .build_store(self.pending_exception().as_pointer_value(), error)
-                    .map_err(|error| error.to_string())?;
-                self.clear_pending_native_text()?;
-                self.mark_pending_native_text(error)?;
-                self.branch_on_pending_exception()?;
-                return Ok(value);
-            }
-            let value = self.compile_typed_quickjs_exact_call(
-                name.as_pointer_value(), array, false, &fresh_argument_handles,
-            )?;
-            return Ok(value);
-        }
         if signature.backend == DynamicBackend::Napi && !function_argument.is_empty() {
             let functions = self.compile_napi_function_arguments(&callback_values, &function_argument)?;
             let count = self
@@ -1835,16 +1705,9 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
             return self.compile_typed_dynamic_result(json, &signature.ret);
         }
-        let result = if signature.backend == DynamicBackend::QuickJs {
-            let handle = self.compile_typed_quickjs_exact_call(
-                name.as_pointer_value(), array, true, &fresh_argument_handles,
-            )?;
-            let json = self.compile_original_quickjs_exception_handle(handle, true)?;
-            self.compile_typed_dynamic_result(json, &signature.ret)?
-        } else {
+        let result = {
             let backend = match signature.backend {
                 DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),
-                DynamicBackend::QuickJs => unreachable!("QuickJS calls use exact exception transport"),
                 DynamicBackend::ThawJs => unreachable!("thaw-js calls return before this match"),
                 DynamicBackend::Napi => "thaw_napi_call_typed_graph_result",
             };
@@ -1884,7 +1747,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         // Fresh handles made while evaluating the arguments (event keys, projections) are owned by
         // this call: a later argument that throws releases them through the scope, and so does the
-        // normal exit (the call took its own references), as on the QuickJS path.
+        // normal exit (the call took its own references), as on the thaw-js path.
         self.begin_fresh_event_key_argument_scope();
         let result = self.compile_typed_thaw_js_call_scoped(signature, args);
         let handles = self.finish_fresh_event_key_argument_scope()?;
@@ -1936,7 +1799,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         // `randomFillSync(buf)` returns the filled bytes; they are copied back into the caller's buffer
-        // (the thaw-js side only ever sees a copy), as the QuickJS lane does.
+        // (the thaw-js side only ever sees a copy), as the thaw-js lane does.
         let mut returned_bytes_argument = None;
         // Owner types of `__thaw_tjs_live_owner_arg` arguments: a returned handle of one of these types maps back to its owner.
         let mut live_owner_types: Vec<HirType> = Vec::new();
@@ -2452,7 +2315,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if !supported {
             // Class operations are only emitted where the program uses them (unlike the wrappers of
             // plain functions), so an unsupported one is a build error the CLI answers by rebuilding
-            // the program on QuickJS.
+            // the program on thaw-js.
             return Err(format!(
                 "thaw-js: class operation `{}` has a signature that cannot cross the thaw-js boundary ({:?} -> {:?})",
                 signature.symbol, signature.params, signature.ret
@@ -2669,7 +2532,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let lookup = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_native_object_pointer").unwrap(),
+                self.module.get_function("thaw_tjs_native_object_pointer").unwrap(),
                 &[id.into(), layout.as_pointer_value().into()],
                 "tjs_live_owner_pointer",
             )
@@ -2911,7 +2774,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// object literal (`lower/objects.rs`). As an argument of a thaw-js call it is built here as
     /// plain Json: data members as they are, methods as `{"__thaw_tjs_handle__": id}` receiver
     /// callbacks. Getters, setters, `__proto__` and spreads stay loud (an unsupported stub), and
-    /// computed or symbol keys keep the QuickJS builder. Anywhere else the builder is the meaning.
+    /// computed or symbol keys keep the thaw-js builder. Anywhere else the builder is the meaning.
     pub(crate) fn compile_dynamic_object_literal_call(
         &mut self,
         args: &[HirExpr],
@@ -2922,7 +2785,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if members.len() % 5 != 0 {
             return Err("live object literal marker expects five operands per member".into());
         }
-        if !(self.thaw_js_routed && self.thaw_js_call_arguments) {
+        if !self.thaw_js_call_arguments {
             return self.compile_expr(builder);
         }
         // the length was checked to be a multiple of five, so no remainder is left
@@ -3022,7 +2885,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(None);
         }
         // A closure with a bare `Json` parameter (an `any` it may call methods on) must receive live
-        // arguments: register it on the graph route (handle marker), as the QuickJS lane does. Bytes and
+        // arguments: register it on the graph route (handle marker), as the thaw-js lane does. Bytes and
         // number closures keep the text route.
         if params.contains(&HirType::Json) && json_callback_wants_graph(params) {
             self.thaw_js_call_arguments = true;
@@ -3038,54 +2901,6 @@ impl<'ctx> HirCompiler<'ctx> {
         self.tracks_owned_json_roots = true;
         self.mark_fresh_owned_json_result(marker)?;
         Ok(Some(marker))
-    }
-
-    fn compile_typed_quickjs_exact_call(
-        &mut self,
-        name: inkwell::values::PointerValue<'ctx>,
-        array: BasicValueEnum<'ctx>,
-        resolve_success: bool,
-        fresh_argument_handles: &[FreshEventKeyHandle<'ctx>],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.js_mark_handles_used();
-        self.compile_register_js_callback_host_operations()?;
-        let callable = self.builder.build_call(
-            self.module.get_function("thaw_js_get_global").unwrap(),
-            &[name.into()], "typed_exact_callable",
-        ).map_err(|error| error.to_string())?
-            .try_as_basic_value().basic().ok_or("QuickJS global lookup returned no handle")?
-            .into_int_value();
-        let args_json = self.builder.build_call(
-            self.module.get_function("thaw_json_graph_encode").unwrap(),
-            &[array.into()], "typed_exact_args_json",
-        ).map_err(|error| error.to_string())?
-            .try_as_basic_value().basic().ok_or("QuickJS argument graph encoding returned no string")?;
-        let mut cleanup_handles = vec![callable];
-        cleanup_handles.extend(Self::fresh_event_key_raw_handles(fresh_argument_handles));
-        let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
-            args_json, &[array], &[], &[], &cleanup_handles,
-        )?;
-        self.release_fresh_event_key_handles(fresh_argument_handles)?;
-        let i64_type = self.context.i64_type();
-        let handles = self.builder.build_alloca(
-            i64_type.array_type(1), "typed_exact_empty_handles",
-        ).map_err(|error| error.to_string())?;
-        self.builder.build_store(handles, i64_type.const_zero())
-            .map_err(|error| error.to_string())?;
-        let function = if resolve_success {
-            "thaw_js_call_handle_mixed_exact_resolved_consuming_result"
-        } else {
-            "thaw_js_call_handle_mixed_exact_consuming_result"
-        };
-        let result = self.builder.build_call(
-            self.module.get_function(function).unwrap(),
-            &[callable.into(), args_json.into(), handles.into()],
-            "typed_exact_call_result",
-        ).map_err(|error| error.to_string())?
-            .try_as_basic_value().basic().ok_or("exact QuickJS call returned no result")?
-            .into_struct_value();
-        self.destroy_typed_host_arguments(array, args_json)?;
-        self.compile_exact_iterator_handle_result(result, "typed exact call")
     }
 
 }

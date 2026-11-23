@@ -161,8 +161,8 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
 
 /// `napi` picks which backend the generated declaration's symbol resolves
 /// to at lower time -- `__thaw_typed_napi_`/`DynamicBackend::Napi` for a
-/// real native addon class, `__thaw_typed_js_`/`DynamicBackend::QuickJs`
-/// for a Fallback one (real example: hono's `Hono`) -- decoded by
+/// real native addon class, `__thaw_typed_tjs_`/`DynamicBackend::ThawJs`
+/// for a thaw-js one (real example: hono's `Hono`) -- decoded by
 /// `dynamic_symbol`, the same convention `generate_napi_class_method_
 /// overloads` already uses. The `$new$Class$arityN` runtime-key scheme
 /// itself is identical either way; `napi_constructor_export_name`/its
@@ -583,7 +583,7 @@ fn generate_class_accessor_declarations(
 ///
 /// `napi` selects which backend the generated declaration's symbol
 /// resolves to at lower time (`__thaw_typed_napi_`/`DynamicBackend::Napi`
-/// vs. `__thaw_typed_js_`/`DynamicBackend::QuickJs`, decoded by
+/// vs. `__thaw_typed_tjs_`/`DynamicBackend::ThawJs`, decoded by
 /// `dynamic_symbol`) -- the runtime-key scheme itself (`$method$Class
 /// $name$overloadN$arityM`, read back by `compile_typed_napi_method`,
 /// which despite the name now serves both backends) is identical either

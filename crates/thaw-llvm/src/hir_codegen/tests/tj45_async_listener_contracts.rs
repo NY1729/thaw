@@ -15,8 +15,8 @@ fn tj45_async_listener_is_a_graph_callback_with_a_promise_finish() {
            __thaw_typed_tjs_{listen}((value: string): void => {{ console.log(value); }});
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     // one graph registration (the async listener) and one marker registration (the sync listener)
     assert_eq!(tj45_count_calls(&ir, "@thaw_tjs_register_native_callback_graph("), 1, "{ir}");
     assert_eq!(tj45_count_calls(&ir, "@thaw_tjs_register_callback("), 1, "{ir}");
@@ -33,8 +33,8 @@ fn tj45_sync_listener_keeps_the_marker_route() {
            __thaw_typed_tjs_{listen}((value: string): void => {{ console.log(value); }});
          }}"
     );
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     assert_eq!(tj45_count_calls(&ir, "@thaw_tjs_register_native_callback_graph("), 0, "{ir}");
     assert_eq!(tj45_count_calls(&ir, "@thaw_tjs_register_callback("), 1, "{ir}");
     assert!(!ir.contains("__thaw_native_promise_finish_"), "{ir}");

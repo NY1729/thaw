@@ -96,8 +96,8 @@ fn let_bound_dynamic_method_result_called_with_two_args_lowers_as_dynamic_handle
 fn call_of_call_on_new_jsvalue_global_lowers_as_dynamic_handle_calls() {
     let body = dynamic_callee_chain_main_body(
         r##"
-        declare function __thaw_typed_js_ctor(): JsValue;
-        let Chalk_: JsValue = __thaw_typed_js_ctor();
+        declare function __thaw_typed_tjs_ctor(): JsValue;
+        let Chalk_: JsValue = __thaw_typed_tjs_ctor();
         function main(): void {
             const chalk = new Chalk_({ level: 1 });
             const h = chalk.hex("#ff8800");

@@ -341,10 +341,6 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
-    fn is_ordinary_quickjs_typed_call(backend: DynamicBackend, symbol: &str) -> bool {
-        is_ordinary_quickjs_symbol(backend, symbol)
-    }
-
     /// Lowers a thaw-js constructor's option object literal that carries a callback (`new Writable({ write })`)
     /// as a live `__thaw_dynamic_object_literal`, so the callbacks become receiver handles. Only a literal
     /// whose keys are all declared fields qualifies; any other shape keeps the typed lowering (and its errors).
@@ -426,11 +422,6 @@ impl<'a> FnLowerer<'a> {
             .collect::<Vec<_>>();
         self.lower_dynamic_accessor_object_lit_with_expected_fields(object, true, Some(&fields))
             .map(Some)
-    }
-
-    fn is_quickjs_instance_typed_method(backend: DynamicBackend, symbol: &str) -> bool {
-        backend == DynamicBackend::QuickJs
-            && (symbol.starts_with("$method$") || symbol.starts_with("$methodvoid$"))
     }
 
     fn is_napi_constructor_typed_call(
@@ -4163,9 +4154,8 @@ impl<'a> FnLowerer<'a> {
                                 && method_argument_sources_aligned
                                 && expected.is_some_and(|ty| matches!(ty, HirType::Object(_)) && class_name_from_type(ty).is_none())
                                 && signature.as_ref().is_some_and(|signature| signature.is_extern
-                                    && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)|
-                                        backend == DynamicBackend::Jit
-                                            || Self::is_ordinary_quickjs_typed_call(backend, &symbol)))
+                                    && dynamic_symbol(&callee_name).is_some_and(|(backend, _)|
+                                        backend == DynamicBackend::Jit))
                                 && self.source_contract_type_for_expression(&argument.expr)
                                     .is_some_and(|ty| class_name_from_type(&ty).is_some()) =>
                             {
@@ -4623,19 +4613,6 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
-        let direct_quickjs_typed_call = signature.as_ref().is_some_and(|signature| {
-            signature.is_extern
-                && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
-                    Self::is_ordinary_quickjs_typed_call(backend, &symbol)
-                })
-        });
-        let quickjs_instance_typed_method = signature.as_ref().is_some_and(|signature| {
-            signature.is_extern
-                && method_argument_sources_aligned
-                && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
-                    Self::is_quickjs_instance_typed_method(backend, &symbol)
-                })
-        });
         let thaw_js_live_json_slot = signature.as_ref().is_some_and(|signature| {
             signature.is_extern
                 && method_argument_sources_aligned
@@ -4740,37 +4717,15 @@ impl<'a> FnLowerer<'a> {
                         )?;
                         let original_is_jsvalue = self.infer_expr_type(&value)? == HirType::JsValue;
                         let actual = self.infer_expr_type(&value)?;
-                        let live_method_json_argument = quickjs_instance_typed_method
-                            && i > 0
-                            && actual == HirType::Json
-                            && call
-                                .args
-                                .get(i)
-                                .is_some_and(|argument| has_dynamic_storage(argument.expr.span()));
-                        if live_method_json_argument {
-                            self.validate_storage_source(&call.args[i].expr, declared)?;
-                        }
-                        let class_object =
-                            direct_quickjs_typed_call && class_name_from_type(&actual).is_some();
                         let jit_structural_class_object = direct_jit_typed_call
                             && class_name_from_type(&actual).is_some()
                             && matches!(declared, HirType::Object(_))
                             && class_name_from_type(declared).is_none();
                         let is_generated_wrapper =
                             callee_name.starts_with("__thaw_typed_wrapper_js_");
-                        let user_function = !(is_generated_wrapper
-                            || direct_quickjs_typed_call
-                            || napi_constructor_typed_call)
+                        let user_function = !(is_generated_wrapper || napi_constructor_typed_call)
                             && signature.as_ref().is_some_and(|sig| !sig.is_extern);
                         let promoted_typed_callback = matches!(value, HirExpr::FunctionRef(..))
-                            || direct_quickjs_typed_call
-                                && matches!(
-                                    value,
-                                    HirExpr::Var(_)
-                                        | HirExpr::Lambda(..)
-                                        | HirExpr::TypedClosure(..)
-                                );
-                        let promoted_typed_callback = promoted_typed_callback
                             && typed_callback_storage_return_matches(&actual, declared);
                         if promoted_typed_callback
                             && matches!(value, HirExpr::FunctionRef(..) | HirExpr::Var(_))
@@ -4785,13 +4740,8 @@ impl<'a> FnLowerer<'a> {
                                     format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                                 })?;
                         }
-                        let value = if live_method_json_argument
-                            || promoted_typed_callback
-                            || direct_quickjs_typed_call && actual == HirType::Json
-                        {
+                        let value = if promoted_typed_callback {
                             Ok(value)
-                        } else if class_object {
-                            self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
                         } else if jit_structural_class_object {
                             self.coerce_jit_structural_class_argument(value, declared)
                         } else if quickjs_function_value
@@ -4817,17 +4767,13 @@ impl<'a> FnLowerer<'a> {
                         .map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                         })?;
-                        if (is_generated_wrapper
-                            || direct_quickjs_typed_call
-                            || napi_constructor_typed_call)
+                        if (is_generated_wrapper || napi_constructor_typed_call)
                             && *declared == HirType::Json
                             && original_is_jsvalue
                             && Self::contains_live_host_jsvalue_json_conversion(&value)
                         {
                             let owner_kind = if is_generated_wrapper {
                                 "wrapper"
-                            } else if direct_quickjs_typed_call {
-                                "direct-quickjs"
                             } else {
                                 "napi-constructor"
                             };
@@ -5051,20 +4997,9 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     (sig.params, sig.ret)
                 };
-                let direct_quickjs_typed_call =
-                    Self::is_ordinary_quickjs_typed_call(backend, &symbol);
                 let direct_jit_typed_call =
                     matches!(backend, DynamicBackend::Jit | DynamicBackend::ThawJs)
                         && method_argument_sources_aligned;
-                let quickjs_instance_typed_method = method_argument_sources_aligned
-                    && Self::is_quickjs_instance_typed_method(backend, &symbol);
-                let ret = if direct_quickjs_typed_call
-                    && (generic_types.is_some() || matches!(&ret, HirType::Union(_)))
-                {
-                    storage_type(call.span, ret)
-                } else {
-                    ret
-                };
                 let napi_constructor_typed_call =
                     Self::is_napi_constructor_typed_call(backend, &symbol, &ret);
                 // Argument coercion was skipped for every generic
@@ -5113,18 +5048,6 @@ impl<'a> FnLowerer<'a> {
                         let value = args.next().expect("fixed_count <= args.len()");
                         let original_is_jsvalue = self.infer_expr_type(&value)? == HirType::JsValue;
                         let actual = self.infer_expr_type(&value)?;
-                        let live_method_json_argument = quickjs_instance_typed_method
-                            && i > 0
-                            && actual == HirType::Json
-                            && call.args.get(i).is_some_and(|argument| {
-                                argument.spread.is_none()
-                                    && has_dynamic_storage(argument.expr.span())
-                            });
-                        if live_method_json_argument {
-                            self.validate_storage_source(&call.args[i].expr, declared)?;
-                        }
-                        let class_object =
-                            direct_quickjs_typed_call && class_name_from_type(&actual).is_some();
                         let jit_structural_class_object = direct_jit_typed_call
                             && class_name_from_type(&actual).is_some()
                             && matches!(declared, HirType::Object(_))
@@ -5138,46 +5061,17 @@ impl<'a> FnLowerer<'a> {
                                 self.validate_storage_source(&argument.expr, declared)?;
                             }
                         }
-                        let promoted_typed_callback = direct_quickjs_typed_call
-                            && matches!(
-                                value,
-                                HirExpr::FunctionRef(..)
-                                    | HirExpr::Var(_)
-                                    | HirExpr::Lambda(..)
-                                    | HirExpr::TypedClosure(..)
-                            )
-                            && typed_callback_storage_return_matches(&actual, declared);
-                        if promoted_typed_callback
-                            && matches!(value, HirExpr::FunctionRef(..) | HirExpr::Var(_))
-                        {
-                            let (HirType::Function(params, ret)
-                            | HirType::CallableFunction(params, _, _, ret)) = declared
-                            else {
-                                unreachable!()
-                            };
-                            self.validate_promise_callback_value(&value, params, Some(ret))
-                                .map_err(|error| {
-                                    format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
-                                })?;
-                        }
-                        let value = if live_method_json_argument
-                            || promoted_typed_callback
-                            || thaw_js_ctor_literal_value(declared, &value)
-                        {
+                        let value = if thaw_js_ctor_literal_value(declared, &value) {
                             Ok(value)
-                        } else if class_object {
-                            self.coerce_primitive_array_argument_aliasing(value, &HirType::Json)
                         } else if jit_structural_class_object {
                             self.coerce_jit_structural_class_argument(value, declared)
-                        } else if direct_quickjs_typed_call && actual == HirType::Json {
-                            Ok(value)
                         } else {
                             self.coerce_primitive_array_argument(value, declared)
                         }
                         .map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                         })?;
-                        if (direct_quickjs_typed_call || napi_constructor_typed_call)
+                        if napi_constructor_typed_call
                             && *declared == HirType::Json
                             && original_is_jsvalue
                             && Self::contains_live_host_jsvalue_json_conversion(&value)
@@ -5187,11 +5081,7 @@ impl<'a> FnLowerer<'a> {
                                     "__thaw_mark_typed_wrapper_json_argument".into(),
                                 )),
                                 vec![
-                                    HirExpr::Lit(HirLit::Str(if direct_quickjs_typed_call {
-                                        "direct-quickjs".into()
-                                    } else {
-                                        "napi-constructor".into()
-                                    })),
+                                    HirExpr::Lit(HirLit::Str("napi-constructor".into())),
                                     HirExpr::Lit(HirLit::Str(symbol.clone())),
                                     value,
                                 ],
@@ -5203,37 +5093,7 @@ impl<'a> FnLowerer<'a> {
                     .collect::<Result<Vec<_>, String>>()?;
                 coerced_args.extend(args);
                 let args = coerced_args;
-                let params = if direct_quickjs_typed_call || quickjs_instance_typed_method {
-                    params
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, declared)| -> Result<_, String> {
-                            let actual = args
-                                .get(i)
-                                .map(|value| self.infer_expr_type(value))
-                                .transpose()?;
-                            let live_method_json_argument = quickjs_instance_typed_method
-                            && i > 0
-                            && actual == Some(HirType::Json)
-                                && call
-                                    .args
-                                    .get(i)
-                                    .is_some_and(|argument| has_dynamic_storage(argument.expr.span()));
-                            if live_method_json_argument {
-                                Ok(HirType::Json)
-                            } else if direct_quickjs_typed_call
-                                && (actual == Some(HirType::Json)
-                                    || actual.as_ref().is_some_and(|actual| {
-                                    typed_callback_storage_return_matches(actual, &declared)
-                                    }))
-                            {
-                                Ok(actual.expect("checked as Some"))
-                            } else {
-                                Ok(declared)
-                            }
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
+                let params = {
                     // A live owner handle replaces the aggregate's by-value layout in the wire slot.
                     params
                         .into_iter()
@@ -5242,6 +5102,7 @@ impl<'a> FnLowerer<'a> {
                             if live_owner_args.contains(&i) { HirType::Json } else { declared }
                         })
                         .collect()
+            
                 };
                 let mut result = HirExpr::DynamicCall(
                     DynamicSignature {

@@ -15,11 +15,11 @@ fn tj35_calls(ir: &str, callee: &str) -> bool {
 #[test]
 fn tj35_buffer_result_is_a_routed_thaw_js_call_not_a_stub() {
     let f = tj35_symbol("m::bytes");
-    let (uses_thaw_js, uses_quickjs, ir) = compile_thaw_js_program(&format!(
+    let (uses_thaw_js, ir) = compile_thaw_js_program(&format!(
         "declare function {f}(): Buffer;
          function main(): void {{ console.log({f}().length); }}"
     ));
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("thaw_tjs_call_typed_result"), "{ir}");
     assert!(!ir.contains("non-plain-data"), "{ir}");
 }
@@ -27,7 +27,7 @@ fn tj35_buffer_result_is_a_routed_thaw_js_call_not_a_stub() {
 #[test]
 fn tj35_promise_of_buffer_is_a_routed_thaw_js_call_not_a_stub() {
     let f = tj35_symbol("m::bytesAsync");
-    let (uses_thaw_js, _, ir) = compile_thaw_js_program(&format!(
+    let (uses_thaw_js, ir) = compile_thaw_js_program(&format!(
         "declare function {f}(): Promise<Buffer>;
          async function main(): Promise<void> {{ const b = await {f}(); console.log(b.length); }}"
     ));
@@ -38,7 +38,7 @@ fn tj35_promise_of_buffer_is_a_routed_thaw_js_call_not_a_stub() {
 #[test]
 fn tj35_bare_buffer_argument_is_sent_as_the_tagged_base64_node() {
     let f = tj35_symbol("m::shape");
-    let (_, _, ir) = compile_thaw_js_program(&format!(
+    let (_, ir) = compile_thaw_js_program(&format!(
         "declare function {f}(value: Buffer): Json;
          function main(): void {{ console.log({f}(Buffer.from([1]))); }}"
     ));
@@ -50,7 +50,7 @@ fn tj35_bare_buffer_argument_is_sent_as_the_tagged_base64_node() {
 fn tj35_bare_buffer_argument_selects_its_kind_at_runtime() {
     // `k` is picked from the runtime kind (`thaw_bytes_console_info`), not hard-coded to "Buffer"
     let f = tj35_symbol("m::shape");
-    let (_, _, ir) = compile_thaw_js_program(&format!(
+    let (_, ir) = compile_thaw_js_program(&format!(
         "declare function {f}(value: Buffer): Json;
          function main(): void {{ console.log({f}(Buffer.from([1]))); }}"
     ));
@@ -62,7 +62,7 @@ fn tj35_bare_buffer_argument_selects_its_kind_at_runtime() {
 fn tj35_nested_buffer_argument_still_stubs() {
     // `Buffer[]` is not encoded per element yet (stage 2), so it keeps the stub
     let f = tj35_symbol("m::shapes");
-    let (uses_thaw_js, _, ir) = compile_thaw_js_program(&format!(
+    let (uses_thaw_js, ir) = compile_thaw_js_program(&format!(
         "declare function {f}(value: Buffer[]): Json;
          function main(): void {{ const xs: Buffer[] = []; if (xs.length > 5) {{ console.log({f}(xs)); }} }}"
     ));
@@ -73,14 +73,14 @@ fn tj35_nested_buffer_argument_still_stubs() {
 #[test]
 fn tj35_random_fill_sync_copies_the_result_back_into_the_argument() {
     let fill = tj35_symbol("m::randomFillSync");
-    let (_, _, ir) = compile_thaw_js_program(&format!(
+    let (_, ir) = compile_thaw_js_program(&format!(
         "declare function {fill}(buf: Buffer): Buffer;
          function main(): void {{ const b = Buffer.alloc(4); if (b.length > 5) {{ console.log({fill}(b).length); }} }}"
     ));
     assert!(tj35_calls(&ir, "thaw_bytes_copy"), "{ir}");
     // any other thaw-js function returning a Buffer from its argument keeps its own copy
     let other = tj35_symbol("m::randomBytes");
-    let (_, _, ir) = compile_thaw_js_program(&format!(
+    let (_, ir) = compile_thaw_js_program(&format!(
         "declare function {other}(buf: Buffer): Buffer;
          function main(): void {{ const b = Buffer.alloc(4); if (b.length > 5) {{ console.log({other}(b).length); }} }}"
     ));
@@ -92,7 +92,7 @@ fn tj35_random_fill_sync_copy_back_passes_array_data_not_handles() {
     // `thaw_bytes_copy` reads ByteView data pointers, so both operands must be unwrapped
     // with `compile_array_data` first; the raw 16-byte array handles would be misread.
     let fill = tj35_symbol("m::randomFillSync");
-    let (_, _, ir) = compile_thaw_js_program(&format!(
+    let (_, ir) = compile_thaw_js_program(&format!(
         "declare function {fill}(buf: Buffer): Buffer;
          function main(): void {{ const b = Buffer.alloc(4); if (b.length > 5) {{ console.log({fill}(b).length); }} }}"
     ));
@@ -107,7 +107,7 @@ fn tj35_random_fill_sync_copy_back_passes_array_data_not_handles() {
 fn tj93_bare_buffer_argument_selects_array_buffer_and_data_view_kinds() {
     // ArrayBuffer (code 1) and DataView (code 2) get their own `k` names, not "Buffer"
     let f = tj35_symbol("m::shape");
-    let (_, _, ir) = compile_thaw_js_program(&format!(
+    let (_, ir) = compile_thaw_js_program(&format!(
         "declare function {f}(value: ArrayBuffer): Json;
          function main(): void {{ console.log({f}(new ArrayBuffer(1))); }}"
     ));

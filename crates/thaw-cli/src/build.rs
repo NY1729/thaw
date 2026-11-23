@@ -356,7 +356,7 @@ fn build_with_assets(
     )
 }
 
-/// `THAW_JS_RUNTIME_DEBUG=1`: name the compiled functions that call into QuickJS in a routed build.
+/// `THAW_JS_RUNTIME_DEBUG=1`: name the compiled functions that call into a `thaw_js_*` runtime symbol.
 fn report_thaw_js_mixed(ir: &str) {
     if let Ok(name) = std::env::var("THAW_JS_RUNTIME_DUMP_FN") {
         let mut printing = false;
@@ -393,10 +393,6 @@ fn report_thaw_js_mixed(ir: &str) {
         eprintln!("thaw-js routing: QuickJS use in routed build: {entry}");
     }
 }
-
-/// Marker error: a thaw-js-routed program also needs QuickJS (a callback or live JavaScript value
-/// crossed into thaw-js), so it is rebuilt with routing off.
-const THAW_JS_MIXED: &str = "thaw-js routing needs QuickJS";
 
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
@@ -497,8 +493,6 @@ mod native_timers_retry_tests {
         // the conflict is not a routed failure: the retry keeps the routing (thaw-js or QuickJS by
         // the program's own needs) instead of recording a "fell back to QuickJS" blocker
         assert!(!routed_failure_falls_back(NATIVE_TIMERS_NEED_ENGINE));
-        assert!(routed_failure_falls_back(THAW_JS_MIXED));
-        assert!(routed_failure_falls_back("thaw-js routing needs QuickJS: unported:x"));
         assert!(routed_failure_falls_back("some other build error"));
     }
 }
@@ -1029,7 +1023,6 @@ fn build_with_native_mode_routed(
         let why = refusals.iter().map(|(package, why)| format!("package `{package}` stays on QuickJS: {why}")).collect::<Vec<_>>().join("; ");
         return Err(format!("unsupported on thaw-js: {why}"));
     }
-    thaw_hir::set_thaw_js_routed(true);
     // `SHARE_ENV` shares the environment table with a worker: `process.env.NAME` must read that table
     thaw_hir::set_shared_env_program(user_source.contains("SHARE_ENV"));
     let mut program = thaw_hir::lower_module(&module)?;
@@ -1070,7 +1063,6 @@ fn build_with_native_mode_routed(
     compiler.set_codegen_opt(codegen_opt_level()?);
     compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
     compiler.set_uses_async_hooks(user_source.contains("async_hooks"));
-    compiler.set_thaw_js_routed(true);
     if let Some(lib) = lib_mode {
         compiler.set_library_mode(lib.exports.clone());
     }
@@ -1078,26 +1070,12 @@ fn build_with_native_mode_routed(
     if compiler.native_timers_conflict() {
         return Err(NATIVE_TIMERS_NEED_ENGINE.to_string());
     }
-    let uses_quickjs = compiler.uses_quickjs();
     let uses_napi = compiler.uses_napi();
-    if compiler.uses_thaw_js() {
-        // `THAW_JS_RUNTIME_DUMP_FN` also dumps a function of a build that stays routed.
-        if std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
-            && (uses_quickjs || std::env::var_os("THAW_JS_RUNTIME_DUMP_FN").is_some())
-        {
-            report_thaw_js_mixed(&compiler.print_to_string());
-        }
-        if uses_quickjs {
-            // The reasons ride the error into the `<build>` blocker (`thaw inspect`).
-            let blockers = compiler.quickjs_blockers().join(",");
-            let blockers: String = blockers.chars().take(600).collect();
-            return Err(format!("{THAW_JS_MIXED}: {blockers}"));
-        }
-    }
-    // A build that still links QuickJS (user `loadScript` and the like, with no thaw-js code in the program to
-    // trigger the mixed-build error above) is refused.
-    if uses_quickjs {
-        return Err("unsupported on thaw-js: the program links QuickJS".to_string());
+    if compiler.uses_thaw_js()
+        && std::env::var("THAW_JS_RUNTIME_DEBUG").as_deref() == Ok("1")
+        && std::env::var_os("THAW_JS_RUNTIME_DUMP_FN").is_some()
+    {
+        report_thaw_js_mixed(&compiler.print_to_string());
     }
     runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
     runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
@@ -1106,12 +1084,11 @@ fn build_with_native_mode_routed(
     // features). Anything else falls back to the static archives, with a notice.
     let shared_rt_active = shared_rt
         && !static_link
-        && !uses_quickjs
         && !uses_napi
         && !compiler.uses_thaw_js()
         && runtime_features.is_empty();
     if shared_rt && !shared_rt_active {
-        let reason = if uses_quickjs || uses_napi || compiler.uses_thaw_js() {
+        let reason = if uses_napi || compiler.uses_thaw_js() {
             "JS engine in use"
         } else {
             "runtime feature in use"
@@ -1122,9 +1099,9 @@ fn build_with_native_mode_routed(
         manifest["shared_rt"] = serde_json::json!(true);
     }
     if let Some(lib) = lib_mode {
-        if uses_quickjs || uses_napi || compiler.uses_thaw_js() || !runtime_features.is_empty() {
+        if uses_napi || compiler.uses_thaw_js() || !runtime_features.is_empty() {
             return Err(format!(
-                "not-libraryizable: package needs a JS engine or a runtime feature (L2): quickjs={uses_quickjs} napi={uses_napi} thaw_js={} features={runtime_features:?}",
+                "not-libraryizable: package needs a JS engine or a runtime feature (L2): napi={uses_napi} thaw_js={} features={runtime_features:?}",
                 compiler.uses_thaw_js()
             ));
         }
@@ -1292,7 +1269,7 @@ fn build_with_native_mode_routed(
             // TLS/WASM/runtime sections alive and bloats dynamic symbol tables.
             linker.args(napi_export_args());
         }
-        if native_poll_exports_needed(uses_quickjs, compiler.uses_thaw_js()) {
+        if compiler.uses_thaw_js() {
             // Promise-valued native callbacks poll these through RTLD_DEFAULT
             // while they reenter the active QuickJS or thaw-js context.
             linker.args(quickjs_callback_export_args());
@@ -1669,12 +1646,6 @@ fn thaw_js_drain_export_needed(uses_thaw_js: bool) -> bool {
     uses_thaw_js
 }
 
-/// thaw-js native-promise bridging also looks these symbols up via RTLD_DEFAULT,
-/// so a thaw-js routed build needs the same dynamic exports as a QuickJS build.
-fn native_poll_exports_needed(uses_quickjs: bool, uses_thaw_js: bool) -> bool {
-    uses_quickjs || uses_thaw_js
-}
-
 fn lld_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(|| {
@@ -1742,13 +1713,6 @@ fn quickjs_callbacks_export_only_their_runtime_poll_symbols() {
             "-Wl,--export-dynamic-symbol=thaw_promise_mark_handled",
         ]
     );
-}
-
-#[test]
-fn native_poll_exports_needed_for_quickjs_or_thaw_js() {
-    assert!(native_poll_exports_needed(true, false));
-    assert!(native_poll_exports_needed(false, true));
-    assert!(!native_poll_exports_needed(false, false));
 }
 
 #[test]

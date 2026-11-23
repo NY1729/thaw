@@ -1,15 +1,15 @@
 impl<'ctx> HirCompiler<'ctx> {
-    fn compile_decode_quickjs_graph(
+    fn compile_decode_js_graph(
         &mut self,
         text: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.compile_decode_graph(text, true)
     }
 
-    /// Capture one already-retained QuickJS exception as an owned JSON value.
+    /// Capture one already-retained thaw-js exception as an owned JSON value.
     /// The graph encoder preserves the original JS identity and never assimilates
     /// thrown promises or thenables.
-    pub(super) fn compile_original_quickjs_exception_handle(
+    pub(super) fn compile_original_js_exception_handle(
         &mut self,
         handle: BasicValueEnum<'ctx>,
         consume_handle: bool,
@@ -20,7 +20,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // resolve_handle_graph_result would assimilate a thrown
         // Promise/thenable and change the exception itself.
         let captured = self.builder.build_call(
-            self.module.get_function("thaw_js_capture_handle_graph_result").unwrap(),
+            self.module.get_function("thaw_tjs_capture_handle_graph_result").unwrap(),
             &[handle.into()], "capture_original_exception",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("exception capture returned no result")?.into_struct_value();
@@ -29,7 +29,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // input before either the success or error branch can unwind.
         if consume_handle {
             self.builder.build_call(
-                self.module.get_function("thaw_js_release_handle").unwrap(),
+                self.module.get_function("thaw_tjs_release_handle").unwrap(),
                 &[handle.into()], "release_captured_exception_handle",
             ).map_err(|error| error.to_string())?;
         }
@@ -77,7 +77,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // Decoding consumes all graph leases and destroys the owned
         // wire. The fresh Box then follows the same arena-owned
         // lifetime as caught aliases and Promise pending transfers.
-        let decoded = self.compile_decode_quickjs_graph(wire)?;
+        let decoded = self.compile_decode_js_graph(wire)?;
         let rooted = self.builder.build_call(
             self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
             &[decoded.into()], "root_original_exception",
@@ -105,18 +105,18 @@ impl<'ctx> HirCompiler<'ctx> {
     /// pending channel. The capture helper owns the input when requested;
     /// this fresh JSON Box is then independently arena-rooted for catch,
     /// async-frame, and Promise handoff.
-    pub(super) fn compile_throw_original_quickjs_exception_handle(
+    pub(super) fn compile_throw_original_js_exception_handle(
         &mut self,
         handle: BasicValueEnum<'ctx>,
         consume_handle: bool,
     ) -> Result<(), String> {
         // Query before the capture below can consume the handle.
         let parked = self.builder.build_call(
-            self.module.get_function("thaw_js_exception_native_token").unwrap(),
+            self.module.get_function("thaw_tjs_exception_native_token").unwrap(),
             &[handle.into()], "original_exception_native_token",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("exception native token returned no value")?.into_int_value();
-        let original = self.compile_original_quickjs_exception_handle(handle, consume_handle)?;
+        let original = self.compile_original_js_exception_handle(handle, consume_handle)?;
         self.builder.build_store(self.pending_exception().as_pointer_value(), original)
             .map_err(|error| error.to_string())?;
         self.builder.build_store(self.pending_exception_object().as_pointer_value(), original)
@@ -154,37 +154,37 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let decoded = self.builder.build_call(
             self.module.get_function("thaw_json_graph_decode").unwrap(),
-            &[text.into()], "decode_quickjs_graph",
+            &[text.into()], "decode_js_graph",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-            .ok_or("QuickJS graph decode returned no value")?;
+            .ok_or("thaw-js graph decode returned no value")?;
         if owned_text {
             self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
-                &[text.into()], "destroy_quickjs_graph_text")
+                &[text.into()], "destroy_js_graph_text")
                 .map_err(|error| error.to_string())?;
         }
         let status = self.builder.build_call(
             self.module.get_function("thaw_json_take_graph_error").unwrap(),
-            &[], "quickjs_graph_error",
+            &[], "js_graph_error",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-            .ok_or("QuickJS graph status returned no value")?.into_int_value();
+            .ok_or("thaw-js graph status returned no value")?.into_int_value();
         let failed = self.builder.build_int_compare(
             inkwell::IntPredicate::NE, status, self.context.i8_type().const_zero(),
-            "quickjs_graph_failed",
+            "js_graph_failed",
         ).map_err(|error| error.to_string())?;
-        let invalid = self.context.append_basic_block(self.current_function(), "quickjs_graph_invalid");
-        let valid = self.context.append_basic_block(self.current_function(), "quickjs_graph_valid");
+        let invalid = self.context.append_basic_block(self.current_function(), "js_graph_invalid");
+        let valid = self.context.append_basic_block(self.current_function(), "js_graph_valid");
         self.builder.build_conditional_branch(failed, invalid, valid)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(invalid);
         self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
-            &[decoded.into()], "destroy_invalid_quickjs_graph")
+            &[decoded.into()], "destroy_invalid_js_graph")
             .map_err(|error| error.to_string())?;
         self.compile_throw_type_error("Invalid JavaScript result graph")?;
         self.builder.position_at_end(valid);
         self.mark_fresh_owned_json_result(decoded)?;
         Ok(decoded)
     }
-    /// A live QuickJS-backed Json operation can execute a getter or coercion.
+    /// A live thaw-js-backed Json operation can execute a getter or coercion.
     /// Consume its error immediately, while the owned result is still in
     /// scope, and use the same pending-exception channel as dynamic calls.
     fn compile_check_json_host_error(

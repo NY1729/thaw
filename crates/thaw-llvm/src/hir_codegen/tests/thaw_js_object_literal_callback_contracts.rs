@@ -17,7 +17,7 @@ fn thaw_js_object_literal_program(members: &str) -> String {
 #[test]
 fn thaw_js_routed_object_literal_methods_are_receiver_handles() {
     let source = thaw_js_object_literal_program("{ cb(x: number): number { return x + 1; }, n: 1 }");
-    let (uses_thaw_js, _, ir) = thaw_js_routed_ir(&source, true);
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
     assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("call { i64, ptr } @thaw_tjs_register_native_method_callback_graph("), "{ir}");
     assert!(!ir.contains("call { i64, ptr } @thaw_tjs_register_native_callback_graph("), "{ir}");
@@ -31,7 +31,7 @@ fn thaw_js_routed_nested_object_literal_members_are_built_inline() {
     let source = thaw_js_object_literal_program(
         "{ inner: { f(x: number): number { return x; } }, n: 1 }",
     );
-    let (uses_thaw_js, _, ir) = thaw_js_routed_ir(&source, true);
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
     assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(!ir.contains("__thaw_object_from_operations"), "{ir}");
@@ -42,7 +42,7 @@ fn thaw_js_routed_nested_object_literal_members_are_built_inline() {
 #[test]
 fn thaw_js_routed_object_literal_getters_stay_loud() {
     let source = thaw_js_object_literal_program("{ get x(): number { return 1; }, n: 1 }");
-    let (_, _, ir) = thaw_js_routed_ir(&source, true);
+    let (_, ir) = thaw_js_routed_ir(&source);
     assert!(
         ir.contains("thaw-js: object literal getter members cannot cross the thaw-js boundary"),
         "{ir}"
@@ -57,9 +57,8 @@ fn thaw_js_routed_object_literal_getters_stay_loud() {
 #[test]
 fn thaw_js_routed_object_literal_argument_does_not_require_the_quickjs_builder() {
     let source = thaw_js_object_literal_program("{ cb(x: number): number { return x + 1; }, n: 1 }");
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
     assert!(uses_thaw_js, "{ir}");
-    assert!(!uses_quickjs, "{ir}");
     assert!(!ir.contains("__thaw_object_from_operations"), "{ir}");
 }
 
@@ -83,8 +82,8 @@ fn any_held_closure_is_a_live_lease_not_a_marker() {
     let source = callback_gate_program(
         "const g: any = (x: number): number => x + 1; console.log(g(1));",
     );
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     assert!(!ir.contains("__thaw_tjs_cb__"), "{ir}");
     assert!(!ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(ir.contains("@thaw_json_from_borrowed_handle("), "{ir}");
@@ -95,8 +94,8 @@ fn map_stored_closure_is_a_live_lease_not_a_marker() {
     let source = callback_gate_program(
         "const m = new Map<string, any>(); m.set(\"q\", (x: number): number => x); console.log(m.size);",
     );
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     assert!(!ir.contains("__thaw_tjs_cb__"), "{ir}");
     assert!(!ir.contains("__thaw_tjs_handle__"), "{ir}");
     assert!(ir.contains("@thaw_json_from_borrowed_handle("), "{ir}");
@@ -106,7 +105,7 @@ fn map_stored_closure_is_a_live_lease_not_a_marker() {
 fn closure_passed_to_a_thaw_js_call_keeps_the_callback_marker() {
     let source = callback_gate_program("__thaw_typed_tjs_KEY((x: number): number => x + 1);")
         .replace("KEY", &hex("k::run"));
-    let (uses_thaw_js, uses_quickjs, ir) = thaw_js_routed_ir(&source, true);
-    assert!(uses_thaw_js && !uses_quickjs, "{ir}");
+    let (uses_thaw_js, ir) = thaw_js_routed_ir(&source);
+    assert!(uses_thaw_js, "{ir}");
     assert!(ir.contains("__thaw_tjs_cb__"), "{ir}");
 }
