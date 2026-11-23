@@ -92,7 +92,7 @@ fn classify_ts_type(
     match ty {
         // External instances are opaque handles today. Treat a fluent
         // `this` result as discarded so the method stays on its native
-        // backend instead of mixing an N-API receiver into QuickJS.
+        // backend instead of mixing an N-API receiver into thaw-js.
         // ponytail: preserve the receiver once HIR has an external self type.
         TsType::TsThisType(_) => DtsType::Native(HirType::Void),
         TsType::TsParenthesizedType(parenthesized) => {
@@ -497,8 +497,8 @@ fn classify_ts_type(
             // (and, via constraint substitution above, a `<T extends
             // Date>` type parameter) classify as `Native` instead of
             // `Unsupported`, so ordinary Object JSON marshaling applies --
-            // QuickJS-side `Date.prototype.toJSON`/the `JSON.parse`
-            // reviver (thaw-quickjs) convert to/from a real JS `Date` at
+            // thaw-js-side `Date.prototype.toJSON`/the `JSON.parse`
+            // reviver (thaw-js) convert to/from a real JS `Date` at
             // the call boundary using this same `{"timestamp": ...}` shape.
             if ref_name == "Date" && ty_ref.type_params.is_none() {
                 return DtsType::Native(HirType::Object(vec![(

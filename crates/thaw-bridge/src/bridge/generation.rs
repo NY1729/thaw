@@ -186,7 +186,7 @@ pub struct QualifiedFallback {
 /// calling it compiles to a direct FFI call, resolved at link time --
 /// still requires `thaw build --link <path>` today, until thaw-registry
 /// can fetch/build that library automatically); a `Fallback` function
-/// becomes a thin wrapper wired to the QuickJS-NG path (`callDynamic`).
+/// becomes a thin wrapper wired to the thaw-js path (`callDynamic`).
 ///
 /// This only generates the *callable surface* -- for `Fallback` functions,
 /// something still has to `loadScript(...)` the package's actual JS source
@@ -256,7 +256,7 @@ pub fn generate_shim(
                 let qualified_entry = qualified.iter().find(|q| q.name == function);
                 if let Some(q) = qualified_entry {
                     out.push_str(&format!(
-                        "// Fallback (QuickJS-NG), package-qualified alias: {reason}\n"
+                        "// Fallback (thaw-js), package-qualified alias: {reason}\n"
                     ));
                     if returns_callable {
                         out.push_str(&format!(
@@ -282,7 +282,7 @@ pub fn generate_shim(
                 if shadows_a_thaw_literal_identifier(&function) || is_reserved_js_identifier(&function) {
                     continue;
                 }
-                out.push_str(&format!("// Fallback (QuickJS-NG): {reason}\n"));
+                out.push_str(&format!("// Fallback (thaw-js): {reason}\n"));
                 // `argsArray` (not `args`): `callDynamic` expects a JSON
                 // *array* of positional arguments, e.g.
                 // `identity(JSON.parse("[42]"))`, not `identity(JSON.parse("42"))` --
@@ -308,7 +308,7 @@ pub fn generate_shim(
 }
 
 /// Generates the same JSON-shaped fallback wrappers as `generate_shim`, but
-/// targets the synchronous N-API host instead of QuickJS.
+/// targets the synchronous N-API host instead of thaw-js.
 pub fn generate_native_addon_shim(
     functions: &[DtsFunction],
     qualified: &[QualifiedFallback],
@@ -452,7 +452,7 @@ pub struct ModuleBundle<'a> {
 /// a real npm package's actual CommonJS/UMD source works unmodified.
 ///
 /// `bundles` is in the order packages should load (later packages can
-/// rely on earlier ones already being loaded into the shared QuickJS-NG
+/// rely on earlier ones already being loaded into the shared thaw-js
 /// global scope). Returns an empty string -- no function emitted at all
 /// -- when `bundles` is empty, since there would be nothing for it to do.
 /// Optional host features required by uncompressed source. Keep this metadata

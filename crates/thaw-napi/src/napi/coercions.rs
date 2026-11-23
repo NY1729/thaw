@@ -378,14 +378,14 @@ unsafe fn qjs_string_units_from_result(
                 crate::engine::thaw_js_release_handle(result.exception_handle);
                 return Err(NAPI_INVALID_ARG);
             };
-            if let Some(value) = owner.quickjs_live_values.get(&result.exception_handle).copied() {
+            if let Some(value) = owner.thawjs_live_values.get(&result.exception_handle).copied() {
                 (value, true)
             } else {
-                let value = owner.alloc(Value::QuickJsHandle {
+                let value = owner.alloc(Value::ThawJsHandle {
                     handle: result.exception_handle,
                     object_like: result.exception_object_like != 0,
                 });
-                owner.quickjs_live_values.insert(result.exception_handle, value);
+                owner.thawjs_live_values.insert(result.exception_handle, value);
                 (value, false)
             }
         };
@@ -889,14 +889,14 @@ pub unsafe extern "C" fn napi_run_script(
     };
     // A JSON literal is also a valid JavaScript script, but evaluating it does
     // not require a JavaScript engine. Keep this fast path deliberately strict:
-    // assignments, expressions, and other syntax continue through QuickJS so
+    // assignments, expressions, and other syntax continue through thaw-js so
     // `napi_run_script` retains its existing semantics for non-JSON scripts.
     let evaluated = match serde_json::from_str::<JsonValue>(&source) {
         Ok(json) => Ok(Some(json.to_string())),
         #[cfg(feature = "js-engine")]
         Err(_) => crate::engine::eval_json(&source),
         #[cfg(not(feature = "js-engine"))]
-        Err(_) => Err("napi_run_script requires the QuickJS feature for JavaScript syntax".into()),
+        Err(_) => Err("napi_run_script requires the thaw-js feature for JavaScript syntax".into()),
     };
     let env_ptr = env;
     let Ok(env) = env_mut(env) else {

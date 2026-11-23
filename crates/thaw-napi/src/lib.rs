@@ -26,8 +26,8 @@ mod napi_version;
 #[cfg(feature = "js-engine")]
 mod engine;
 
-// With the `quickjs` feature (on by default), this crate transitively
-// needs thaw-quickjs's `thaw_js_dynamic_object_query`, which calls
+// With the `engine-thaw-js` feature (on by default), this crate transitively
+// needs thaw-js's `thaw_tjs_dynamic_object_query`, which calls
 // thaw-std's `thaw_json_parse` as an `extern "C"` declaration resolved at
 // link time (no real Rust-level dependency between these archives -- see
 // thaw-runtime's own `Cargo.toml` comment) -- without this marker import,
@@ -525,7 +525,7 @@ enum ThawCallback {
     Value(ThawNativeValueCallback),
     ValueGraph(ThawNativeValueCallback),
     #[cfg(feature = "js-engine")]
-    QuickJs(ThawNativeValueCallback),
+    ThawJs(ThawNativeValueCallback),
 }
 
 pub enum Value {
@@ -578,8 +578,8 @@ pub enum Value {
         byte_offset: usize,
     },
     External(*mut c_void),
-    // One independently retained QuickJS handle, owned by this Env.
-    QuickJsHandle {
+    // One independently retained thaw-js handle, owned by this Env.
+    ThawJsHandle {
         handle: u64,
         object_like: bool,
     },
@@ -786,7 +786,7 @@ pub struct Env {
     // Symbols imported from JS are permanent yet must revive as their exact
     // original JS values, never by description or a fresh local Symbol.
     js_original_symbol_ids: HashSet<u64>,
-    // Local symbols imported from the per-addon QuickJS realm have a weak JS
+    // Local symbols imported from the per-addon thaw-js realm have a weak JS
     // cache entry. Their native wrapper is kept only while native roots or
     // the engine's independent WeakRef target remain live.
     js_origin_symbol_ids: HashSet<u64>,
@@ -805,9 +805,9 @@ pub struct Env {
     // Legacy ownerless carrier metadata; managed bridge Symbols use native
     // IDs plus per-owner weak JS identity rather than an Env-owned handle.
     #[cfg(feature = "js-engine")]
-    quickjs_symbol_ids: HashMap<u64, u64>,
-    quickjs_references: HashMap<u64, NapiValue>,
-    quickjs_live_values: HashMap<u64, NapiValue>,
+    thawjs_symbol_ids: HashMap<u64, u64>,
+    thawjs_references: HashMap<u64, NapiValue>,
+    thawjs_live_values: HashMap<u64, NapiValue>,
     #[cfg(feature = "js-engine")]
     released_handles: HashSet<usize>,
     // Positive references held by native Json graph nodes postpone proxy
@@ -895,11 +895,11 @@ struct Accessor {
     getter_reflection: Option<NapiValue>,
     setter_reflection: Option<NapiValue>,
     #[cfg(feature = "js-engine")]
-    js_owner: Option<Arc<QuickJsAccessorRoots>>,
+    js_owner: Option<Arc<ThawJsAccessorRoots>>,
 }
 
 #[cfg(feature = "js-engine")]
-struct QuickJsAccessorRoots {
+struct ThawJsAccessorRoots {
     getter: u64,
     setter: u64,
     getter_native: NapiValue,
@@ -907,11 +907,11 @@ struct QuickJsAccessorRoots {
 }
 
 #[cfg(feature = "js-engine")]
-impl Drop for QuickJsAccessorRoots {
+impl Drop for ThawJsAccessorRoots {
     fn drop(&mut self) {
         // Releasing the last callback handle may run a JS finalizer that
         // reenters this addon. Keep Env retirement deferred until both
-        // independent roots have been returned to the QuickJS registry.
+        // independent roots have been returned to the thaw-js registry.
         let _dispatch = ForeignCallbackGuard::new();
         if self.getter != 0 {
             crate::engine::thaw_js_release_handle(self.getter);
@@ -974,9 +974,9 @@ impl Env {
             utf16_strings: HashMap::new(),
             utf16_symbols: HashMap::new(),
             #[cfg(feature = "js-engine")]
-            quickjs_symbol_ids: HashMap::new(),
-            quickjs_references: HashMap::new(),
-            quickjs_live_values: HashMap::new(),
+            thawjs_symbol_ids: HashMap::new(),
+            thawjs_references: HashMap::new(),
+            thawjs_live_values: HashMap::new(),
             #[cfg(feature = "js-engine")]
             released_handles: HashSet::new(),
             native_graph_pins: 0,
@@ -1202,8 +1202,8 @@ impl Env {
         }
         // A JavaScript callback wrapper stays alive only while native code
         // holds it (a napi_ref of any count, a scope, another rooted value).
-        // Other QuickJS references are owned by the JavaScript side.
-        for value in self.quickjs_references.values() {
+        // Other thaw-js references are owned by the JavaScript side.
+        for value in self.thawjs_references.values() {
             let is_function = matches!(unsafe { &**value }, Value::Function(_));
             if !is_function
                 || self
@@ -1216,16 +1216,13 @@ impl Env {
         }
         for (id, value) in &self.symbols {
             // Native/global IDs and provisional JS registrations have their
-            // own roots. A QuickJsHandle entry in this metadata table is not
+            // own roots. A ThawJsHandle entry in this metadata table is not
             // itself an owner; its actual property-key edges are traversed
             // below with every native property map.
             if self.strong_symbol_ids.contains(id)
                 || self.js_registering_symbol_ids.contains(id)
                 || (self.graph_owner_id == 0
-                    && matches!(
-                        unsafe { value_ref(*value) },
-                        Ok(Value::QuickJsHandle { .. })
-                    ))
+                    && matches!(unsafe { value_ref(*value) }, Ok(Value::ThawJsHandle { .. })))
             {
                 enqueue(*value, &live, &mut seen, &mut queue);
             }
@@ -1608,7 +1605,7 @@ unsafe fn retire_scoped_value(
     generation: u64,
     old_payloads: &mut Vec<Value>,
     old_accessors: &mut Vec<Accessor>,
-    quickjs_releases: &mut Vec<u64>,
+    thawjs_releases: &mut Vec<u64>,
     callbacks: &mut ScopedFinalizeCallbacks,
 ) {
     let key = value as usize;
@@ -1665,13 +1662,13 @@ unsafe fn retire_scoped_value(
     }
     #[cfg(feature = "js-engine")]
     env_ref
-        .quickjs_symbol_ids
+        .thawjs_symbol_ids
         .retain(|_, id| !removed_symbols.contains(id));
     env_ref.error_names.remove(&key);
     // These tables describe the Value; they do not independently own it.
     env_ref.graph_wrappers.remove(&key);
     env_ref.host_properties.remove(&key);
-    // Remove owner descriptors before callbacks run. Their Arc<QuickJsAccessorRoots>
+    // Remove owner descriptors before callbacks run. Their Arc<ThawJsAccessorRoots>
     // destructors may reenter this Env, so defer the actual Drop until after
     // the entire unreachable set has been detached.
     let accessor_keys: Vec<_> = env_ref
@@ -1686,24 +1683,24 @@ unsafe fn retire_scoped_value(
         }
     }
     #[cfg(feature = "js-engine")]
-    if let Value::QuickJsHandle { handle, .. } = &*value {
-        env_ref.quickjs_symbol_ids.remove(handle);
-        if env_ref.quickjs_live_values.get(handle) == Some(&value) {
-            env_ref.quickjs_live_values.remove(handle);
-            quickjs_releases.push(*handle);
+    if let Value::ThawJsHandle { handle, .. } = &*value {
+        env_ref.thawjs_symbol_ids.remove(handle);
+        if env_ref.thawjs_live_values.get(handle) == Some(&value) {
+            env_ref.thawjs_live_values.remove(handle);
+            thawjs_releases.push(*handle);
         }
     }
     #[cfg(not(feature = "js-engine"))]
-    let _ = quickjs_releases;
+    let _ = thawjs_releases;
     #[cfg(feature = "js-engine")]
     if matches!(&*value, Value::Function(_)) {
         let released: Vec<u64> = env_ref
-            .quickjs_references
+            .thawjs_references
             .iter()
             .filter_map(|(id, held)| (*held == value).then_some(*id))
             .collect();
         for id in released {
-            env_ref.quickjs_references.remove(&id);
+            env_ref.thawjs_references.remove(&id);
             PENDING_JS_REFERENCE_RELEASES.with(|pending| pending.borrow_mut().push(id));
         }
     }
@@ -1758,7 +1755,7 @@ unsafe fn sweep_pending_scope_values(env: NapiEnv) {
     let reachable = env_ref.scope_reachable_values(&candidates, None, &external_roots, true, true);
     let mut old_payloads = Vec::new();
     let mut old_accessors = Vec::new();
-    let mut quickjs_releases = Vec::new();
+    let mut thawjs_releases = Vec::new();
     let mut callbacks = ScopedFinalizeCallbacks::default();
     for (value, generation) in values {
         if reachable.contains(&(value as usize)) {
@@ -1770,7 +1767,7 @@ unsafe fn sweep_pending_scope_values(env: NapiEnv) {
                 generation,
                 &mut old_payloads,
                 &mut old_accessors,
-                &mut quickjs_releases,
+                &mut thawjs_releases,
                 &mut callbacks,
             );
         }
@@ -1785,7 +1782,7 @@ unsafe fn sweep_pending_scope_values(env: NapiEnv) {
         capture_shutdown_exception(env);
     }
     #[cfg(feature = "js-engine")]
-    for handle in quickjs_releases {
+    for handle in thawjs_releases {
         crate::engine::thaw_js_release_handle(handle);
         capture_shutdown_exception(env);
     }
@@ -1889,7 +1886,7 @@ unsafe fn close_handle_scope(
         env_ref.scope_reachable_values(&candidates, escaped, &external_roots, true, true);
     let mut old_payloads = Vec::new();
     let mut old_accessors = Vec::new();
-    let mut quickjs_releases = Vec::new();
+    let mut thawjs_releases = Vec::new();
     let mut callbacks = ScopedFinalizeCallbacks::default();
     for (value, generation) in values {
         let key = value as usize;
@@ -1911,7 +1908,7 @@ unsafe fn close_handle_scope(
                 generation,
                 &mut old_payloads,
                 &mut old_accessors,
-                &mut quickjs_releases,
+                &mut thawjs_releases,
                 &mut callbacks,
             );
         }
@@ -1926,7 +1923,7 @@ unsafe fn close_handle_scope(
         capture_shutdown_exception(env);
     }
     #[cfg(feature = "js-engine")]
-    for handle in quickjs_releases {
+    for handle in thawjs_releases {
         crate::engine::thaw_js_release_handle(handle);
         capture_shutdown_exception(env);
     }
@@ -2152,15 +2149,15 @@ impl Env {
         // native descriptor table before their final release can reenter.
         let accessors = std::mem::take(&mut (*env).accessors);
         drop(accessors);
-        // A QuickJS release can invoke a JS finalizer and reenter N-API.
+        // A thaw-js release can invoke a JS finalizer and reenter N-API.
         // Invalidate this Env's cache first, then release outside any HOST
         // borrow or reference into an Env value. The Box remains pinned.
         #[cfg(feature = "js-engine")]
-        let quickjs_handles = std::mem::take(&mut (*env).quickjs_live_values)
+        let thawjs_handles = std::mem::take(&mut (*env).thawjs_live_values)
             .into_keys()
             .collect::<Vec<_>>();
         #[cfg(feature = "js-engine")]
-        for handle in quickjs_handles {
+        for handle in thawjs_handles {
             crate::engine::thaw_js_release_handle(handle);
         }
     }
@@ -2380,7 +2377,7 @@ fn retire_owned_envs() {
             return;
         }
         // External libuv callbacks may still hold Env, addon function data,
-        // and QuickJS context. Cleanup hooks must close/unregister their loops
+        // and thaw-js context. Cleanup hooks must close/unregister their loops
         // before any finalizer can reclaim those resources.
         // A finalizer may register a hook or queue work on another Env. Do
         // one owner at a time, then restart the global hook/work barrier.
@@ -2570,7 +2567,7 @@ fn is_object_value(value: &Value) -> bool {
             | Value::TypedArray { .. }
             | Value::DataView { .. }
             | Value::Function(_)
-            | Value::QuickJsHandle {
+            | Value::ThawJsHandle {
                 object_like: true,
                 ..
             }

@@ -572,7 +572,7 @@ unsafe fn array_index_exceeds_readonly_length_in_env(
 
 // ArraySetLength must remove configurable indexed properties in descending
 // order and stop above the first nonconfigurable index. Dropping an accessor
-// can run a QuickJS finalizer, so the removed roots leave the Env borrow
+// can run a thaw-js finalizer, so the removed roots leave the Env borrow
 // before their final strong reference is released.
 unsafe fn set_array_length(
     env: NapiEnv, object: NapiValue, value: NapiValue, make_readonly: bool,

@@ -179,7 +179,7 @@ pub unsafe extern "C" fn napi_define_properties(
                     .insert((object as usize, key_name), attributes);
                 replaced
             };
-            // A replaced JS accessor may release its last QuickJS handle and
+            // A replaced JS accessor may release its last thaw-js handle and
             // run a finalizer. Do so after the Env mutation borrow ends.
             drop(replaced);
             scope_sweep.changed();
@@ -658,7 +658,7 @@ pub unsafe extern "C" fn napi_new_instance(
 }
 
 // The ordinary N-API entry uses its constructor as new.target. A trusted
-// QuickJS Proxy construct trap may supply a different engine new.target;
+// thaw-js Proxy construct trap may supply a different engine new.target;
 // keep that extension private so the public N-API ABI remains unchanged.
 unsafe fn napi_new_instance_with_target(
     env: NapiEnv,
@@ -724,7 +724,7 @@ unsafe fn napi_new_instance_with_target(
     // constructor itself is new.target. Snapshot the callback first, then
     // perform this read before taking an Env mutation borrow.
     let prototype = if !fallback_prototype.is_null() {
-        // The QuickJS proxy construct trap already performed the one observable
+        // The thaw-js proxy construct trap already performed the one observable
         // Get(newTarget, "prototype") while computing this realm-correct fallback.
         Some(fallback_prototype)
     } else {
@@ -800,7 +800,7 @@ pub unsafe extern "C" fn napi_instanceof(
     }
     #[cfg(feature = "js-engine")]
     if qjs_handle(object).is_some() || qjs_handle(constructor).is_some() {
-        if !matches!(value_ref(constructor), Ok(Value::QuickJsHandle { .. } | Value::Function(_))) {
+        if !matches!(value_ref(constructor), Ok(Value::ThawJsHandle { .. } | Value::Function(_))) {
             return record_status(env, NAPI_FUNCTION_EXPECTED);
         }
         return qjs_instanceof(env, object, constructor, result);
@@ -856,7 +856,7 @@ pub unsafe extern "C" fn napi_get_prototype(
     }
     #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
-        if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
+        if matches!(value_ref(object), Ok(Value::ThawJsHandle { object_like: false, .. })) {
             return record_status(env, NAPI_OBJECT_EXPECTED);
         }
         return qjs_get_prototype(env, handle, result);
@@ -890,7 +890,7 @@ pub unsafe extern "C" fn node_api_set_prototype(
     }
     #[cfg(feature = "js-engine")]
     if let Some(handle) = qjs_handle(object) {
-        if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
+        if matches!(value_ref(object), Ok(Value::ThawJsHandle { object_like: false, .. })) {
             return record_status(env, NAPI_OBJECT_EXPECTED);
         }
         if !matches!(value_ref(prototype), Ok(value) if is_object_value(value) || matches!(value, Value::Null)) {
@@ -954,7 +954,7 @@ pub unsafe extern "C" fn napi_strict_equals(
 }
 
 /// Trace-only: the Function-to-Function comparisons, with how each side was
-/// represented (a QuickJS/thaw-js handle id, or a native value) and the raw
+/// represented (a thaw-js/thaw-js handle id, or a native value) and the raw
 /// value pointers, so a re-marshalled handle for the same JS function shows up.
 unsafe fn napi_trace_strict_equals(left: NapiValue, right: NapiValue, result: *const bool, status: NapiStatus) {
     let (Some(left_kind), Some(right_kind)) = (napi_trace_function_kind(left), napi_trace_function_kind(right)) else {
