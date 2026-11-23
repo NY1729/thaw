@@ -6988,6 +6988,27 @@ pub fn from_value(it: &mut Interp, v: &Value, depth: usize) -> Result<Native, Ho
             if matches!(&*o.kind.borrow(), Kind::RegExp(_)) {
                 return Err(HostError::NotPlainData("RegExp".into()));
             }
+            // a Proxy over an array (nested in a result) is an array read through its traps: a throwing
+            // `length` or element getter is the error of the call, not an empty or object-shaped copy
+            if matches!(&*o.kind.borrow(), Kind::Proxy(_))
+                && matches!(
+                    it.proxy_unwrap(v, "isArray").unwrap_or(Value::Undefined),
+                    Value::Object(ref target) if matches!(&*target.kind.borrow(), Kind::Array(_))
+                )
+            {
+                let length = it.get(v, "length").map_err(|c| classify(it, c))?;
+                let length = it.num(&length);
+                let mut items = Vec::new();
+                for index in 0..(length.max(0.0) as usize).min(1 << 24) {
+                    let item = it.get(v, &index.to_string()).map_err(|c| classify(it, c))?;
+                    items.push(if item.is_callable() {
+                        Native::Null
+                    } else {
+                        from_value(it, &item, depth + 1)?
+                    });
+                }
+                return Ok(Native::Array(items));
+            }
             if matches!(&*o.kind.borrow(), Kind::Array(_)) {
                 if crate::array_snapshot_unsafe(o) {
                     return Err(HostError::NotPlainData(

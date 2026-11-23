@@ -2826,6 +2826,23 @@ fn reporting_a_thrown_error_reads_its_message_once_and_keeps_a_getter_failure() 
 }
 
 #[test]
+fn a_proxy_array_nested_in_a_result_is_read_through_its_traps() {
+    use crate::host::{HostError, Native, Package};
+    let bundle = MINI.replace(
+        "exports.VERSION = '1.0';",
+        "exports.plain = function () { return { data: new Proxy([1, 2], {}) }; };\nexports.bad = function () { return { data: new Proxy([1, 2], { get(t, k, r) { if (k === 'length') throw new Error('length failed'); return Reflect.get(t, k, r); } }) }; };",
+    );
+    let mut p = Package::load(&bundle).expect("loads");
+    match p.call("plain", &[]) {
+        Ok(Native::Object(fields)) => {
+            assert!(matches!(&fields[0].1, Native::Array(items) if items.len() == 2));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(p.call("bad", &[]), Err(HostError::Thrown(d)) if d == "Error: length failed"));
+}
+
+#[test]
 fn a_later_string_throw_does_not_pick_up_the_previous_errors_frame() {
     use crate::host::{HostError, Package};
     let bundle = MINI.replace(
