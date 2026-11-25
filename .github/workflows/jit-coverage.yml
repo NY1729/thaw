@@ -102,9 +102,9 @@ jobs:
       - name: Check for corpus programs
         id: corpus
         run: |
-          # The 24 committed programs and their pinned versions live under tools/quickjs-removal/corpus.
+          # The 24 committed programs and their pinned versions live under tools/corpus/corpus.
           # Missing corpus is a failure (no silent skip).
-          corpus="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus"
+          corpus="$GITHUB_WORKSPACE/tools/corpus/corpus"
           for need in "$corpus/pk" "$corpus/versions.txt"; do
             if [ ! -e "$need" ]; then
               echo "corpus input not found: $need" >&2
@@ -118,8 +118,8 @@ jobs:
         env:
           THAW: ${{ github.workspace }}/target/release/thaw
           SCRATCH: ${{ runner.temp }}/jit-coverage-scratch
-          PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
-          VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
+          PK_DIR: ${{ github.workspace }}/tools/corpus/corpus/pk
+          VERSIONS: ${{ github.workspace }}/tools/corpus/corpus/versions.txt
           ONLY: ${{ inputs.only }}
           MEASURE_RUNS: ${{ inputs.runs || '5' }}
         run: |

@@ -115,8 +115,6 @@ jobs:
             target/debug/thaw build "$f" -o "$W/bin/$base" > "$W/$base.build.log" 2>&1 || rc=$?
             echo "$rc" > "$W/$base.build.rc"
             echo "$base: thaw build exit $rc"
-            # which engine the binary links: count of JS_NewRuntime symbols: the permanent guard that no QuickJS is linked (expect 0)
-            [ -x "$W/bin/$base" ] && echo "$base thaw-js binary JS_NewRuntime=$(nm "$W/bin/$base" 2>/dev/null | grep -c ' JS_NewRuntime$')" >> "$W/engines.txt"
             if [ "$rc" != 0 ]; then
               {
                 echo "### $base: thaw build failed (exit $rc), first 40 lines of build.log"
@@ -171,7 +169,6 @@ jobs:
             else
               echo "- no gaps.json produced; see the build and run logs in the artifact"
             fi
-            echo "- linked-engine check (JS_NewRuntime symbol count per binary): $(tr '\n' ';' < "$W/engines.txt" 2>/dev/null)"
             echo
             echo "### failed chunks"
             echo

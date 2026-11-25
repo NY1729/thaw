@@ -6864,6 +6864,10 @@ mod napi_symbols_tests;
 mod native_recursion_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(all(test, unix))]
+mod node_twin_rest_tests;
+#[cfg(test)]
+mod node_twin_tests;
 #[cfg(test)]
 mod process_env_tests;
 #[cfg(test)]
@@ -6876,10 +6880,6 @@ mod prop_configurable_tests;
 mod prop_get_tests;
 #[cfg(test)]
 mod proxy_trap_tests;
-#[cfg(all(test, unix))]
-mod quickjs_twin_rest_tests;
-#[cfg(test)]
-mod quickjs_twin_tests;
 #[cfg(test)]
 mod regexp_proto_tests;
 #[cfg(test)]

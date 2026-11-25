@@ -1,6 +1,6 @@
 name: route-all
 
-# Non-gating measurement of the QuickJS-free routing (THAW_JS_ROUTE_ALL=1 is the default now; this workflow keeps the
+# Non-gating measurement of the routing (THAW_JS_ROUTE_ALL=1 is the default now; this workflow keeps the
 # per-case measurement). The engine-tests and npm-integration legs were removed: the default CI runs them routed
 # (with THAW_JS_FALLBACK warn/error), so they only duplicated it. Reports, per case, the recorded
 # blockers, and the cases whose output or classification differs from Node. Nothing here fails
@@ -288,7 +288,7 @@ jobs:
       - name: Check for corpus programs
         id: corpus
         run: |
-          corpus="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus"
+          corpus="$GITHUB_WORKSPACE/tools/corpus/corpus"
           for need in "$corpus/pk" "$corpus/versions.txt"; do
             if [ ! -e "$need" ]; then
               echo "corpus input not found: $need" >&2
@@ -303,11 +303,11 @@ jobs:
           THAW: ${{ github.workspace }}/target/release/thaw
           THAW_SCAN: ${{ github.workspace }}/target/release/thaw-js-scan
           SCRATCH: ${{ runner.temp }}/routeall-corpus
-          PK_DIR: ${{ github.workspace }}/tools/quickjs-removal/corpus/pk
-          VERSIONS: ${{ github.workspace }}/tools/quickjs-removal/corpus/versions.txt
+          PK_DIR: ${{ github.workspace }}/tools/corpus/corpus/pk
+          VERSIONS: ${{ github.workspace }}/tools/corpus/corpus/versions.txt
           MEASURE_RUNS: "5"
         run: |
-          tools/quickjs-removal/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus.tsv" || true
+          tools/corpus/measure.sh --skip-node-compat -o "$RUNNER_TEMP/corpus.tsv" || true
       - name: Summarize corpus pass/fail (thaw-js, route-all)
         if: always()
         run: |
