@@ -2672,12 +2672,29 @@ impl<'ctx> HirCompiler<'ctx> {
         // instruction selection. They are no-ops for today's synchronous
         // functions, so keeping the pipeline always enabled gives both modes
         // one deterministic object-generation path.
+        //
+        // `default<O2>` already schedules the coroutine passes (early, split,
+        // cleanup, elide) around its own mid-end, so it replaces the bare
+        // coroutine pipeline. `THAW_CODEGEN_MIDEND=off` (or a backend level of
+        // `None`, i.e. `--fast-compile`) keeps the coroutine-only pipeline; any
+        // other value is used verbatim as an LLVM pass pipeline (debugging).
+        let mode = std::env::var("THAW_CODEGEN_MIDEND").ok();
+        let pipeline = match mode.as_deref() {
+            Some("off" | "0" | "none") => "coro-early,coro-split,coro-cleanup",
+            Some(custom) if !custom.is_empty() && custom != "on" => custom,
+            _ if matches!(self.codegen_opt, OptimizationLevel::None) => {
+                "coro-early,coro-split,coro-cleanup"
+            }
+            _ => "default<O2>",
+        };
+        // Mid-end passes lay out `{ i8, i64 }` unions using the module's data
+        // layout; without the target's it defaults to 4-byte i64 alignment and
+        // disagrees with the 8/16-byte slots the codegen hard-codes.
+        self.module.set_triple(&triple);
         self.module
-            .run_passes(
-                "coro-early,coro-split,coro-cleanup",
-                &target_machine,
-                PassBuilderOptions::create(),
-            )
+            .set_data_layout(&target_machine.get_target_data().get_data_layout());
+        self.module
+            .run_passes(pipeline, &target_machine, PassBuilderOptions::create())
             .map_err(|e| format!("coroutine pass pipeline failed: {e}"))?;
 
         target_machine
