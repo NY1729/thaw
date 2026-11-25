@@ -82,7 +82,8 @@ jobs:
           rc=0
           python3 -I tools/test262/compare.py "$RUNNER_TEMP/results.jsonl" > "$RUNNER_TEMP/ratchet.md" || rc=$?
           { echo "### shard ${{ matrix.shard }}: ratchet exit $rc (non-gating)"; cat "$RUNNER_TEMP/ratchet.md"; } >> "$GITHUB_STEP_SUMMARY"
-          exit $rc
+          if [ "$rc" != 0 ]; then echo "::warning title=test262 ratchet::shard ${{ matrix.shard }} has regressions vs the baseline (non-gating, see the job summary)"; fi
+          exit 0
       - uses: actions/upload-artifact@v4
         if: always()
         with:

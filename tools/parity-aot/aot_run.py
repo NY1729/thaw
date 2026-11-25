@@ -146,6 +146,9 @@ def reject_kind(detail):
 def render_program(prog, lines, node):
     """Program text for probe lines. Module programs carry their `import * as M` lines in prog["imports"], which
     gen_probes.render does not write; they go right after the header line."""
+    if prog.get("renderer") == "boundary":
+        import gen_boundary
+        return gen_boundary.render(lines, prog.get("imports") or [], node)
     text = gen_probes.render(lines, prog["module"], node)
     imports = prog.get("imports") or []
     if imports:
@@ -158,6 +161,14 @@ def pa_tmp_dir(cfg, prog):
     """Per-program scratch directory exported as PA_TMP. The same path for Node and the engine, so that a value
     derived from the path (length included) cannot differ between the two sides. diff.py masks it to <tmp>."""
     return os.path.join(cfg.out, "pa-tmp", prog["name"])
+
+
+def limit_as():
+    """preexec_fn of every probe binary run: RLIMIT_AS of PARITY_AOT_RLIMIT_AS_MB megabytes (0 or unset: no limit)."""
+    mb = int(os.environ.get("PARITY_AOT_RLIMIT_AS_MB", "0"))
+    if mb > 0:
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (mb << 20, mb << 20))
 
 
 def diag_detail(diag):
@@ -268,7 +279,8 @@ class Program:
         binary = os.path.join(self.work, stem)
         out_path = os.path.join(self.work, stem + ".out")
         try:
-            p = subprocess.run([binary], cwd=self.cwd, env=self.env, capture_output=True, timeout=RUN_TIMEOUT)
+            p = subprocess.run([binary], cwd=self.cwd, env=self.env, capture_output=True, timeout=RUN_TIMEOUT,
+                               preexec_fn=limit_as)
             status, rc, data = ("OK" if p.returncode == 0 else "CRASH"), p.returncode, p.stdout
         except subprocess.TimeoutExpired as e:
             status, rc, data = "HANG", None, e.stdout or b""
@@ -364,7 +376,7 @@ def engine_stage(cfg, engine, manifest, node_blocks):
     cmd = [sys.executable, os.path.join(PARITY, "diff.py"),
            "--node-dir", os.path.join(eng, "corpus/node"), "--thaw-dir", os.path.join(eng, "corpus/thaw"),
            "--blocks", "--skip", os.path.join(HERE, "skip.txt"), "--waivers", os.path.join(HERE, "waivers.json"),
-           "--baseline", os.path.join(HERE, "known-gaps.json"), "--gaps", os.path.join(eng, "gaps.json")]
+           "--baseline", cfg.baseline, "--gaps", os.path.join(eng, "gaps.json")]
     p = subprocess.run(cmd, capture_output=True, text=True)
     with open(os.path.join(eng, "diff.txt"), "w", encoding="utf-8") as fh:
         fh.write(p.stdout + p.stderr)
@@ -459,6 +471,8 @@ def main(argv):
     ap.add_argument("--only", default="", help="program name prefix (local debugging)")
     ap.add_argument("--node-only", action="store_true", help="run only the Node reference (selftest)")
     ap.add_argument("--write-baseline", action="store_true")
+    ap.add_argument("--baseline", default=os.path.join(HERE, "known-gaps.json"),
+                    help="known-gaps file (the boundary suite passes known-gaps-boundary.json)")
     ap.add_argument("--keep-work", action="store_true")
     cfg = ap.parse_args(argv)
     cfg.programs = os.path.abspath(cfg.programs)
@@ -486,7 +500,7 @@ def main(argv):
             shutil.rmtree(os.path.join(cfg.out, "pa-tmp"), ignore_errors=True)
         print(summarise(cfg, engines, out))
         if cfg.write_baseline:
-            n = write_baseline(os.path.join(HERE, "known-gaps.json"), out)
+            n = write_baseline(cfg.baseline, out)
             print(f"wrote baseline with {n} gap(s)")
         return 0
     except HarnessError as e:
