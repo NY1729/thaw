@@ -1941,6 +1941,7 @@ struct StaticlibBuildKey {
     workspace: PathBuf,
     cwd: Option<PathBuf>,
     env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    lto: bool,
 }
 
 fn staticlib_build_key(
@@ -1962,6 +1963,22 @@ fn staticlib_build_key(
         workspace: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"),
         cwd: std::env::current_dir().ok(),
         env,
+        lto: runtime_lto(),
+    }
+}
+
+/// Set while `thaw prepare` runs: the archives it ships are built with the `thaw-rt` profile (fat LTO, one
+/// codegen unit), which shrinks programs ~10% and runs runtime-bound code 5-30% faster, at roughly +50% build
+/// time per archive. On-demand builds (dev checkouts, CI) keep the plain release profile.
+static PREPARING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `THAW_RT_LTO=1` forces the `thaw-rt` profile for every runtime archive build, `THAW_RT_LTO=0` forces plain
+/// `--release` (also for `thaw prepare`); unset follows [`PREPARING`].
+fn runtime_lto() -> bool {
+    match std::env::var("THAW_RT_LTO").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => PREPARING.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
@@ -1992,7 +2009,12 @@ fn cargo_build_staticlib(
 ) -> Result<PathBuf, String> {
     let mut command = Command::new("cargo");
     command
-        .args(["build", "--release", "-p", pkg, "--message-format=json"])
+        .args(["build", "-p", pkg, "--message-format=json"])
+        .args(if runtime_lto() {
+            ["--profile", "thaw-rt"]
+        } else {
+            ["--profile", "release"]
+        })
         .arg("--manifest-path")
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"));
     if no_default_features {
@@ -2142,6 +2164,7 @@ fn run_prepare(args: &[String]) -> Result<(), String> {
         println!("prepared runtime archives are current (cache hit)");
         return Ok(());
     }
+    PREPARING.store(true, std::sync::atomic::Ordering::Relaxed);
     for package in [
         "thaw-arena",
         "thaw-runtime",
