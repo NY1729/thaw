@@ -3910,8 +3910,9 @@ fn native_process_report(
             value: u64::from(handled),
             error: ptr::null_mut(),
         },
+        // a listener that threw was a listener: only its own error is reported, not the original again
         Ok(Err(e)) | Err(e) => HandleResult {
-            value: 0,
+            value: 1,
             error: error_string(error_text(e)),
         },
     }

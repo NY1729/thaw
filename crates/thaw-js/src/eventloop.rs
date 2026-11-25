@@ -2607,9 +2607,11 @@ impl Interp {
                     put(o, "code", code.clone());
                 }
             }
-            // Node emits 'warning' asynchronously; stderr is only the fallback when nobody listens.
+            // Node emits 'warning' asynchronously.
             let cb = it.native(move |it, _, _| {
-                if !it.emit("warning", std::slice::from_ref(&warning))? {
+                // Node's own default 'warning' listener prints to stderr whether or not user code listens.
+                it.emit("warning", std::slice::from_ref(&warning))?;
+                {
                     let name = it.get(&warning, "name")?;
                     let name = it.to_str(&name);
                     let msg = it.get(&warning, "message")?;
