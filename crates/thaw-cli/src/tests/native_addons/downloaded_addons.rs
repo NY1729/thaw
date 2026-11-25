@@ -703,7 +703,7 @@ function main(): void {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let mut client = spawn_with_log(&mut Command::new(&client_output), &dir);
+    let mut client = spawn_with_log(&mut Command::new(&client_output), &dir.join("client-logs"));
     // Wait until the expected output appears (or the client exits) instead of a
     // fixed delay; the assertions below report the captured output on timeout.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -724,12 +724,12 @@ function main(): void {
     client.wait().unwrap();
     server.kill().unwrap();
     server.wait().unwrap();
-    let stderr = read_log(&client.stderr_log);
-    assert!(stderr.lines().any(|line| line == "ack:hello"), "{stderr}");
-    assert!(stderr.lines().any(|line| line == "hello"), "{stderr}");
-    assert!(
-        stderr.lines().any(|line| line == "disconnected"),
-        "{stderr}"
-    );
+    // The client logs live in their own directory: sharing `stderr.log` let the client truncate the server's log.
+    let server_stderr = read_log(&server.stderr_log);
+    let stderr = format!("client stderr:\n{}\nserver stderr:\n{server_stderr}", read_log(&client.stderr_log));
+    let client_lines = read_log(&client.stderr_log);
+    for want in ["ack:hello", "hello", "disconnected"] {
+        assert!(client_lines.lines().any(|line| line == want), "missing {want}\n{stderr}");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -909,8 +909,7 @@ const SOAK_MAX_WALL: Duration = Duration::from_secs(120);
 const SOAK_SAMPLE_EVERY: usize = 500;
 /// A per-request leak above this slope fails. The arena-reset fix leaves fastify at about 0.31 KiB/request
 /// (express about 0.22); the unfixed leak measured 1.1.
-// ponytail: 0.4 KiB/request tolerates ~0.3 KiB/request of residual fastify growth (measured 0.307 to 0.322; the unfixed
-// fastify measured 0.413, so the original leak still fails), cause not found yet; tighten to 0.15 once found.
+// 0.4 KiB/request: main measures 0.000 (median slope); the unfixed leak measured 1.1 and a 0.5 ramp must still fail.
 #[cfg(target_os = "linux")]
 const SOAK_MAX_KIB_PER_REQUEST: f64 = 0.4;
 /// A loose total backstop: a catastrophic leak fails fast even when the slope check is skipped.
@@ -934,28 +933,23 @@ fn soak_mid_sample(pid: u32, requests: usize, series: &mut Vec<(u64, usize)>) {
     }
 }
 
-/// Per-request RSS growth (KiB/request) over a series of (RSS KiB, request count) samples, needing at least two.
-/// The two largest interval jumps are removed from both growth and window, so up to two discrete events (a Vec or
-/// arena doubling, allocator page growth on a slow shared runner: CI series show 2-6 MB steps) do not count as a
-/// leak. A smooth leak loses only those intervals' proportional share of growth and window, so its slope is kept.
+/// Per-request RSS growth (KiB/request): the median of the per-interval slopes between consecutive samples.
+/// Allocator and arena growth shows up as a few one-off steps of 1-4 MB (CI series: 4.1, 2.9, 1.2, 1.6 MB in 16
+/// intervals) on an otherwise flat line, so any fixed number of discarded jumps eventually fails a bounded run. The
+/// median ignores up to half of the intervals, however large their steps, while a leak that grows every interval
+/// keeps its slope.
+// ponytail: a leak that only grows in chunks every other interval or less often has a median of 0; the
+// `SOAK_BACKSTOP_KIB` total check is the only guard for that shape.
 #[cfg(target_os = "linux")]
 fn soak_slope(series: &[(u64, usize)]) -> f64 {
     assert!(series.len() >= 2, "a slope needs two samples");
-    let (first, last) = (series[0], series[series.len() - 1]);
-    let mut grown = last.0 as i64 - first.0 as i64;
-    let mut between = (last.1 - first.1) as i64;
-    let mut jumps: Vec<(i64, i64)> = series
+    let mut slopes: Vec<f64> = series
         .windows(2)
-        .map(|pair| (pair[1].0 as i64 - pair[0].0 as i64, (pair[1].1 - pair[0].1) as i64))
+        .map(|pair| (pair[1].0 as f64 - pair[0].0 as f64) / (pair[1].1 - pair[0].1) as f64)
         .collect();
-    jumps.sort_by_key(|&(kib, _)| std::cmp::Reverse(kib));
-    // keep at least half of the intervals: a very short series must not be reduced to nothing
-    let drop = 2.min(jumps.len() / 2);
-    for &(kib, requests) in &jumps[..drop] {
-        grown -= kib;
-        between -= requests;
-    }
-    grown as f64 / between as f64
+    slopes.sort_by(f64::total_cmp);
+    let mid = slopes.len() / 2;
+    if slopes.len() % 2 == 1 { slopes[mid] } else { (slopes[mid - 1] + slopes[mid]) / 2.0 }
 }
 
 /// Judges a soak run by slope, not total (see `soak_slope`). A run too short for a usable window skips only that
@@ -1023,6 +1017,61 @@ fn soak_slope_ignores_two_steps() {
     }
     let slope = soak_slope(&series);
     assert!(slope.abs() < 1e-9, "two-step slope {slope}");
+}
+
+#[cfg(target_os = "linux")]
+fn soak_series_from(rss: &[u64]) -> Vec<(u64, usize)> {
+    rss.iter().enumerate().map(|(i, &kib)| (kib, SOAK_MID_REQUESTS + i * SOAK_SAMPLE_EVERY)).collect()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_passes_the_observed_failing_ci_series() {
+    // PR #1088 (0.402 under the old estimator) and PR #1098 (0.454): bounded steps, then flat.
+    let pr1088 = [
+        136272, 140452, 140772, 143944, 143944, 143948, 143948, 143948, 143948, 143948, 143948, 144688, 145648,
+        146436, 146436, 146436, 146436,
+    ];
+    let pr1098 = [
+        136348, 140412, 140732, 143652, 143652, 143656, 143656, 143656, 143656, 143656, 143656, 144884, 146464,
+        146512, 146512, 146512, 146512,
+    ];
+    for rss in [&pr1088[..], &pr1098[..]] {
+        let slope = soak_slope(&soak_series_from(rss));
+        assert!(slope <= SOAK_MAX_KIB_PER_REQUEST, "observed series slope {slope}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_passes_a_flat_series_with_many_one_off_steps() {
+    // Six steps of 1-4 MB in 16 intervals on a flat line.
+    let mut rss = vec![140_000u64; 17];
+    for (at, kib) in [(1, 4_000), (3, 3_000), (5, 1_200), (8, 1_600), (11, 2_500), (14, 1_000)] {
+        for sample in &mut rss[at..] {
+            *sample += kib;
+        }
+    }
+    let slope = soak_slope(&soak_series_from(&rss));
+    assert!(slope <= SOAK_MAX_KIB_PER_REQUEST, "stepped series slope {slope}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn soak_slope_judges_steady_ramps_with_noise() {
+    // Deterministic jitter of up to 40 KiB per sample (page-granular RSS noise) around a steady ramp.
+    let noisy = |per_request: f64| {
+        let series: Vec<(u64, usize)> = soak_synthetic_series(per_request, None)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (kib, requests))| (kib + [0, 40, 0, 20, 40, 0][i % 6], requests))
+            .collect();
+        soak_slope(&series)
+    };
+    assert!(noisy(0.3) <= SOAK_MAX_KIB_PER_REQUEST, "0.3 ramp must pass");
+    assert!(noisy(0.35) <= SOAK_MAX_KIB_PER_REQUEST, "0.35 ramp must pass");
+    assert!(noisy(0.45) > SOAK_MAX_KIB_PER_REQUEST, "0.45 ramp must fail");
+    assert!(noisy(0.5) > SOAK_MAX_KIB_PER_REQUEST, "0.5 ramp must fail");
 }
 
 #[cfg(target_os = "linux")]
