@@ -154,14 +154,14 @@ def fs_specs():
     sync("rmSync_missing", "fs.rmSync($0, { force: true })", "P:new")
     # callback and stream forms of the slot values
     def cb(i, call, k):
-        A(("fs", i, "await new Promise<any>((r: any) => { " + call + " })", (k,)))
-    R = '(e: any, v: any) => r(e ? "E" + e.name + "/" + e.code : v)'
+        A(("fs", i, "await new Promise<string>((r: any) => { " + call + " })", (k,)))
+    R = '(e: any, v: any) => r(e ? "E" + e.name + "/" + e.code : show(v, 0))'
     cb("readFile_cb", f'fs.readFile($0, "utf8", {R});', "P:src")
     cb("writeFile_cb", f'fs.writeFile($0, "x", {R});', "P:new")
     cb("mkdir_cb", f"fs.mkdir($0, {{ recursive: true }}, {R});", "P:newdir")
     cb("rm_cb", f"fs.rm($0, {{ force: true }}, {R});", "P:src")
     cb("copyFile_cb", f"fs.copyFile($0, {PATHS['new']}, {R});", "P:src")
-    cb("stat_cb", f"fs.stat($0, (e: any, v: any) => r(e ? \"E\" + e.name + \"/\" + e.code : v.isFile()));", "P:src")
+    cb("stat_cb", f"fs.stat($0, (e: any, v: any) => r(e ? \"E\" + e.name + \"/\" + e.code : String(v.isFile())));", "P:src")
     cb("access_cb", f"fs.access($0, {R});", "P:src")
     cb("readdir_cb", f"fs.readdir($0, {R});", "P:dir")
     cb("rename_cb", f"fs.rename($0, {PATHS['new']}, {R});", "P:src")

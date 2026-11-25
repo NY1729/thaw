@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TSV + markdown report of a boundary-matrix run (gen_boundary.py programs, aot_run.py results).
 
-Usage: boundary_report.py OUT_DIR   (reads OUT/programs/manifest.json, OUT/thaw-js/classes.json, OUT/node/*.out,
+Usage: boundary_report.py OUT_DIR | --merge-baseline OUT_DIR...   (reads OUT/programs/manifest.json, OUT/thaw-js/classes.json, OUT/node/*.out,
 OUT/thaw-js/gaps.json; writes OUT/boundary.tsv and OUT/boundary.md)
 Columns of boundary.tsv: module.fn, slot, shape, origin, class, sub, node first lines, thaw detail, new (1 when the gap is
 not in known-gaps-boundary.json). A REJECT of a `direct` origin probe whose sub is `type` is shown as REJECT-TYPE: the
@@ -101,5 +101,22 @@ def main(out):
     return 0
 
 
+def merge_baseline(outs):
+    """known-gaps-boundary.json = union of the gaps of several run directories (one per module group)."""
+    gaps = {}
+    for out in outs:
+        for g in json.load(open(os.path.join(out, "thaw-js", "gaps.json")))["gaps"]:
+            gaps[g["id"]] = g["kind"]
+    with open(os.path.join(HERE, "known-gaps-boundary.json"), "w", encoding="utf-8") as fh:
+        json.dump({"note": "boundary-value matrix gaps (gen_boundary.py, ci profile); gaps may only shrink; regenerate with "
+                   "boundary_report.py --merge-baseline OUT... after a fix",
+                   "gaps": [{"id": i, "kind": k} for i, k in sorted(gaps.items())]}, fh, indent=1)
+        fh.write("\n")
+    print(f"wrote {len(gaps)} gaps")
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "--merge-baseline":
+        merge_baseline(sys.argv[2:])
+        sys.exit(0)
     sys.exit(main(sys.argv[1]))
