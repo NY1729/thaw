@@ -1,10 +1,10 @@
-//! `Intl` for thaw-js (cargo feature `intl`): the `web/intl.js` polyfill (shared with thaw-quickjs)
+//! `Intl` for thaw-js (cargo feature `intl`): the `web/intl.js` polyfill
 //! runs, over the same icu4x natives (`thaw_intl::js_native`, a leaf crate with no thaw-runtime/std dep).
 
 use crate::{arg, Interp, Value};
 
 const POLYFILL: &str = include_str!("web/intl.js");
-// Locale-sensitive built-ins that delegate to the polyfill above (thaw-js only: thaw-quickjs keeps its own).
+// Locale-sensitive built-ins that delegate to the polyfill above (thaw-js only).
 const TO_LOCALE: &str = include_str!("web/intl_tolocale.js");
 
 impl Interp {
@@ -30,7 +30,7 @@ impl Interp {
         self.run_builtin(&format!("(function () {{\n{POLYFILL}"))
             .unwrap_or_else(|_| panic!("thaw-js Intl polyfill must evaluate"));
         // thaw-js has no `Intl.DurationFormat` (Node 22 lacks it, so feature detection must see
-        // `undefined`). The shared polyfill keeps it for thaw-quickjs and the HIR lowering.
+        // `undefined`). The polyfill keeps it for the HIR lowering.
         self.run_builtin("delete globalThis.Intl.DurationFormat")
             .unwrap_or_else(|_| panic!("thaw-js must drop Intl.DurationFormat"));
         self.run(TO_LOCALE)

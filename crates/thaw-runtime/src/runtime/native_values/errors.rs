@@ -34,7 +34,7 @@ const ERROR_CODE_MARKER: char = '\u{3}';
 /// functions still handle the combination correctly regardless.
 const ERROR_NAME_OVERRIDE_MARKER: char = '\u{4}';
 /// Trailing bag of an exception's own extra properties (a JSON object),
-/// appended by thaw-quickjs's `describe_tagged_exception` for a JS error
+/// appended by `describe_tagged_exception` for a JS error
 /// crossing native code and back (e.g. an `http-errors` error's `status`).
 /// Native `.message`/`.name` reads must ignore it.
 const ERROR_PROPS_MARKER: char = '\u{5}';
@@ -330,7 +330,7 @@ pub unsafe extern "C" fn thaw_error_suppress(
 }
 
 /// Reads a caught error's own custom property from the trailing
-/// `\u{5}<json>` bag `describe_tagged_exception` (thaw-quickjs) appends --
+/// `\u{5}<json>` bag `describe_tagged_exception` appends --
 /// real trigger: `catch (e) { e.status }` for an `http-errors` Error thrown
 /// by koa, whose `status`/`expose` live on the error's prototype. Returns
 /// the value rendered as a string (`"418"`, `"true"`, a string itself),
@@ -1709,7 +1709,7 @@ mod error_native_tests {
 
     #[test]
     fn a_labeled_rejection_keeps_its_labeled_text_and_drops_the_trailing_tag() {
-        // thaw-quickjs's `describe_promise_exception` wraps a plain-Error
+        // `describe_promise_exception` wraps a plain-Error
         // rejection in a human-readable label and appends the original
         // `\u{1}Error\u{1}message\u{5}<props>` so a later property
         // reconstruction can read it; `.message`/`String()` still show

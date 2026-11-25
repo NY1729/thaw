@@ -1077,11 +1077,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "heck"
@@ -1709,12 +1704,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
 
 [[package]]
-name = "leb128fmt"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2274,15 +2263,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "relative-path"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bca40a312222d8ba74837cb474edef44b37f561da5f773981007a10bbaa992b0"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2304,33 +2284,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rquickjs"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e04e4eedfb060b503b5f0a2644abb890b0b3620d3fb674f9455f230014964e4"
-dependencies = [
- "rquickjs-core",
-]
-
-[[package]]
-name = "rquickjs-core"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16e4f499ac5b943d97ee6dbc44f23c2c10426f420f7d2f1793d6318911b6608c"
-dependencies = [
- "hashbrown 0.17.1",
- "relative-path",
- "rquickjs-sys",
-]
-
-[[package]]
-name = "rquickjs-sys"
-version = "0.12.2"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -3335,65 +3288,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "thaw-quickjs"
-version = "0.1.0"
-dependencies = [
- "aes",
- "base64 0.22.1",
- "brotli",
- "cbc",
- "des",
- "ecdsa",
- "ed25519-dalek",
- "ed448-goldilocks",
- "elliptic-curve 0.13.8",
- "fixed_decimal",
- "flate2",
- "getrandom 0.2.17",
- "httlib-huffman",
- "icu_calendar",
- "icu_collator",
- "icu_datetime",
- "icu_decimal",
- "icu_experimental",
- "icu_list",
- "icu_locale",
- "icu_plurals",
- "icu_provider",
- "icu_segmenter",
- "icu_time",
- "jiff",
- "libc",
- "md-5",
- "p256",
- "p384",
- "p521",
- "pkcs1",
- "pkcs8 0.10.2",
- "rand_core 0.6.4",
- "rquickjs",
- "rsa",
- "rustls",
- "scrypt",
- "sec1 0.7.3",
- "serde_json",
- "sha1",
- "sha2",
- "signature 2.2.0",
- "thaw-arena",
- "thaw-icu-data",
- "thaw-runtime",
- "thaw-std",
- "url",
- "wasmi",
- "wasmi_wasi",
- "webpki-roots",
- "writeable",
- "x25519-dalek",
- "x509-parser",
-]
-
-[[package]]
 name = "thaw-registry"
 version = "0.1.0"
 dependencies = [
@@ -3768,16 +3662,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-encoder"
-version = "0.258.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e974fe6821a8cf64575d51ea2194e2c8f77e7b66e9afe7419ce8a97f9ee0d251"
-dependencies = [
- "leb128fmt",
- "wasmparser 0.258.0",
-]
-
-[[package]]
 name = "wasmi"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3787,8 +3671,7 @@ dependencies = [
  "wasmi_collections",
  "wasmi_core",
  "wasmi_ir",
- "wasmparser 0.239.0",
- "wat",
+ "wasmparser",
 ]
 
 [[package]]
@@ -3840,44 +3723,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasmparser"
-version = "0.258.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9a61719f93a87b16d325921e251800c4833f8fab50fa21c7de73aed50086313"
-dependencies = [
- "bitflags 2.13.1",
- "indexmap",
-]
-
-[[package]]
 name = "wast"
 version = "35.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ef140f1b49946586078353a453a1d28ba90adfc54dde75710bc1931de204d68"
 dependencies = [
  "leb128",
-]
-
-[[package]]
-name = "wast"
-version = "258.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97f7defc7ecca8b19ac7f824598eadd0c53985ee00c74060d65051e9da5b58a1"
-dependencies = [
- "bumpalo",
- "leb128fmt",
- "memchr",
- "unicode-width",
- "wasm-encoder",
-]
-
-[[package]]
-name = "wat"
-version = "1.258.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7555c008cca87f2ac58d9f83ccda7e7b44611093ce28eb28f052e7c78024b9bf"
-dependencies = [
- "wast 258.0.0",
 ]
 
 [[package]]
@@ -4163,7 +4014,7 @@ dependencies = [
  "anyhow",
  "log",
  "thiserror 1.0.69",
- "wast 35.0.2",
+ "wast",
 ]
 
 [[package]]

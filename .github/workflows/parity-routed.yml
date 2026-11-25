@@ -63,7 +63,7 @@ jobs:
             ~/.cargo/git
             target/release
             target/thaw-*
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -115,7 +115,7 @@ jobs:
             target/debug/thaw build "$f" -o "$W/bin/$base" > "$W/$base.build.log" 2>&1 || rc=$?
             echo "$rc" > "$W/$base.build.rc"
             echo "$base: thaw build exit $rc"
-            # which engine the binary links: count of QuickJS JS_NewRuntime symbols (0 = none, or a stripped binary)
+            # which engine the binary links: count of JS_NewRuntime symbols: the permanent guard that no QuickJS is linked (expect 0)
             [ -x "$W/bin/$base" ] && echo "$base thaw-js binary JS_NewRuntime=$(nm "$W/bin/$base" 2>/dev/null | grep -c ' JS_NewRuntime$')" >> "$W/engines.txt"
             if [ "$rc" != 0 ]; then
               {

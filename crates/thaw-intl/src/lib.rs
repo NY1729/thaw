@@ -1,4 +1,4 @@
-//! Native (AOT, QuickJS-free) ECMA-402 subset: `String.prototype.localeCompare`,
+//! Native (AOT) ECMA-402 subset: `String.prototype.localeCompare`,
 //! `Number.prototype.toLocaleString` and `Date.prototype.toLocale*String`.
 //!
 //! The icu4x primitives (the `intl*.rs` files here, `include!`d below) are the ones the shared

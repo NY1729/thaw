@@ -153,13 +153,12 @@ fn prepared_runtime_variants_have_stable_names() {
 /// lowering.rs`, extended alongside `Intl.DateTimeFormat`/
 /// `NumberFormat`/`ListFormat` for M3/M8/M9/M10/M11 of docs/design/
 /// intl-polyfill.md's "Real CLDR data via icu4x" plan), and the
-/// resulting binary really links `thaw-quickjs` with the `intl` feature
+/// resulting binary really links the thaw-intl runtime with the `intl` feature
 /// on (`source_uses_intl` detects the literal class names in this
 /// program's own source) -- an end-to-end build, not just a
 /// compile-time check, since the feature-detection and the actual
 /// classes only come together at this level, not in thaw-llvm's simpler
-/// `compile_and_run` test harness (which always builds thaw-quickjs
-/// with default features only). One build covers all four classes'
+/// `compile_and_run` test harness (which builds with default features only). One build covers all four classes'
 /// allow-list entries rather than paying the ~50s build cost each time.
 ///
 /// `Intl.Segmenter`'s check here only calls `resolvedOptions()`, not
@@ -171,7 +170,7 @@ fn prepared_runtime_variants_have_stable_names() {
 /// Json") -- two real, general native-compiler gaps in custom-iterable
 /// support, unrelated to `Intl.Segmenter`'s own correctness (already
 /// proven via the interpreted-thaw-js-level cross-check against real
-/// Node in `crates/thaw-quickjs/src/tests.rs`'s own test). Not chased
+/// Node in thaw-js's own tests). Not chased
 /// further here, out of scope for this milestone.
 #[test]
 fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
@@ -1811,10 +1810,10 @@ fn keeps_a_promise_of_an_opaque_payload_as_a_promise_on_thaw_js() {
     assert!(!thaw_js.contains(": Json;"), "{thaw_js}");
 
     // thaw-js keeps its own opaque-handle return.
-    let (_, quickjs) =
+    let (_, legacy) =
         typed_dynamic_declaration("node:events", &function, false, &arities, None).unwrap();
-    assert!(quickjs.contains("): JsValue;"), "{quickjs}");
-    assert!(!quickjs.contains("Promise<"), "{quickjs}");
+    assert!(legacy.contains("): JsValue;"), "{legacy}");
+    assert!(!legacy.contains("Promise<"), "{legacy}");
 
     // A `Promise<any>` payload is still erased to a plain Json result on thaw-js.
     let erased = thaw_bridge::DtsFunction {
@@ -1827,7 +1826,7 @@ fn keeps_a_promise_of_an_opaque_payload_as_a_promise_on_thaw_js() {
 }
 
 #[test]
-fn widens_callable_union_parameters_at_the_quickjs_boundary() {
+fn widens_callable_union_parameters_at_the_legacy_engine_boundary() {
     let function = thaw_bridge::DtsFunction {
         param_field_constraints: Vec::new(),
         name: "replace".into(),
@@ -1860,7 +1859,7 @@ fn widens_callable_union_parameters_at_the_quickjs_boundary() {
 }
 
 #[test]
-fn renders_namespace_scoped_options_for_quickjs_arity_dispatch() {
+fn renders_namespace_scoped_options_for_legacy_engine_arity_dispatch() {
     let functions = thaw_bridge::parse_dts(
         r#"declare namespace ParcelWatcher {
             export type BackendType = "fs-events" | "watchman" | "inotify" | "windows";

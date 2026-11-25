@@ -2615,7 +2615,7 @@ fn runs_a_multifile_lambda_with_two_bare_import_packages() {
 }
 
 #[test]
-fn numeric_comparison_edge_cases_use_jit_without_quickjs() {
+fn numeric_comparison_edge_cases_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-compare-edge-cases-{}",
         std::process::id()
@@ -2656,7 +2656,7 @@ fn numeric_comparison_edge_cases_use_jit_without_quickjs() {
 }
 
 #[test]
-fn bitwise_int32_boundary_edge_cases_use_jit_without_quickjs() {
+fn bitwise_int32_boundary_edge_cases_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-bitwise-edge-cases-{}",
         std::process::id()
@@ -2702,7 +2702,7 @@ fn bitwise_int32_boundary_edge_cases_use_jit_without_quickjs() {
 }
 
 #[test]
-fn string_surrogate_pair_and_empty_edge_cases_use_jit_without_quickjs() {
+fn string_surrogate_pair_and_empty_edge_cases_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-surrogate-edge-cases-{}",
         std::process::id()
@@ -2743,7 +2743,7 @@ fn string_surrogate_pair_and_empty_edge_cases_use_jit_without_quickjs() {
 }
 
 #[test]
-fn recursion_and_dictionary_aliasing_edge_cases_use_jit_without_quickjs() {
+fn recursion_and_dictionary_aliasing_edge_cases_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-recursion-edge-cases-{}",
         std::process::id()
@@ -2784,7 +2784,7 @@ fn recursion_and_dictionary_aliasing_edge_cases_use_jit_without_quickjs() {
 }
 
 #[test]
-fn array_methods_chained_directly_on_array_from_use_jit_without_quickjs() {
+fn array_methods_chained_directly_on_array_from_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-from-chain-{}",
         std::process::id()
@@ -2825,7 +2825,7 @@ fn array_methods_chained_directly_on_array_from_use_jit_without_quickjs() {
 }
 
 #[test]
-fn array_from_and_of_chains_generalize_across_methods_without_quickjs() {
+fn array_from_and_of_chains_generalize_across_methods_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-from-of-chains-{}",
         std::process::id()
@@ -2866,7 +2866,7 @@ fn array_from_and_of_chains_generalize_across_methods_without_quickjs() {
 }
 
 #[test]
-fn array_methods_chained_directly_on_object_keys_values_use_jit_without_quickjs() {
+fn array_methods_chained_directly_on_object_keys_values_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-object-keys-chain-{}",
         std::process::id()
@@ -2904,7 +2904,7 @@ fn array_methods_chained_directly_on_object_keys_values_use_jit_without_quickjs(
 }
 
 #[test]
-fn string_methods_chained_directly_on_from_char_code_use_jit_without_quickjs() {
+fn string_methods_chained_directly_on_from_char_code_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-fromcharcode-chain-{}",
         std::process::id()
@@ -2942,7 +2942,7 @@ fn string_methods_chained_directly_on_from_char_code_use_jit_without_quickjs() {
 }
 
 #[test]
-fn array_methods_chained_on_split_and_spread_literals_use_jit_without_quickjs() {
+fn array_methods_chained_on_split_and_spread_literals_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-split-spread-chain-{}",
         std::process::id()
@@ -2980,7 +2980,7 @@ fn array_methods_chained_on_split_and_spread_literals_use_jit_without_quickjs() 
 }
 
 #[test]
-fn array_methods_chained_on_a_parenthesized_ternary_use_jit_without_quickjs() {
+fn array_methods_chained_on_a_parenthesized_ternary_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-ternary-receiver-{}",
         std::process::id()
@@ -3023,7 +3023,7 @@ fn array_methods_chained_on_a_parenthesized_ternary_use_jit_without_quickjs() {
 // object type instead). Both are intentional scope limits, not receiver-gate bugs -
 // this locks in the shapes that already work correctly through the JIT today.
 #[test]
-fn object_from_entries_and_assign_round_trips_use_jit_without_quickjs() {
+fn object_from_entries_and_assign_round_trips_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-fromentries-assign-{}",
         std::process::id()
@@ -3061,7 +3061,7 @@ fn object_from_entries_and_assign_round_trips_use_jit_without_quickjs() {
 }
 
 #[test]
-fn array_valued_short_circuit_operators_use_jit_without_quickjs() {
+fn array_valued_short_circuit_operators_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-short-circuit-array-{}",
         std::process::id()
@@ -3102,7 +3102,7 @@ fn array_valued_short_circuit_operators_use_jit_without_quickjs() {
 }
 
 #[test]
-fn array_methods_chained_on_short_circuit_operators_use_jit_without_quickjs() {
+fn array_methods_chained_on_short_circuit_operators_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-short-circuit-chain-{}",
         std::process::id()
@@ -3140,7 +3140,7 @@ fn array_methods_chained_on_short_circuit_operators_use_jit_without_quickjs() {
 }
 
 #[test]
-fn object_assign_with_an_empty_literal_target_uses_jit_without_quickjs() {
+fn object_assign_with_an_empty_literal_target_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-assign-empty-literal-{}",
         std::process::id()
@@ -3178,7 +3178,7 @@ fn object_assign_with_an_empty_literal_target_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn object_from_entries_with_a_literal_array_of_pairs_uses_jit_without_quickjs() {
+fn object_from_entries_with_a_literal_array_of_pairs_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-fromentries-literal-{}",
         std::process::id()

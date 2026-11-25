@@ -4,7 +4,7 @@ name: jit-coverage
 # program, the interpreter share of wall time and the AOT clones, for the shipped build (default) and for
 # THAW_JS_INFER=1. Nothing here fails a build or belongs in a required-checks list: read the step summary.
 # Runs on demand, or on a PR that carries the `jit-coverage-measure` label (never on push or by default).
-# The job skeleton, toolchain and cache steps are those of the corpus-ratio job in jsengine-bench.yml.
+# The job skeleton, toolchain and cache steps follow the other corpus workflows (route-all.yml).
 
 on:
   pull_request:
@@ -93,7 +93,7 @@ jobs:
             ~/.cargo/git
             target/release
             target/thaw-*
-          key: jsengine-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
+          key: jsengine-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             jsengine-corpus-${{ runner.os }}-
       - name: Build thaw CLI (release)

@@ -1,6 +1,6 @@
 // Helper globals the compiler's dynamic-value paths look up by name (`getDynamicValue("__thaw_...")`),
 // installed once per realm that serves compiled code. The blocks below are verbatim ports of the
-// retired-engine bootstrap helpers (thaw-quickjs `platform_globals/runtime.js`), run against thaw-js with the
+// retired-engine bootstrap helpers (the retired engine's `platform_globals/runtime.js`), run against thaw-js with the
 // captured intrinsics re-bound here.
 (function () {
   'use strict';

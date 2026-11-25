@@ -1,5 +1,5 @@
 #[test]
-fn primitive_loops_use_jit_without_quickjs() {
+fn primitive_loops_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-loops-{}",
         std::process::id()
@@ -49,7 +49,7 @@ fn primitive_loops_use_jit_without_quickjs() {
 }
 
 #[test]
-fn string_for_of_uses_jit_without_quickjs() {
+fn string_for_of_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-string-loop-{}",
         std::process::id()
@@ -91,7 +91,7 @@ fn string_for_of_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_array_for_of_uses_jit_without_quickjs() {
+fn mixed_array_for_of_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-mixed-array-loop-{}",
         std::process::id()
@@ -134,7 +134,7 @@ fn mixed_array_for_of_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn nested_declared_loop_uses_jit_without_quickjs() {
+fn nested_declared_loop_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-nested-loop-{}",
         std::process::id()
@@ -174,7 +174,7 @@ fn nested_declared_loop_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn loop_early_returns_use_jit_without_quickjs() {
+fn loop_early_returns_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-loop-return-{}",
         std::process::id()
@@ -220,7 +220,7 @@ fn loop_early_returns_use_jit_without_quickjs() {
 }
 
 #[test]
-fn loop_block_locals_use_jit_without_quickjs() {
+fn loop_block_locals_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-loop-locals-{}",
         std::process::id()
@@ -263,7 +263,7 @@ fn loop_block_locals_use_jit_without_quickjs() {
 }
 
 #[test]
-fn loop_aggregate_locals_use_jit_without_quickjs() {
+fn loop_aggregate_locals_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-loop-aggregates-{}",
         std::process::id()
@@ -306,7 +306,7 @@ fn loop_aggregate_locals_use_jit_without_quickjs() {
 }
 
 #[test]
-fn loop_aggregate_early_returns_use_jit_without_quickjs() {
+fn loop_aggregate_early_returns_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-loop-aggregate-returns-{}",
         std::process::id()
@@ -349,7 +349,7 @@ fn loop_aggregate_early_returns_use_jit_without_quickjs() {
 }
 
 #[test]
-fn dictionary_for_in_uses_jit_without_quickjs() {
+fn dictionary_for_in_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-for-in-{}",
         std::process::id()
@@ -392,7 +392,7 @@ fn dictionary_for_in_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn loop_switch_uses_jit_without_quickjs() {
+fn loop_switch_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-loop-switch-{}",
         std::process::id()
@@ -435,7 +435,7 @@ fn loop_switch_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn loop_try_finally_uses_jit_without_quickjs() {
+fn loop_try_finally_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-loop-finally-{}",
         std::process::id()
@@ -481,7 +481,7 @@ fn loop_try_finally_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn loop_try_catch_uses_jit_without_quickjs() {
+fn loop_try_catch_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-loop-catch-{}",
         std::process::id()
@@ -553,7 +553,7 @@ fn loop_try_catch_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn uncaught_loop_throw_uses_jit_without_quickjs() {
+fn uncaught_loop_throw_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-uncaught-throw-{}",
         std::process::id()

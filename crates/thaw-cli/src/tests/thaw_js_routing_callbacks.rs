@@ -66,12 +66,12 @@ fn thaw_js_routing_serves_a_package_that_calls_back_into_typescript() {
         "[ 2, 4, 6 ]\n6\n2 12\n[ [ 1, 4 ], [ 4, 9 ] ]\n"
     );
     let bytes = std::fs::read(&output).unwrap();
-    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "QuickJS was linked");
+    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "the binary links the retired QuickJS engine (rquickjs symbols present)");
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
-fn thaw_js_routing_catches_a_package_error_without_linking_quickjs() {
+fn thaw_js_routing_catches_a_package_error_without_linking_legacy_engine() {
     let (dir, registry, entry) = thaw_js_callback_fixture(
         "catch",
         "import { check } from 'tjs-cb';\n\

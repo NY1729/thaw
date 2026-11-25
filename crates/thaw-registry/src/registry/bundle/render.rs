@@ -733,7 +733,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
         // appears anywhere in this shim or in a typical package's own
         // bundled source (only the short code `'br'` does). thaw-cli's
         // `source_uses_brotli` (build.rs) is a blind substring scan for
-        // that literal word to decide whether to compile thaw-quickjs's
+        // that literal word to decide whether to link the
         // optional Brotli decoder in at all -- so without this comment,
         // a real `br`-compressed response silently gets a stubbed-out
         // decoder no matter how large or small the package bundle is.

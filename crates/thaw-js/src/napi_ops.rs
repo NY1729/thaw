@@ -1,6 +1,6 @@
 //! Pure handle operations of the N-API engine seam: strict equality, `instanceof`, prototype reads
 //! and writes, Promise tests, object integrity and UTF-16 string building. Each mirrors the
-//! same-named `thaw_js_*` function of thaw-quickjs. None captures an exception object (PR 2 does):
+//! same-named `thaw_js_*` function of the retired engine. None captures an exception object (PR 2 does):
 //! a JS throw comes back as the error text.
 
 use std::ffi::c_char;

@@ -8,7 +8,7 @@
 /// thaw-js function value: reuses the existing (N-API-oriented but
 /// backend-agnostic) `compile_napi_value_callback` adapter, then bridges
 /// it into a real callable via a new `thaw_js_register_native_callback`
-/// (thaw-quickjs).
+/// (retired engine).
 ///
 /// `bundle.js`'s `check` method calls the predicate three times with
 /// different arguments to confirm each call round-trips independently
@@ -503,7 +503,7 @@ function main(): void {
 ///    test exercising this bridge, this program's *first-ever* touch of a
 ///    JsValue handle at all is registering the closure itself (no prior
 ///    `makeHolder(): JsValue`-style call to have bootstrapped anything
-///    first). `retain_value` (thaw-quickjs's `api.rs`, the sole write path
+///    first). `retain_value` (the retired engine's `api.rs`, the sole write path
 ///    into the realm's handle registry) assumed the registry (`__thaw_
 ///    value_handles`/`__thaw_value_handle_live`) already existed, unlike
 ///    its near-duplicate sibling `thaw_js_get_global`, which already
@@ -789,7 +789,7 @@ function main(): void {
 ///    call. Fixed by reusing the `ActiveNapiContext` guard `install_
 ///    napi_bridge`'s own reentrant call already relies on (despite the
 ///    "napi" name, a generic "currently active `Ctx`" mechanism, not
-///    N-API-specific) via a new `with_active_or_context` (thaw-quickjs).
+///    N-API-specific) via a new `with_active_or_context` (retired engine).
 ///
 /// `val`'s own numeric fields are read via `Json`/`Number(...)`, not
 /// `JsValue` -- deliberately: `val` is plain, JSON-representable data
@@ -861,7 +861,7 @@ function main(): void {
 }
 
 #[test]
-fn an_async_native_callback_can_reenter_quickjs_while_being_polled() {
+fn an_async_native_callback_can_reenter_legacy_engine_while_being_polled() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-reentrant-native-promise-{}",
         std::process::id()

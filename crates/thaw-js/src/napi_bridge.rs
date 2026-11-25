@@ -1,7 +1,7 @@
 //! Bridge host of the N-API engine seam (PR 5 of the stage 2 plan): the seven callbacks the napi side
 //! registers, the four shutdown callbacks, the per-realm `__thaw_napi_bridge_*` and
 //! `__thaw_napi_graph_{owner,release}` globals, and the loop hooks (poll, pending, shutdown).
-//! Mirrors `register_napi_bridge`, `register_napi_shutdown_bridge` and `install_napi_bridge` of thaw-quickjs.
+//! Mirrors `register_napi_bridge`, `register_napi_shutdown_bridge` and `install_napi_bridge` of the retired engine.
 //! Registration is by function pointer, so no link-time export is needed.
 //! ponytail: the callbacks are process-wide while the napi host is thread-local; a worker thread's end has no shutdown hook yet.
 
@@ -350,7 +350,7 @@ pub(crate) fn install(it: &mut Interp) {
 }
 
 /// Releases the references a packet names in `leases` (handles) and `napiLeases` (bridge references), for a
-/// packet no bridge call will consume (`release_unconsumed_graph_leases` of thaw-quickjs).
+/// packet no bridge call will consume (`release_unconsumed_graph_leases` of the retired engine).
 fn release_packet_leases(graph: &str) {
     let Ok(packet) = serde_json::from_str::<serde_json::Value>(graph) else {
         return;

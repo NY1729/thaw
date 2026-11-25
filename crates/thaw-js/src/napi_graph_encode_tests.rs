@@ -1,5 +1,5 @@
 //! Unit tests for the N-API graph encoder in `napi_graph.rs` (PR 6a-3). Goldens are the retired-engine
-//! `thawGraphEncode` bytes (thaw-quickjs api.rs `forced_root_guard_preserves_other_graph_modes`); the
+//! `thawGraphEncode` bytes (the retired engine api.rs `forced_root_guard_preserves_other_graph_modes`); the
 //! round trip goes through `decode_napi_wire`.
 
 use crate::host::*;

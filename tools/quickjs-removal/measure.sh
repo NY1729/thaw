@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# QuickJS removal stage Q-1: measurement harness.
+# npm corpus measurement harness.
 #
-# Builds the 24-program npm corpus under both JS engines and records, per program and engine:
-#   build_ok, build_s, F (QuickJS-routed entries from `thaw inspect`),
+# Builds the 24-program npm corpus with thaw-js and records, per program:
+#   build_ok, build_ms, why (thaw-js blockers from `thaw inspect`),
 #   stdout_eq_node, run_ms, rss_kb, binary size.
 # Also records: thaw-js-scan eligibility over the bundle corpus, and `thaw node-compat` pass/fail
-# for tests/node-compat.json and tests/builtins-compat.json under both engines, plus the number of
-# cases whose classification differs between the two engines ("both ways" diff).
+# for tests/node-compat.json and tests/builtins-compat.json.
 #
 # Output: one long-format TSV (section, subject, engine, metric, value). Scratch lives under $SCRATCH.
 #
@@ -18,9 +17,8 @@
 #        VERSIONS    pinned specs           (default: $CORPUS/versions.txt; lines `name spec@ver ...`)
 #        PK_DIR      corpus programs        (default: $CORPUS/pk)
 #        JS_DIR      scan bundles           (default: $CORPUS/corpus; scan skipped if absent)
-#        MEASURE_EXTRA_ENV  space-separated NAME=VALUE for the thaw-js timed runs only (default empty; quickjs never sees it)
+#        MEASURE_EXTRA_ENV  space-separated NAME=VALUE for the thaw-js timed runs only (default empty)
 #        Each program's run_ms is the median of 5 runs (date-based ms, %e kept for RSS). Engines alternate within each round (MEASURE_RUNS rounds, default 5);
-#        paired_ratio is the median over rounds of thaw-js/quickjs.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -49,7 +47,7 @@ done
 [ -f "$VERSIONS" ] || { echo "missing versions file: $VERSIONS" >&2; exit 1; }
 mapfile -t PROGRAMS < <(grep -vE '^[[:space:]]*(#|$)' "$VERSIONS")
 
-ENGINES=(quickjs thaw-js)
+ENGINES=(thaw-js)
 RUNS="${MEASURE_RUNS:-5}"
 case "$RUNS" in ''|*[!0-9]*|0) RUNS=5 ;; esac
 EXTRA_ENV=()
@@ -79,7 +77,7 @@ diagnose() {
   done
 }
 
-# Engine selection: THAW_JS_ENGINE=quickjs|thaw-js; the legacy THAW_JS_RUNTIME is always unset.
+# Engine selection: thaw-js is the only engine; the legacy THAW_JS_RUNTIME is always unset.
 engine_env() {
   echo "-u THAW_JS_RUNTIME THAW_JS_ENGINE=$1"
 }
@@ -152,38 +150,30 @@ measure_program() {
     if [ "$build_ok" = 0 ]; then
       # Visible skip: the corpus ratio table prints this program as SKIP and excludes it from geomean/OVER.
       echo "[measure] SKIP $name/$engine: build failed (no run_ms; excluded from ratio)" >&2
-      row program "$name" "$engine" F ""
       row program "$name" "$engine" why ""
       row program "$name" "$engine" stdout_eq_node 0
       diagnose "$name" "$engine" "$log" 0 na 0
       continue
     fi
     "$THAW" inspect "$bin" > "$log.inspect" 2>&1
-    local F
-    F=$(grep -c '^quickjs-reason:' "$log.inspect")
-    row program "$name" "$engine" F "$F"
-    # Reason lines from `thaw inspect` (quickjs-reason / thaw-js-blocker), tabs flattened, cut to 400 chars.
+    # Blocker lines from `thaw inspect` (thaw-js-blocker), tabs flattened, cut to 400 chars.
     local why
-    why=$(grep -E '^(quickjs-reason|thaw-js-blocker):' "$log.inspect" | tr '\t' ' ' | paste -sd';' | cut -c1-400)
+    why=$(grep -E '^thaw-js-blocker:' "$log.inspect" | tr '\t' ' ' | paste -sd';' | cut -c1-400)
     row program "$name" "$engine" why "$why"
     row program "$name" "$engine" size_bytes "$(stat -c %s "$bin")"
     binof[$engine]="$bin"; logof[$engine]="$log"; built+=( "$engine" )
   done
 
-  # Phase 2: MEASURE_RUNS rounds (default 5), each round runs every built engine once, alternating which engine goes
-  # first. A runner that speeds up or slows down during the job then hits both engines alike, and the per-round
-  # thaw-js/quickjs ratio (reported as paired_ratio, median over rounds) cancels the drift. stdout must match Node
+  # Phase 2: MEASURE_RUNS rounds (default 5), each round runs the built binary once. stdout must match Node
   # on every run.
   local -A runs_of=() status_of=() rss_of=() ok_of=()
   local round eng order r2 status rrss rs0
   for engine in "${built[@]}"; do runs_of[$engine]=""; status_of[$engine]=0; rss_of[$engine]=0; ok_of[$engine]=1; done
-  local -a paired=()
   for (( round = 1; round <= RUNS; round++ )); do
     order=( "${built[@]}" )
     if (( round % 2 == 0 )); then
       order=(); for (( r2 = ${#built[@]} - 1; r2 >= 0; r2-- )); do order+=( "${built[$r2]}" ); done
     fi
-    local qms="" tms=""
     for eng in "${order[@]}"; do
       local log2="${logof[$eng]}"
       local -a wrap=()
@@ -200,12 +190,7 @@ measure_program() {
       case "$rrss" in ''|*[!0-9]*) rrss=0 ;; esac
       [ "$rrss" -gt "${rss_of[$eng]}" ] && rss_of[$eng]=$rrss
       cmp -s "$log2.stdout" "$SCRATCH/out/$name.node" || ok_of[$eng]=0
-      [ "$eng" = quickjs ] && qms=$rs0
-      [ "$eng" = thaw-js ] && tms=$rs0
     done
-    if [ -n "$qms" ] && [ -n "$tms" ] && [ "$qms" -gt 0 ]; then
-      paired+=( "$(awk -v t="$tms" -v q="$qms" 'BEGIN { printf "%.4f", t / q }')" )
-    fi
   done
 
   # Phase 3: rows. run_ms is the median of the rounds (startup-dominated runs are noisy).
@@ -218,9 +203,6 @@ measure_program() {
     row program "$name" "$engine" stdout_eq_node "${ok_of[$engine]}"
     diagnose "$name" "$engine" "${logof[$engine]}" 1 "${status_of[$engine]}" "${ok_of[$engine]}"
   done
-  if [ "${#paired[@]}" -gt 0 ]; then
-    row program "$name" thaw-js paired_ratio "$(printf '%s\n' "${paired[@]}" | sort -n | sed -n "$(( (${#paired[@]} + 1) / 2 ))p")"
-  fi
 }
 
 for entry in "${PROGRAMS[@]}"; do
@@ -242,7 +224,7 @@ if [ -z "$ONLY" ] && [ -x "$THAW_SCAN" ] && [ -d "$JS_DIR" ]; then
   row scan corpus thaw-js scan_errors "$(awk -F'\t' '$2=="error"' "$SCRATCH/out/scan.tsv" | wc -l)"
 fi
 
-# node-compat manifests under both engines, and per-case agreement between the engines.
+# node-compat manifests.
 if [ "$SKIP_NODE_COMPAT" = 0 ] && [ -z "$ONLY" ]; then
   cd "$REPO" || exit 1
   for manifest in tests/node-compat.json tests/builtins-compat.json; do
@@ -266,17 +248,6 @@ for metric, value in [("total", total), ("pass", total - bugs - ref), ("bug", bu
     print(f"compat\t{label}\t{engine}\t{metric}\t{value}")
 PY
     done
-    python3 - "$SCRATCH/out/$label.quickjs.json" "$SCRATCH/out/$label.thaw-js.json" "$label" >> "$MEASURE_ROWS" <<'PY'
-import json, sys
-a, b, label = sys.argv[1:4]
-try:
-    ra = {r["name"]: r["classification"] for r in json.load(open(a))["results"]}
-    rb = {r["name"]: r["classification"] for r in json.load(open(b))["results"]}
-    diff = sum(1 for k in set(ra) | set(rb) if ra.get(k) != rb.get(k))
-    print(f"compat\t{label}\tboth\tcase_diffs\t{diff}")
-except Exception as e:
-    print(f"compat\t{label}\tboth\tcase_diffs\tunavailable")
-PY
   done
   cd "$REPO" || exit 1
 fi

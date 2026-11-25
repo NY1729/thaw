@@ -37,7 +37,7 @@ fn static_toolchain_check_is_actionable_or_complete() {
 
 #[test]
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn specialized_jit_runs_without_quickjs() {
+fn specialized_jit_runs_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-jit-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("main.ts");
@@ -77,7 +77,7 @@ fn specialized_jit_runs_without_quickjs() {
 
 #[test]
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-fn tagged_jit_union_runs_without_quickjs() {
+fn tagged_jit_union_runs_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-jit-union-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("main.ts");
@@ -330,7 +330,7 @@ fn artifact_section_fixture(big_endian: bool, metadata: &[u8]) -> Vec<u8> {
 
 #[test]
 fn artifact_manifest_uses_only_the_exact_elf_section_in_both_byte_orders() {
-    let payload = b"THAW_ARTIFACT_V1:{\"packages\":[\"correct\"],\"quickjs\":false}\0";
+    let payload = b"THAW_ARTIFACT_V1:{\"packages\":[\"correct\"]}\0";
     for big in [false, true] {
         let elf = artifact_section_fixture(big, payload);
         let manifest = artifact_manifest_from_bytes(&elf).unwrap();

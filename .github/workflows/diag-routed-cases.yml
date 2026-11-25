@@ -2,11 +2,11 @@ name: diag-routed-cases
 
 # Diagnostics only, never gating: builds named node-compat cases (or the ky/https bisect legs) with
 # thaw-js forced on and wire tracing enabled, then uploads each case's stdout, stderr and the build
-# report (`thaw inspect`, which lists the QuickJS reasons and thaw-js blockers the build recorded).
+# report (`thaw inspect`, which lists the thaw-js blockers the build recorded).
 # Runs on demand only (workflow_dispatch). Nothing here belongs in a required-checks list.
 #
 # Routing: THAW_JS_ROUTE_ALL=1 only flips the program-level routing flag. Package-level blockers
-# (thaw_js_package_eligible) still keep a case on QuickJS, and there is no env override for them.
+# (thaw_js_package_eligible) still keep a case off thaw-js, and there is no env override for them.
 # So the `ref` input checks out a tree where the blockers are already gone. The default is
 # cfc01bd1 (PR #583's first commit, on fix/routing-stale-guards-allowlist): it removes the
 # perf_hooks blocker, allowlists node:test/reporters, and keeps the mock.timers and cluster.fork
@@ -19,10 +19,9 @@ name: diag-routed-cases
 #   gh run download <run-id> -n diag-routed-cases ; gh run download <run-id> -n diag-ky-https-bisect
 #
 # Step 0 of plan-q9-thawjs-fetch.md (5 fetch cases with the native-server fetch blocker lifted in this
-# checkout only; per case: build/run exit, manifest.txt, quickjs-symbols.txt, run.stdout/stderr):
 #   gh workflow run diag-routed-cases.yml -f ref=main -f lift_fetch_blocker=true -f ky_bisect=false \
 #     -f cases="fetch Response from a local http server|unannotated await fetch is a Response|r2c for await over http request body|r2c http chunked response framing headers|r2c Response static members spread of Headers and res.end without arguments"
-#   Read: the job summary ("quickjs symbols" per case) and the artifact diag-routed-cases, out/<slug>/run.stdout.
+#   Read: the job summary (blockers per case) and the artifact diag-routed-cases, out/<slug>/run.stdout.
 #   Hang = run exit 124. Compare run.stdout with tests/node-compat.json expectations.
 
 on:
@@ -93,7 +92,7 @@ jobs:
             ~/.cargo/git
             target/release
             target/thaw-*
-          key: diag-routed-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: diag-routed-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             diag-routed-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -176,14 +175,13 @@ jobs:
               cp "$D/cases/$slug.missing" "$case_out/build.log"
               continue
             fi
-            # Build report: the stderr of the routed build (THAW_JS_RUNTIME_DEBUG names each QuickJS-bound package).
+            # Build report: the stderr of the routed build (THAW_JS_RUNTIME_DEBUG names each package that stays off thaw-js).
             timeout 900 target/release/thaw build "$D/cases/$slug.ts" -o "$bin_dir/$slug" < /dev/null > "$case_out/build.stdout" 2> "$case_out/build.log"
             echo "$?" > "$case_out/build.exit"
             if [ -x "$bin_dir/$slug" ]; then
               target/release/thaw inspect "$bin_dir/$slug" > "$case_out/inspect.txt" 2>&1
-              # Step 0 evidence: manifest line and QuickJS symbol count of the linked binary.
+              # Step 0 evidence: manifest line of the linked binary.
               strings "$bin_dir/$slug" | grep THAW_ARTIFACT_V1 | head -3 > "$case_out/manifest.txt"
-              nm "$bin_dir/$slug" 2>/dev/null | grep -c thaw_quickjs > "$case_out/quickjs-symbols.txt" || true
               # Run the binary: stdout and stderr are kept separately, exit status recorded.
               timeout 120 "$bin_dir/$slug" < /dev/null > "$case_out/run.stdout" 2> "$case_out/run.stderr"
               echo "$?" > "$case_out/run.exit"
@@ -200,7 +198,6 @@ jobs:
             for c in "$D"/out/*/; do
               slug=$(basename "$c")
               echo "- $slug: $(cat "$c/name.txt" 2>/dev/null) | build exit $(cat "$c/build.exit" 2>/dev/null || echo n/a) | run exit $(cat "$c/run.exit" 2>/dev/null || echo n/a)"
-              echo "    quickjs symbols: $(cat "$c/quickjs-symbols.txt" 2>/dev/null || echo n/a)"
               grep -E '^thaw-js-blocker' "$c/inspect.txt" 2>/dev/null | cut -c1-300 | sed 's/^/    /'
             done
           } >> "$GITHUB_STEP_SUMMARY" || true
@@ -259,7 +256,7 @@ jobs:
             ~/.cargo/git
             target/release
             target/thaw-*
-          key: diag-routed-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: diag-routed-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             diag-routed-${{ runner.os }}-
       - name: Restore LLVM 22 cache

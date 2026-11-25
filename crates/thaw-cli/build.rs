@@ -30,10 +30,8 @@ fn main() {
         "crates/thaw-jit",
         "crates/thaw-js",
         "crates/thaw-parser",
-        "crates/thaw-quickjs",
         "crates/thaw-rt-dylib",
         "crates/thaw-napi",
-        "vendor/rquickjs-sys",
     ];
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for input in inputs {
