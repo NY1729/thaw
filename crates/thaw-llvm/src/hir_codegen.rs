@@ -512,6 +512,9 @@ pub struct HirCompiler<'ctx> {
     class_layouts: Vec<HirType>,
     /// Where each stack-visible function (by LLVM symbol) is defined, for `Error.stack`.
     stack_locs: HashMap<String, SourceLoc>,
+    /// Symbol of the lambda compiled last, and the source names given to lambda symbols (`const f = () => ..`).
+    last_lambda_symbol: Option<String>,
+    lambda_frame_names: HashMap<String, String>,
     /// NUL-terminated string constants already emitted, so each distinct text exists once.
     /// Whole-program builds route synthetic errors through one shared setter function.
     share_error_setter: bool,
@@ -868,6 +871,8 @@ impl<'ctx> HirCompiler<'ctx> {
             fn_locs: HashMap::new(),
             class_layouts: Vec::new(),
             stack_locs: HashMap::new(),
+            last_lambda_symbol: None,
+            lambda_frame_names: HashMap::new(),
             share_error_setter: false,
             interned_strings: std::cell::RefCell::new(HashMap::new()),
             uses_napi: false,
@@ -2237,14 +2242,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .set_metadata(weights, self.context.get_kind_id("prof"))
             .map_err(|e| e.to_string())?;
         self.builder.position_at_end(cold);
-        // The trusted-text marker keeps this cold path free of runtime calls (JIT-mapped modules
-        // must not gain external symbols) and of the arena-owned literal frame.
-        self.compile_stmt(&HirStmt::Throw(HirExpr::Call(
-            Box::new(HirExpr::Var("@@thaw_trusted_exception_text".to_string())),
-            vec![HirExpr::Lit(HirLit::Str(
-                "\u{1}RangeError\u{1}Maximum call stack size exceeded".to_string(),
-            ))],
-        )))?;
+        // A literal framed error: `thaw_error_frame_own` copies it and records the call stack, so the
+        // RangeError carries `at fn` frames like Node's.
+        self.compile_stmt(&HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+            "\u{1}RangeError\u{1}Maximum call stack size exceeded".to_string(),
+        ))))?;
         self.builder.position_at_end(ok);
         Ok(())
     }

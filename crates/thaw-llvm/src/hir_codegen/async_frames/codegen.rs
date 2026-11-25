@@ -49,6 +49,9 @@ impl<'ctx> HirCompiler<'ctx> {
         self.loop_scopes.clear();
         self.loop_promotion_scopes.clear();
         self.seed_global_variables();
+        // Unbounded async recursion would otherwise run the ramps off the stack.
+        // ponytail: throws synchronously (Node rejects the promise); a try/await caller sees the same RangeError.
+        self.emit_stack_overflow_guard()?;
 
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
         let frame = self
