@@ -191,11 +191,11 @@ fn generated_dynamic_wrappers_preserve_json_callback_boundaries() {
     let program = lower(
         r#"
         declare function __thaw_typed_tjs_66(value: Json): JsValue;
-        function __thaw_typed_wrapper_js_66(value: Json): JsValue {
+        function __thaw_typed_wrapper_tjs_66(value: Json): JsValue {
             return __thaw_typed_tjs_66(value);
         }
         function forward(value: Json): JsValue {
-            return __thaw_typed_wrapper_js_66(value);
+            return __thaw_typed_wrapper_tjs_66(value);
         }
         function main(): void {
             const callback = (value: Json): Json => value;
@@ -206,7 +206,7 @@ fn generated_dynamic_wrappers_preserve_json_callback_boundaries() {
     let wrapper = program
         .functions
         .iter()
-        .find(|function| function.name == "__thaw_typed_wrapper_js_66")
+        .find(|function| function.name == "__thaw_typed_wrapper_tjs_66")
         .unwrap();
     assert_eq!(wrapper.params[0].ty, HirType::Json);
 }

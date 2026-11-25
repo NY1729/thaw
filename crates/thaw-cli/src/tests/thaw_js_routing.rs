@@ -53,7 +53,7 @@ fn thaw_js_declaration_scan_accepts_plain_data_and_rejects_everything_else() {
     assert!(!plain(
         "declare function __thaw_typed_tjs_6d73(): Promise<number>;"
     ));
-    assert!(!plain("function __thaw_typed_wrapper_js_6d73(): number {"));
+    assert!(!plain("function __thaw_typed_wrapper_tjs_6d73(): number {"));
     // a bare `Uint8Array` result crosses as bytes; in params, unions and nested positions it stays out
     assert!(plain(
         "declare function __thaw_typed_tjs_6d73(path: string): Uint8Array;"

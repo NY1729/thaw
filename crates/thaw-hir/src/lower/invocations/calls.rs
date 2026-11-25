@@ -4722,7 +4722,7 @@ impl<'a> FnLowerer<'a> {
                             && matches!(declared, HirType::Object(_))
                             && class_name_from_type(declared).is_none();
                         let is_generated_wrapper =
-                            callee_name.starts_with("__thaw_typed_wrapper_js_");
+                            callee_name.starts_with("__thaw_typed_wrapper_tjs_");
                         let user_function = !(is_generated_wrapper || napi_constructor_typed_call)
                             && signature.as_ref().is_some_and(|sig| !sig.is_extern);
                         let promoted_typed_callback = matches!(value, HirExpr::FunctionRef(..))

@@ -1608,9 +1608,7 @@ fn generate_registry_shims_pass(
                                 .contains(&function.name.as_str())
                             && generic.contextual_rest_param_type.is_some()
                         {
-                            let direct = symbol
-                                .replace("__thaw_typed_wrapper_", "__thaw_typed_")
-                                .replace("__thaw_typed_js_", "__thaw_typed_tjs_");
+                            let direct = symbol.replace("__thaw_typed_wrapper_", "__thaw_typed_");
                             let specialized = generic_rest_array_result(generic).is_some();
                             for &arity in arities {
                                 let mut params = scoring_param_hir_types(function, napi);
@@ -1701,9 +1699,7 @@ fn generate_registry_shims_pass(
                     .as_ref()
                     .filter(|_| function.rest_param.is_some())
                 {
-                    let direct = symbol
-                        .replace("__thaw_typed_wrapper_", "__thaw_typed_")
-                        .replace("__thaw_typed_js_", "__thaw_typed_tjs_");
+                    let direct = symbol.replace("__thaw_typed_wrapper_", "__thaw_typed_");
                     let specialized = generic_rest_array_result(generic).is_some();
                     for &arity in call_arities {
                         let mut params = scoring_param_hir_types(function, napi);
