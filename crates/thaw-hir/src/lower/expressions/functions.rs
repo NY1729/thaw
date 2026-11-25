@@ -1654,6 +1654,14 @@ impl<'a> FnLowerer<'a> {
                         lowerer.lower_sparse_mapping_returns(&mut stmts)?;
                     }
                     let mut inferred = lowerer.infer_return_type(&stmts)?;
+                    // A body without a value `return` satisfies an `any` result: it yields `undefined`.
+                    if inferred == HirType::Void && expected_return == Some(&HirType::Json) {
+                        if !ast_block_terminates(&block.stmts) {
+                            let undefined = lowerer.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
+                            stmts.push(HirStmt::Return(Some(undefined)));
+                        }
+                        inferred = HirType::Json;
+                    }
                     // A body that always throws has no `return`, so it infers
                     // `Void`, but it satisfies any declared return type.
                     if inferred == HirType::Void

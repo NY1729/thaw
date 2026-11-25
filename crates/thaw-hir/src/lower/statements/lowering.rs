@@ -1648,6 +1648,10 @@ impl<'a> FnLowerer<'a> {
                             })
                         }
                     }
+                    // `return;` in an `any`-returning function yields `undefined`.
+                    None if self.ret_type == HirType::Json => {
+                        Some(self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?)
+                    }
                     None => {
                         if !matches!(
                             self.ret_type,

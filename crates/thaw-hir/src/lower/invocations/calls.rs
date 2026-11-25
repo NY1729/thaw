@@ -541,6 +541,22 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call_unread(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        // `(0, eval)(code)` is the idiomatic indirect eval: the same call as `eval(code)`.
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Paren(paren) = callee.as_ref() {
+                if let Expr::Seq(sequence) = paren.expr.as_ref() {
+                    if let Some((last, leading)) = sequence.exprs.split_last() {
+                        if matches!(last.as_ref(), Expr::Ident(name) if name.sym == *"eval")
+                            && leading.iter().all(|expr| matches!(expr.as_ref(), Expr::Lit(_)))
+                        {
+                            let mut routed = call.clone();
+                            routed.callee = Callee::Expr(last.clone());
+                            return self.lower_call_unread(&routed);
+                        }
+                    }
+                }
+            }
+        }
         if let Some(has_own) = self.lower_prototype_has_own_symbol_call(call)? {
             return Ok(has_own);
         }
@@ -580,10 +596,19 @@ impl<'a> FnLowerer<'a> {
         // an `(text, encoding)` pair to the matching native entry point.
         if let Callee::Expr(callee) = &call.callee {
             if let Expr::Member(member) = callee.as_ref() {
-                if let (Expr::Ident(_), MemberProp::Ident(method)) = (member.obj.as_ref(), &member.prop) {
+                // `res.writeHead(..).end()`: the chained receiver is the response `writeHead` was called on.
+                let receiver = match member.obj.as_ref() {
+                    Expr::Call(CallExpr { callee: Callee::Expr(callee), args, .. }) => match callee.as_ref() {
+                        Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(head), .. })
+                            if head.sym == *"writeHead" && !args.is_empty() && matches!(obj.as_ref(), Expr::Ident(_)) => obj.as_ref(),
+                        _ => member.obj.as_ref(),
+                    },
+                    other => other,
+                };
+                if let (Expr::Ident(_), MemberProp::Ident(method)) = (receiver, &member.prop) {
                     let method_name = method.sym.as_ref();
                     if matches!(method_name, "end" | "write")
-                        && matches!(self.peek_type_without_lowering(&member.obj), Some(HirType::Object(fields))
+                        && matches!(self.peek_type_without_lowering(receiver), Some(HirType::Object(fields))
                             if ["endBytes", "endEncoded", "writeBytes"].iter().all(|name| fields.iter().any(|(field, _)| field == name)))
                         && call.args.iter().all(|argument| argument.spread.is_none())
                     {
@@ -3536,7 +3561,19 @@ impl<'a> FnLowerer<'a> {
                     false,
                 ));
             }
-            let [argument] = call.args.as_slice() else {
+            // `Promise.reject()` rejects with `undefined`.
+            let implicit_undefined = swc_ecma_ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    "undefined".into(),
+                    call.span,
+                ))),
+            };
+            let [argument] = (if is_reject && call.args.is_empty() {
+                std::slice::from_ref(&implicit_undefined)
+            } else {
+                call.args.as_slice()
+            }) else {
                 return Err(format!("`{callee_name}` expects exactly one argument"));
             };
             if argument.spread.is_some() {
@@ -3775,6 +3812,32 @@ impl<'a> FnLowerer<'a> {
             let options = self.lower_expr(&options.expr)?;
             let options_type = self.infer_expr_type(&options)?;
             return self.lower_error_options(tagged, options, options_type);
+        }
+
+        // `http.createServer()` without a listener: the request handler is optional in Node.
+        if callee_name == "createServer"
+            && call.args.is_empty()
+            && self.signatures.get(&callee_name).is_some_and(|signature| {
+                matches!(signature.params.as_slice(), [HirType::Function(..) | HirType::CallableFunction(..)])
+            })
+        {
+            let mut routed = call.clone();
+            routed.args.push(swc_ecma_ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Arrow(swc_ecma_ast::ArrowExpr {
+                    span: call.span,
+                    ctxt: Default::default(),
+                    params: Vec::new(),
+                    body: Box::new(swc_ecma_ast::ArrowFunctionBody::Expr(Box::new(Expr::Ident(
+                        swc_ecma_ast::Ident::new_no_ctxt("undefined".into(), call.span),
+                    )))),
+                    is_async: false,
+                    is_generator: false,
+                    type_params: None,
+                    return_type: None,
+                })),
+            });
+            return self.lower_call(&routed);
         }
 
         let signature = self.signatures.get(&callee_name).cloned();
