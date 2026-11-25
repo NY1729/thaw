@@ -196,3 +196,23 @@ fn annexb_in_eval_follows_the_enclosing_scopes() {
         "2"
     );
 }
+
+#[test]
+fn typeof_parenthesized_undeclared_name_is_undefined() {
+    assert_eq!(
+        lines("function g(){ return typeof (nope) + typeof ((nope2)); } console.log(g());"),
+        "undefinedundefined"
+    );
+    assert_eq!(
+        lines("function g(){ 'use strict'; eval('function fun(x){ return x }'); return typeof (fun); } console.log(g());"),
+        "undefined"
+    );
+}
+
+#[test]
+fn define_property_without_value_creates_an_undefined_global() {
+    assert_eq!(
+        lines("Object.defineProperty(globalThis, 'nv', { enumerable: true, writable: true, configurable: false }); (0,eval)('function nv(){ return 1; }'); var d = Object.getOwnPropertyDescriptor(globalThis, 'nv'); console.log(typeof nv, d.enumerable, d.configurable);"),
+        "function true false"
+    );
+}

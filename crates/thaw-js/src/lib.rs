@@ -5790,7 +5790,11 @@ impl Interp {
         match u.op {
             a::UnaryOp::TypeOf => {
                 // typeof of an undeclared identifier must not throw
-                let v = match &*u.arg {
+                let mut arg = &*u.arg;
+                while let a::Expr::Paren(p) = arg {
+                    arg = &p.expr;
+                }
+                let v = match arg {
                     a::Expr::Ident(i) if scope.in_with => self
                         .with_ref_get(scope, &i.sym)?
                         .map_or(Value::Undefined, |(v, _)| v),
