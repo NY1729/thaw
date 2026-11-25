@@ -2,6 +2,7 @@ stat0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string 
 readdir0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
 exists0 ok false
 rename0 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
+write0 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Array
 copy0 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
 basename0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Array
 join0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Array
@@ -13,6 +14,7 @@ stat1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string 
 readdir1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Date
 exists1 ok false
 rename1 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received an instance of Date
+write1 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Date
 copy1 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received an instance of Date
 basename1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Date
 join1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Date
@@ -24,6 +26,7 @@ stat2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string 
 readdir2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Object
 exists2 ok false
 rename2 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received an instance of Object
+write2 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Object
 copy2 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received an instance of Object
 basename2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Object
 join2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Object
@@ -35,6 +38,7 @@ stat3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string 
 readdir3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type number (5)
 exists3 ok false
 rename3 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received type number (5)
+write3 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type number (5)
 copy3 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received type number (5)
 basename3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type number (5)
 join3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type number (5)
@@ -46,6 +50,7 @@ stat4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string 
 readdir4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received null
 exists4 ok false
 rename4 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received null
+write4 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received null
 copy4 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received null
 basename4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received null
 join4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received null
@@ -57,6 +62,7 @@ stat5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string 
 readdir5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received undefined
 exists5 ok false
 rename5 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received undefined
+write5 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received undefined
 copy5 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received undefined
 basename5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received undefined
 join5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received undefined
@@ -68,6 +74,7 @@ stat6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string 
 readdir6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type bigint (5n)
 exists6 ok false
 rename6 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received type bigint (5n)
+write6 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type bigint (5n)
 copy6 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received type bigint (5n)
 basename6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type bigint (5n)
 join6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type bigint (5n)

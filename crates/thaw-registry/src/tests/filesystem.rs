@@ -1562,7 +1562,7 @@ fn fs_shim_revives_tagged_buffer_shape_in_data_and_fd_view() {
         "bufferShape helper missing from fs shim"
     );
     assert!(
-        bundle.contains("function data(value, options) { value = bufferShape(value); return ArrayBuffer.isView(value) ?"),
+        bundle.contains("function data(value, options) { value = bufferShape(value);"),
         "data() does not revive the Buffer shape"
     );
     assert!(

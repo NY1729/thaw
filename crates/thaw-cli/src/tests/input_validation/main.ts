@@ -16,6 +16,7 @@ async function run(): Promise<void> {
     t("readdir" + i, () => fs.readdirSync(v));
     t("exists" + i, () => fs.existsSync(v));
     t("rename" + i, () => fs.renameSync("/nonexistent-r75-a", v));
+    t("write" + i, () => fs.writeFileSync("/nonexistent-r75-d/x", v));
     t("copy" + i, () => fs.copyFileSync(v, "/nonexistent-r75-b"));
     t("basename" + i, () => path.basename(v));
     t("join" + i, () => path.join("a", v));
