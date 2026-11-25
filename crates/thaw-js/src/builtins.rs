@@ -3549,7 +3549,7 @@ impl Interp {
                         }
                     }
                     parts => {
-                        let n: Vec<f64> = parts.iter().map(|v| it.num(v)).collect();
+                        let n = parts.iter().map(|v| it.tonum(v)).collect::<R<Vec<f64>>>()?;
                         crate::date::local_from_parts(&n)
                     }
                 };
@@ -3575,11 +3575,11 @@ impl Interp {
             self.set_native(d, "now", |_, _, _| Ok(Value::Number(now_ms())));
             self.set_native(d, "parse", |it, _, args| {
                 Ok(Value::Number(crate::date::parse_date(
-                    &it.to_str(&arg(args, 0)),
+                    &it.tostr(&arg(args, 0))?,
                 )))
             });
             self.set_native(d, "UTC", |it, _, args| {
-                let n: Vec<f64> = args.iter().map(|v| it.num(v)).collect();
+                let n = args.iter().map(|v| it.tonum(v)).collect::<R<Vec<f64>>>()?;
                 Ok(Value::Number(crate::date::utc_from_parts(&n)))
             });
         }

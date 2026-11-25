@@ -503,7 +503,11 @@ impl Interp {
         ] {
             self.set_native(dp, name, move |it, this, args| {
                 let t = it.date_time(this)?;
-                let nums: Vec<f64> = args.iter().take(max).map(|v| it.num(v)).collect();
+                let nums = args
+                    .iter()
+                    .take(max)
+                    .map(|v| it.tonum(v))
+                    .collect::<R<Vec<f64>>>()?;
                 let base = if t.is_nan() {
                     if first != 0 {
                         return Ok(Value::Number(f64::NAN));
@@ -530,7 +534,7 @@ impl Interp {
         }
         self.set_native(dp, "setTime", |it, this, args| {
             it.date_time(this)?;
-            let n = it.num(&arg(args, 0));
+            let n = it.tonum(&arg(args, 0))?;
             let t = clip(n);
             it.date_set(this, t);
             Ok(Value::Number(t))

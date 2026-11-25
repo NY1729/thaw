@@ -13513,3 +13513,17 @@ fn promise_subclass_executor_resolves_the_instance() {
         let r; const p = new M(f => { r = f }); p.then(v => console.log('then', v, p instanceof M)); r(7);";
     assert_eq!(run_main_lines(src), "then 7 true");
 }
+
+// Date setters / constructor / UTC / parse propagate ToNumber/ToString errors (same output as Node)
+#[test]
+fn date_conversions_propagate_abrupt_completions() {
+    let src = "const th={valueOf(){throw new RangeError('x')}};const d=new Date(0);\
+        for (const f of [()=>d.setDate(th),()=>d.setHours(1,th),()=>d.setTime(th),()=>d.setUTCFullYear(Symbol()),\
+        ()=>new Date(2000,th),()=>Date.UTC(1,th),()=>Date.parse(Symbol())]) {\
+        try{f();console.log('no')}catch(e){console.log(e.name)} }\
+        console.log(d.getTime())";
+    assert_eq!(
+        run_main_lines(src),
+        "RangeError|RangeError|RangeError|TypeError|RangeError|RangeError|TypeError|0"
+    );
+}
