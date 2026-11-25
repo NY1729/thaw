@@ -2242,11 +2242,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .set_metadata(weights, self.context.get_kind_id("prof"))
             .map_err(|e| e.to_string())?;
         self.builder.position_at_end(cold);
-        // A literal framed error: `thaw_error_frame_own` copies it and records the call stack, so the
-        // RangeError carries `at fn` frames like Node's.
-        self.compile_stmt(&HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-            "\u{1}RangeError\u{1}Maximum call stack size exceeded".to_string(),
-        ))))?;
+        // The shared synthetic-error setter creates the framed RangeError (recording the call stack), so
+        // each guard site is just a compare and a call.
+        let message = self
+            .intern_string("Maximum call stack size exceeded", "stack_overflow_message")
+            .map_err(|e| e.to_string())?
+            .as_pointer_value();
+        self.compile_throw_builtin_error_with("RangeError", message)?;
         self.builder.position_at_end(ok);
         Ok(())
     }
