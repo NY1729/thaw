@@ -227,12 +227,12 @@ where
     F: Fn(f64, f64) -> Value + 'static,
 {
     mk_ex(move |it, f| {
-        let lv = leaf_val(&l, it, f)?;
-        let rv = leaf_val(&r, it, f)?;
-        if let (Value::Number(x), Value::Number(y)) = (&lv, &rv) {
+        let lv = l.eval_n(it, f)?;
+        let rv = r.eval_n(it, f)?;
+        if let (Num2::N(x), Num2::N(y)) = (&lv, &rv) {
             return Ok(fast(*x, *y));
         }
-        bx(combine(it, op, &lv, &rv))
+        bx(combine(it, op, &num2_val(lv), &num2_val(rv)))
     })
 }
 
@@ -348,12 +348,12 @@ where
     F: Fn(f64, f64) -> bool + 'static,
 {
     Box::new(move |it: &mut Interp, f: &mut Frame| {
-        let lv = leaf_val(&l, it, f)?;
-        let rv = leaf_val(&r, it, f)?;
-        if let (Value::Number(x), Value::Number(y)) = (&lv, &rv) {
+        let lv = l.eval_n(it, f)?;
+        let rv = r.eval_n(it, f)?;
+        if let (Num2::N(x), Num2::N(y)) = (&lv, &rv) {
             return Ok(fast(*x, *y));
         }
-        Ok(bx(combine(it, op, &lv, &rv))?.truthy())
+        Ok(bx(combine(it, op, &num2_val(lv), &num2_val(rv)))?.truthy())
     })
 }
 

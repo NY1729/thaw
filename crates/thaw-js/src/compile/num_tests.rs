@@ -305,3 +305,45 @@ fn pr6_blowfish_leaf_checksum_matches_the_reference() {
         vec!["blowfish_leaf 1459210893 1459210893".to_string()]
     );
 }
+
+#[test]
+fn num_fastpath_slot_and_const_operands_mixed_types() {
+    let out = same(
+        r#"
+function f(a, b) { return [a + b, a - b, a * b, a < b, a >= b, a == b, a === b, a % b, a & b, a >>> b]; }
+function g(a) { var r = []; for (var i = 0; i < 3; i++) { r.push(a + 1, a < 2, 1 + a, a * 2); } return r; }
+var cases = [[1, 2], [NaN, 1], [0, -0], [-0, 0], ["3", 4], [null, 1], [undefined, 1], [true, 2],
+  [2147483648, 1], [4294967297, 33], [-1, 1], [1e300, 1e300], [{ valueOf() { return 7; } }, 1], [[], 1]];
+for (var c of cases) console.log(f(c[0], c[1]).map(function (x) { return Object.is(x, -0) ? "-0" : String(x); }).join());
+console.log(g(5).join()); console.log(g("5").join()); console.log(g(NaN).join());
+console.log(Object.is(-0 * 1, -0), Object.is(f(-0, 0)[7], NaN));
+"#,
+        1,
+    );
+    assert!(out.len() >= 14);
+}
+
+#[test]
+fn num_fastpath_bigint_mixing_throws_and_evaluation_order() {
+    same(
+        r#"
+function t(fn) { try { console.log(String(fn())); } catch (e) { console.log(e.name); } }
+function add(a, b) { return a + b; }
+function lt(a, b) { return a < b; }
+function and(a, b) { return a & b; }
+function sub(a, b) { return a - b; }
+t(function () { return add(1n, 2n); });
+t(function () { return add(1n, 2); });
+t(function () { return sub(1, 2n); });
+t(function () { return and(1n, 2); });
+t(function () { return and(2n ** 70n, 3n); });
+t(function () { return lt(1n, 2); });
+t(function () { return add("a", 1n); });
+t(function () { return and(4294967296 + 5, 2147483647 + 3); });
+function ord(x) { var y = x + (x = 10); return [y, x]; }
+function ord2(x) { return [x < (x = 0), x]; }
+console.log(ord(1).join(), ord2(1).join());
+"#,
+        1,
+    );
+}
