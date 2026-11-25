@@ -943,10 +943,12 @@ impl<'a> FnLowerer<'a> {
         };
         let swap = |width: usize| {
             format!(
-                "(b: Buffer): Buffer => {{ for (let i = 0; i + {w} <= b.length; i += {w}) {{ \
+                "(b: Buffer): Buffer => {{ if (b.length % {w} !== 0) {{ const e: any = new RangeError(\"Buffer size must be a multiple of {bits}-bits\"); \
+                 e.code = \"ERR_INVALID_BUFFER_SIZE\"; throw e; }} for (let i = 0; i + {w} <= b.length; i += {w}) {{ \
                  for (let j = 0; j < {h}; j++) {{ const t = b[i + j]; b[i + j] = b[i + {m} - j]; \
                  b[i + {m} - j] = t; }} }} return b; }}",
                 w = width,
+                bits = width * 8,
                 h = width / 2,
                 m = width - 1
             )

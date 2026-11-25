@@ -3784,6 +3784,63 @@ impl<'a> FnLowerer<'a> {
                             }));
                         }
                     }
+                    // `delete b[i]` of a byte-buffer element throws in strict code (typed or `any`).
+                    if matches!(object_type, HirType::Bytes | HirType::Json) {
+                        let key_expr = match &member.prop {
+                            MemberProp::Ident(property) => Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                                span: member.span,
+                                value: property.sym.as_ref().into(),
+                                raw: None,
+                            })),
+                            MemberProp::Computed(computed) => (*computed.expr).clone(),
+                            MemberProp::PrivateName(_) => {
+                                return Err("native `delete` does not support private properties".into());
+                            }
+                        };
+                        let module = thaw_parser::parse_typescript(
+                            "((k: any): boolean => { const n = Number(k); if (Number.isInteger(n) && n >= 0) { \
+                             throw new TypeError(\"Cannot delete property '\" + String(k) + \"' of [object Uint8Array]\"); } \
+                             return true; });",
+                        )?;
+                        let Some(swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(statement))) = module.body.first() else {
+                            return Err("internal: delete snippet did not parse".into());
+                        };
+                        let Expr::Paren(arrow) = statement.expr.as_ref() else {
+                            return Err("internal: delete snippet shape".into());
+                        };
+                        let denied = self.lower_expr(&Expr::Call(swc_ecma_ast::CallExpr {
+                            span: member.span,
+                            ctxt: swc_common::SyntaxContext::empty(),
+                            callee: Callee::Expr(Box::new(Expr::Paren(arrow.clone()))),
+                            args: vec![swc_ecma_ast::ExprOrSpread { spread: None, expr: Box::new(key_expr) }],
+                            type_args: None,
+                        }))?;
+                        if object_type == HirType::Bytes {
+                            return Ok(HirExpr::EvalThen(Box::new(object), Box::new(denied)));
+                        }
+                        let key = match &member.prop {
+                            MemberProp::Ident(property) => HirExpr::Lit(HirLit::Str(property.sym.to_string())),
+                            MemberProp::Computed(computed) => {
+                                let key = self.lower_expr(&computed.expr)?;
+                                self.coerce_primitive_to_string(key)?
+                            }
+                            MemberProp::PrivateName(_) => unreachable!(),
+                        };
+                        let name = format!("__thaw_delete_json_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::Json);
+                        let is_buffer = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_buffer_shape".into())),
+                            vec![HirExpr::Var(name.clone())],
+                        );
+                        let result = HirExpr::Conditional(
+                            Box::new(is_buffer),
+                            Box::new(denied),
+                            Box::new(HirExpr::JsonDelete(Box::new(HirExpr::Var(name.clone())), Box::new(key))),
+                            HirType::Bool,
+                        );
+                        return self.wrap_call_argument_bindings(result, &[(name, HirType::Json, object)]);
+                    }
                     if !matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         return Err(format!(
                             "native `delete` requires a JSON or dictionary receiver, got {object_type:?}"
