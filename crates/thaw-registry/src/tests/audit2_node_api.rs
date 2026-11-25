@@ -93,3 +93,14 @@ return new b.Blob(['hello ', 'world']).text().then(function (t) { r.push(t); ret
     let expected = r####"["aGVsbG8=","hello","function",true,"hello world"]"####;
     assert_eq!(run_node_api_js("node_api_buffer_exports", body), expected);
 }
+
+#[test]
+fn readable_pipe_listens_for_error_on_the_destination_only() {
+    let body = r####"var s = require('node:stream'), r = [];
+var source = new s.Readable({ read() {} }); source.pipe(new s.PassThrough());
+try { source.emit('error', new Error('boom')); r.push('swallowed'); } catch (e) { r.push(e.message); }
+var s3 = new s.Readable({ read() {} }), d3 = new s.PassThrough(); d3.on('error', function (e) { r.push('listener ' + e.message); }); s3.pipe(d3); d3.emit('error', new Error('dest2'));
+return r;"####;
+    let expected = r####"["boom","listener dest2"]"####;
+    assert_eq!(run_node_api_js("node_api_pipe_source_error", body), expected);
+}

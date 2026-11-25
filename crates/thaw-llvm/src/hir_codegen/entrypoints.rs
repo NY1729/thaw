@@ -1382,10 +1382,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_int_value()
             },
         );
-        let failure_status = self
-            .builder
-            .build_int_z_extend(process_failure, i32_type, "failure_exit_status")
-            .unwrap();
+        // 1, or 7 when an `uncaughtException` listener itself threw (Node's "handler failed" status)
+        let failure_status = if self.uses_thaw_js {
+            self.builder
+                .build_call(self.module.get_function("thaw_tjs_failure_status").unwrap(), &[], "failure_exit_status")
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_int_value()
+        } else {
+            self.builder
+                .build_int_z_extend(process_failure, i32_type, "failure_exit_status")
+                .unwrap()
+        };
         let status = self
             .builder
             .build_select(

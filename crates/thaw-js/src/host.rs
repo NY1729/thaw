@@ -3938,9 +3938,31 @@ fn native_report_text(message: *const c_char) -> Option<String> {
     )
 }
 
+/// Set when an `uncaughtException` listener threw: Node then exits with status 7.
+static UNCAUGHT_HANDLER_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The exit status of a failed compiled process: 1, or 7 after an `uncaughtException` listener threw.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_failure_status() -> i32 {
+    if UNCAUGHT_HANDLER_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        7
+    } else {
+        1
+    }
+}
+
 /// A native uncaught exception: `process.emit('uncaughtExceptionMonitor')`, then `uncaughtException`.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_emit_uncaught_result(message: *const c_char) -> HandleResult {
+    let result = emit_uncaught_result(message);
+    if !result.error.is_null() {
+        UNCAUGHT_HANDLER_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    result
+}
+
+fn emit_uncaught_result(message: *const c_char) -> HandleResult {
     let Some(raw) = native_report_text(message) else {
         return HandleResult {
             value: 0,
@@ -8009,8 +8031,9 @@ pub extern "C" fn thaw_tjs_fatal_exit() {
     for handle in 0..count {
         let _ = with_package(handle, |p| {
             p.interp.drop_pending_work();
-            p.interp.set_exit_code(Some(1.0));
-            p.interp.emit_exit_once(1);
+            p.interp
+                .set_exit_code(Some(f64::from(thaw_tjs_failure_status())));
+            p.interp.emit_exit_once(thaw_tjs_failure_status());
             Ok::<(), HostError>(())
         });
     }
@@ -8022,7 +8045,7 @@ fn end_process_after_fatal() {
     let count = PACKAGES.with(|ps| ps.borrow().len());
     for handle in 0..count {
         let _ = with_package(handle, |p| {
-            terminate_process(&mut p.interp, 1);
+            terminate_process(&mut p.interp, thaw_tjs_failure_status());
             Ok::<(), HostError>(())
         });
     }

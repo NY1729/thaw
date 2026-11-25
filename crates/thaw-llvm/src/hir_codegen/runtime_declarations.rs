@@ -4228,6 +4228,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_tjs_failure_status",
+            self.context.i32_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_tjs_fatal_exit",
             self.context.void_type().fn_type(&[], false),
             Some(Linkage::External),
