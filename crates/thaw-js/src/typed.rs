@@ -1284,6 +1284,17 @@ impl Interp {
             let mut array_like = false;
             let src: Vec<Value> = if let Some(s) = Self::typed_of(&arg(a, 0)) {
                 it.check_mix(s.ty, t.ty)?;
+                // same element type: the bytes copy as they are (no f64 round trip per element)
+                if s.ty == t.ty && !s.gone() {
+                    let n = s.cur_len();
+                    if off + n > t.cur_len() {
+                        return it.throw_error("RangeError", "offset is out of bounds");
+                    }
+                    let bytes = s.window();
+                    let at = t.off + off * t.ty.size();
+                    t.data.borrow_mut()[at..at + bytes.len()].copy_from_slice(&bytes);
+                    return Ok(Value::Undefined);
+                }
                 s.to_values()
             } else {
                 match it.iter_items(&arg(a, 0)) {

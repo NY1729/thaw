@@ -2,6 +2,20 @@
 
 use crate::*;
 
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// `(typed array, start, end)` arguments as the bytes they select.
+fn byte_window(it: &mut Interp, a: &[Value]) -> R<Vec<u8>> {
+    let Some(t) = Interp::typed_of(&arg(a, 0)) else {
+        return it.throw_error("TypeError", "argument must be a typed array");
+    };
+    let bytes = t.window();
+    let start = (it.num(&arg(a, 1)).max(0.0) as usize).min(bytes.len());
+    let end = (it.num(&arg(a, 2)).max(0.0) as usize).min(bytes.len());
+    Ok(bytes[start..end.max(start)].to_vec())
+}
+
 impl Interp {
     pub(crate) fn install_buffer(&mut self) {
         let g = self.global.clone();
@@ -24,9 +38,13 @@ impl Interp {
             };
             let slice = &bytes[start..end.max(start)];
             if arg(a, 3).truthy() {
-                return Ok(std::str::from_utf8(slice).map_or(Value::Undefined, Value::str));
+                return Ok(std::str::from_utf8(slice).map_or(Value::Undefined, |t| {
+                    Value::str(&crate::builtins::from_scalar(t))
+                }));
             }
-            Ok(Value::str(&String::from_utf8_lossy(slice)))
+            Ok(Value::str(&crate::builtins::from_scalar(
+                &String::from_utf8_lossy(slice),
+            )))
         });
         g.declare("__thaw_utf8_decode", f, true);
         // hex string -> bytes, stopping at the first pair that is not two hex digits (as Node does)
@@ -48,6 +66,149 @@ impl Interp {
             Ok(it.u8_from_vec(bytes))
         });
         g.declare("__thaw_hex_decode", f, true);
+        // number of trailing bytes that are a valid but incomplete UTF-8 sequence (streaming decode keeps them)
+        let f = self.native(|it, _, a| {
+            let Some(t) = Self::typed_of(&arg(a, 0)) else {
+                return it.throw_error("TypeError", "argument must be a typed array");
+            };
+            let bytes = t.window();
+            let tail = (1..=3.min(bytes.len())).find(|&k| {
+                matches!(std::str::from_utf8(&bytes[bytes.len() - k..]),
+                    Err(e) if e.valid_up_to() == 0 && e.error_len().is_none())
+            });
+            Ok(Value::Number(tail.unwrap_or(0) as f64))
+        });
+        g.declare("__thaw_utf8_tail", f, true);
+        // (bytes, start, end, url) -> base64 / base64url text
+        let f = self.native(|it, _, a| {
+            let bytes = byte_window(it, a)?;
+            let url = arg(a, 3).truthy();
+            let table: &[u8; 64] = if url { B64URL } else { B64 };
+            let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+            for c in bytes.chunks(3) {
+                let n = u32::from(c[0]) << 16
+                    | u32::from(*c.get(1).unwrap_or(&0)) << 8
+                    | u32::from(*c.get(2).unwrap_or(&0));
+                let ch = |sh: u32| table[(n >> sh & 63) as usize] as char;
+                out.push(ch(18));
+                out.push(ch(12));
+                match c.len() {
+                    1 if !url => out.push_str("=="),
+                    1 => {}
+                    2 => {
+                        out.push(ch(6));
+                        if !url {
+                            out.push('=');
+                        }
+                    }
+                    _ => {
+                        out.push(ch(6));
+                        out.push(ch(0));
+                    }
+                }
+            }
+            Ok(Value::str(&out))
+        });
+        g.declare("__thaw_b64_encode", f, true);
+        // text -> bytes: either alphabet, invalid characters skipped, `=` ends the data (as Node does)
+        let f = self.native(|it, _, a| {
+            let s = it.to_str(&arg(a, 0));
+            let (mut acc, mut bits) = (0u32, 0u32);
+            let mut out = Vec::with_capacity(s.len() / 4 * 3);
+            for c in s.chars() {
+                let v = match c {
+                    'A'..='Z' => c as u32 - 'A' as u32,
+                    'a'..='z' => c as u32 - 'a' as u32 + 26,
+                    '0'..='9' => c as u32 - '0' as u32 + 52,
+                    '+' | '-' => 62,
+                    '/' | '_' => 63,
+                    '=' => break,
+                    _ => continue,
+                };
+                acc = acc << 6 | v;
+                bits += 6;
+                if bits >= 8 {
+                    bits -= 8;
+                    out.push((acc >> bits & 255) as u8);
+                }
+            }
+            Ok(it.u8_from_vec(out))
+        });
+        g.declare("__thaw_b64_decode", f, true);
+        let f = self.native(|it, _, a| {
+            let bytes = byte_window(it, a)?;
+            let mut out = String::with_capacity(bytes.len() * 2);
+            for b in bytes {
+                out.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
+                out.push(char::from_digit(u32::from(b & 15), 16).unwrap_or('0'));
+            }
+            Ok(Value::str(&out))
+        });
+        g.declare("__thaw_hex_encode", f, true);
+        // (bytes, start, end, ascii) -> one char per byte (ascii masks to 7 bits)
+        let f = self.native(|it, _, a| {
+            let bytes = byte_window(it, a)?;
+            let mask = if arg(a, 3).truthy() { 0x7f } else { 0xff };
+            Ok(Value::str(
+                &bytes
+                    .iter()
+                    .map(|&b| char::from(b & mask))
+                    .collect::<String>(),
+            ))
+        });
+        g.declare("__thaw_latin1_decode", f, true);
+        // btoa: `undefined` when a character is above U+00FF
+        let f = self.native(|it, _, a| {
+            let s = it.to_str(&arg(a, 0));
+            if s.chars().any(|c| c as u32 > 255) {
+                return Ok(Value::Undefined);
+            }
+            let bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
+            let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+            for c in bytes.chunks(3) {
+                let n = u32::from(c[0]) << 16
+                    | u32::from(*c.get(1).unwrap_or(&0)) << 8
+                    | u32::from(*c.get(2).unwrap_or(&0));
+                let ch = |sh: u32| B64[(n >> sh & 63) as usize] as char;
+                out.push(ch(18));
+                out.push(ch(12));
+                out.push(if c.len() > 1 { ch(6) } else { '=' });
+                out.push(if c.len() > 2 { ch(0) } else { '=' });
+            }
+            Ok(Value::str(&out))
+        });
+        g.declare("__thaw_btoa", f, true);
+        // atob (forgiving-base64 decode): `undefined` when the text is not correctly encoded
+        let f = self.native(|it, _, a| {
+            let s = it.to_str(&arg(a, 0));
+            let mut t: Vec<char> = s.chars().filter(|c| !"\t\n\x0c\r ".contains(*c)).collect();
+            if t.len().is_multiple_of(4) {
+                for _ in 0..2 {
+                    if t.last() == Some(&'=') {
+                        t.pop();
+                    }
+                }
+            }
+            if t.len() % 4 == 1
+                || t.iter()
+                    .any(|c| !(c.is_ascii_alphanumeric() || *c == '+' || *c == '/'))
+            {
+                return Ok(Value::Undefined);
+            }
+            let (mut acc, mut bits) = (0u32, 0u32);
+            let mut out = String::with_capacity(t.len() * 3 / 4);
+            for c in t {
+                let v = B64.iter().position(|&b| b as char == c).unwrap_or(0) as u32;
+                acc = acc << 6 | v;
+                bits += 6;
+                if bits >= 8 {
+                    bits -= 8;
+                    out.push(char::from((acc >> bits & 255) as u8));
+                }
+            }
+            Ok(Value::str(&out))
+        });
+        g.declare("__thaw_atob", f, true);
         self.run_builtin(BUFFER_PRELUDE)
             .unwrap_or_else(|_| panic!("thaw-js buffer prelude must evaluate"));
     }
@@ -58,7 +219,8 @@ const BUFFER_PRELUDE: &str = r#"
   function def(o, name, f) {
     Object.defineProperty(o, name, { value: f, writable: true, enumerable: false, configurable: true });
   }
-  var enc8 = __thaw_utf8_encode, dec8 = __thaw_utf8_decode, hexDec = __thaw_hex_decode;
+  var enc8 = __thaw_utf8_encode, dec8 = __thaw_utf8_decode, hexDec = __thaw_hex_decode,
+    b64Dec = __thaw_b64_decode, b64Enc = __thaw_b64_encode, hexEnc = __thaw_hex_encode, latin1Dec = __thaw_latin1_decode;
   var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   var B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
@@ -131,18 +293,7 @@ const BUFFER_PRELUDE: &str = r#"
     var out, i, n;
     if (enc === 'utf8') return enc8(s);
     if (enc === 'hex') return hexDec(s);
-    if (enc === 'base64' || enc === 'base64url') {
-      out = []; var acc = 0, bits = 0;
-      for (i = 0; i < s.length; i++) {
-        var c = s[i], v = B64.indexOf(c);
-        if (v < 0) v = B64URL.indexOf(c);
-        if (c === '=') break;
-        if (v < 0) continue;
-        acc = (acc << 6) | v; bits += 6;
-        if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 255); }
-      }
-      return new U8(out);
-    }
+    if (enc === 'base64' || enc === 'base64url') return b64Dec(s);
     if (enc === 'utf16le') {
       out = [];
       for (i = 0; i < s.length; i++) { var u = s.charCodeAt(i); out.push(u & 255, u >> 8); }
@@ -233,21 +384,10 @@ const BUFFER_PRELUDE: &str = r#"
     enc = normEnc(enc);
     var i, s = '';
     if (enc === 'utf8') return dec8(this, start, end);
-    if (enc === 'hex') { for (i = start; i < end; i++) s += (this[i] < 16 ? '0' : '') + this[i].toString(16); return s; }
-    if (enc === 'base64' || enc === 'base64url') {
-      var T = enc === 'base64' ? B64 : B64URL;
-      for (i = start; i < end; i += 3) {
-        var a = this[i], b = i + 1 < end ? this[i + 1] : 0, c = i + 2 < end ? this[i + 2] : 0;
-        var n = (a << 16) | (b << 8) | c;
-        s += T[(n >> 18) & 63] + T[(n >> 12) & 63];
-        s += i + 1 < end ? T[(n >> 6) & 63] : (enc === 'base64' ? '=' : '');
-        s += i + 2 < end ? T[n & 63] : (enc === 'base64' ? '=' : '');
-      }
-      return s;
-    }
+    if (enc === 'hex') return hexEnc(this, start, end);
+    if (enc === 'base64' || enc === 'base64url') return b64Enc(this, start, end, enc === 'base64url');
     if (enc === 'utf16le') { for (i = start; i + 1 < end; i += 2) s += String.fromCharCode(this[i] | (this[i + 1] << 8)); return s; }
-    for (i = start; i < end; i++) s += String.fromCharCode(enc === 'ascii' ? this[i] & 127 : this[i]);
-    return s;
+    return latin1Dec(this, start, end, enc === 'ascii');
   });
   def(P, 'toJSON', function () { return { type: 'Buffer', data: Array.from(this) }; });
   def(P, 'equals', function (o) { return Buffer.compare(this, o) === 0; });
