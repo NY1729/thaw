@@ -664,6 +664,9 @@ enum Origin {
     Defined,
     /// top-level let/const/class: a scope binding only, not an own property of `globalThis`.
     Lexical,
+    /// created by `Object.defineProperty(globalThis, ...)` with an explicit `(enumerable, configurable)`
+    /// pair other than the `Defined` one.
+    Attrs(bool, bool),
 }
 
 /// Node 22's `globalThis` own properties, as `(name, e/w/c flags)` from the recorded surface (`-` where
@@ -884,6 +887,7 @@ fn global_view_flags(name: &str, b: &Binding) -> Option<(bool, bool, bool)> {
         Origin::Decl | Origin::Defined => Some((false, b.mutable, true)),
         Origin::Var => Some((true, b.mutable, false)),
         Origin::Prop => Some((true, b.mutable, true)),
+        Origin::Attrs(e, c) => Some((e, b.mutable, c)),
     }
 }
 
@@ -1162,6 +1166,9 @@ const SK_FIELD: u8 = 4;
 /// The `with` scope of a vm context's sandbox (vm.rs): the global object's record, not a user `with`, so a call it
 /// resolves has no `this` object.
 const SK_VMGLOBAL: u8 = 8;
+/// A call frame whose parameter expressions are being evaluated: a direct eval there sees the
+/// parameter environment (`arguments` and the parameters are bound outside the body's var scope).
+const SK_PARAMS: u8 = 16;
 
 impl Scope {
     fn new(parent: Option<Rc<Scope>>) -> Rc<Scope> {
@@ -3554,6 +3561,7 @@ impl Interp {
                 frame.declare("arguments", self.array(args.to_vec()), true);
             }
         }
+        let mut in_params = false;
         for (i, p) in def.params.iter().enumerate() {
             if let Some(Some(name)) = def.param_names.get(i) {
                 let value = args.get(i).cloned().unwrap_or(Value::Undefined);
@@ -3569,9 +3577,13 @@ impl Interp {
                     },
                 );
             } else if let a::Pat::Rest(r) = p {
+                in_params = true;
+                frame.kind.set(frame.kind.get() | SK_PARAMS);
                 let rest = self.array(args.get(i..).unwrap_or(&[]).to_vec());
                 self.bind_pattern(&r.arg, rest, &frame, true)?;
             } else {
+                in_params = true;
+                frame.kind.set(frame.kind.get() | SK_PARAMS);
                 self.bind_pattern(
                     p,
                     args.get(i).cloned().unwrap_or(Value::Undefined),
@@ -3579,6 +3591,9 @@ impl Interp {
                     true,
                 )?;
             }
+        }
+        if in_params {
+            frame.kind.set(frame.kind.get() & !SK_PARAMS);
         }
         Ok(frame)
     }
@@ -3943,13 +3958,13 @@ impl Interp {
                 Some(true)
             }
             Origin::Decl | Origin::Lexical => None,
-            Origin::Var => Some(false),
+            Origin::Var | Origin::Attrs(_, false) => Some(false),
             Origin::Prop => {
                 g.vars.borrow_mut().remove(name);
                 self.unpublish_global(name);
                 Some(true)
             }
-            Origin::Defined => {
+            Origin::Defined | Origin::Attrs(_, true) => {
                 g.vars.borrow_mut().remove(name);
                 self.global_object.remove_prop(name);
                 self.unpublish_global(name);
@@ -4509,7 +4524,7 @@ impl Interp {
     /// of the caller: `let`/`const`/`class` stay in it, a sloppy `var` or function goes to the caller's
     /// variable scope, a strict caller or `"use strict"` text gets its own. Its `this`, `arguments` and
     /// `new.target` are the caller's. Returns the completion value.
-    fn direct_eval(&mut self, src: &str, scope: &Rc<Scope>) -> R<Value> {
+    pub(crate) fn direct_eval(&mut self, src: &str, scope: &Rc<Scope>) -> R<Value> {
         let src = &*builtins::to_source(src);
         if too_nested(src) {
             return self.throw_error("RangeError", STACK_OVERFLOW);
@@ -4539,10 +4554,27 @@ impl Interp {
             var_target(scope)
         };
         let names = hoisted_names(&stmts);
+        if !strict
+            && var_scope.kind.get() & SK_PARAMS != 0
+            && names.iter().any(|n| &**n == "arguments")
+            && (var_scope.kind.get() & SK_FUNC != 0
+                || var_scope.mask.get() & name_bit("arguments") != 0)
+        {
+            return self.throw_error(
+                "SyntaxError",
+                "Identifier 'arguments' has already been declared",
+            );
+        }
         if !strict {
             if let Some(name) = names.iter().find(|n| lexical_between(scope, &var_scope, n)) {
                 let msg = format!("Identifier '{name}' has already been declared");
                 return self.throw_error("SyntaxError", &msg);
+            }
+        }
+        if !strict && Rc::ptr_eq(&var_scope, &self.global) {
+            if let Some(name) = self.undefinable_global(&stmts, &names) {
+                let msg = format!("Cannot declare global '{name}'");
+                return self.throw_error("TypeError", &msg);
             }
         }
         let saved_run = self.run_id;
@@ -4559,6 +4591,31 @@ impl Interp {
         outcome.map(|()| completion)
     }
 
+    /// The first name of sloppy eval code that CanDeclareGlobalVar / CanDeclareGlobalFunction refuses: a
+    /// new name on a non-extensible global object, or a function over a property that is neither
+    /// configurable nor a writable enumerable data property.
+    fn undefinable_global(&self, stmts: &[a::Stmt], names: &[Rc<str>]) -> Option<Rc<str>> {
+        let extensible = self.global_object.ext.get() == 0;
+        let fn_names: Vec<&str> = stmts
+            .iter()
+            .filter_map(|s| match s {
+                a::Stmt::Decl(a::Decl::Fn(f)) => Some(&*f.ident.sym),
+                _ => None,
+            })
+            .collect();
+        names.iter().find_map(|n| {
+            let ok = match self.global_prop(n) {
+                None => extensible,
+                Some(p) if fn_names.contains(&&**n) => {
+                    p.configurable
+                        || (p.enumerable && p.writable && matches!(p.slot, Slot::Data(_)))
+                }
+                Some(_) => true,
+            };
+            (!ok).then(|| n.clone())
+        })
+    }
+
     /// The declaration instantiation and the statements of a direct eval (see `direct_eval`).
     fn run_direct_eval(
         &mut self,
@@ -4569,6 +4626,7 @@ impl Interp {
         strict: bool,
     ) -> R<()> {
         let origin = if strict { Origin::Decl } else { Origin::Prop };
+        let is_global = Rc::ptr_eq(var_scope, &self.global);
         for name in names {
             if !var_scope.vars.borrow().contains_key(name) {
                 var_scope.declare_with(name.clone(), Value::Undefined, true, origin);
@@ -4578,7 +4636,31 @@ impl Interp {
             if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
                 let name = self.intern(&f.ident.sym);
                 let func = self.function_value(Some(name.clone()), &f.function, lex)?;
-                var_scope.declare_with(name, func, true, origin);
+                // an existing global binding keeps its attributes: only its value is replaced
+                let mut vars = var_scope.vars.borrow_mut();
+                match vars.get_mut(&name) {
+                    Some(b) => {
+                        b.value = func;
+                        // CreateGlobalFunctionBinding: a configurable global property becomes a plain
+                        // enumerable, writable, configurable data property
+                        if is_global
+                            && matches!(
+                                b.origin,
+                                Origin::Decl
+                                    | Origin::Defined
+                                    | Origin::Prop
+                                    | Origin::Attrs(_, true)
+                            )
+                        {
+                            b.origin = Origin::Prop;
+                            b.mutable = true;
+                        }
+                    }
+                    None => {
+                        drop(vars);
+                        var_scope.declare_with(name, func, true, origin);
+                    }
+                }
             }
         }
         for s in stmts {
@@ -6856,6 +6938,8 @@ mod dynamic_helper_contract_tests;
 mod errors_stack_tests;
 #[cfg(test)]
 mod esm_private_tests;
+#[cfg(test)]
+mod eval_scoping_tests;
 #[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]

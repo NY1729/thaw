@@ -1422,15 +1422,22 @@ impl Interp {
                     .borrow()
                     .get(key)
                     .is_none_or(|b| matches!(b.origin, Origin::Defined));
-            self.global.declare(
-                key,
-                v.clone(),
-                d.writable.as_ref().is_some_and(Value::truthy),
-            );
+            // the descriptor's flags, defaulting to the existing property's (false for a new one)
+            let had = self.global_prop(key);
+            let flag = |f: &Option<Value>, old: Option<bool>| {
+                f.as_ref().map_or(old.unwrap_or(false), Value::truthy)
+            };
+            let enumerable = flag(&d.enumerable, had.as_ref().map(|p| p.enumerable));
+            let configurable = flag(&d.configurable, had.as_ref().map(|p| p.configurable));
+            let writable = flag(&d.writable, had.as_ref().map(|p| p.writable));
+            self.global.declare(key, v.clone(), writable);
             // a data descriptor ends a Node accessor global's accessor form (`node_accessor`).
             // ponytail: only a descriptor with a value redefines; a writable-only one keeps the accessor form.
             self.global.set_redefined(key);
-            if deletable {
+            if enumerable || !configurable {
+                self.global
+                    .set_origin(key, Origin::Attrs(enumerable, configurable));
+            } else if deletable || had.is_none() || configurable {
                 self.global.set_origin(key, Origin::Defined);
             }
             self.publish_global(key);
@@ -2370,7 +2377,10 @@ impl Interp {
         g.declare("Function", function, true);
         // The indirect (global-scope) form; a direct call is recognised by the interpreter's Call arm.
         let eval = self.native(|it, _, args| match arg(args, 0) {
-            Value::Str(src) => it.run_sloppy(&src),
+            Value::Str(src) => {
+                let global = it.global.clone();
+                it.direct_eval(&src, &global)
+            }
             other => Ok(other),
         });
         if let Value::Object(o) = &eval {
@@ -4002,6 +4012,11 @@ impl Interp {
             return Ok(self.get(&d, "enumerable")?.truthy());
         }
         let key = self.key_of(key);
+        if matches!(target, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Global)) {
+            if let Some(p) = self.global_prop(&key) {
+                return Ok(p.enumerable);
+            }
+        }
         Ok(match target {
             Value::Object(o) => crate::typed::typed_own_key(o, &key).unwrap_or_else(|| {
                 find_own(o, &key).is_some_and(|(_, e)| e)
