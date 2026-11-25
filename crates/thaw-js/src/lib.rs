@@ -597,6 +597,8 @@ struct FuncDef {
     cstate: std::cell::RefCell<compile::CState>,
     /// Created while `Interp::no_compile_define` was set (a prelude that opted out): never analysed or compiled.
     no_compile: bool,
+    /// Own properties the last instance built by `new` ended with (capped at 8): the next `this` reserves that many.
+    ctor_props: Cell<u8>,
 }
 
 enum Body {
@@ -1999,6 +2001,13 @@ impl Interp {
 
     pub(crate) fn plain(&self) -> Obj {
         new_obj(Some(self.object_proto.clone()), Kind::Plain)
+    }
+
+    /// A plain object whose property storage holds exactly `n` entries before it grows.
+    pub(crate) fn plain_with_capacity(&self, n: usize) -> Obj {
+        let o = self.plain();
+        reserve_props(&o, n);
+        o
     }
 
     /// Global binding `name` as an own property of `globalThis`, or None when it is not one.
@@ -3640,7 +3649,15 @@ impl Interp {
             }
             return Ok(r);
         }
-        let this = Value::Object(new_obj(Some(proto), Kind::Plain));
+        let this_obj = new_obj(Some(proto), Kind::Plain);
+        let ctor_def = match &*fo.kind.borrow() {
+            Kind::Closure { def, .. } => Some(def.clone()),
+            _ => None,
+        };
+        if let Some(d) = &ctor_def {
+            reserve_props(&this_obj, d.ctor_props.get() as usize);
+        }
+        let this = Value::Object(this_obj);
         // new.target reaches only closures (a host callback has no new.target of its own)
         self.rt.pending_nt = (!is_hostcb).then(|| new_target.clone());
         let result = if is_class {
@@ -3650,6 +3667,9 @@ impl Interp {
         };
         self.rt.pending_nt = None;
         let result = result?;
+        if let (Some(d), Value::Object(t)) = (&ctor_def, &this) {
+            d.ctor_props.set(t.raw_props.borrow().len().min(8) as u8);
+        }
         match result {
             r @ Value::Object(_) => Ok(r),
             _ => Ok(this),
@@ -3709,6 +3729,7 @@ impl Interp {
                     class: None,
                     cstate: Default::default(),
                     no_compile: self.no_compile_define,
+                    ctor_props: Cell::new(0),
                 })
             })
             .clone();
@@ -3755,6 +3776,7 @@ impl Interp {
                 owner: Rc::downgrade(&f),
                 parent: self.object_proto.clone(),
             };
+            reserve_props(&f, 1);
             push_prop(
                 &f,
                 &mut f.raw_props.borrow_mut(),
@@ -5217,7 +5239,12 @@ impl Interp {
                 Ok(self.array(items))
             }
             a::Expr::Object(o) => {
-                let obj = self.plain();
+                let obj = self.plain_with_capacity(
+                    o.props
+                        .iter()
+                        .filter(|p| matches!(p, a::PropOrSpread::Prop(_)))
+                        .count(),
+                );
                 for p in &o.props {
                     match p {
                         a::PropOrSpread::Spread(sp) => {
@@ -6321,6 +6348,15 @@ fn find_in_chain(o: &Obj, key: &str) -> Option<Slot> {
 
 /// Index of the first property an array-index key `key` must precede, so integer keys stay
 /// first in ascending order (`None`: not an array index, append).
+/// Sizes `o`'s (still empty) property vector to exactly `n` entries, so the first `n` pushes do not take the
+/// growth default of 4.
+pub(crate) fn reserve_props(o: &ObjData, n: usize) {
+    if n > 0 {
+        o.raw_props.borrow_mut().reserve_exact(n);
+        account(o);
+    }
+}
+
 pub(crate) fn push_prop(o: &ObjData, props: &mut Vec<Prop>, p: Prop) {
     // Insertion order is kept; the integer-keys-first rule is applied when keys are enumerated
     // (`order_keys`), so appending stays O(1) and the hash index stays valid.
@@ -6902,6 +6938,8 @@ mod registry_tests;
 mod resizable_buffer_tests;
 #[cfg(test)]
 mod sab_tests;
+#[cfg(test)]
+mod size_tests;
 #[cfg(test)]
 mod stack_overflow_tests;
 #[cfg(test)]
