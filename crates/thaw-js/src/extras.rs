@@ -188,28 +188,15 @@ pub(crate) const EXTRAS: &str = r#"
     }
     return c !== c ? undefined : c;
   });
-  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   function b64error(msg) { return typeof DOMException === 'function' ? new DOMException(msg, 'InvalidCharacterError') : new Error(msg); }
   btoa = function (s) {
-    s = String(s);
-    var out = '';
-    for (var i = 0; i < s.length; i += 3) {
-      var a = s.charCodeAt(i), b = s.charCodeAt(i + 1), c = s.charCodeAt(i + 2);
-      if (a > 255 || b > 255 || c > 255) throw b64error('Invalid character');
-      var n = (a << 16) | ((b || 0) << 8) | (c || 0);
-      out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + (i + 1 < s.length ? B64[(n >> 6) & 63] : '=') + (i + 2 < s.length ? B64[n & 63] : '=');
-    }
+    var out = __thaw_btoa(String(s));
+    if (out === undefined) throw b64error('Invalid character');
     return out;
   };
   atob = function (s) {
-    s = String(s).replace(/[\t\n\f\r ]/g, '');
-    if (s.length % 4 === 0) s = s.replace(/==?$/, '');
-    if (s.length % 4 === 1 || /[^A-Za-z0-9+\/]/.test(s)) throw b64error('The string to be decoded is not correctly encoded.');
-    var out = '', bits = 0, acc = 0;
-    for (var i = 0; i < s.length; i++) {
-      acc = (acc << 6) | B64.indexOf(s[i]); bits += 6;
-      if (bits >= 8) { bits -= 8; out += String.fromCharCode((acc >> bits) & 255); }
-    }
+    var out = __thaw_atob(String(s));
+    if (out === undefined) throw b64error('The string to be decoded is not correctly encoded.');
     return out;
   };
   // WeakMap / WeakSet / WeakRef / FinalizationRegistry. ponytail: entries are held strongly (no GC is
