@@ -1,4 +1,4 @@
-// Worker message wire (ported from thaw-quickjs `platform_globals/workers/structured_clone.js`). A value becomes a
+// Worker message wire. A value becomes a
 // JSON string `{root, nodes}` that crosses worker threads as plain text; `__thaw_worker_decode` rebuilds it.
 // Differences from the retired-engine wire: no uncloneable marks, no blob snapshots, and an `Error` node so error events
 // keep name, message, stack and cause. A SharedArrayBuffer is an `SAB` node holding an id into the shared-block table

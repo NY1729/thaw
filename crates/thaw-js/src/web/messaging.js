@@ -1,4 +1,4 @@
-// MessageEvent (ported from thaw-quickjs `platform_globals/workers/blob_events.js`); messaging.js below needs it.
+// MessageEvent; messaging.js below needs it.
 if (typeof globalThis.MessageEvent !== 'function') {
   const messageFields = new WeakMap();
   const messageOf = self => {
@@ -31,7 +31,7 @@ if (typeof globalThis.MessageEvent !== 'function') {
     });
   }
 }
-// MessagePort / MessageChannel / BroadcastChannel (verbatim from thaw-quickjs `platform_globals/workers/messaging.js`).
+// MessagePort / MessageChannel / BroadcastChannel.
   // `on<type>` event-handler attributes are one listener, registered when the
   // handler is first set, so it runs in listener order and honours
   // stopImmediatePropagation like any other listener.

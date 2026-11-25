@@ -1,5 +1,5 @@
 // CommonJS loader for a file on disk: `__thaw_run_main_file(filename)` runs it as the main module with
-// relative `require`, JSON, index files, cycles and a module cache. Adapted from thaw-quickjs runtime.js.
+// relative `require`, JSON, index files, cycles and a module cache.
 // Reads go through the host primitive `__thaw_worker_read_source(path)` (throws when missing).
 Object.defineProperty(globalThis, '__thaw_run_main_file', {
   writable: true,

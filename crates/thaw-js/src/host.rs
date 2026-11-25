@@ -5823,8 +5823,7 @@ pub(crate) fn handle_value(id: u64) -> Option<Value> {
 /// that is a tracked native Json root. The guard does not require `pending == object` or
 /// `native_text == 0`, because async-callback rejections publish a display text in `pending` and
 /// `native_text` while the object stays in `object`; the tracked-root lookup is what authenticates
-/// the object. An id of 0 (untracked, or not a live handle) keeps the framed-Error path. The
-/// retired-engine side (`thaw-quickjs` `reconstitute_exception_packet`) is unchanged.
+/// the object. An id of 0 (untracked, or not a live handle) keeps the framed-Error path.
 pub(crate) fn original_js_exception_with(
     packet: &thaw_arena::exception::ExceptionPacket,
     lookup: impl FnOnce(usize) -> u64,
@@ -5860,7 +5859,7 @@ fn original_js_exception(packet: &thaw_arena::exception::ExceptionPacket) -> Opt
 /// The exact value of a thrown or rejected primitive (`throw 0`, `throw false`, `reject(undefined)`).
 /// It has no object, native or aggregate identity, so its type is the packet's value tag. The tags
 /// are the compiled runtime's (`hir_codegen/statements.rs` unions 1 number, 2 bigint, 3 bool, 5
-/// undefined, 6 null) and match thaw-quickjs `reconstitute_exception_packet`. Tag 4 (text) is not
+/// undefined, 6 null). Tag 4 (text) is not
 /// mapped here: a string throw keeps the existing Error path.
 fn primitive_reason(packet: &thaw_arena::exception::ExceptionPacket) -> Option<Value> {
     if packet.object != 0 || packet.native != 0 || packet.aggregate != 0 {

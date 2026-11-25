@@ -1,4 +1,4 @@
-// node:crypto (hashing, HMAC, random): lifted from thaw-quickjs buffer_crypto.js (the oracle).
+// node:crypto (hashing, HMAC, random):
 // Runs after web/crypto.js, which owns globalThis.crypto; this file only adds the node half.
 function def(o, name, v) {
   Object.defineProperty(o, name, { value: v, writable: true, enumerable: false, configurable: true });
@@ -31,7 +31,7 @@ function plainDigestError() { return new Error('Digest method not supported'); }
 function unsupportedHashDigest(algorithm) { return new Error('Digest method ' + algorithm + ' is not supported'); }
 function invalidDigest(algorithm) { return cryptoError(TypeError, 'ERR_CRYPTO_INVALID_DIGEST', 'Invalid digest: ' + algorithm); }
 function invalidSignDigest() { return cryptoError(TypeError, 'ERR_CRYPTO_INVALID_DIGEST', 'Invalid digest'); }
-// Digests createHash/createHmac accept; the names match thaw-quickjs exactly.
+// Digests createHash/createHmac accept.
 function normalizeDigestAlgorithm(algorithm, unknown) {
   var name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
   if (name === 'rmd160' || name === 'ripemd') name = 'ripemd160';

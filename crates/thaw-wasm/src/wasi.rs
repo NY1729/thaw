@@ -1,5 +1,5 @@
 //! WASI preview1 on top of `wasmi_wasi` (wasi-common, cap-std sandboxed dirs).
-//! Stdio is inherited from the process, as in the QuickJS wasm host.
+//! Stdio is inherited from the process.
 
 use std::path::PathBuf;
 

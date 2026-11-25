@@ -160,8 +160,8 @@ add-ons can be embedded or placed beside the executable with
 Statically understood code is compiled through HIR and LLVM. Package code that
 requires general JavaScript semantics runs on the Thaw-native JavaScript evaluator
 (`thaw-js`), the only engine; see [thaw-js](#thaw-js). A package or program thaw-js cannot
-serve fails the build with `unsupported on thaw-js: ...` listing every refusal; there is no QuickJS
-fallback and no environment opt-out.
+serve fails the build with `unsupported on thaw-js: ...` listing every refusal; there is no fallback
+engine and no environment opt-out.
 `thaw inspect` reports whether N-API is present, which packages were
 routed to thaw-js, and explains known fallback reasons.
 
