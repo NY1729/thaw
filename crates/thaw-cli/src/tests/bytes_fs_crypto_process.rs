@@ -40,6 +40,69 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// fs APIs given a file: `URL` object (AOT `new URL`, `import.meta.url` derived) must resolve it like
+/// Node's fileURLToPath; the URL used to be stringified into the path (a stray `file:` directory).
+#[test]
+fn node_fs_accepts_file_url_objects_from_compiled_code() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-node_fs_accepts_file_url_objects-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.txt"), "A\n").unwrap();
+    std::fs::write(dir.join("index.html"), "<p>\n").unwrap();
+    let entry = dir.join("main.mjs");
+    std::fs::write(&entry, r#"import { cp, mkdir, rm, copyFile, readFile, writeFile, stat, readdir, rename, unlink, access } from 'node:fs/promises';
+import * as fs from 'node:fs';
+const root = new URL('./', import.meta.url);
+const out = new URL('dist/', root);
+await rm(out, { recursive: true, force: true });
+await mkdir(new URL('vendor/', out), { recursive: true });
+await cp(new URL('src/', root), new URL('src/', out), { recursive: true });
+await copyFile(new URL('index.html', root), new URL('index.html', out));
+await writeFile(new URL('w.txt', out), 'hi');
+console.log(await readFile(new URL('w.txt', out), 'utf8'));
+await rename(new URL('w.txt', out), new URL('v.txt', out));
+console.log((await stat(new URL('v.txt', out))).size);
+console.log((await readdir(out)).sort().join(','));
+await unlink(new URL('v.txt', out));
+await access(new URL('index.html', out));
+fs.mkdirSync(new URL('sync/', out));
+fs.writeFileSync(new URL('sync/a', out), 's');
+fs.copyFileSync(new URL('sync/a', out), new URL('sync/b', out));
+fs.cpSync(new URL('src/', root), new URL('sync/src/', out), { recursive: true });
+console.log(fs.readFileSync(new URL('sync/b', out), 'utf8'), fs.existsSync(new URL('sync/a', out)), fs.statSync(new URL('sync/a', out)).size);
+console.log(fs.readdirSync(new URL('sync/', out)).sort().join(','));
+fs.renameSync(new URL('sync/a', out), new URL('sync/c', out));
+fs.rmSync(new URL('sync/c', out));
+try { await readFile(new URL('http://x/y')); } catch (e) { console.log(e.code); }
+console.log(fs.readdirSync('.').filter((n) => n.startsWith('file')).length);
+fs.readFile(new URL('sync/b', out), 'utf8', (err, data) => {
+  console.log(err, data);
+  fs.copyFile(new URL('sync/b', out), new URL('sync/d', out), (err) => {
+    console.log(err, fs.existsSync(new URL('sync/d', out)));
+    fs.mkdir(new URL('cb/', out), (err) => {
+      console.log(err, fs.existsSync(new URL('cb/', out)));
+      fs.rm(new URL('cb/', out), { recursive: true }, (err) => {
+        console.log(err, fs.existsSync(new URL('cb/', out)));
+        fs.rmSync(out, { recursive: true });
+      });
+    });
+  });
+});
+"#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).current_dir(&dir).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    // Expected output produced by Node 22 running the same program.
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "hi\n2\nindex.html,src,v.txt,vendor\ns true 1\na,b,src\nERR_INVALID_URL_SCHEME\n0\nnull s\nnull true\nnull true\nnull false\n"
+    );
+    assert!(!dir.join("file:").exists());
+    assert!(!dir.join("dist").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn node_crypto_md5_sha3_hash_and_subtle_match_node() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-node_crypto_md5_sha3_hash_and_subtle_match_node-{}", std::process::id()));
