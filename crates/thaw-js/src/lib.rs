@@ -6905,6 +6905,8 @@ mod string_conversion_tests;
 #[cfg(test)]
 mod structured_clone_tests;
 #[cfg(test)]
+mod swc_parser_gap_tests;
+#[cfg(test)]
 mod sysio_stdin_tests;
 #[cfg(test)]
 mod tests;
