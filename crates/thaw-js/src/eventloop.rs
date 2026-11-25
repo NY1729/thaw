@@ -44,7 +44,7 @@ pub(crate) enum PState {
 pub(crate) struct PromiseData {
     pub(crate) state: PState,
     pub(crate) reactions: Vec<Reaction>,
-    handled: bool,
+    pub(crate) handled: bool,
 }
 
 /// One realm's promise-job queue. A reaction keeps the queue of the realm that registered it (`Reaction::queue`),

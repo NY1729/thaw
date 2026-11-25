@@ -3968,13 +3968,41 @@ pub extern "C" fn thaw_tjs_emit_unhandled_rejection_result(message: *const c_cha
             error: ptr::null_mut(),
         };
     };
-    native_process_report(&["unhandledRejection"], |it| {
+    native_process_report(&["unhandledRejection", "uncaughtException"], |it| {
         let reason = if raw.starts_with('\u{1}') {
             native_report_error(it, &raw)?
         } else {
             Value::str(&raw)
         };
-        it.emit("unhandledRejection", &[reason, Value::Undefined])
+        if it.listener_count("unhandledRejection") > 0 {
+            // the listener's second argument is a real (already rejected, handled) Promise
+            let promise = it.new_promise();
+            if let Kind::Promise(d) = &mut *promise.kind.borrow_mut() {
+                d.handled = true;
+            }
+            it.reject_promise(&promise, reason.clone());
+            return it.emit("unhandledRejection", &[reason, Value::Object(promise)]);
+        }
+        // Node's default `--unhandled-rejections=throw`: with no `unhandledRejection` listener the
+        // rejection becomes an uncaught exception (origin `unhandledRejection`); a non-Error reason
+        // is wrapped in an `UnhandledPromiseRejection` error.
+        let error = if raw.starts_with('\u{1}') {
+            reason
+        } else {
+            let shown = it.inspect(&reason, false);
+            let e = it.make_error(
+                "Error",
+                &format!("This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"{shown}\"."),
+            )?;
+            if let Value::Object(o) = &e {
+                crate::put(o, "name", Value::str("UnhandledPromiseRejection"));
+                crate::put(o, "code", Value::str("ERR_UNHANDLED_REJECTION"));
+            }
+            e
+        };
+        let origin = Value::str("unhandledRejection");
+        it.emit("uncaughtExceptionMonitor", &[error.clone(), origin.clone()])?;
+        it.emit("uncaughtException", &[error, origin])
     })
 }
 
