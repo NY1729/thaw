@@ -4779,6 +4779,24 @@ impl Interp {
         self.global.declare("require", f, true);
     }
 
+    /// Test262 host hook: a hidden global `__thaw_eval_script(src)` that runs `src` as a Script in the global
+    /// scope (global let/const/class persist; vars/functions are non-configurable), like `$262.evalScript`.
+    pub fn install_eval_script(&mut self) {
+        let f = self.native(|it, _, args| {
+            let src = it.to_str(&args.first().cloned().unwrap_or(Value::Undefined));
+            let src = &*builtins::to_source(&src);
+            let parsed = thaw_parser::parse_javascript_script(src);
+            if let Err(msg) = &parsed {
+                return it.throw_error("SyntaxError", msg);
+            }
+            let saved = it.run_id;
+            let r = it.run_parsed(src, parsed, true);
+            it.run_id = saved;
+            r
+        });
+        self.global.declare("__thaw_eval_script", f, true);
+    }
+
     /// Call `exports[name](...args)`.
     pub fn call_export(&mut self, exports: &Value, name: &str, args: &[Value]) -> R<Value> {
         let f = self.get(exports, name)?;
