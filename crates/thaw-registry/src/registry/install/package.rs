@@ -36,7 +36,80 @@
 /// requested and later confirmed, rather than every `add` silently
 /// meaning "whatever's newest today".
 pub fn add(registry_dir: &Path, package: &str) -> Result<AddedPackage, String> {
-    validate_installed_package_name(split_package_spec(package).0)?;
+    let name = split_package_spec(package).0;
+    validate_installed_package_name(name)?;
+    // Global store (opportunity 4 of the r46 memo): reuse a finished result for this exact
+    // version instead of re-running npm + bundling in every project.
+    let stored = store::store_root().and_then(|root| {
+        let version = exact_registry_version(package)?;
+        let key = store::key(name, &version);
+        Some((root, version, key))
+    });
+    if let Some((root, version, key)) = &stored {
+        if let Some((added, files)) = store::lookup(root, name, version, key) {
+            if let Ok(()) = install_from_store(registry_dir, name, &files) {
+                return Ok(added);
+            }
+        }
+    }
+    let added = add_uncached(registry_dir, package)?;
+    if let Some((root, version, key)) = stored {
+        let directory = registry_dir.join(name);
+        let own_output = added.resolved_version == version
+            && added.native_addon.is_none()
+            && added.native_diagnostic.is_none()
+            && !["native-dependencies", "platform-executable"].iter().any(|f| directory.join(f).exists())
+            // an `external:` instance would pin an absolute path of this machine
+            && !fs::read_to_string(directory.join("instances.json")).map_or(true, |s| s.contains("\"external:"));
+        if own_output {
+            let _ = store::publish(&root, name, &version, &key, &directory, &added);
+        }
+    }
+    Ok(added)
+}
+
+/// The exact registry version `package` (`name`, `name@1.2.3`, `name@^1`, `name@next`) denotes:
+/// strict semver is taken as is, a range or tag is resolved with `npm view`. `None` for
+/// anything else (URLs, paths, git specs) or when npm cannot say.
+fn exact_registry_version(package: &str) -> Option<String> {
+    let (name, spec) = split_package_spec(package);
+    let spec = spec.unwrap_or("latest");
+    let is_semver = {
+        let (core, rest) = spec.split_once(['-', '+']).unwrap_or((spec, ""));
+        let parts: Vec<_> = core.split('.').collect();
+        parts.len() == 3
+            && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b))
+    };
+    if is_semver {
+        return Some(spec.to_string());
+    }
+    if !spec.bytes().all(|b| b.is_ascii_alphanumeric() || b"._^~<>=|* -".contains(&b)) {
+        return None;
+    }
+    let output = Command::new("npm")
+        .args(["view", "--json", &format!("{name}@{spec}"), "version"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    match serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()? {
+        serde_json::Value::String(version) => Some(version),
+        // several matches: npm lists them in ascending order and `install` takes the highest
+        serde_json::Value::Array(all) => all.last()?.as_str().map(str::to_string),
+        _ => None,
+    }
+}
+
+fn install_from_store(registry_dir: &Path, name: &str, files: &Path) -> Result<(), String> {
+    let destination = registry_dir.join(name);
+    let _writer = PackageWriterGuard::acquire(&destination)?;
+    let (staged, backup) = staged_package_paths(&destination)?;
+    store::materialize(files, &staged)
+        .and_then(|()| publish_staged_package(&staged, &destination, &backup))
+        .map_err(|error| discard_staged_package(&staged, error))
+}
+
+fn add_uncached(registry_dir: &Path, package: &str) -> Result<AddedPackage, String> {
     // Create-exclusive and owner-only, with a random suffix: a predictable
     // name in the shared temp dir could be pre-created by another local user
     // and filled with files that then get installed into the registry.
