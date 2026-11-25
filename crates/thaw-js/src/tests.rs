@@ -13495,3 +13495,21 @@ fn writing_existing_property_respects_order_readonly_and_setters() {
         "1"
     );
 }
+
+// Promise.resolve / reject honour their receiver (NewPromiseCapability); same output as Node.
+#[test]
+fn promise_resolve_reject_use_receiver_capability() {
+    let src = "let n=0,t={};function P(e){n++;return new Promise((_,rj)=>e(()=>{throw t},rj))}\
+        try{Promise.resolve.call(P,1)}catch(e){console.log('threw',e===t,n)}\
+        try{Promise.resolve.call(1)}catch(e){console.log(e instanceof TypeError)}\
+        const p=Promise.resolve(1);console.log(Promise.resolve(p)===p)";
+    assert_eq!(run_main_lines(src), "threw true 1|true|true");
+}
+
+// a Promise subclass's executor resolves the object `new X` returns, also when it resolves later
+#[test]
+fn promise_subclass_executor_resolves_the_instance() {
+    let src = "class M extends Promise {}\
+        let r; const p = new M(f => { r = f }); p.then(v => console.log('then', v, p instanceof M)); r(7);";
+    assert_eq!(run_main_lines(src), "then 7 true");
+}
