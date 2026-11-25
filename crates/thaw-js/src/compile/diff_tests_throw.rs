@@ -208,3 +208,16 @@ fn check_mode_pure_kernel_that_throws() {
     let (_, _, it) = run_mode(src, CompileMode::Check);
     assert_eq!(it.cstats.compiled(), 1);
 }
+
+/// A template substitution whose `toString` throws propagates the error from a compiled function.
+#[test]
+fn compiled_template_substitution_propagates_tostring_throw() {
+    let src = r#"
+        function f(x) { return `a${x}b` }
+        const boom = { toString() { throw 'boom' } };
+        console.log(f(1));
+        try { f(boom); console.log('no throw') } catch (e) { console.log('caught', e) }
+        "#;
+    let out = same(src, 1);
+    assert_eq!(out, lines(&["a1b", "caught boom"]));
+}

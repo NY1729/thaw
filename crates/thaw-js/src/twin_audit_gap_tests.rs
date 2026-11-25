@@ -32,10 +32,7 @@ P('blobNull', () => new Blob(null)); P('blobArrayLike', () => new Blob({ length:
 P('empty', () => [new Blob().size, new Blob(undefined).size]);
 P('blobNum', () => new Blob(5)); P('blobStr', () => new Blob('abc').size);
 let closed = 0; const S = {};
-P('closing', () => { try { new Blob({ *[Symbol.iterator]() { try { yield { toString() { throw S; } }; yield 'u'; } finally { closed++; } } }); } catch (e) { return [e === S, closed]; } let called = 0, thrown = 'none'; try { new Blob([{ toString() { called++; throw S; } }]); } catch (e) { thrown = e === S; }
-  let steps = []; try { new Blob({ *[Symbol.iterator]() { steps.push('start'); try { steps.push('y1'); yield { toString() { steps.push('ts'); throw S; } }; steps.push('y2'); yield 'u'; } finally { steps.push('fin'); } } }); } catch (e) { steps.push('caught' + (e === S)); }
-  let own = 'none'; try { `${{ toString() { throw S; } }}`; } catch (e) { own = e === S; }
-  return ['noerr', called, thrown, steps.join(), own, closed, Blob.toString().length, Blob.toString().slice(0,200), String(Object.getOwnPropertyNames(Blob.prototype))]; });
+P('closing', () => { try { new Blob({ *[Symbol.iterator]() { try { yield { toString() { throw S; } }; yield 'u'; } finally { closed++; } } }); } catch (e) { return [e === S, closed]; } });
 const order = [];
 P('order', () => { new File([{ toString() { order.push('parts'); return 'x'; } }], { toString() { order.push('name'); return 'n'; } }, {
   get endings() { order.push('endings-get'); return { toString() { order.push('endings-convert'); return 'transparent'; } }; },
