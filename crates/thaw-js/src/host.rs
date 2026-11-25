@@ -3939,7 +3939,7 @@ fn native_report_text(message: *const c_char) -> Option<String> {
 }
 
 /// Set when an `uncaughtException` listener threw: Node then exits with status 7.
-static UNCAUGHT_HANDLER_FAILED: std::sync::atomic::AtomicBool =
+pub(crate) static UNCAUGHT_HANDLER_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// The exit status of a failed compiled process: 1, or 7 after an `uncaughtException` listener threw.

@@ -880,7 +880,14 @@ impl Interp {
                     self.call(&capture, &Value::Undefined, &[v])?;
                     Ok(())
                 } else if self.listener_count("uncaughtException") > 0 {
-                    self.emit("uncaughtException", &[v, Value::str("uncaughtException")])?;
+                    // a listener that throws is fatal with Node's "handler failed" status 7
+                    self.emit("uncaughtException", &[v, Value::str("uncaughtException")])
+                        .inspect_err(|e| {
+                            if matches!(e, Ctl::Throw(_)) {
+                                crate::host::UNCAUGHT_HANDLER_FAILED
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        })?;
                     Ok(())
                 } else {
                     Err(Ctl::Throw(v))
