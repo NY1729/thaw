@@ -263,6 +263,50 @@ fn compile_and_run_raw_with_opt(
     commonjs: bool,
     codegen_opt: inkwell::OptimizationLevel,
 ) -> std::process::Output {
+    let output = compile_and_run_raw_once(source, test_name, envs, commonjs, codegen_opt);
+    // THAW_TEST_DIFF_MIDEND=1: also build with the mid-end off (`OptimizationLevel::None` selects the
+    // coroutine-only pipeline, the same as `THAW_CODEGEN_MIDEND=off`, plus an -O0 backend) and require
+    // identical stdout and exit code. THAW_TEST_DIFF_LOG=<file> gets one line per compared program.
+    if std::env::var_os("THAW_TEST_DIFF_MIDEND").is_some()
+        && matches!(codegen_opt, inkwell::OptimizationLevel::Default)
+    {
+        let off_name = format!("{test_name}_midend_off");
+        let off = compile_and_run_raw_once(
+            source,
+            &off_name,
+            envs,
+            commonjs,
+            inkwell::OptimizationLevel::None,
+        );
+        if let Some(log) = std::env::var_os("THAW_TEST_DIFF_LOG") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+            {
+                let _ = writeln!(f, "{test_name}");
+            }
+        }
+        assert_eq!(
+            (String::from_utf8_lossy(&off.stdout), off.status.code()),
+            (
+                String::from_utf8_lossy(&output.stdout),
+                output.status.code()
+            ),
+            "MIDEND DIVERGENCE (off vs O2) in {test_name}"
+        );
+    }
+    output
+}
+
+fn compile_and_run_raw_once(
+    source: &str,
+    test_name: &str,
+    envs: &[(&str, &str)],
+    commonjs: bool,
+    codegen_opt: inkwell::OptimizationLevel,
+) -> std::process::Output {
     // A routed build's shim declares typed calls into script globals as `__thaw_typed_tjs_*`.
     let source = source.replace("__thaw_typed_js_", "__thaw_typed_tjs_");
     let source = source.as_str();
@@ -788,6 +832,7 @@ include!("tests/library_mode.rs");
 include!("tests/lim4_contracts.rs");
 include!("tests/errframes_contracts.rs");
 include!("tests/stackloc_contracts.rs");
+include!("tests/stack_fidelity_contracts.rs");
 include!("tests/anon_fn_contracts.rs");
 include!("tests/audit_silent1_contracts.rs");
 include!("tests/audit2_class_contracts.rs");
