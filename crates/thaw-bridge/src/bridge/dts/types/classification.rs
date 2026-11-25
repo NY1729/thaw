@@ -668,3 +668,35 @@ fn classify_ts_type(
         other => DtsType::Unsupported(format!("unsupported type `{}`", describe_ts_type(other))),
     }
 }
+
+/// In-process memo of the three heavy `.d.ts` parses: a build runs `generate_registry_shims_pass` twice over the
+/// same package declarations, and each parse is a pure function of the text, the filename and the thread-local
+/// modes below. Only taken when every mode but `ALLOW_NATIVE_BYTES_TYPE` is at its default (the entry-point state
+/// of the shim pass); otherwise, or with `THAW_NO_BUILD_CACHE`, the parse just runs. Results are cloned out, so
+/// a caller's later mutation never reaches the memo.
+fn dts_memo<T: Clone + Send + 'static>(
+    kind: &'static str, source: &str, filename: &thaw_parser::common::FileName,
+    compute: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    use std::any::Any;
+    use std::sync::{Mutex, OnceLock};
+    static MEMO: OnceLock<Mutex<HashMap<String, Box<dyn Any + Send>>>> = OnceLock::new();
+    let default_modes = CLASS_CALLBACK_PARAM_NAMES.with(|n| n.borrow().is_empty())
+        && TYPE_SCOPE.with(|s| s.borrow().is_empty())
+        && ACTIVE_GENERIC_TYPES.with(|a| a.borrow().is_empty());
+    let disabled = std::env::var_os("THAW_NO_BUILD_CACHE").is_some_and(|v| !v.is_empty() && v != "0");
+    if !default_modes || disabled {
+        return compute();
+    }
+    let native_bytes = ALLOW_NATIVE_BYTES_TYPE.with(std::cell::Cell::get);
+    let key = format!("{kind}\0{native_bytes}\0{filename:?}\0{source}");
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some(hit) = memo.lock().ok().and_then(|m| m.get(&key).and_then(|b| b.downcast_ref::<Result<T, String>>().cloned())) {
+        return hit;
+    }
+    let result = compute();
+    if let Ok(mut m) = memo.lock() {
+        m.insert(key, Box::new(result.clone()));
+    }
+    result
+}

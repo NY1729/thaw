@@ -81,6 +81,41 @@ pub fn scan_bundle_for_build(
     installed: &std::collections::HashSet<String>,
     served: &std::collections::HashSet<String>,
 ) -> Result<thaw_js::scan::Report, String> {
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, Result<thaw_js::scan::Report, String>>>,
+    > = std::sync::OnceLock::new();
+    let caching = std::env::var_os("THAW_NO_BUILD_CACHE").is_none_or(|v| v.is_empty() || v == "0");
+    if !caching {
+        return scan_bundle_for_build_uncached(bundle_js, native_addon, installed, served);
+    }
+    let key = scan_cache_key(bundle_js, native_addon, installed, served);
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some(hit) = memo.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return hit;
+    }
+    let dir = build_cache_dir("scan");
+    let result = match dir.as_deref().and_then(|d| scan_cache_load(d, &key)) {
+        Some(report) => Ok(report),
+        None => {
+            let result = scan_bundle_for_build_uncached(bundle_js, native_addon, installed, served);
+            if let (Ok(report), Some(dir)) = (&result, dir.as_deref()) {
+                scan_cache_store(dir, &key, report);
+            }
+            result
+        }
+    };
+    if let Ok(mut m) = memo.lock() {
+        m.insert(key, result.clone());
+    }
+    result
+}
+
+fn scan_bundle_for_build_uncached(
+    bundle_js: &str,
+    native_addon: bool,
+    installed: &std::collections::HashSet<String>,
+    served: &std::collections::HashSet<String>,
+) -> Result<thaw_js::scan::Report, String> {
     let ctx = thaw_js::scan::ScanContext {
         known_methods: builtin_defined_names(),
         installed_packages: installed,
@@ -90,6 +125,126 @@ pub fn scan_bundle_for_build(
         thaw_js::scan::scan_addon_bundle_in(bundle_js, &ctx)
     } else {
         thaw_js::scan::scan_bundle_in(bundle_js, &ctx)
+    }
+}
+
+/// Identity of this compiler binary: any rebuild changes the size or mtime, so a cache entry written by another
+/// build (different scanner, builtin sources or interpreter globals) is never read. A copied binary only misses.
+fn build_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| fs::metadata(p).ok())
+            .map(|m| {
+                let nanos = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                format!("{}:{nanos}", m.len())
+            })
+            .unwrap_or_default();
+        format!("{}:{exe}", env!("CARGO_PKG_VERSION"))
+    })
+}
+
+/// `$XDG_CACHE_HOME/thaw/build-cache/<kind>` (or `$HOME/.cache/thaw/...`); `None` when neither is set.
+fn build_cache_dir(kind: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    Some(base.join("thaw").join("build-cache").join(kind))
+}
+
+/// Every input of the scan result, hashed: the build id, the bundle text, the addon flag, the installed and served sets.
+fn scan_cache_key(
+    bundle_js: &str,
+    native_addon: bool,
+    installed: &std::collections::HashSet<String>,
+    served: &std::collections::HashSet<String>,
+) -> String {
+    let mut hasher = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    field(b"scan-v1");
+    field(build_id().as_bytes());
+    field(&[native_addon as u8]);
+    field(bundle_js.as_bytes());
+    for set in [installed, served] {
+        let mut names: Vec<&String> = set.iter().collect();
+        names.sort();
+        field(&(names.len() as u64).to_le_bytes());
+        for name in names {
+            field(name.as_bytes());
+        }
+    }
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn scan_cache_load(dir: &Path, key: &str) -> Option<thaw_js::scan::Report> {
+    let text = fs::read_to_string(dir.join(format!("{key}.json"))).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if v.get("key")?.as_str()? != key {
+        return None;
+    }
+    let mut blockers = BTreeMap::new();
+    for row in v.get("blockers")?.as_array()? {
+        let row = row.as_array()?;
+        blockers.insert(
+            row.first()?.as_str()?.to_string(),
+            (row.get(1)?.as_u64()? as usize, row.get(2)?.as_str()?.to_string()),
+        );
+    }
+    Some(thaw_js::scan::Report {
+        entry: v.get("entry")?.as_str()?.to_string(),
+        factories_total: v.get("factories_total")?.as_u64()? as usize,
+        factories_reachable: v.get("factories_reachable")?.as_u64()? as usize,
+        blockers,
+    })
+}
+
+/// Best effort: any failure just leaves the entry missing. Written to a unique temp file and renamed, so a
+/// concurrent build reads a whole entry or none. The directory is kept to a few hundred entries.
+fn scan_cache_store(dir: &Path, key: &str, report: &thaw_js::scan::Report) {
+    // exhaustive destructuring: a new `Report` field must be added to the cache format too
+    let thaw_js::scan::Report { entry, factories_total, factories_reachable, blockers } = report;
+    let rows: Vec<serde_json::Value> = blockers
+        .iter()
+        .map(|(k, (n, m))| serde_json::json!([k, n, m]))
+        .collect();
+    let text = serde_json::json!({
+        "key": key, "entry": entry, "factories_total": factories_total,
+        "factories_reachable": factories_reachable, "blockers": rows,
+    })
+    .to_string();
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        ".{key}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let done = fs::create_dir_all(dir)
+        .and_then(|_| fs::write(&tmp, text))
+        .and_then(|_| fs::rename(&tmp, dir.join(format!("{key}.json"))));
+    if done.is_err() {
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    const MAX_ENTRIES: usize = 256;
+    let Ok(read) = fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = read
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if entries.len() > MAX_ENTRIES {
+        entries.sort();
+        for (_, path) in entries.iter().take(entries.len() - MAX_ENTRIES / 2) {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
