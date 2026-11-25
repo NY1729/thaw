@@ -98,3 +98,22 @@ fn string_prototype_conversions_match_node22() {
         .join("|");
     assert_eq!(one(src), expected);
 }
+
+/// `localeCompare` and `toLocale{Lower,Upper}Case` run ToString on the receiver and the argument, so a Symbol throws
+/// TypeError (the intl build's JS implementations used `String(x)`, which converts a Symbol silently).
+/// Expectation: Node 22.23.1.
+#[test]
+fn locale_string_methods_reject_symbols_like_node22() {
+    let src = r#"
+const r = [];
+for (const [n, f] of [['lower', () => String.prototype.toLocaleLowerCase.call(Symbol())], ['upper', () => String.prototype.toLocaleUpperCase.call(Symbol())], ['cmp-this', () => String.prototype.localeCompare.call(Symbol(), 'a')], ['cmp-that', () => 'a'.localeCompare(Symbol())]]) {
+  try { f(); r.push(n + ':no-throw'); } catch (e) { r.push(n + ':' + e.name); }
+}
+r.push('ok:' + 'b'.localeCompare('a') + ('A'.toLocaleLowerCase() === 'a'));
+console.log(r.join('|'));
+"#;
+    assert_eq!(
+        one(src),
+        "lower:TypeError|upper:TypeError|cmp-this:TypeError|cmp-that:TypeError|ok:1true"
+    );
+}
