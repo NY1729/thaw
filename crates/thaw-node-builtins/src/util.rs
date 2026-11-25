@@ -2,6 +2,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "util" => Some(
             "var inspectCustom = Symbol.for('nodejs.util.inspect.custom');\n\
+             function received(value) { if (value === null || value === undefined) return String(value); if (typeof value === 'function') return 'function ' + value.name; if (typeof value === 'object') return value.constructor && value.constructor.name ? 'an instance of ' + value.constructor.name : '[Object: null prototype] {}'; var text = typeof value === 'string' ? \"'\" + value + \"'\" : typeof value === 'bigint' ? String(value) + 'n' : Object.is(value, -0) ? '-0' : String(value); if (text.length > 28) text = text.slice(0, 25) + '...'; return 'type ' + typeof value + ' (' + text + ')'; }\n\
+             function argTypeError(name, type, value) { var error = new TypeError('The \"' + name + '\" argument must be ' + type + '. Received ' + received(value)); error.code = 'ERR_INVALID_ARG_TYPE'; return error; }\n\
              function inspect(value, options) {\n\
              \x20\x20if (typeof options === 'boolean') options = { showHidden: options, depth: arguments[2], colors: arguments[3] };\n\
              \x20\x20var merged = {}, defaults = inspect.defaultOptions, given = options || {};\n\
@@ -226,7 +228,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function inherits(constructor, superConstructor) { if (constructor === undefined || superConstructor === undefined) throw new TypeError('constructors are required'); constructor.super_ = superConstructor; Object.setPrototypeOf(constructor.prototype, superConstructor.prototype); }\n\
              var promisifyCustom = Symbol.for('nodejs.util.promisify.custom');\n\
              function promisify(original) {\n\
-             \x20\x20if (typeof original !== 'function') throw new TypeError('original must be a function');\n\
+             \x20\x20if (typeof original !== 'function') throw argTypeError('original', 'of type function', original);\n\
              \x20\x20if (original[promisifyCustom]) { var custom = original[promisifyCustom]; if (typeof custom !== 'function') { var error = new TypeError('util.promisify.custom must be a function'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error; } Object.defineProperty(custom, promisifyCustom, { value: custom, enumerable: false, writable: false, configurable: true }); return custom; }\n\
              \x20\x20function wrapped() { var self = this; var args = Array.prototype.slice.call(arguments); return new Promise(function(resolve, reject) { args.push(function(error, value) { if (error) reject(error); else resolve(value); }); original.apply(self, args); }); }\n\
              \x20\x20Object.setPrototypeOf(wrapped, Object.getPrototypeOf(original));\n\
@@ -241,7 +243,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              }\n\
              function deprecate(fn) { return function() { return fn.apply(this, arguments); }; }\n\
              function debuglog(section) { var enabled = String(process.env.NODE_DEBUG || '').toUpperCase().split(/[ ,]+/).indexOf(String(section).toUpperCase()) >= 0; var logger = enabled ? function() { console.error(String(section).toUpperCase() + ' ' + format.apply(null, arguments)); } : function() {}; logger.enabled = enabled; return logger; }\n\
-             function stripVTControlCharacters(value) { return String(value).replace(/[\\u001B\\u009B][[\\]()#;?]*(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*)?\\u0007|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))/g, ''); }\n\
+             function stripVTControlCharacters(value) { if (typeof value !== 'string') throw argTypeError('str', 'of type string', value); return value.replace(/[\\u001B\\u009B][[\\]()#;?]*(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*)?\\u0007|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))/g, ''); }\n\
              function toUSVString(value) { var s = String(value), out = [], i = 0; while (i < s.length) { var c = s.charCodeAt(i), d = i + 1 < s.length ? s.charCodeAt(i + 1) : 0; if (c >= 0xd800 && c <= 0xdbff && d >= 0xdc00 && d <= 0xdfff) { out.push(s.charAt(i) + s.charAt(i + 1)); i += 2; } else { out.push(c >= 0xd800 && c <= 0xdfff ? String.fromCharCode(0xfffd) : s.charAt(i)); i++; } } return out.join(''); }\n\
              function parseArgs(config) {\n\
              \x20\x20config = config || {};\n\

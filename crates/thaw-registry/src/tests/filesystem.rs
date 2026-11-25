@@ -909,7 +909,8 @@ fn fs_stat_no_entry_option_respects_sync_and_async_boundaries() {
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 5);
     let result = run_js_with_args(&bundle, vec![thaw_js::host::Native::Str(dir.to_string_lossy().into_owned())]);
-    assert_eq!(result, r#"[[true,true],[[null,true],true],["ENOENT",true],"ENOENT",true,"ENOTDIR",[[null,true],true,["ENOTDIR",true]],[true,true],["bigint",7,true],["EACCES","EINVAL"],[true,true,true],true]"#);
+    assert_eq!(result, r#"[[true,true],[[null,true],true],["ENOENT",true],"ENOENT",true,"ENOTDIR",[[null,true],true,["ENOTDIR",true]],[true,true],["bigint",7,true],["EACCES","EINVAL"],[true,true,true],false]"#);
+    // conversionPassed true -> false: an object path is ERR_INVALID_ARG_TYPE as in Node, its toString is never called.
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -1568,6 +1569,23 @@ fn fs_shim_revives_tagged_buffer_shape_in_data_and_fd_view() {
         bundle.contains("function fdView(buffer) { buffer = bufferShape(buffer); if (!ArrayBuffer.isView(buffer))"),
         "fdView() does not revive the Buffer shape"
     );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+/// Invalid argument types throw Node's ERR_INVALID_ARG_TYPE from the shared prelude validation (fs, path, url, util,
+/// querystring). Expected text is Node 22 running tests/input_validation/body.js.
+#[test]
+fn builtin_invalid_argument_types_throw_node_errors() {
+    let dir = temp_registry("builtin_invalid_argument_types");
+    fs::write(
+        dir.join("index.js"),
+        format!("module.exports = async function () {{ {} }};", include_str!("input_validation/body.js")),
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_invalid_argument_types_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(run_js(&bundle), include_str!("input_validation/expected.json").trim());
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
