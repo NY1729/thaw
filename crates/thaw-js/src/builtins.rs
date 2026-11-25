@@ -150,7 +150,9 @@ pub(crate) const PRELUDE: &str = r#"
     if (s < e && Array.isArray(this) && Object.isFrozen(this)) throw new TypeError("Cannot assign to read only property '" + s + "' of object '[object Array]'");
     for (var i = s; i < e; i++) this[i] = v; return this;
   });
-  def(AP, 'sort', function (cmp) {
+  // native stable sort for plain dense arrays; it returns undefined (before touching anything) for any other receiver
+  var nativeSort = AP.sort;
+  var slowSort = function (cmp) {
     'use strict';
     var a = this, defined = [], undef = 0, holes = 0;
     if (a.length > 1 && Array.isArray(a) && Object.isFrozen(a)) throw new TypeError("Cannot assign to read only property '0' of object '[object Array]'");
@@ -173,6 +175,12 @@ pub(crate) const PRELUDE: &str = r#"
     for (var u = 0; u < undef; u++) a[n + u] = undefined;
     for (var h = 0; h < holes; h++) delete a[n + undef + h];
     return a;
+  };
+  def(AP, 'sort', function sort(cmp) {
+    'use strict';
+    if (cmp !== undefined && typeof cmp !== 'function') throw new TypeError('The comparison function must be either a function or undefined');
+    var r = nativeSort.call(this, cmp);
+    return r === undefined ? slowSort.call(this, cmp) : r;
   });
   def(Object, 'fromEntries', function (entries) { var o = {}; for (var e of entries) o[e[0]] = e[1]; return o; });
   // Missing members: Annex B `Object.prototype` accessors, unscopables, Symbol/Date/DataView members.
@@ -2569,6 +2577,48 @@ impl Interp {
             }
             Ok(Value::Undefined)
         });
+        self.set_native(&ap, "sort", |it, this, args| {
+            let Value::Object(o) = this else {
+                return Ok(Value::Undefined);
+            };
+            let ok = matches!(&*o.kind.borrow(), Kind::Array(items) if !items.iter().any(|v| matches!(v, Value::Hole)))
+                && !restricted(o)
+                && !array_snapshot_unsafe(o);
+            if !ok {
+                return Ok(Value::Undefined);
+            }
+            let cmp = arg(args, 0);
+            let mut vals = it.array_items_raw(this);
+            let total = vals.len();
+            vals.retain(|v| !matches!(v, Value::Undefined));
+            let n = vals.len();
+            if matches!(cmp, Value::Undefined) {
+                // ToString once per element (not per comparison), then a stable sort on UTF-16 order
+                let mut keyed = Vec::with_capacity(n);
+                for v in vals {
+                    keyed.push((it.try_to_str(&v)?, v));
+                }
+                keyed.sort_by(|a, b| cmp_utf16(&a.0, &b.0));
+                vals = keyed.into_iter().map(|(_, v)| v).collect();
+            } else {
+                vals = merge_sort(it, vals, &cmp)?;
+            }
+            vals.resize(total, Value::Undefined);
+            // the comparator may have changed the array: write through the generic path then
+            let plain = matches!(this, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(cur) if cur.len() == total) && !restricted(o) && !array_snapshot_unsafe(o));
+            if plain {
+                if let Value::Object(o) = this {
+                    if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
+                        *items = vals;
+                    }
+                }
+            } else {
+                for (i, v) in vals.into_iter().enumerate() {
+                    it.set_index(this, i, v, true)?;
+                }
+            }
+            Ok(this.clone())
+        });
         self.set_native(&ap, "reverse", |it, this, _| {
             it.sparse_unsupported(this)?;
             if let Value::Object(o) = this {
@@ -4437,4 +4487,70 @@ pub(crate) fn sloppy_ordinary_obj(o: &Obj) -> bool {
         Kind::Closure { def, scope }
             if !def.strict && !scope.strict.get() && !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype && def.class.is_none()
     )
+}
+
+/// Orders two strings by UTF-16 code units (the engine stores astral chars whole and lone surrogates in a
+/// private range, so a plain `str` compare is wrong only when an astral char meets one in E000..FFFF).
+pub(crate) fn cmp_utf16(a: &str, b: &str) -> std::cmp::Ordering {
+    let i = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    let mut i = i.min(a.len()).min(b.len());
+    while !a.is_char_boundary(i) {
+        i -= 1;
+    }
+    let big = |s: &str| s[i..].chars().next().is_some_and(|c| c as u32 >= 0x10000);
+    if big(a) || big(b) {
+        str_units(a).cmp(&str_units(b))
+    } else {
+        a.cmp(b)
+    }
+}
+
+/// Stable bottom-up merge sort with a user comparator. Every step is bounded, so an inconsistent
+/// comparator only yields some order; a throw (or a throwing `valueOf` on its result) propagates.
+fn merge_sort(it: &mut Interp, vals: Vec<Value>, cmp: &Value) -> R<Vec<Value>> {
+    let n = vals.len();
+    let (mut src, mut dst) = (vals, vec![Value::Undefined; n]);
+    let mut w = 1;
+    while w < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = (lo + w).min(n);
+            let hi = (lo + 2 * w).min(n);
+            let (mut i, mut j, mut k) = (lo, mid, lo);
+            while i < mid && j < hi {
+                let mut a = [src[j].clone(), src[i].clone()];
+                let r = it.call_direct_owned(cmp, &Value::Undefined, &mut a)?;
+                let r = match r {
+                    Value::Number(x) => x,
+                    Value::Object(_) => {
+                        let p = it.primitive_of(&r, extras::Hint::Number)?;
+                        it.num(&p)
+                    }
+                    r => it.num(&r),
+                };
+                if r < 0.0 {
+                    dst[k] = src[j].clone();
+                    j += 1;
+                } else {
+                    dst[k] = src[i].clone();
+                    i += 1;
+                }
+                k += 1;
+            }
+            while i < mid {
+                dst[k] = src[i].clone();
+                i += 1;
+                k += 1;
+            }
+            while j < hi {
+                dst[k] = src[j].clone();
+                j += 1;
+                k += 1;
+            }
+            lo += 2 * w;
+        }
+        std::mem::swap(&mut src, &mut dst);
+        w *= 2;
+    }
+    Ok(src)
 }
