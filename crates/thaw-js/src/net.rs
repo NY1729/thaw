@@ -126,7 +126,7 @@ fn net_register_stream(stream: TcpStream, host: &str, port: u16) -> String {
     })
 }
 
-fn net_connect(host: &str, port: u16) -> String {
+pub(crate) fn net_connect(host: &str, port: u16) -> String {
     match tcp_connect_structured(host, port) {
         Ok(stream) => net_register_stream(stream, host, port),
         Err(wire) => wire,
@@ -506,7 +506,13 @@ pub(crate) fn tcp_socket_option(
 }
 
 /// `kind` is `tcp`, `tls` (client or server connection, whichever owns the handle).
-fn net_set_option(kind: &str, handle: u32, option: &str, enable: bool, delay_ms: u32) -> String {
+pub(crate) fn net_set_option(
+    kind: &str,
+    handle: u32,
+    option: &str,
+    enable: bool,
+    delay_ms: u32,
+) -> String {
     let outcome: Option<io::Result<()>> = match kind {
         "tcp" => NET_STREAMS.with(|streams| {
             streams
@@ -525,7 +531,7 @@ fn net_set_option(kind: &str, handle: u32, option: &str, enable: bool, delay_ms:
     }
 }
 
-fn net_poll_read(handle: u32) -> String {
+pub(crate) fn net_poll_read(handle: u32) -> String {
     net_poll_read_impl(handle, false)
 }
 
