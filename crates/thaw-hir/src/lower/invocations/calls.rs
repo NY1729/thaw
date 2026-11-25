@@ -621,6 +621,32 @@ impl<'a> FnLowerer<'a> {
                             }
                             routed
                         };
+                        // `res.end(c ? undefined : body)`: the chunk is optional, so it is `c ? res.end() : res.end(body)`.
+                        if method_name == "end" && call.args.len() == 1 {
+                            if let Expr::Cond(cond) = call.args[0].expr.as_ref() {
+                                let is_nothing = |expr: &Expr| match expr {
+                                    Expr::Ident(name) => name.sym == *"undefined",
+                                    Expr::Lit(swc_ecma_ast::Lit::Null(_)) => true,
+                                    Expr::Unary(unary) => unary.op == swc_ecma_ast::UnaryOp::Void,
+                                    _ => false,
+                                };
+                                let with_args = |args: Vec<swc_ecma_ast::ExprOrSpread>| {
+                                    let mut routed = call.clone();
+                                    routed.args = args;
+                                    Box::new(Expr::Call(routed))
+                                };
+                                let none = is_nothing(&cond.cons);
+                                if none || is_nothing(&cond.alt) {
+                                    let chunk = if none { &cond.alt } else { &cond.cons };
+                                    let chunked = with_args(vec![swc_ecma_ast::ExprOrSpread { spread: None, expr: chunk.clone() }]);
+                                    let (cons, alt) = if none { (with_args(Vec::new()), chunked) } else { (chunked, with_args(Vec::new())) };
+                                    let mut routed = cond.clone();
+                                    routed.cons = cons;
+                                    routed.alt = alt;
+                                    return self.lower_expr(&Expr::Cond(routed));
+                                }
+                            }
+                        }
                         let first_type = match call.args.first() {
                             Some(argument) => match self.peek_type_without_lowering(&argument.expr) {
                                 Some(ty) => Some(ty),

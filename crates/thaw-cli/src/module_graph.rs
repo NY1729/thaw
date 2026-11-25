@@ -1519,6 +1519,47 @@ impl VisitMut for RenameReferences<'_> {
     }
 
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        // The entry guard `process.argv[1] === fileURLToPath(import.meta.url)` (or `import.meta.filename`):
+        // a compiled executable has no script path in `argv`, so the guard is the entry-module test.
+        // (`node:url`'s `fileURLToPath` reaches here either by name or as its typed-wrapper overload.)
+        let is_file_url_to_path = |name: &str| {
+            name == "fileURLToPath"
+                || name.contains("6e6f64653a75726c3a3a66696c6555524c546f50617468")
+        };
+        if let Expr::Bin(binary) = &*expr {
+            use thaw_parser::ast::BinaryOp::{EqEq, EqEqEq, NotEq, NotEqEq};
+            let is_meta = |expr: &Expr, property: &str| {
+                matches!(expr, Expr::Member(member)
+                if matches!(member.obj.as_ref(), Expr::MetaProp(meta) if meta.kind == thaw_parser::ast::MetaPropKind::ImportMeta)
+                    && matches!(&member.prop, thaw_parser::ast::MemberProp::Ident(name) if name.sym == *property))
+            };
+            let is_script_path = |expr: &Expr| match expr {
+                Expr::Call(call) => {
+                    matches!(&call.callee, Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Ident(name) if is_file_url_to_path(&name.sym)))
+                        && matches!(call.args.as_slice(), [argument] if argument.spread.is_none() && is_meta(&argument.expr, "url"))
+                }
+                other => is_meta(other, "filename"),
+            };
+            let is_argv_script = |expr: &Expr| {
+                matches!(expr, Expr::Member(member)
+                if matches!(&member.prop, thaw_parser::ast::MemberProp::Computed(index)
+                    if matches!(index.expr.as_ref(), Expr::Lit(thaw_parser::ast::Lit::Num(number)) if number.value == 1.0))
+                    && matches!(member.obj.as_ref(), Expr::Member(argv)
+                        if matches!(argv.obj.as_ref(), Expr::Ident(process) if process.sym == *"process")
+                            && matches!(&argv.prop, thaw_parser::ast::MemberProp::Ident(name) if name.sym == *"argv")))
+            };
+            if matches!(binary.op, EqEq | EqEqEq | NotEq | NotEqEq)
+                && !self.shadowed.contains("process")
+                && ((is_argv_script(&binary.left) && is_script_path(&binary.right))
+                    || (is_script_path(&binary.left) && is_argv_script(&binary.right)))
+            {
+                *expr = Expr::Lit(thaw_parser::ast::Lit::Bool(thaw_parser::ast::Bool {
+                    span: binary.span,
+                    value: self.import_meta_main == matches!(binary.op, EqEq | EqEqEq),
+                }));
+                return;
+            }
+        }
         // Resolve a complete external namespace path before a child member
         // can be rewritten on its own. The export table keeps qualified
         // keys such as `Outer.Inner.make` distinct from another `make`.
