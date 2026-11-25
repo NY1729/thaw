@@ -6218,7 +6218,7 @@ impl<'a> FnLowerer<'a> {
                 // Database: { new (...): Database; (...): Database; ...}`,
                 // real `better-sqlite3`) that the registry/bridge already
                 // rewrote to its own generated typed-wrapper symbol
-                // (`__thaw_typed_wrapper_js_<hex>`) *before* thaw-hir ever
+                // (`__thaw_typed_wrapper_tjs_<hex>`) *before* thaw-hir ever
                 // sees this source, so none of the special-cased bare-
                 // identifier forms above (real native classes, `Error`,
                 // `Date`, `Map`/`Set`, the bare dynamic globals) can ever

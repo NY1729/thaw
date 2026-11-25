@@ -522,7 +522,7 @@ fn typed_dynamic_rest_declaration(
 
     let wrapper = format!(
         "__thaw_typed_wrapper_{}_{}",
-        if napi { "napi" } else { "js" },
+        if napi { "napi" } else { "tjs" },
         encoded
     );
     let rest_name = function
@@ -912,7 +912,7 @@ fn union_overload_dispatch_declaration(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let dispatcher = format!("__thaw_typed_dispatch_js_{encoded}");
+    let dispatcher = format!("__thaw_typed_dispatch_tjs_{encoded}");
     declarations.push_str(&format!(
         "function {dispatcher}({params_text}): {ret_text} {{\n"
     ));
@@ -1334,7 +1334,7 @@ fn thaw_js_plain_callable(ty: &thaw_hir::HirType) -> bool {
 
 /// A thaw-js callable result (one callable, or a union of callables, with plain parameters and return)
 /// returns as a live `JsValue` handle, so the declaration, its bare and qualified aliases and the
-/// `__thaw_typed_wrapper_js_` dispatchers all agree on that type. Not for node:* builtins, which keep
+/// `__thaw_typed_wrapper_tjs_` dispatchers all agree on that type. Not for node:* builtins, which keep
 /// their plain return, nor for `thaw_js_keeps_js_value` packages (already `JsValue`).
 fn thaw_js_callable_union_as_handle<'a>(
     package: &str,
@@ -1848,7 +1848,7 @@ fn typed_dynamic_arity_dispatch_declaration(
     };
     let wrapper = format!(
         "__thaw_typed_wrapper_{}_{}",
-        if napi { "napi" } else { "js" },
+        if napi { "napi" } else { "tjs" },
         encoded
     );
     let mut declarations = String::new();
