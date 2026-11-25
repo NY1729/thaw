@@ -2117,7 +2117,7 @@ fn settle_promise(
 }
 
 fn destroy_promise_box(promise: *mut ThawPromise) {
-    ACTIVE_PROMISES.with(|active| active.borrow_mut().retain(|current| *current != promise));
+    ACTIVE_PROMISES.with(|active| active.borrow_mut().remove(promise));
     TIMERS.with(|timers| timers.borrow_mut().retain(|timer| timer.promise != promise));
     FD_WAITS.with(|waits| waits.borrow_mut().retain(|wait| wait.promise != promise));
     thaw_arena::forget_references(promise as usize);
