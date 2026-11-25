@@ -4208,19 +4208,28 @@ impl Interp {
         for name in &hoisted_names(stmts) {
             global.declare_global_var(name, origin);
         }
-        self.hoist_functions(stmts, &global)?;
+        // a program-level "use strict": its statements run in a strict child scope (its vars are the hoisted
+        // globals), and its functions close over that scope so they see its let/const/class
+        let run_scope = if starts_with_use_strict(stmts) {
+            let strict = Scope::new(Some(global.clone()));
+            strict.strict.set(true);
+            strict
+        } else {
+            global.clone()
+        };
+        for s in stmts {
+            if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                let name = self.intern(&f.ident.sym);
+                let func = self.function_value(Some(name.clone()), &f.function, &run_scope)?;
+                global.declare_rc(name, func, true);
+            }
+        }
         for s in stmts {
             if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
                 global.set_origin(&f.ident.sym, origin);
             }
         }
-        if starts_with_use_strict(stmts) {
-            // a program-level "use strict": its statements run in a strict child scope (its vars are the hoisted globals)
-            let strict = Scope::new(Some(global));
-            strict.strict.set(true);
-            return self.run_hoisted(stmts, &strict);
-        }
-        self.run_hoisted(stmts, &global)
+        self.run_hoisted(stmts, &run_scope)
     }
 
     /// `run` for builtin JS (a prelude, or a native's JS helper): the run id is recorded in `builtin_runs`, so

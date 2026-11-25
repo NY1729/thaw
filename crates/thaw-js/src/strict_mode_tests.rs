@@ -265,3 +265,23 @@ fn strict_env_default_is_on_and_off_or_audit_select_the_other_modes() {
     assert_eq!(StrictMode::parse(Some("off")), StrictMode::Off);
     assert_eq!(StrictMode::parse(Some("audit")), StrictMode::Audit);
 }
+
+#[test]
+fn strict_script_toplevel_lexicals_are_visible_to_hoisted_functions() {
+    let cases: &[(&str, &str)] = &[
+        ("'use strict'; const a = 1; function f() { return a } console.log(f());", "1"),
+        ("\"use strict\"; let a = 2; function f() { return a } a = 3; console.log(f());", "3"),
+        ("'use strict'; class C { m() { return 4 } } function f() { return new C().m() } console.log(f());", "4"),
+        ("'use strict'; const a = 5; console.log((function () { return a })(), (() => a)());", "5 5"),
+        (
+            "'use strict'; const mk = () => () => k; const before = mk(); const k = 6; const after = mk(); console.log(before(), after());",
+            "6 6",
+        ),
+        ("'use strict'; var v = 7; function f() { return v } console.log(f(), globalThis.f === f);", "7 true"),
+        ("function f() { 'use strict'; const a = 8; function g() { return a } return g() } console.log(f());", "8"),
+        ("const a = 9; function f() { return a } console.log(f());", "9"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(outcome(src, StrictMode::On), [*want], "{src}");
+    }
+}
