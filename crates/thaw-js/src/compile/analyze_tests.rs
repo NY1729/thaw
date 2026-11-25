@@ -645,3 +645,46 @@ fn report_lists_only_reasons_seen() {
     assert!(text.contains("with"), "{text}");
     assert!(!text.contains("delete"), "{text}");
 }
+
+#[test]
+fn compile_mode_parsing() {
+    for v in ["on", "ON", "On", "1", "true", " TRUE "] {
+        assert_eq!(
+            CompileMode::parse_opt(Some(v)),
+            Some(CompileMode::On),
+            "{v}"
+        );
+    }
+    for v in ["check", "CHECK"] {
+        assert_eq!(
+            CompileMode::parse_opt(Some(v)),
+            Some(CompileMode::Check),
+            "{v}"
+        );
+    }
+    for v in ["off", "OFF", "0", "false"] {
+        assert_eq!(
+            CompileMode::parse_opt(Some(v)),
+            Some(CompileMode::Off),
+            "{v}"
+        );
+    }
+    for v in [None, Some(""), Some("  "), Some("yes")] {
+        assert_eq!(CompileMode::parse_opt(v), None, "{v:?}");
+    }
+    assert_eq!(CompileMode::parse(Some("yes")), CompileMode::Off);
+}
+
+#[test]
+fn stats_tsv_line() {
+    assert!(Stats::with_level(1).tsv().is_empty());
+    let mut s = Stats::with_level(0);
+    s.eligible = 2;
+    s.rejected[0] = 3;
+    s.compiled = 1;
+    s.calls = 10;
+    s.compiled_calls = 4;
+    let t = s.tsv();
+    assert!(t.starts_with("thaw-js-compile-stats\tanalysed=5\teligible=2\trejected=3\tcompiled=1\tcalls=10\tcompiled_calls=4\tinterpreted_calls=6"), "{t}");
+    assert!(t.ends_with('\n') && t.lines().count() == 1);
+}
