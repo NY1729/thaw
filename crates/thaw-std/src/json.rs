@@ -2031,7 +2031,10 @@ struct JsonRootLease {
 
 impl Drop for JsonRootLease {
     fn drop(&mut self) {
-        let destroy = JSON_ROOT_PINS.with(|pins| {
+        // A lease held by another thread-local (a thrown exception packet) can drop during
+        // thread teardown, after `JSON_ROOT_PINS` is gone; touching it then aborts the process
+        // at exit. The pins die with the thread, so there is nothing left to release.
+        let Ok(destroy) = JSON_ROOT_PINS.try_with(|pins| {
             let mut pins = pins.borrow_mut();
             let Some((count, requested)) = pins.get_mut(&self.value) else {
                 return false;
@@ -2044,7 +2047,9 @@ impl Drop for JsonRootLease {
             } else {
                 false
             }
-        });
+        }) else {
+            return;
+        };
         if destroy {
             unsafe { thaw_json_destroy(self.value as *mut Value) };
         }

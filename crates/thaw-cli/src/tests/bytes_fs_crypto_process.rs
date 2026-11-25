@@ -123,3 +123,46 @@ fn process_hrtime_bigint_ids_release_and_self_kill_match_node() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// A thrown error inside an async host callback no longer aborts the process at exit (a lease held
+// in a thread-local dropped after the pin table it needs), `(await readdir()).sort()` as a tail
+// `return await` keeps its async frame, and a `Promise<Buffer>` callback result is a Buffer, not
+// the byte view read as `f64` slots. Expected output from node 22.
+#[test]
+fn async_callbacks_nested_await_thrown_error_and_buffer_result() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-async_callbacks_nested_await-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"import * as fsp from "node:fs/promises";
+import * as path from "node:path";
+const Q: any[] = [];
+function show(v: any): string {
+  if (Array.isArray(v)) { return "array"; }
+  if (Buffer.isBuffer(v)) { return "Buffer " + v.length + " " + v.toString("hex"); }
+  return String(v);
+}
+async function main(): Promise<void> {
+  Q.push(async (d: any) => { return path.join(d, "b"); });
+  Q.push(async (d: string) => { return await (await fsp.readdir(d)).sort(); });
+  Q.push(async (d: string) => { return Buffer.from("hello"); });
+  Q.push(async (d: string) => { return Buffer.alloc(3); });
+  const join: any = Q[0];
+  try { await join(5); } catch (e: any) { console.log(e.code); }
+  const readdir: any = Q[1];
+  console.log(String(await readdir("/proc/self")).length > 0);
+  const hello: any = Q[2];
+  const zeros: any = Q[3];
+  console.log(show(await hello("x")), show(await zeros("x")));
+}
+"#;
+    std::fs::write(&entry, source).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "ERR_INVALID_ARG_TYPE\ntrue\nBuffer 5 68656c6c6f Buffer 3 000000\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

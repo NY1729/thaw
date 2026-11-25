@@ -122,3 +122,36 @@ function main(): void {
     let output = compile_and_run(source, "uint8array_from_any_array_source");
     assert_eq!(output, "3\n");
 }
+
+// `Buffer.alloc` never coerces its size (Node: ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE), is zero
+// filled, and a `Buffer` crossing into `any` is not an Array. Expected output from node 22.
+#[test]
+fn buffer_alloc_validates_size_and_buffer_in_any_is_not_array() {
+    let source = r#"
+function show(v: any): string {
+  return Array.isArray(v) ? "array" : Buffer.isBuffer(v) ? "buffer " + v.length + " " + v[0] : "other";
+}
+function attempt(f: () => any): void {
+  try { console.log(f().length); } catch (e: any) { console.log(e.name, e.code); }
+}
+function main(): void {
+  const five: any = 5;
+  const nul: any = null;
+  const str: any = "5";
+  const neg: any = -1;
+  attempt(() => Buffer.alloc(five));
+  attempt(() => Buffer.alloc(nul));
+  attempt(() => Buffer.alloc(str));
+  attempt(() => Buffer.alloc(neg));
+  attempt(() => Buffer.allocUnsafe(neg));
+  attempt(() => Buffer.alloc(NaN));
+  console.log(Buffer.alloc(4).toString("hex"), Buffer.alloc(3, 7).toString("hex"));
+  console.log(show(Buffer.alloc(5)), show(Buffer.from("hello")));
+}
+"#;
+    let output = compile_and_run(source, "buffer_alloc_validates_size_and_buffer_in_any_is_not_array");
+    assert_eq!(
+        output,
+        "5\nTypeError ERR_INVALID_ARG_TYPE\nTypeError ERR_INVALID_ARG_TYPE\nRangeError ERR_OUT_OF_RANGE\nRangeError ERR_OUT_OF_RANGE\nRangeError ERR_OUT_OF_RANGE\n00000000 070707\nbuffer 5 0 buffer 5 104\n"
+    );
+}
