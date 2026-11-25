@@ -234,15 +234,11 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
     // arguments, new.target
     (
         "function f() { return arguments.length }",
-        Some(R::Arguments),
+        None,
         "| free: arguments",
     ),
     // inner functions compile, so the outer function's `arguments` use is now the reason
-    (
-        "function f() { return () => arguments }",
-        Some(R::Arguments),
-        "",
-    ),
+    ("function f() { return () => arguments }", None, ""),
     ("function f() { return new.target }", Some(R::NewTarget), ""),
     (
         "function f() { function g() { return arguments } return g }",

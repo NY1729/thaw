@@ -137,7 +137,7 @@ pub(crate) fn compile(
         || plan
             .names
             .iter()
-            .any(|n| n.class == NameClass::Scoped && !matches!(n.kind, DeclKind::Param | DeclKind::Var))
+            .any(|n| n.class == NameClass::Scoped && !matches!(n.kind, DeclKind::Param | DeclKind::Var | DeclKind::SelfName))
     {
         return reject();
     }
@@ -153,8 +153,14 @@ pub(crate) fn compile(
     let self_slot = plan
         .names
         .iter()
-        .find(|n| n.kind == DeclKind::SelfName)
+        .find(|n| n.kind == DeclKind::SelfName && n.class == NameClass::Slot)
         .map(|n| g.declare_fn(&n.name, true));
+    // a self name an inner closure references lives in the call's `Scope`, declared before the parameters
+    let scoped_self = plan
+        .names
+        .iter()
+        .find(|n| n.kind == DeclKind::SelfName && n.class == NameClass::Scoped)
+        .map(|n| intern(&n.name));
     let mut param_slots = Vec::with_capacity(def.params.len());
     let mut scoped_params = Vec::new();
     for (i, p) in def.params.iter().enumerate() {
@@ -192,6 +198,8 @@ pub(crate) fn compile(
         expr_body,
         frame: plan.needs_scope.then_some(FrameInit {
             set_this: def.uses_this && !def.arrow,
+            self_name: scoped_self,
+            arguments: plan.uses_arguments,
             params: scoped_params,
             vars: scoped_vars,
         }),

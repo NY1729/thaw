@@ -59,6 +59,11 @@ impl CompiledFn {
         };
         // a recycled buffer (`resize` fills it with Undefined); a nested call finds the pool empty or smaller
         // and takes its own buffer, so no live frame is ever shared
+        // `arguments` copies the values before the parameters move them out of `args`
+        let arguments = match &self.frame {
+            Some(init) if init.arguments => Some(it.array(args.to_vec())),
+            _ => None,
+        };
         let mut slots = it.frame_pool.pop().unwrap_or_default();
         slots.resize(self.nslots as usize, Value::Undefined);
         if let Some(k) = self.self_slot {
@@ -85,6 +90,12 @@ impl CompiledFn {
                 }
                 if init.set_this {
                     s.set_this(this.clone());
+                }
+                if let Some(name) = &init.self_name {
+                    s.declare_rc(name.clone(), callee.clone(), true);
+                }
+                if let Some(a) = arguments {
+                    s.declare("arguments", a, true);
                 }
                 for (i, name) in &init.params {
                     let v = match args.get_mut(*i) {

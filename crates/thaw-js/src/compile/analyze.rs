@@ -90,6 +90,8 @@ pub(crate) struct FnPlan {
     /// Inner functions need a per-call `Scope`: a captured name, strict mode, or a `this` seen by an arrow.
     /// Nothing reads it yet (no behaviour change in this step).
     pub(crate) needs_scope: bool,
+    /// The function reads its own `arguments` (declared in the call's `Scope`, as `bind_frame` does).
+    pub(crate) uses_arguments: bool,
     reason: Option<FallbackReason>,
 }
 
@@ -149,6 +151,9 @@ struct Walk {
     labels: Vec<String>,
     impure: bool,
     self_name: Option<String>,
+    /// `arguments` references may be compiled: a non-arrow function the interpreter gives an `arguments` binding.
+    args_ok: bool,
+    args_used: bool,
 }
 
 impl Walk {
@@ -168,6 +173,8 @@ impl Walk {
             labels: Vec::new(),
             impure: false,
             self_name: None,
+            args_ok: false,
+            args_used: false,
         }
     }
 
@@ -430,12 +437,13 @@ impl Visit for Walk {
     fn visit_ident(&mut self, n: &a::Ident) {
         let name = &*n.sym;
         if name == "arguments" && self.nonarrow_depth == 0 {
-            self.block(FallbackReason::Arguments);
+            if self.args_ok {
+                self.args_used = true;
+            } else {
+                self.block(FallbackReason::Arguments);
+            }
         }
         if self.fn_depth > 0 {
-            if self.self_name.as_deref() == Some(name) {
-                self.block(FallbackReason::SelfBinding);
-            }
             self.captured.insert(name.to_string());
             return;
         }
@@ -812,6 +820,7 @@ impl Visit for Walk {
 /// verdict says why it cannot be compiled.
 pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     let mut w = Walk::new();
+    w.args_ok = def.uses_arguments && !def.arrow;
     if def.class.is_some() {
         w.block(FallbackReason::ClassConstructor);
     }
@@ -880,6 +889,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         labels,
         impure,
         inner_fns,
+        args_used,
         ..
     } = w;
     let class_of = |name: &str| {
@@ -901,6 +911,14 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
             if reason.is_none_or(|cur| FallbackReason::ReadBeforeDecl.priority() > cur.priority()) {
                 reason = Some(FallbackReason::ReadBeforeDecl);
             }
+        }
+    }
+
+    // a declaration named `arguments` (parameter, `var`, `let`, function) interacts with the implicit binding
+    if args_used && decls.iter().any(|d| d.name == "arguments") {
+        blockers |= FallbackReason::Arguments.bit();
+        if reason.is_none_or(|cur| FallbackReason::Arguments.priority() > cur.priority()) {
+            reason = Some(FallbackReason::Arguments);
         }
     }
 
@@ -932,10 +950,10 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     }
     // A captured name is compiled only as a parameter or a `var` (function level). Any other captured name
     // (lexical, block-level, catch, self, class) keeps the function on the AST.
-    if names
-        .iter()
-        .any(|n| n.class == NameClass::Scoped && !matches!(n.kind, DeclKind::Param | DeclKind::Var))
-    {
+    if names.iter().any(|n| {
+        n.class == NameClass::Scoped
+            && !matches!(n.kind, DeclKind::Param | DeclKind::Var | DeclKind::SelfName)
+    }) {
         blockers |= FallbackReason::InnerFunction.bit();
         if reason.is_none_or(|cur| FallbackReason::InnerFunction.priority() > cur.priority()) {
             reason = Some(FallbackReason::InnerFunction);
@@ -944,7 +962,8 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     let needs_scope = inner_fns > 0
         && (names.iter().any(|n| n.class == NameClass::Scoped)
             || def.strict
-            || (def.uses_this && !def.arrow));
+            || (def.uses_this && !def.arrow))
+        || args_used;
     FnPlan {
         names,
         free: free.into_iter().collect(),
@@ -953,6 +972,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         pure_kernel: !impure && !def.is_gen && !def.is_async,
         blockers,
         needs_scope,
+        uses_arguments: args_used,
         reason,
     }
 }
