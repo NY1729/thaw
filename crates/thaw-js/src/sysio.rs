@@ -114,6 +114,65 @@ fn identity() -> String {
     )
 }
 
+/// `/proc/stat` per-core times in milliseconds, keyed by core number: user, nice, system, idle, irq. The guest columns
+/// are already inside user/nice; tick counts that overflow saturate.
+pub(crate) fn linux_cpu_times(stat: &str, ticks_per_second: u64) -> Vec<(usize, [u64; 5])> {
+    if ticks_per_second == 0 {
+        return Vec::new();
+    }
+    stat.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let index = fields.next()?.strip_prefix("cpu")?.parse::<usize>().ok()?;
+            let raw = fields
+                .take(6)
+                .map(str::parse::<u64>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            if raw.len() != 6 {
+                return None;
+            }
+            let milliseconds = |ticks: u64| {
+                ((ticks as u128 * 1000) / ticks_per_second as u128).min(u64::MAX as u128) as u64
+            };
+            Some((
+                index,
+                [raw[0], raw[1], raw[2], raw[3], raw[5]].map(milliseconds),
+            ))
+        })
+        .collect()
+}
+
+/// `/proc/cpuinfo` model name and rounded MHz per processor number.
+pub(crate) fn linux_cpu_metadata(
+    cpu_info: &str,
+) -> std::collections::HashMap<usize, (String, u64)> {
+    cpu_info
+        .split("\n\n")
+        .filter_map(|block| {
+            let (mut index, mut model, mut speed) = (None, None, None);
+            for line in block.lines() {
+                let Some((key, value)) = line.split_once(':') else {
+                    continue;
+                };
+                match key.trim() {
+                    "processor" => index = value.trim().parse::<usize>().ok(),
+                    "model name" => model = Some(value.trim().to_string()),
+                    "cpu MHz" => {
+                        speed = value
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .map(|mhz| mhz.round() as u64)
+                    }
+                    _ => {}
+                }
+            }
+            Some((index?, (model.unwrap_or_default(), speed.unwrap_or(0))))
+        })
+        .collect()
+}
+
 /// `/proc`-backed statistics (zeros where the host has none).
 fn info() -> String {
     let cpuinfo = read("/proc/cpuinfo");
@@ -128,29 +187,30 @@ fn info() -> String {
     let speed = field("cpu MHz")
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0)
-        .round();
+        .round() as u64;
     #[cfg(unix)]
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
     #[cfg(not(unix))]
-    let hz = 100.0;
-    let cpus: Vec<String> = read("/proc/stat")
-        .lines()
-        .filter(|l| l.starts_with("cpu") && l.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
-        .map(|l| {
-            let t: Vec<f64> = l
-                .split_whitespace()
-                .skip(1)
-                .map(|v| v.parse::<f64>().unwrap_or(0.0) * 1000.0 / hz)
-                .collect();
-            let g = |i: usize| t.get(i).copied().unwrap_or(0.0).round();
+    let hz = 100;
+    // Per-core model and speed are matched by processor number: a heterogeneous host (big.LITTLE) differs per core.
+    let metadata = linux_cpu_metadata(&cpuinfo);
+    let cpus: Vec<String> = linux_cpu_times(&read("/proc/stat"), hz)
+        .into_iter()
+        .map(|(index, [user, nice, sys, idle, irq])| {
+            let (core_model, core_speed) = metadata
+                .get(&index)
+                .map(|(name, mhz)| (if name.is_empty() { &model } else { name }, *mhz))
+                .unwrap_or((&model, speed));
+            // libuv reports the core's current frequency when the kernel exposes it.
+            let current = std::fs::read_to_string(format!(
+                "/sys/devices/system/cpu/cpu{index}/cpufreq/scaling_cur_freq"
+            ))
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(core_speed, |khz| khz / 1000);
             format!(
-                "{{\"model\":{},\"speed\":{speed},\"times\":{{\"user\":{},\"nice\":{},\"sys\":{},\"idle\":{},\"irq\":{}}}}}",
-                q(&model),
-                g(0),
-                g(1),
-                g(2),
-                g(3),
-                g(5)
+                "{{\"model\":{},\"speed\":{current},\"times\":{{\"user\":{user},\"nice\":{nice},\"sys\":{sys},\"idle\":{idle},\"irq\":{irq}}}}}",
+                q(core_model),
             )
         })
         .collect();
@@ -206,7 +266,7 @@ fn priority_result(r: std::io::Result<i32>) -> String {
 }
 
 #[cfg(unix)]
-fn get_priority(pid: i32) -> std::io::Result<i32> {
+pub(crate) fn get_priority(pid: i32) -> std::io::Result<i32> {
     // getpriority can legitimately return -1: errno tells the failure apart
     #[cfg(target_os = "linux")]
     unsafe {
@@ -826,28 +886,66 @@ fn path_from(bytes: Vec<u8>) -> std::path::PathBuf {
     std::ffi::OsString::from_vec(bytes).into()
 }
 
-fn fs_code(e: &std::io::Error) -> String {
+pub(crate) fn fs_code(e: &std::io::Error) -> String {
     #[cfg(unix)]
     if let Some(raw) = e.raw_os_error() {
+        // Linux spells ENOTSUP and EOPNOTSUPP alike; Node names both ENOTSUP.
+        if raw == libc::ENOTSUP || raw == libc::EOPNOTSUPP {
+            return "ENOTSUP".into();
+        }
         return match raw {
             libc::EPERM => "EPERM",
             libc::ENOENT => "ENOENT",
+            libc::ESRCH => "ESRCH",
+            libc::EINTR => "EINTR",
             libc::EIO => "EIO",
+            libc::ENXIO => "ENXIO",
+            libc::E2BIG => "E2BIG",
+            libc::ENOEXEC => "ENOEXEC",
             libc::EBADF => "EBADF",
+            libc::ECHILD => "ECHILD",
+            libc::EAGAIN => "EAGAIN",
+            libc::ENOMEM => "ENOMEM",
             libc::EACCES => "EACCES",
+            libc::EFAULT => "EFAULT",
             libc::EBUSY => "EBUSY",
             libc::EEXIST => "EEXIST",
             libc::EXDEV => "EXDEV",
+            libc::ENODEV => "ENODEV",
             libc::ENOTDIR => "ENOTDIR",
             libc::EISDIR => "EISDIR",
             libc::EINVAL => "EINVAL",
+            libc::ENFILE => "ENFILE",
             libc::EMFILE => "EMFILE",
+            libc::ENOTTY => "ENOTTY",
+            libc::ETXTBSY => "ETXTBSY",
+            libc::EFBIG => "EFBIG",
             libc::ENOSPC => "ENOSPC",
+            libc::ESPIPE => "ESPIPE",
             libc::EROFS => "EROFS",
+            libc::EMLINK => "EMLINK",
+            libc::EPIPE => "EPIPE",
+            libc::EDOM => "EDOM",
+            libc::ERANGE => "ERANGE",
+            libc::EDEADLK => "EDEADLK",
             libc::ENAMETOOLONG => "ENAMETOOLONG",
+            libc::ENOLCK => "ENOLCK",
             libc::ENOSYS => "ENOSYS",
             libc::ENOTEMPTY => "ENOTEMPTY",
             libc::ELOOP => "ELOOP",
+            libc::EOVERFLOW => "EOVERFLOW",
+            libc::EILSEQ => "EILSEQ",
+            libc::EADDRINUSE => "EADDRINUSE",
+            libc::EADDRNOTAVAIL => "EADDRNOTAVAIL",
+            libc::ENETDOWN => "ENETDOWN",
+            libc::ENETUNREACH => "ENETUNREACH",
+            libc::ECONNABORTED => "ECONNABORTED",
+            libc::ECONNRESET => "ECONNRESET",
+            libc::ENOBUFS => "ENOBUFS",
+            libc::ENOTCONN => "ENOTCONN",
+            libc::ETIMEDOUT => "ETIMEDOUT",
+            libc::ECONNREFUSED => "ECONNREFUSED",
+            libc::EHOSTUNREACH => "EHOSTUNREACH",
             n => return format!("ERRNO_{n}"),
         }
         .into();
@@ -865,7 +963,7 @@ fn fs_code(e: &std::io::Error) -> String {
     .into()
 }
 
-fn fs_err(op: &str, path: &str, e: &std::io::Error) -> String {
+pub(crate) fn fs_err(op: &str, path: &str, e: &std::io::Error) -> String {
     format!(
         "{{\"ok\":false,\"code\":{},\"operation\":{},\"path\":{},\"message\":{}}}",
         q(&fs_code(e)),
@@ -1332,13 +1430,17 @@ fn fs_mkdir_with_mode(
 }
 
 #[cfg(unix)]
-fn fs_timespec(value: Option<&str>) -> std::io::Result<libc::timespec> {
+pub(crate) fn fs_timespec(value: Option<&str>) -> std::io::Result<libc::timespec> {
     let seconds = value
         .ok_or_else(|| fs_invalid("missing timestamp"))?
         .parse::<f64>()
         .map_err(|_| fs_invalid("invalid timestamp"))?;
     if !seconds.is_finite() {
         return Err(fs_invalid("invalid timestamp"));
+    }
+    // outside the i64 second range: refuse before the arithmetic below can overflow
+    if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&seconds) {
+        return Err(fs_invalid("timestamp out of range"));
     }
     let mut sec = seconds.trunc() as i128;
     let mut nsec = ((seconds - sec as f64) * 1_000_000_000.0).trunc() as i128;
@@ -1402,7 +1504,7 @@ fn fs_statfs_type(_: &std::ffi::CString) -> std::io::Result<u64> {
 }
 
 #[cfg(unix)]
-fn fs_statfs_record(st: &libc::statvfs, fs_type: u64) -> String {
+pub(crate) fn fs_statfs_record(st: &libc::statvfs, fs_type: u64) -> String {
     serde_json::json!({
         "ok": true, "type": fs_type, "bsize": st.f_bsize, "blocks": st.f_blocks,
         "bfree": st.f_bfree, "bavail": st.f_bavail, "files": st.f_files, "ffree": st.f_ffree,
@@ -1544,7 +1646,7 @@ fn fs_copy_destination_resolved(
 }
 
 #[cfg(unix)]
-fn fs_copy_unsafe_relation(
+pub(crate) fn fs_copy_unsafe_relation(
     source: &std::path::Path,
     destination: &std::path::Path,
     dereference: bool,
@@ -1614,7 +1716,7 @@ fn fs_copy_exclusive(
 }
 
 #[cfg(unix)]
-fn fs_copy_recursive(
+pub(crate) fn fs_copy_recursive(
     source: &std::path::Path,
     destination: &std::path::Path,
 ) -> std::io::Result<u64> {

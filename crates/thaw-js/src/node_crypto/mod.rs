@@ -2,7 +2,7 @@
 //! `web/node_crypto.js`; the digest code is copied from thaw-quickjs (see `digest.rs`).
 
 mod asym;
-mod cipher;
+pub(crate) mod cipher;
 mod digest;
 mod kdf;
 #[cfg(test)]
