@@ -208,12 +208,14 @@ pub(crate) const EXTRAS: &str = r#"
       // the store's kind is the brand `util.types.isWeakMap` / `isWeakSet` read (builtins.rs plain_brand)
       def(this, '__store', isMap ? new Map() : new Set());
       if (iterable !== undefined && iterable !== null) {
-        var items = Array.isArray(iterable) ? iterable : Array.from(iterable);
-        for (var i = 0; i < items.length; i++) {
+        var adder = this[isMap ? 'set' : 'add'];
+        if (typeof adder !== 'function') throw new TypeError("'" + String(adder) + "' returned for property '" + (isMap ? 'set' : 'add') + "' of object '#<" + name + ">' is not a function");
+        // a throw in the body closes the iterator (for-of)
+        for (var item of iterable) {
           if (isMap) {
-            if (!isObject(items[i])) throw new TypeError('Iterator value ' + String(items[i]) + ' is not an entry object');
-            this.set(items[i][0], items[i][1]);
-          } else this.add(items[i]);
+            if (!isObject(item)) throw new TypeError('Iterator value ' + String(item) + ' is not an entry object');
+            adder.call(this, item[0], item[1]);
+          } else adder.call(this, item);
         }
       }
     };
@@ -297,6 +299,11 @@ pub(crate) const EXTRAS: &str = r#"
   def(AP, 'keys', function keys() { return arrayIter(liveArray(this, 'keys'), 'keys'); });
   def(AP, 'values', function values() { return arrayIter(liveArray(this, 'values'), 'values'); });
   def(AP, Symbol.iterator, AP.values);
+  var origValues = AP.values, origNext = iterProto('Array Iterator').next;
+  // whether an array may be read directly: its iteration protocol is unmodified (collections.rs array_iter_intact)
+  def(globalThis, '__thaw_array_iter_intact', function () {
+    return AP[Symbol.iterator] === origValues && iterProto('Array Iterator').next === origNext;
+  });
   // (in this file, after @@iterator: own symbol keys list in V8's order)
   var unscopables = Object.create(null);
   var unscopableNames = ['at', 'copyWithin', 'entries', 'fill', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'includes', 'keys', 'toReversed', 'toSorted', 'toSpliced', 'values'];

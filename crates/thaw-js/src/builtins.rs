@@ -2414,43 +2414,47 @@ impl Interp {
             self.set_native(o, "of", |it, _, args| Ok(it.array(args.to_vec())));
             self.set_native(o, "from", |it, _, args| {
                 let src = arg(args, 0);
-                let mut items = match &src {
-                    Value::Str(s) => str_code_points(s)
-                        .into_iter()
-                        .map(|c| Value::Str(c.into()))
-                        .collect(),
-                    Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
-                        it.sparse_unsupported(&src)?;
-                        it.array_items(&src)
-                    }
-                    Value::Object(_) => match it.iter_protocol(&src)? {
-                        Some(items) => items,
-                        None => {
-                            let n = it.get(&src, "length")?;
-                            let n = it.num(&n);
-                            // ArrayCreate(len): a length past 2^32 - 1 is a RangeError before any element is read
-                            if n > 4294967295.0 {
-                                return it.throw_error("RangeError", "Invalid array length");
-                            }
-                            let mut v = Vec::new();
-                            for i in 0..(if n.is_nan() { 0 } else { n as usize }) {
-                                v.push(it.get(&src, &i.to_string())?);
-                            }
-                            v
-                        }
-                    },
-                    _ => Vec::new(),
+                let (map_fn, this_arg) = (arg(args, 1), arg(args, 2));
+                if !matches!(map_fn, Value::Undefined) && !map_fn.is_callable() {
+                    let shown = it.inspect(&map_fn, false);
+                    return it.throw_error("TypeError", &format!("{shown} is not a function"));
+                }
+                let mapped = !matches!(map_fn, Value::Undefined);
+                let mut out: Vec<Value> = Vec::new();
+                let mut push = |it: &mut Interp, v: Value| -> R<()> {
+                    let v = if mapped {
+                        let i = Value::Number(out.len() as f64);
+                        it.call(&map_fn, &this_arg, &[v, i])?
+                    } else {
+                        v
+                    };
+                    out.push(v);
+                    Ok(())
                 };
-                if arg(args, 1).is_callable() {
-                    for (i, item) in items.iter_mut().enumerate() {
-                        *item = it.call(
-                            &arg(args, 1),
-                            &Value::Undefined,
-                            &[item.clone(), Value::Number(i as f64)],
-                        )?;
+                let is_array =
+                    matches!(&src, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
+                if is_array && it.array_iter_intact() {
+                    it.sparse_unsupported(&src)?;
+                    for v in it.array_items(&src) {
+                        push(it, v)?;
+                    }
+                } else if matches!(src, Value::Str(_) | Value::Object(_))
+                    && !it.for_each_iterated(&src, &mut push)?
+                {
+                    {
+                        let n = it.get(&src, "length")?;
+                        let n = it.num(&n);
+                        // ArrayCreate(len): a length past 2^32 - 1 is a RangeError before any element is read
+                        if n > 4294967295.0 {
+                            return it.throw_error("RangeError", "Invalid array length");
+                        }
+                        for i in 0..(if n.is_nan() { 0 } else { n as usize }) {
+                            let v = it.get(&src, &i.to_string())?;
+                            push(it, v)?;
+                        }
                     }
                 }
-                Ok(it.array(items))
+                Ok(it.array(out))
             });
         }
         g.declare("Array", array, true);

@@ -6842,6 +6842,8 @@ mod handle_zero_tests;
 #[cfg(test)]
 mod heap_limit_tests;
 #[cfg(test)]
+mod iterator_close_tests;
+#[cfg(test)]
 mod job_barrier_tests;
 #[cfg(test)]
 mod leak_audit_tests;
