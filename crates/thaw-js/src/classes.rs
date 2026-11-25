@@ -115,6 +115,7 @@ impl Interp {
             strict: true,
             class: Some(info),
             cstate: Default::default(),
+            ctor_props: std::cell::Cell::new(0),
         });
         crate::gc_registry::capture_scope(&proto_scope);
         let ctor_obj = new_obj(
