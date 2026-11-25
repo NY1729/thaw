@@ -451,15 +451,127 @@ pub(crate) fn civil_to_ms(n: &[f64]) -> f64 {
         + get(6, 0.0)
 }
 
-/// Strings are stored as UTF-8 but behave as UTF-16 sequences. A lone surrogate (which `str`
-/// cannot hold) is kept as the private-use char `U+10F800 + (unit - 0xD800)`.
+/// Strings are stored as UTF-8 but behave as UTF-16 sequences. A lone surrogate (which `str` cannot hold) is
+/// kept as the char `U+10F800 + (unit - 0xD800)`. To keep that injective, every char >= `LONE` is a lone unit
+/// (1 unit); the 2048 real code points `U+10F800..=U+10FFFF` are stored as two lone chars (hi in DBFE/DBFF, lo).
+/// A lone hi followed by a lone lo is merged into one real char only when the result is below `LONE`.
 pub(crate) const LONE: u32 = 0x10F800;
+
+/// The stored char of a lone surrogate unit (`0xD800..=0xDFFF`).
+#[inline]
+pub(crate) fn lone_char(unit: u32) -> char {
+    char::from_u32(LONE + unit - 0xD800).unwrap_or('\u{FFFD}')
+}
+
+/// The surrogate unit a stored char stands for, when it is a lone one.
+#[inline]
+pub(crate) fn lone_unit(c: char) -> Option<u16> {
+    (c as u32 >= LONE).then(|| (c as u32 - LONE + 0xD800) as u16)
+}
+
+/// Appends the real code point `cp` in stored form (split in two lone chars when `cp >= LONE`).
+#[inline]
+pub(crate) fn push_scalar(out: &mut String, cp: char) {
+    if (cp as u32) < LONE {
+        out.push(cp);
+    } else {
+        let v = cp as u32 - 0x10000;
+        out.push(lone_char(0xD800 + (v >> 10)));
+        out.push(lone_char(0xDC00 + (v & 0x3FF)));
+    }
+}
+
+/// Whether `s` holds a char >= `LONE` (UTF-8 `F4 8F ..`); the byte scan is the cheap pre-filter.
+#[inline]
+fn has_high_plane(s: &str) -> bool {
+    s.as_bytes().contains(&0xF4) && s.chars().any(|c| c as u32 >= LONE)
+}
+
+/// Stored form of external text (source files, host data): real `U+10F800..` code points become two lone chars.
+pub(crate) fn from_scalar(s: &str) -> std::borrow::Cow<'_, str> {
+    if !has_high_plane(s) {
+        return s.into();
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        push_scalar(&mut out, c);
+    }
+    out.into()
+}
+
+/// Real-text form of a stored string: a split pair becomes its real char, any other lone unit U+FFFD (as Node's
+/// UTF-8 encoder does).
+pub(crate) fn to_scalar(s: &str) -> std::borrow::Cow<'_, str> {
+    if !has_high_plane(s) {
+        return s.into();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match lone_unit(c) {
+            None => out.push(c),
+            Some(h @ 0xD800..=0xDBFF) => match it.peek().and_then(|n| lone_unit(*n)) {
+                Some(l @ 0xDC00..=0xDFFF) => {
+                    it.next();
+                    let cp = 0x10000 + ((u32::from(h) - 0xD800) << 10) + (u32::from(l) - 0xDC00);
+                    out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                }
+                _ => out.push('\u{FFFD}'),
+            },
+            Some(_) => out.push('\u{FFFD}'),
+        }
+    }
+    out.into()
+}
+
+/// Parser-input form of a stored string: lone chars become `\uXXXX` escapes (the parser yields real chars for
+/// real text and for those escapes, and [`from_scalar`] is applied to its literal values).
+pub(crate) fn to_source(s: &str) -> std::borrow::Cow<'_, str> {
+    if !has_high_plane(s) {
+        return s.into();
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match lone_unit(c) {
+            Some(u) => out.push_str(&format!("\\u{u:04X}")),
+            None => out.push(c),
+        }
+    }
+    out.into()
+}
+
+/// A parser string value (`Wtf8Atom`) in stored form.
+pub(crate) fn wtf8_to_str(w: &swc_atoms::Wtf8Atom) -> String {
+    match w.as_str() {
+        Some(x) => from_scalar(x).into_owned(),
+        None => units_str(&w.to_ill_formed_utf16().collect::<Vec<u16>>()),
+    }
+}
+
+/// `String.prototype[Symbol.iterator]`: the code points of `s`, each as its own string (a split real pair stays one).
+pub(crate) fn str_code_points(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        let mut one = String::from(c);
+        if matches!(lone_unit(c), Some(0xD800..=0xDBFF)) {
+            if let Some(n) = it.peek().copied() {
+                if matches!(lone_unit(n), Some(0xDC00..=0xDFFF)) {
+                    one.push(n);
+                    it.next();
+                }
+            }
+        }
+        out.push(one);
+    }
+    out
+}
 
 pub(crate) fn str_units(s: &str) -> Vec<u16> {
     let mut out = Vec::with_capacity(s.len());
     for c in s.chars() {
-        if (c as u32) >= LONE {
-            out.push((c as u32 - LONE + 0xD800) as u16);
+        if let Some(u) = lone_unit(c) {
+            out.push(u);
         } else {
             let mut b = [0u16; 2];
             out.extend_from_slice(c.encode_utf16(&mut b));
@@ -469,14 +581,14 @@ pub(crate) fn str_units(s: &str) -> Vec<u16> {
 }
 
 pub(crate) fn units_str(u: &[u16]) -> String {
-    char::decode_utf16(u.iter().copied())
-        .map(|r| {
-            r.unwrap_or_else(|e| {
-                char::from_u32(LONE + u32::from(e.unpaired_surrogate()) - 0xD800)
-                    .unwrap_or('\u{FFFD}')
-            })
-        })
-        .collect()
+    let mut out = String::with_capacity(u.len());
+    for r in char::decode_utf16(u.iter().copied()) {
+        match r {
+            Ok(c) => push_scalar(&mut out, c),
+            Err(e) => out.push(lone_char(u32::from(e.unpaired_surrogate()))),
+        }
+    }
+    out
 }
 
 /// `s.length` in UTF-16 code units.
@@ -600,11 +712,7 @@ pub(crate) fn str_unit_at_with(s: &str, ascii: bool, i: usize) -> Option<u16> {
         let n = if (0x10000..LONE).contains(&cp) { 2 } else { 1 };
         if i < u + n {
             if n == 1 {
-                return Some(if cp >= LONE {
-                    (cp - LONE + 0xD800) as u16
-                } else {
-                    cp as u16
-                });
+                return Some(lone_unit(c).unwrap_or(cp as u16));
             }
             let v = cp - 0x10000;
             let unit = if i == u {
@@ -619,34 +727,27 @@ pub(crate) fn str_unit_at_with(s: &str, ascii: bool, i: usize) -> Option<u16> {
     None
 }
 
-/// `s += t`, re-pairing a trailing lone high surrogate with a leading lone low surrogate.
+/// `s += t`, re-pairing a trailing lone high surrogate with a leading lone low surrogate (unless the pair is
+/// a real `U+10F800..` code point, which stays in its split stored form).
 pub(crate) fn push_joined(s: &mut String, t: &str) {
-    let hi = |c: char| (LONE..LONE + 0x400).contains(&(c as u32));
-    let lo = |c: char| (LONE + 0x400..LONE + 0x800).contains(&(c as u32));
     if let (Some(a), Some(b)) = (s.chars().next_back(), t.chars().next()) {
-        if hi(a) && lo(b) {
-            let (h, l) = (a as u32 - LONE + 0xD800, b as u32 - LONE + 0xD800);
-            s.pop();
-            s.extend(char::from_u32(
-                0x10000 + ((h - 0xD800) << 10) + (l - 0xDC00),
-            ));
-            s.push_str(&t[b.len_utf8()..]);
-            return;
+        if let (Some(h @ 0xD800..=0xDBFF), Some(l @ 0xDC00..=0xDFFF)) = (lone_unit(a), lone_unit(b))
+        {
+            let cp = 0x10000 + ((u32::from(h) - 0xD800) << 10) + (u32::from(l) - 0xDC00);
+            if cp < LONE {
+                s.pop();
+                s.extend(char::from_u32(cp));
+                s.push_str(&t[b.len_utf8()..]);
+                return;
+            }
         }
     }
     s.push_str(t);
 }
 
-/// Output form: lone surrogates print as U+FFFD.
+/// Output form: lone surrogates print as U+FFFD, a split real pair as its char.
 pub(crate) fn lossy_out(s: &str) -> std::borrow::Cow<'_, str> {
-    if s.chars().any(|c| (c as u32) >= LONE) {
-        s.chars()
-            .map(|c| if (c as u32) >= LONE { '\u{FFFD}' } else { c })
-            .collect::<String>()
-            .into()
-    } else {
-        s.into()
-    }
+    to_scalar(s)
 }
 
 /// RequireObjectCoercible, then ToString, for `String.prototype.<name>` (V8's message names the method).
@@ -1435,9 +1536,9 @@ impl Interp {
                 },
                 _ => Vec::new(),
             },
-            Value::Str(s) => s
-                .chars()
-                .map(|c| Value::Str(c.to_string().into()))
+            Value::Str(s) => str_code_points(s)
+                .into_iter()
+                .map(|c| Value::Str(c.into()))
                 .collect(),
             _ => Vec::new(),
         }
@@ -2306,9 +2407,9 @@ impl Interp {
             self.set_native(o, "from", |it, _, args| {
                 let src = arg(args, 0);
                 let mut items = match &src {
-                    Value::Str(s) => s
-                        .chars()
-                        .map(|c| Value::Str(c.to_string().into()))
+                    Value::Str(s) => str_code_points(s)
+                        .into_iter()
+                        .map(|c| Value::Str(c.into()))
                         .collect(),
                     Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
                         it.sparse_unsupported(&src)?;
@@ -3490,7 +3591,8 @@ impl Interp {
 
 pub(crate) fn json_quote(s: &str, out: &mut String) {
     out.push('"');
-    for c in s.chars() {
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -3501,7 +3603,19 @@ pub(crate) fn json_quote(s: &str, out: &mut String) {
             '\u{c}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c if (c as u32) >= LONE => {
-                out.push_str(&format!("\\u{:04x}", c as u32 - LONE + 0xD800))
+                // a split real pair is well-formed text: kept as is; any other lone unit is escaped
+                let u = c as u32 - LONE + 0xD800;
+                match it.peek().copied() {
+                    Some(n)
+                        if (0xD800..0xDC00).contains(&u)
+                            && (LONE + 0x400..LONE + 0x800).contains(&(n as u32)) =>
+                    {
+                        out.push(c);
+                        out.push(n);
+                        it.next();
+                    }
+                    _ => out.push_str(&format!("\\u{u:04x}")),
+                }
             }
             c => out.push(c),
         }

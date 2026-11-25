@@ -158,11 +158,7 @@ impl JsStr {
         let (u, _, c) = self.locate_char(i)?;
         let cp = c as u32;
         Some(if units_of(c) == 1 {
-            if cp >= LONE {
-                (cp - LONE + 0xD800) as u16
-            } else {
-                cp as u16
-            }
+            crate::builtins::lone_unit(c).unwrap_or(cp as u16)
         } else {
             let v = cp - 0x10000;
             if i == u {

@@ -276,6 +276,7 @@ fn script_file(it: &mut Interp, v: &Value) -> Option<Rc<str>> {
 
 /// The SyntaxError of `code` for `new vm.Script(code, { filename })`, which compiles it without running it.
 fn syntax_check(it: &mut Interp, code: &str, file: Option<Rc<str>>) -> R<()> {
+    let code = &*crate::builtins::to_source(code);
     if crate::too_nested(code) {
         return it.throw_error("RangeError", crate::STACK_OVERFLOW);
     }

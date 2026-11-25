@@ -20,6 +20,8 @@ fn main() {
         std::process::exit(2);
     };
     let source = std::fs::read_to_string(&path).expect("read script");
+    // the engine's stored form of text (a real U+10F800.. code point is two lone chars)
+    let source = thaw_js::builtins_from_scalar(&source);
     let code = std::thread::Builder::new()
         .stack_size(256 << 20)
         .spawn(move || {

@@ -42,6 +42,11 @@ pub mod mem_trace;
 mod profile;
 mod regexp_statics;
 pub use jsstr::JsStr;
+
+/// The engine's stored form of external text: a real `U+10F800..` code point becomes two lone chars.
+pub fn builtins_from_scalar(s: &str) -> String {
+    builtins::from_scalar(s).into_owned()
+}
 mod co;
 mod co_stack;
 mod co_thread;
@@ -4146,6 +4151,7 @@ impl Interp {
 
     /// Evaluate a script in the global scope; the value is that of the last expression statement.
     pub fn run(&mut self, source: &str) -> R<Value> {
+        let source = &*builtins::to_source(source);
         if too_nested(source) {
             return self.throw_error("RangeError", STACK_OVERFLOW);
         }
@@ -4156,6 +4162,7 @@ impl Interp {
     /// parsed as a script first; only text that fails as a script (import/export, top-level await) is parsed
     /// as a module.
     pub(crate) fn run_main_source(&mut self, source: &str) -> R<Value> {
+        let source = &*builtins::to_source(source);
         if too_nested(source) {
             return self.throw_error("RangeError", STACK_OVERFLOW);
         }
@@ -4166,6 +4173,7 @@ impl Interp {
 
     /// Like [`run`](Self::run) for `eval` / `new Function` text: parsed as a sloppy-mode script.
     pub fn run_sloppy(&mut self, source: &str) -> R<Value> {
+        let source = &*builtins::to_source(source);
         if too_nested(source) {
             return self.throw_error("RangeError", STACK_OVERFLOW);
         }
@@ -4308,6 +4316,7 @@ impl Interp {
 
     /// Parses a `node:vm` script in this realm. A failure throws a SyntaxError here, with the script file in effect.
     pub(crate) fn parse_vm_script(&mut self, source: &str) -> R<a::Module> {
+        let source = &*builtins::to_source(source);
         if too_nested(source) {
             return self.throw_error("RangeError", STACK_OVERFLOW);
         }
@@ -4429,7 +4438,7 @@ impl Interp {
     /// `eval_function` for an ES-module factory (the runtime ESM loader's only caller): parsed with the module
     /// goal, so `import.meta` and `import()` parse and reach their hooks. `eval_function` keeps the script goal.
     pub(crate) fn eval_module_function(&mut self, source: &str) -> R<Value> {
-        let text = format!("({source})");
+        let text = format!("({})", builtins::to_source(source));
         if too_nested(&text) {
             return self.throw_error("RangeError", STACK_OVERFLOW);
         }
@@ -4469,6 +4478,7 @@ impl Interp {
     /// variable scope, a strict caller or `"use strict"` text gets its own. Its `this`, `arguments` and
     /// `new.target` are the caller's. Returns the completion value.
     fn direct_eval(&mut self, src: &str, scope: &Rc<Scope>) -> R<Value> {
+        let src = &*builtins::to_source(src);
         if too_nested(src) {
             return self.throw_error("RangeError", STACK_OVERFLOW);
         }
@@ -5141,13 +5151,7 @@ impl Interp {
         match e {
             a::Expr::Lit(l) => Ok(match l {
                 a::Lit::Num(n) => Value::Number(n.value),
-                a::Lit::Str(s) => match s.value.as_str() {
-                    Some(x) => Value::str(x),
-                    None => Value::Str(
-                        builtins::units_str(&s.value.to_ill_formed_utf16().collect::<Vec<u16>>())
-                            .into(),
-                    ),
-                },
+                a::Lit::Str(s) => Value::Str(builtins::wtf8_to_str(&s.value).into()),
                 a::Lit::Bool(b) => Value::Bool(b.value),
                 a::Lit::Null(_) => Value::Null,
                 a::Lit::Regex(r) => return self.new_regexp(&r.exp, &r.flags),
@@ -5169,7 +5173,10 @@ impl Interp {
                 for (i, q) in t.quasis.iter().enumerate() {
                     builtins::push_joined(
                         &mut s,
-                        q.cooked.as_ref().and_then(|c| c.as_str()).unwrap_or(""),
+                        &q.cooked
+                            .as_ref()
+                            .map(builtins::wtf8_to_str)
+                            .unwrap_or_default(),
                     );
                     if let Some(e) = t.exprs.get(i) {
                         let v = self.eval(e, scope)?;
@@ -5483,12 +5490,17 @@ impl Interp {
                             .tpl
                             .quasis
                             .iter()
-                            .map(|q| match q.cooked.as_ref().and_then(|c| c.as_str()) {
-                                Some(c) => Value::str(c),
+                            .map(|q| match q.cooked.as_ref() {
+                                Some(c) => Value::Str(builtins::wtf8_to_str(c).into()),
                                 None => Value::Undefined,
                             })
                             .collect();
-                        let raw = t.tpl.quasis.iter().map(|q| Value::str(&q.raw)).collect();
+                        let raw = t
+                            .tpl
+                            .quasis
+                            .iter()
+                            .map(|q| Value::str(&builtins::from_scalar(&q.raw)))
+                            .collect();
                         let strings = self.array(cooked);
                         if let Value::Object(o) = &strings {
                             let raw = self.array(raw);
@@ -5544,7 +5556,7 @@ impl Interp {
     pub(crate) fn prop_name(&mut self, key: &a::PropName, scope: &Rc<Scope>) -> R<Rc<str>> {
         Ok(match key {
             a::PropName::Ident(i) => i.sym.as_ref().into(),
-            a::PropName::Str(s) => s.value.as_str().unwrap_or("").into(),
+            a::PropName::Str(s) => builtins::wtf8_to_str(&s.value).into(),
             a::PropName::Num(n) => number_to_string(n.value).into(),
             a::PropName::Computed(c) => {
                 let v = self.eval(&c.expr, scope)?;
@@ -6882,6 +6894,8 @@ mod sab_tests;
 mod stack_overflow_tests;
 #[cfg(test)]
 mod str_cursor_tests;
+#[cfg(test)]
+mod str_lone_tests;
 #[cfg(test)]
 mod str_unit_tests;
 #[cfg(test)]

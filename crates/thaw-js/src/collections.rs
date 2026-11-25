@@ -313,8 +313,9 @@ impl Interp {
     pub(crate) fn iter_items(&mut self, v: &Value) -> Option<Vec<Value>> {
         match v {
             Value::Str(s) => Some(
-                s.chars()
-                    .map(|c| Value::Str(c.to_string().into()))
+                crate::builtins::str_code_points(s)
+                    .into_iter()
+                    .map(|c| Value::Str(c.into()))
                     .collect(),
             ),
             // a sparse array takes the protocol path (live Get per index), which sees its tail

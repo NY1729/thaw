@@ -58,12 +58,7 @@ pub(crate) fn sequence(list: Vec<Ex>) -> Ex {
 pub(crate) fn lit_value(l: &a::Lit) -> CG<Value> {
     Ok(match l {
         a::Lit::Num(n) => Value::Number(n.value),
-        a::Lit::Str(s) => match s.value.as_str() {
-            Some(x) => Value::str(x),
-            None => Value::Str(
-                builtins::units_str(&s.value.to_ill_formed_utf16().collect::<Vec<u16>>()).into(),
-            ),
-        },
+        a::Lit::Str(s) => Value::Str(builtins::wtf8_to_str(&s.value).into()),
         a::Lit::Bool(b) => Value::Bool(b.value),
         a::Lit::Null(_) => Value::Null,
         a::Lit::BigInt(b) => bigint::big((*b.value).clone()),
@@ -484,9 +479,8 @@ fn template(g: &mut Gen, t: &a::Tpl) -> CG<Ex> {
         let text = q
             .cooked
             .as_ref()
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
+            .map(builtins::wtf8_to_str)
+            .unwrap_or_default();
         let e = match t.exprs.get(i) {
             Some(e) => Some(compile(g, e)?),
             None => None,
