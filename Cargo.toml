@@ -14,3 +14,4 @@ codegen-units = 1
 
 [patch.crates-io]
 regress = { path = "vendor/regress" }
+swc_ecma_parser = { path = "vendor/swc_ecma_parser" }
