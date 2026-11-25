@@ -827,11 +827,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_float_div(lhs_val, rhs_val, "divtmp")
                 .map(Into::into)
                 .map_err(|e| e.to_string()),
-            BinOp::Mod => self
-                .builder
-                .build_float_rem(lhs_val, rhs_val, "modtmp")
-                .map(Into::into)
-                .map_err(|e| e.to_string()),
+            BinOp::Mod => self.compile_js_rem(lhs_val, rhs_val),
             BinOp::Exp => self.compile_js_pow(lhs_val, rhs_val),
             BinOp::BitOr
             | BinOp::BitXor
@@ -951,6 +947,88 @@ impl<'ctx> HirCompiler<'ctx> {
             (&float.const_float(f64::NAN), special_block),
             (&regular, regular_block),
         ]);
+        Ok(result.as_basic_value())
+    }
+
+    /// JS `%`. Integral operands below 2^53 in magnitude with a non-zero
+    /// divisor take an integer `srem` (the result keeps the dividend's sign,
+    /// including -0 via copysign); everything else (NaN, Infinity, fractions,
+    /// zero divisor, large values) falls back to `frem` (libm fmod).
+    fn compile_js_rem(
+        &mut self,
+        lhs: FloatValue<'ctx>,
+        rhs: FloatValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let err = |e: inkwell::builder::BuilderError| e.to_string();
+        let float = self.context.f64_type();
+        let i64_type = self.context.i64_type();
+        let limit = float.const_float(9_007_199_254_740_992.0);
+        let fabs = self.module.get_function("llvm.fabs.f64").unwrap();
+        let abs_of = |this: &mut Self, v: FloatValue<'ctx>| -> Result<FloatValue<'ctx>, String> {
+            Ok(this
+                .builder
+                .build_call(fabs, &[v.into()], "rem_abs")
+                .map_err(err)?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("llvm.fabs returned no value")?
+                .into_float_value())
+        };
+        let abs_l = abs_of(self, lhs)?;
+        let abs_r = abs_of(self, rhs)?;
+        // Ordered compares are false for NaN, so NaN/Infinity never take the fast path.
+        let l_small = self.builder.build_float_compare(FloatPredicate::OLT, abs_l, limit, "rem_l_small").map_err(err)?;
+        let r_small = self.builder.build_float_compare(FloatPredicate::OLT, abs_r, limit, "rem_r_small").map_err(err)?;
+        let r_nonzero = self.builder.build_float_compare(FloatPredicate::ONE, rhs, float.const_zero(), "rem_r_nonzero").map_err(err)?;
+        let in_range = self.builder.build_and(l_small, r_small, "rem_in_range").map_err(err)?;
+        let in_range = self.builder.build_and(in_range, r_nonzero, "rem_in_range_nz").map_err(err)?;
+        // Safe operands so the conversions are never out of range.
+        let l_safe = self.builder.build_select(in_range, lhs, float.const_zero(), "rem_l_safe").map_err(err)?.into_float_value();
+        let r_safe = self.builder.build_select(in_range, rhs, float.const_float(1.0), "rem_r_safe").map_err(err)?.into_float_value();
+        let li = self.builder.build_float_to_signed_int(l_safe, i64_type, "rem_li").map_err(err)?;
+        let ri = self.builder.build_float_to_signed_int(r_safe, i64_type, "rem_ri").map_err(err)?;
+        let l_back = self.builder.build_signed_int_to_float(li, float, "rem_l_back").map_err(err)?;
+        let r_back = self.builder.build_signed_int_to_float(ri, float, "rem_r_back").map_err(err)?;
+        let l_int = self.builder.build_float_compare(FloatPredicate::OEQ, l_back, l_safe, "rem_l_int").map_err(err)?;
+        let r_int = self.builder.build_float_compare(FloatPredicate::OEQ, r_back, r_safe, "rem_r_int").map_err(err)?;
+        let both_int = self.builder.build_and(l_int, r_int, "rem_both_int").map_err(err)?;
+        let fast = self.builder.build_and(in_range, both_int, "rem_fast").map_err(err)?;
+
+        let function = self.current_function();
+        let fast_block = self.context.append_basic_block(function, "rem_fast");
+        let slow_block = self.context.append_basic_block(function, "rem_slow");
+        let done_block = self.context.append_basic_block(function, "rem_done");
+        self.builder.build_conditional_branch(fast, fast_block, slow_block).map_err(err)?;
+
+        self.builder.position_at_end(fast_block);
+        let rem = self.builder.build_int_signed_rem(li, ri, "rem_srem").map_err(err)?;
+        let rem_f = self.builder.build_signed_int_to_float(rem, float, "rem_srem_f").map_err(err)?;
+        let copysign = self.module.get_function("llvm.copysign.f64").unwrap_or_else(|| {
+            self.module.add_function(
+                "llvm.copysign.f64",
+                float.fn_type(&[float.into(), float.into()], false),
+                None,
+            )
+        });
+        let signed = self
+            .builder
+            .build_call(copysign, &[rem_f.into(), lhs.into()], "rem_signed")
+            .map_err(err)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("llvm.copysign returned no value")?
+            .into_float_value();
+        let fast_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done_block).map_err(err)?;
+
+        self.builder.position_at_end(slow_block);
+        let slow = self.builder.build_float_rem(lhs, rhs, "modtmp").map_err(err)?;
+        let slow_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done_block).map_err(err)?;
+
+        self.builder.position_at_end(done_block);
+        let result = self.builder.build_phi(float, "rem_result").map_err(err)?;
+        result.add_incoming(&[(&signed, fast_end), (&slow, slow_end)]);
         Ok(result.as_basic_value())
     }
 

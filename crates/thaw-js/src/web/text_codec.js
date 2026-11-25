@@ -72,23 +72,10 @@
     return copy;
   };
 
-  const encodeUtf8 = input => {
-    const bytes = [];
-    for (const character of String(input)) {
-      let code = character.codePointAt(0);
-      if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;
-      if (code <= 0x7f) bytes.push(code);
-      else if (code <= 0x7ff) bytes.push(0xc0 | code >> 6, 0x80 | code & 0x3f);
-      else if (code <= 0xffff) bytes.push(0xe0 | code >> 12,
-        0x80 | code >> 6 & 0x3f, 0x80 | code & 0x3f);
-      else bytes.push(0xf0 | code >> 18, 0x80 | code >> 12 & 0x3f,
-        0x80 | code >> 6 & 0x3f, 0x80 | code & 0x3f);
-    }
-    return bytes;
-  };
+  const __thawEncode = __thaw_utf8_encode, __thawDecode = __thaw_utf8_decode, __thawTail = __thaw_utf8_tail;
   globalThis.TextEncoder = class TextEncoder {
     get encoding() { return 'utf-8'; }
-    encode(input = '') { return Uint8Array.from(encodeUtf8(`${input}`)); }
+    encode(input = '') { return __thawEncode(`${input}`); }
     encodeInto(input, destination) {
       if (!__thawTextApply(__thawTextIsView, __thawTextArrayBuffer, [destination]) ||
           __thawTextApply(__thawTextViewTag, destination, []) !== 'Uint8Array') {
@@ -97,18 +84,12 @@
       if (typeof input !== 'string') throw __thawTextErr(__thawTextTypeError, 'ERR_INVALID_ARG_TYPE', 'The "src" argument must be of type string.');
       const text = input;
       const capacity = __thawTextApply(__thawTextViewByteLength, destination, []);
-      let read = 0;
-      let written = 0;
-      for (const character of text) {
-        const bytes = encodeUtf8(character);
-        if (written + bytes.length > capacity) break;
-        const encoded = new __thawTextUint8Array(bytes.length);
-        for (let index = 0; index < bytes.length; index++) encoded[index] = bytes[index];
-        __thawTextApply(__thawTextSet, destination, [encoded, written]);
-        written += bytes.length;
-        read += character.codePointAt(0) > 0xffff ? 2 : 1; // thaw-js strings count code points
-      }
-      return { read, written };
+      const bytes = __thawEncode(text);
+      let written = Math.min(bytes.length, capacity);
+      // never split a code point: back off to a character boundary
+      while (written > 0 && written < bytes.length && (bytes[written] & 0xc0) === 0x80) written--;
+      __thawTextApply(__thawTextSet, destination, [new __thawTextUint8Array(bytes.buffer, 0, written)]);
+      return { read: __thawDecode(bytes, 0, written).length, written };
     }
   };
 
@@ -139,9 +120,12 @@
       const pendingLength = __thawTextApply(__thawTextViewByteLength, this._pending, []);
       const chunkLength = __thawTextApply(__thawTextViewByteLength, chunk, []);
       const byteLength = pendingLength + chunkLength;
-      const bytes = new __thawTextUint8Array(byteLength);
-      __thawTextApply(__thawTextSet, bytes, [this._pending]);
-      __thawTextApply(__thawTextSet, bytes, [chunk, pendingLength]);
+      let bytes = chunk;
+      if (pendingLength) {
+        bytes = new __thawTextUint8Array(byteLength);
+        __thawTextApply(__thawTextSet, bytes, [this._pending]);
+        __thawTextApply(__thawTextSet, bytes, [chunk, pendingLength]);
+      }
       this._pending = new __thawTextUint8Array();
       let output = '';
       let index = 0;
@@ -178,41 +162,15 @@
         if (!streaming && byteLength % 2) invalid();
         index = byteLength;
       }
-      while (index < byteLength) {
-        const first = bytes[index++];
-        if (first <= 0x7f) { output += __thawTextCp(first); continue; }
-        let length, code, minimum;
-        if (first >= 0xc2 && first <= 0xdf) { length = 1; code = first & 0x1f; minimum = 0x80; }
-        else if (first >= 0xe0 && first <= 0xef) { length = 2; code = first & 0x0f; minimum = 0x800; }
-        else if (first >= 0xf0 && first <= 0xf4) { length = 3; code = first & 7; minimum = 0x10000; }
-        else { invalid(); continue; }
-        let valid = true, consumed = 0;
-        for (let offset = 0; offset < length && index + offset < byteLength; offset++) {
-          const continuation = bytes[index + offset];
-          const lower = offset === 0 && first === 0xe0 ? 0xa0
-            : offset === 0 && first === 0xf0 ? 0x90 : 0x80;
-          const upper = offset === 0 && first === 0xed ? 0x9f
-            : offset === 0 && first === 0xf4 ? 0x8f : 0xbf;
-          if (continuation < lower || continuation > upper) { valid = false; break; }
-          code = code << 6 | continuation & 0x3f;
-          consumed++;
+      else {
+        const tail = streaming ? __thawTail(bytes) : 0;
+        if (tail) {
+          this._pending = new __thawTextUint8Array(tail);
+          for (let pendingIndex = 0; pendingIndex < tail; pendingIndex++) this._pending[pendingIndex] = bytes[byteLength - tail + pendingIndex];
         }
-        if (index + length > byteLength) {
-          if (!valid) { index += consumed; invalid(); continue; }
-          if (streaming) {
-            const remainingLength = byteLength - index + 1;
-            this._pending = new __thawTextUint8Array(remainingLength);
-            for (let pendingIndex = 0; pendingIndex < remainingLength; pendingIndex++) {
-              this._pending[pendingIndex] = bytes[index - 1 + pendingIndex];
-            }
-            break;
-          }
-          invalid(); break;
-        }
-        if (!valid || code < minimum || code > 0x10ffff ||
-            (code >= 0xd800 && code <= 0xdfff)) { index += consumed; invalid(); continue; }
-        index += length;
-        output += __thawTextCp(code);
+        const text = __thawDecode(bytes, 0, byteLength - tail, this._fatal);
+        if (text === undefined) invalid();
+        else output = text;
       }
       if (!this._bomSeen && output.length) {
         this._bomSeen = true;

@@ -191,6 +191,40 @@ struct ReadyContinuation {
     js_barrier: u64,
 }
 
+/// Live promises in creation order with O(log n) insert/remove (destroy used to be a
+/// linear `retain`, making await loops quadratic).
+#[derive(Default)]
+struct ActivePromises {
+    seq: u64,
+    by_ptr: std::collections::HashMap<usize, u64>,
+    ordered: std::collections::BTreeMap<u64, *mut ThawPromise>,
+}
+
+impl ActivePromises {
+    fn push(&mut self, promise: *mut ThawPromise) {
+        self.seq += 1;
+        if let Some(old) = self.by_ptr.insert(promise as usize, self.seq) {
+            self.ordered.remove(&old);
+        }
+        self.ordered.insert(self.seq, promise);
+    }
+
+    fn remove(&mut self, promise: *mut ThawPromise) {
+        if let Some(seq) = self.by_ptr.remove(&(promise as usize)) {
+            self.ordered.remove(&seq);
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, promise: &*mut ThawPromise) -> bool {
+        self.by_ptr.contains_key(&(*promise as usize))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &*mut ThawPromise> {
+        self.ordered.values()
+    }
+}
+
 thread_local! {
     static READY_CONTINUATIONS: RefCell<VecDeque<ReadyContinuation>> =
         const { RefCell::new(VecDeque::new()) };
@@ -198,7 +232,7 @@ thread_local! {
     static FD_WAITS: RefCell<Vec<PromiseFdWait>> = const { RefCell::new(Vec::new()) };
     static FD_WATCHERS: RefCell<Vec<FdWatcher>> = const { RefCell::new(Vec::new()) };
     static ACTIVE_PROMISE_JOINS: Cell<usize> = const { Cell::new(0) };
-    static ACTIVE_PROMISES: RefCell<Vec<*mut ThawPromise>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_PROMISES: RefCell<ActivePromises> = RefCell::new(ActivePromises::default());
     static UNHANDLED_REPORTER: Cell<Option<PromiseUnhandledFn>> = const { Cell::new(None) };
     static UNHANDLED_REPORTER_RESULT: Cell<Option<PromiseUnhandledResultFn>> = const { Cell::new(None) };
     static UNHANDLED_REPORTER_TEXT_RESULT: Cell<Option<PromiseUnhandledResultFn>> = const { Cell::new(None) };

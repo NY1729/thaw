@@ -9,7 +9,7 @@ mod napi_version {
 /// (`main` plus everything it reaches via same-package relative
 /// `require`s) got folded into `bundle.js` -- 1 for a package that's
 /// just a single file.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AddedPackage {
     pub dts_relative_path: String,
     pub js_relative_path: String,
