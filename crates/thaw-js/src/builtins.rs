@@ -2637,50 +2637,29 @@ impl Interp {
                     }
                 }
                 let needle = arg(args, 0);
+                // a primitive `fromIndex` runs no user code, so a plain array is searched in place; an
+                // object one (valueOf may mutate the array) keeps the snapshot taken first
+                if !matches!(arg(args, 1), Value::Object(_)) {
+                    if let Value::Object(o) = this {
+                        let from = match arg(args, 1) {
+                            Value::Undefined => None,
+                            v => Some(it.num(&v)),
+                        };
+                        if let Kind::Array(items) = &*o.kind.borrow() {
+                            let pos = index_search(items, last, &needle, from);
+                            return Ok(Value::Number(pos.map_or(-1.0, |i| i as f64)));
+                        }
+                    }
+                }
                 let items = match it.proxy_array_elements(this)? {
                     Some(items) => items,
                     None => it.array_items_raw(this),
                 };
-                let len = items.len() as f64;
-                let pos = if last {
-                    let from = match arg(args, 1) {
-                        Value::Undefined => len - 1.0,
-                        v => {
-                            let n = it.num(&v);
-                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
-                            if n < 0.0 {
-                                len + n
-                            } else {
-                                n.min(len - 1.0)
-                            }
-                        }
-                    };
-                    if from < 0.0 {
-                        None
-                    } else {
-                        items[..=(from as usize)]
-                            .iter()
-                            .rposition(|v| strict_equals(v, &needle))
-                    }
-                } else {
-                    let from = match arg(args, 1) {
-                        Value::Undefined => 0.0,
-                        v => {
-                            let n = it.num(&v);
-                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
-                            if n < 0.0 {
-                                (len + n).max(0.0)
-                            } else {
-                                n
-                            }
-                        }
-                    } as usize;
-                    items
-                        .iter()
-                        .skip(from)
-                        .position(|v| strict_equals(v, &needle))
-                        .map(|p| p + from)
+                let from = match arg(args, 1) {
+                    Value::Undefined => None,
+                    v => Some(it.num(&v)),
                 };
+                let pos = index_search(&items, last, &needle, from);
                 Ok(Value::Number(pos.map_or(-1.0, |i| i as f64)))
             });
         }
@@ -2688,19 +2667,38 @@ impl Interp {
             it.sparse_unsupported(this)?;
             let needle = arg(args, 0);
             let same_zero = |v: &Value| strict_equals(v, &needle) || matches!((v, &needle), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan());
+            let start = |it: &mut Interp, len: f64| -> usize {
+                (match arg(args, 1) {
+                    Value::Undefined => 0.0,
+                    v => {
+                        let n = it.num(&v);
+                        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                        if n < 0.0 { (len + n).max(0.0) } else { n }
+                    }
+                }) as usize
+            };
+            // a primitive `fromIndex` runs no user code: search a plain array in place (a hole reads as undefined)
+            if !matches!(arg(args, 1), Value::Object(_)) {
+                if let Value::Object(o) = this {
+                    let len = match &*o.kind.borrow() {
+                        Kind::Array(items) => Some(items.len() as f64),
+                        _ => None,
+                    };
+                    if let Some(len) = len {
+                        let from = start(it, len);
+                        if let Kind::Array(items) = &*o.kind.borrow() {
+                            return Ok(Value::Bool(items.iter().skip(from).any(|v| {
+                                same_zero(if matches!(v, Value::Hole) { &Value::Undefined } else { v })
+                            })));
+                        }
+                    }
+                }
+            }
             let items = match it.proxy_array_elements(this)? {
                 Some(items) => items,
                 None => it.array_items(this),
             };
-            let len = items.len() as f64;
-            let from = match arg(args, 1) {
-                Value::Undefined => 0.0,
-                v => {
-                    let n = it.num(&v);
-                    let n = if n.is_nan() { 0.0 } else { n.trunc() };
-                    if n < 0.0 { (len + n).max(0.0) } else { n }
-                }
-            } as usize;
+            let from = start(it, items.len() as f64);
             Ok(Value::Bool(items.iter().skip(from).any(same_zero)))
         });
         self.set_native(&ap, "slice", |it, this, args| {
@@ -2708,6 +2706,22 @@ impl Interp {
                 matches!(this, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
             if is_array {
                 it.sparse_unsupported(this)?;
+                // primitive bounds run no user code: copy just the window in place
+                if !matches!(arg(args, 0), Value::Object(_))
+                    && !matches!(arg(args, 1), Value::Object(_))
+                {
+                    if let Value::Object(o) = this {
+                        let len = match &*o.kind.borrow() {
+                            Kind::Array(items) => items.len(),
+                            _ => 0,
+                        };
+                        let (from, to) = it.range(args, len)?;
+                        if let Kind::Array(items) = &*o.kind.borrow() {
+                            let part = items[from..to].to_vec();
+                            return Ok(it.array(part));
+                        }
+                    }
+                }
                 let items = it.array_items_raw(this);
                 let (from, to) = it.range(args, items.len())?;
                 return Ok(it.array(items[from..to].to_vec()));
@@ -2750,7 +2764,9 @@ impl Interp {
                     }
                     Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
                         it.sparse_unsupported(v)?;
-                        items.extend(it.array_items_raw(v))
+                        if let Kind::Array(src) = &*o.kind.borrow() {
+                            items.extend_from_slice(src);
+                        }
                     }
                     Value::Object(_) => {
                         let key = it.well_known_key("isConcatSpreadable");
@@ -4437,4 +4453,46 @@ pub(crate) fn sloppy_ordinary_obj(o: &Obj) -> bool {
         Kind::Closure { def, scope }
             if !def.strict && !scope.strict.get() && !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype && def.class.is_none()
     )
+}
+
+/// `indexOf` / `lastIndexOf` over `items` (a hole never `===`); `from` is the converted `fromIndex`, if any.
+fn index_search(items: &[Value], last: bool, needle: &Value, from: Option<f64>) -> Option<usize> {
+    let len = items.len() as f64;
+    let norm = |n: f64| if n.is_nan() { 0.0 } else { n.trunc() };
+    if last {
+        let from = match from {
+            None => len - 1.0,
+            Some(n) => {
+                let n = norm(n);
+                if n < 0.0 {
+                    len + n
+                } else {
+                    n.min(len - 1.0)
+                }
+            }
+        };
+        if from < 0.0 {
+            return None;
+        }
+        items[..=(from as usize)]
+            .iter()
+            .rposition(|v| strict_equals(v, needle))
+    } else {
+        let from = match from {
+            None => 0.0,
+            Some(n) => {
+                let n = norm(n);
+                if n < 0.0 {
+                    (len + n).max(0.0)
+                } else {
+                    n
+                }
+            }
+        } as usize;
+        items
+            .iter()
+            .skip(from)
+            .position(|v| strict_equals(v, needle))
+            .map(|p| p + from)
+    }
 }
