@@ -2630,7 +2630,11 @@ impl Interp {
         });
         self.install_process_events(&p);
         // the streams are emitters (`process.stdout.on('error', ..)`): they inherit the EventEmitter base
-        let emitter_base = p.proto.borrow().as_ref().and_then(|pp| pp.proto.borrow().clone());
+        let emitter_base = p
+            .proto
+            .borrow()
+            .as_ref()
+            .and_then(|pp| pp.proto.borrow().clone());
         for (name, is_err) in [("stdout", false), ("stderr", true)] {
             let s = self.plain();
             if let Some(base) = &emitter_base {
