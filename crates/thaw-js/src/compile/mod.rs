@@ -40,6 +40,8 @@ mod diff_tests_num2;
 #[cfg(test)]
 mod diff_tests_self;
 #[cfg(test)]
+mod diff_tests_selfarg;
+#[cfg(test)]
 mod diff_tests_switch;
 #[cfg(test)]
 mod diff_tests_throw;
@@ -816,6 +818,10 @@ pub(crate) struct Frame {
 pub(crate) struct FrameInit {
     /// The non-arrow `this` is bound in the `Scope` (an inner arrow reads it through the chain).
     pub(crate) set_this: bool,
+    /// A captured self name: declared with the callee, before `arguments` and the parameters.
+    pub(crate) self_name: Option<Rc<str>>,
+    /// The function reads `arguments`: an array of the call's arguments is declared (unmapped, as `bind_frame` does).
+    pub(crate) arguments: bool,
     /// Captured parameters: (argument index, interned name), in argument order.
     pub(crate) params: Vec<(usize, Rc<str>)>,
     /// Captured `var`s: declared with `declare_if_absent` after the parameters, as `call_closure_ast` does.

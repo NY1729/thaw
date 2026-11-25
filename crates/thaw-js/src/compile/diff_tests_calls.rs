@@ -272,7 +272,7 @@ fn calls_throw_from_callee_caught_by_ast_caller() {
 }
 
 #[test]
-fn calls_arguments_user_stays_ast_and_callers_compile() {
+fn calls_arguments_user_and_callers_compile() {
     let mut it = Interp::with_compile_mode(CompileMode::On);
     it.compile_after = 1;
     let src = r#"
@@ -283,9 +283,9 @@ fn calls_arguments_user_stays_ast_and_callers_compile() {
     "#;
     assert!(it.run_sloppy(src).is_ok());
     assert_eq!(it.out, lines(&["3", "4"]));
-    assert_eq!(it.cstats.rejected(FallbackReason::Arguments), 1);
+    assert_eq!(it.cstats.rejected(FallbackReason::Arguments), 0);
     assert_eq!(it.cstats.rejected(FallbackReason::NotYet), 0);
-    assert!(it.cstats.compiled() >= 1);
+    assert!(it.cstats.compiled() >= 2);
 }
 
 #[test]

@@ -280,26 +280,14 @@ fn self_name_top_level_lexical_stays_on_ast() {
 }
 
 #[test]
-fn self_name_captured_by_closure_stays_on_ast() {
+fn self_name_captured_by_closure_compiles() {
     let out = same(
         r#"
         function cf(n) { return n ? (() => cf)() : 0 }
         console.log(typeof cf(1));
         console.log(typeof cf(1));
         "#,
-        0,
+        1,
     );
     assert_eq!(out, vec!["function".to_string(), "function".to_string()]);
-    let it = on_only(
-        r#"
-        function cf(n) { return n ? (() => cf)() : 0 }
-        cf(1); cf(1);
-        "#,
-    );
-    // the arrow inside is an inner function (a higher-priority reason); the self name alone would be SelfBinding
-    assert!(
-        it.cstats.rejected(FallbackReason::InnerFunction)
-            + it.cstats.rejected(FallbackReason::SelfBinding)
-            >= 1
-    );
 }

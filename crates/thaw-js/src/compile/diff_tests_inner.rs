@@ -306,14 +306,6 @@ fn refused_captured_catch_param_stays_on_ast() {
 }
 
 #[test]
-fn refused_captured_self_name_stays_on_ast() {
-    refused(
-        "function f(n) { return n ? 0 : function () { return f } } console.log('' + (f(0) === f));",
-        FallbackReason::SelfBinding,
-    );
-}
-
-#[test]
 fn refused_inner_method_stays_on_ast() {
     refused(
         "function f() { var o = { m() { return 1 } }; return o.m() } console.log('' + f());",
