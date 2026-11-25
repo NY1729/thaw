@@ -2577,3 +2577,29 @@ fn thaw_js_peer_pair_bundles_share_one_group_marker_and_an_unrelated_package_has
     assert_eq!(thaw_js_run_guarded(&output), "true 1\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The build cache (scan report + parsed `.d.ts` memo, `THAW_NO_BUILD_CACHE`) never changes a build: the
+/// executable of a cold build, a warm build and a cache-disabled build are byte-identical.
+#[test]
+fn build_cache_cold_warm_and_disabled_builds_are_byte_identical() {
+    let (dir, registry, entry) = thaw_js_fixture(
+        "build-cache",
+        "import { describe, add } from 'tjs-kit';\n\
+         function main(): void { console.log(describe(['a', 'b', 'a'], 'x')); console.log(add(2, 3)); }\n",
+    );
+    std::env::remove_var("THAW_NO_BUILD_CACHE");
+    let output = dir.join("app");
+    let mut built = Vec::new();
+    for disabled in [false, false, true] {
+        if disabled {
+            std::env::set_var("THAW_NO_BUILD_CACHE", "1");
+        }
+        thaw_js_build(&entry, &output, &registry);
+        built.push(std::fs::read(&output).unwrap());
+        std::fs::remove_file(&output).unwrap();
+    }
+    std::env::remove_var("THAW_NO_BUILD_CACHE");
+    assert!(built[0] == built[1], "warm build differs from the cold build");
+    assert!(built[0] == built[2], "cache-disabled build differs from the cached build");
+    let _ = std::fs::remove_dir_all(dir);
+}

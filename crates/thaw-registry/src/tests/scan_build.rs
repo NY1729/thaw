@@ -74,3 +74,58 @@ fn scan_build_accepts_the_zlib_builtin_without_the_zstd_feature() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
+
+fn scan_cache_test_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("thaw-scan-cache-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn scan_cache_roundtrips_a_report_and_rejects_corrupt_or_foreign_entries() {
+    let bundle = thaw_js::scan::script_as_bundle("module.exports = function () { return require('./x.node'); };");
+    let empty = std::collections::HashSet::new();
+    let report = scan_bundle_for_build_uncached(&bundle, false, &empty, &empty).unwrap();
+    assert!(!report.blockers.is_empty());
+    let key = scan_cache_key(&bundle, false, &empty, &empty);
+    let dir = scan_cache_test_dir("rt");
+    assert!(scan_cache_load(&dir, &key).is_none());
+    scan_cache_store(&dir, &key, &report);
+    let back = scan_cache_load(&dir, &key).unwrap();
+    assert_eq!(format!("{report:?}"), format!("{back:?}"));
+    // truncated / garbage entries are misses
+    let path = dir.join(format!("{key}.json"));
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, &text[..text.len() / 2]).unwrap();
+    assert!(scan_cache_load(&dir, &key).is_none());
+    fs::write(&path, "").unwrap();
+    assert!(scan_cache_load(&dir, &key).is_none());
+    // an entry whose embedded key differs (renamed/foreign file) is a miss
+    fs::write(&path, text.replace(&key, &"0".repeat(64))).unwrap();
+    assert!(scan_cache_load(&dir, &key).is_none());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scan_cache_key_covers_every_input() {
+    let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<std::collections::HashSet<_>>();
+    let base = scan_cache_key("b", false, &set(&["a"]), &set(&[]));
+    assert_eq!(base, scan_cache_key("b", false, &set(&["a"]), &set(&[])));
+    assert_ne!(base, scan_cache_key("c", false, &set(&["a"]), &set(&[])));
+    assert_ne!(base, scan_cache_key("b", true, &set(&["a"]), &set(&[])));
+    assert_ne!(base, scan_cache_key("b", false, &set(&["a", "z"]), &set(&[])));
+    assert_ne!(base, scan_cache_key("b", false, &set(&[]), &set(&["a"])));
+    assert_ne!(base, scan_cache_key("b", false, &set(&[]), &set(&[])));
+}
+
+#[test]
+fn scan_cache_store_bounds_the_directory() {
+    let dir = scan_cache_test_dir("bound");
+    let report = thaw_js::scan::Report::default();
+    for i in 0..300 {
+        scan_cache_store(&dir, &format!("{i:064}"), &report);
+    }
+    let count = fs::read_dir(&dir).unwrap().count();
+    assert!(count <= 256, "{count}");
+    let _ = fs::remove_dir_all(&dir);
+}

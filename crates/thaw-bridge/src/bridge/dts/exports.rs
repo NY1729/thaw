@@ -15,6 +15,12 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
 pub fn parse_dts_named(
     source: &str, filename: thaw_parser::common::FileName,
 ) -> Result<Vec<DtsFunction>, String> {
+    dts_memo("functions", source, &filename, || parse_dts_named_uncached(source, filename.clone()))
+}
+
+fn parse_dts_named_uncached(
+    source: &str, filename: thaw_parser::common::FileName,
+) -> Result<Vec<DtsFunction>, String> {
     let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     let generated_internals = generated_public_alias_internals(&module);
     let type_only_namespaces = type_only_namespace_names_named(source, &filename);
@@ -500,6 +506,10 @@ pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
 }
 
 pub fn parse_dts_values_named(source: &str, filename: &thaw_parser::common::FileName) -> Result<Vec<DtsValue>, String> {
+    dts_memo("values", source, filename, || parse_dts_values_named_uncached(source, filename))
+}
+
+fn parse_dts_values_named_uncached(source: &str, filename: &thaw_parser::common::FileName) -> Result<Vec<DtsValue>, String> {
     let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module)?;
     let generated_internals = generated_public_alias_internals(&module);
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
