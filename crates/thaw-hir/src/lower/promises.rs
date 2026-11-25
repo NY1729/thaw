@@ -1236,8 +1236,8 @@ impl<'a> FnLowerer<'a> {
         let Some(resolve_binding) = resolve_binding else {
             // `new Promise<T>(() => ...)`: no resolver to read the type from,
             // so the explicit type argument is the Promise's result type.
-            return explicit.cloned().map(|resolved| (resolved, false))
-                .ok_or_else(|| "cannot infer Promise type without a resolve parameter".into());
+            // Without a type argument nothing can resolve the promise: `Promise<void>`.
+            return Ok((explicit.cloned().unwrap_or(HirType::Void), false));
         };
         let resolve_binding = match resolve_binding {
             Pat::Ident(binding) => binding,
@@ -1360,8 +1360,8 @@ impl<'a> FnLowerer<'a> {
             // value some other way this static scan can't see.
             return Ok((HirType::Void, false));
         }
-        Err("cannot infer Promise type because the executor has no resolvable `resolve(value)` call"
-            .into())
+        // `resolve` is never called or passed on (`new Promise((_, reject) => ...)`): it can only reject.
+        Ok((HirType::Void, false))
     }
 }
 
