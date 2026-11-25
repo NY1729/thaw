@@ -362,7 +362,7 @@ fn caught_errors_expose_message_name_and_instanceof() {
     "#;
     assert_eq!(
         compile_and_run(source, "caught_error_properties"),
-        "wrong type\nTypeError\nTypeError: wrong type\ntrue\ntrue\nfalse\nplain string\nError\nError: plain string\nfalse\nfalse\n"
+        "wrong type\nTypeError\nTypeError: wrong type\n    at main (input.ts:2:9)\ntrue\ntrue\nfalse\nplain string\nError\nError: plain string\n    at <anonymous>\nfalse\nfalse\n"
     );
 }
 
