@@ -2785,49 +2785,72 @@ const PROMISE_PRELUDE: &str = r#"
       function (v) { return P.resolve(f()).then(function () { return v; }); },
       function (e) { return P.resolve(f()).then(function () { throw e; }); });
   });
-  function items(it) {
-    var out = [];
-    for (var x of it) out.push(x);
-    return out;
+  // The spec's combinator shape: `resolve` is read once before iterating, the iterable is stepped lazily, a
+  // throw anywhere rejects (the executor throws) and the for-of closes the iterator.
+  function resolver(C) {
+    var resolve = C.resolve;
+    if (typeof resolve !== 'function') throw new TypeError('Promise resolve or reject function is not callable');
+    return function (x) { return resolve.call(C, x); };
+  }
+  // `new C(executor)` for the receiver C; a throw in the body (also after a for-of closed the iterator) rejects.
+  function combine(C, name, body) {
+    if (C === null || (typeof C !== 'object' && typeof C !== 'function')) throw new TypeError('Promise.' + name + ' called on non-object');
+    return new C(function (res, rej) {
+      try { body(res, rej, resolver(C)); } catch (e) { rej(e); }
+    });
   }
   def(P, 'all', function (it) {
-    return new P(function (res, rej) {
-      var xs = items(it), n = xs.length, out = [], left = n;
-      if (n === 0) { res(out); return; }
-      xs.forEach(function (x, i) {
-        out.push(undefined);
-        P.resolve(x).then(function (v) { out[i] = v; if (--left === 0) res(out); }, rej);
-      });
+    return combine(this, 'all', function (res, rej, resolve) {
+      var out = [], left = 1, i = 0;
+      for (var x of it) {
+        (function (i) {
+          var done = false;
+          out.push(undefined);
+          left++;
+          resolve(x).then(function (v) { if (done) return; done = true; out[i] = v; if (--left === 0) res(out); }, rej);
+        })(i++);
+      }
+      if (--left === 0) res(out);
     });
   });
   def(P, 'allSettled', function (it) {
-    return new P(function (res) {
-      var xs = items(it), n = xs.length, out = [], left = n;
-      if (n === 0) { res(out); return; }
-      xs.forEach(function (x, i) {
-        out.push(undefined);
-        P.resolve(x).then(
-          function (v) { out[i] = { status: 'fulfilled', value: v }; if (--left === 0) res(out); },
-          function (e) { out[i] = { status: 'rejected', reason: e }; if (--left === 0) res(out); });
-      });
+    return combine(this, 'allSettled', function (res, rej, resolve) {
+      var out = [], left = 1, i = 0;
+      for (var x of it) {
+        (function (i) {
+          var done = false;
+          out.push(undefined);
+          left++;
+          resolve(x).then(
+            function (v) { if (done) return; done = true; out[i] = { status: 'fulfilled', value: v }; if (--left === 0) res(out); },
+            function (e) { if (done) return; done = true; out[i] = { status: 'rejected', reason: e }; if (--left === 0) res(out); });
+        })(i++);
+      }
+      if (--left === 0) res(out);
     });
   });
   def(P, 'race', function (it) {
-    return new P(function (res, rej) {
-      items(it).forEach(function (x) { P.resolve(x).then(res, rej); });
+    return combine(this, 'race', function (res, rej, resolve) {
+      for (var x of it) resolve(x).then(res, rej);
     });
   });
   def(P, 'any', function (it) {
-    return new P(function (res, rej) {
-      var xs = items(it), n = xs.length, errs = [], left = n;
-      if (n === 0) { rej(new AE([], 'All promises were rejected')); return; }
-      xs.forEach(function (x, i) {
-        errs.push(undefined);
-        P.resolve(x).then(res, function (e) {
-          errs[i] = e;
-          if (--left === 0) rej(new AE(errs, 'All promises were rejected'));
-        });
-      });
+    return combine(this, 'any', function (res, rej, resolve) {
+      var errs = [], left = 1, i = 0;
+      for (var x of it) {
+        (function (i) {
+          var done = false;
+          errs.push(undefined);
+          left++;
+          resolve(x).then(res, function (e) {
+            if (done) return;
+            done = true;
+            errs[i] = e;
+            if (--left === 0) rej(new AE(errs, 'All promises were rejected'));
+          });
+        })(i++);
+      }
+      if (--left === 0) rej(new AE(errs, 'All promises were rejected'));
     });
   });
   def(P, 'withResolvers', function () {

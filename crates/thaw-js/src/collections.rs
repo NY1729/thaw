@@ -380,6 +380,100 @@ impl Interp {
         }
     }
 
+    /// Whether `Array.prototype[Symbol.iterator]` and `%ArrayIteratorPrototype%.next` are the originals, so an
+    /// array may be read directly instead of through its iterator (`__thaw_array_iter_intact`, extras.rs).
+    pub(crate) fn array_iter_intact(&mut self) -> bool {
+        let global = self.global.clone();
+        match self.lookup(&global, "__thaw_array_iter_intact") {
+            Some(f) if f.is_callable() => self
+                .call(&f, &Value::Undefined, &[])
+                .map(|v| v.truthy())
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Steps `v`'s iterator, calling `f` on each value; when `f` throws, the iterator is closed (`return()` once,
+    /// its own error dropped) and that error propagates. `Ok(false)`: `v` has no iterator, nothing was called.
+    /// A plain array is read directly only while its iteration protocol is unmodified.
+    pub(crate) fn for_each_iterated(
+        &mut self,
+        v: &Value,
+        f: &mut dyn FnMut(&mut Interp, Value) -> R<()>,
+    ) -> R<bool> {
+        let is_array = matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
+        if !is_array || self.array_iter_intact() {
+            if let Some(items) = self.iter_items(v) {
+                for x in items {
+                    f(self, x)?;
+                }
+                return Ok(true);
+            }
+        }
+        let Some((iter, next)) = self.get_iterator(v)? else {
+            return Ok(false);
+        };
+        loop {
+            let r = self.call(&next, &iter, &[])?;
+            if !matches!(r, Value::Object(_)) {
+                return self.throw_error("TypeError", "Iterator result is not an object");
+            }
+            if self.get(&r, "done")?.truthy() {
+                return Ok(true);
+            }
+            let value = self.get(&r, "value")?;
+            if let Err(e) = f(self, value) {
+                self.close_iterator(&iter);
+                return Err(e);
+            }
+        }
+    }
+
+    /// `new Map(iterable)` / `new Set(iterable)`: feeds each value through `adder` called on `target`.
+    /// `entries`: the values must be entry objects whose `0` and `1` are the adder's arguments.
+    fn fill_collection(
+        &mut self,
+        target: &Value,
+        src: &Value,
+        adder_name: &str,
+        entries: bool,
+    ) -> R<()> {
+        if matches!(src, Value::Undefined | Value::Null) {
+            return Ok(());
+        }
+        let adder = self.get(target, adder_name)?;
+        if !adder.is_callable() {
+            let shown = self.inspect(&adder, false);
+            return self.throw_error(
+                "TypeError",
+                &format!(
+                    "'{shown}' returned for property '{adder_name}' of object is not a function"
+                ),
+            );
+        }
+        let found = self.for_each_iterated(src, &mut |it, item| {
+            if !entries {
+                it.call(&adder, target, &[item])?;
+                return Ok(());
+            }
+            if !matches!(item, Value::Object(_)) || crate::is_symbol_object(&item) {
+                let shown = it.inspect(&item, false);
+                return it.throw_error(
+                    "TypeError",
+                    &format!("Iterator value {shown} is not an entry object"),
+                );
+            }
+            let (k, v) = (it.get(&item, "0")?, it.get(&item, "1")?);
+            it.call(&adder, target, &[k, v])?;
+            Ok(())
+        })?;
+        if !found {
+            let shown = self.inspect(src, false);
+            return self.throw_error("TypeError", &format!("{shown} is not iterable"));
+        }
+        Ok(())
+    }
+
     /// `(iterator, next)` of a `Symbol.iterator` iterable; `None` if it has no iterator method.
     pub(crate) fn get_iterator(&mut self, iterable: &Value) -> R<Option<(Value, Value)>> {
         if !matches!(iterable, Value::Object(_)) {
@@ -563,18 +657,9 @@ impl Interp {
         let map = self.native({
             let mp = mp.clone();
             move |it, _, args| {
-                let mut entries = MapData::default();
-                if let Some(items) = it.iter_protocol(&arg(args, 0))? {
-                    for item in items {
-                        let kv = it.iter_items(&item).unwrap_or_default();
-                        let (k, v) = (
-                            kv.first().cloned().unwrap_or(Value::Undefined),
-                            kv.get(1).cloned().unwrap_or(Value::Undefined),
-                        );
-                        entries.set(k, v);
-                    }
-                }
-                Ok(Value::Object(new_obj(Some(mp.clone()), Kind::Map(entries))))
+                let obj = Value::Object(new_obj(Some(mp.clone()), Kind::Map(MapData::default())));
+                it.fill_collection(&obj, &arg(args, 0), "set", true)?;
+                Ok(obj)
             }
         });
         if let Value::Object(m) = &map {
@@ -664,11 +749,9 @@ impl Interp {
         let set = self.native({
             let sp = sp.clone();
             move |it, _, args| {
-                let mut items = SetData::default();
-                for v in it.iter_protocol(&arg(args, 0))?.unwrap_or_default() {
-                    items.add(v);
-                }
-                Ok(Value::Object(new_obj(Some(sp.clone()), Kind::Set(items))))
+                let obj = Value::Object(new_obj(Some(sp.clone()), Kind::Set(SetData::default())));
+                it.fill_collection(&obj, &arg(args, 0), "add", false)?;
+                Ok(obj)
             }
         });
         if let Value::Object(s) = &set {
