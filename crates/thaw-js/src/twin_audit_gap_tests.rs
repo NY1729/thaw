@@ -1,4 +1,4 @@
-//! Regression tests for gaps the QuickJS-twin audit found in thaw-js: Blob/File conversion order, brand checks and
+//! Regression tests for gaps the Node-twin audit found in thaw-js: Blob/File conversion order, brand checks and
 //! private state, WebAssembly argument typing, EventTarget / URL details. Each program prints lines joined with `|`;
 //! the expected text is the output of real Node 22 for the same program.
 

@@ -12,7 +12,7 @@ async function main(): Promise<void> {
   line("compareOk", compareSync("password123", h));
   line("compareBad", compareSync("wrong", h));
   line("unicode", hashSync("pässwörd-日本", SALT));
-  // WORKLOAD: N=40 cost-4 hashes; each bcrypt hash is pure-JS and expensive under QuickJS. Estimate only.
+  // WORKLOAD: N=40 cost-4 hashes; each bcrypt hash is pure-JS and expensive in the interpreter.
   const N = 40;
   let acc = 0;
   for (let i = 0; i < N; i++) {

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       program:
-        description: corpus program name (tools/quickjs-removal/corpus/pk/<name>.ts)
+        description: corpus program name (tools/corpus/corpus/pk/<name>.ts)
         default: bcryptjs
       iterations:
         description: number of back-to-back runs of the binary inside one profile (perf only)
@@ -135,9 +135,9 @@ jobs:
           [[ "$PROGRAM" =~ ^[a-z0-9-]+$ ]] || { echo "bad program name: $PROGRAM" >&2; exit 1; }
           [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || { echo "bad iterations: $ITERATIONS" >&2; exit 1; }
           [[ -z "$WORKLOAD_N" || "$WORKLOAD_N" =~ ^[1-9][0-9]*$ ]] || { echo "bad workload_n: $WORKLOAD_N" >&2; exit 1; }
-          spec=$(awk -v p="$PROGRAM" '$1 == p { $1 = ""; print substr($0, 2) }' tools/quickjs-removal/corpus/versions.txt)
+          spec=$(awk -v p="$PROGRAM" '$1 == p { $1 = ""; print substr($0, 2) }' tools/corpus/corpus/versions.txt)
           [ -n "$spec" ] || { echo "no versions.txt entry for $PROGRAM" >&2; exit 1; }
-          src="$GITHUB_WORKSPACE/tools/quickjs-removal/corpus/pk/$PROGRAM.ts"
+          src="$GITHUB_WORKSPACE/tools/corpus/corpus/pk/$PROGRAM.ts"
           [ -f "$src" ] || { echo "no corpus program $src" >&2; exit 1; }
           proj="$RUNNER_TEMP/proj"; mkdir -p "$proj" "$RUNNER_TEMP/out"; cd "$proj"
           echo '{"name":"t","version":"1.0.0"}' > package.json

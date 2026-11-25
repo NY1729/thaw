@@ -2,7 +2,7 @@
 
 Question: how much of the interpreter time could a JIT or a JS->HIR clone absorb?
 
-For each of the 24 corpus programs (`tools/quickjs-removal/corpus/pk`), the workflow builds the program
+For each of the 24 corpus programs (`tools/corpus/corpus/pk`), the workflow builds the program
 twice with the thaw CLI and profiles both binaries:
 
 - `default`: as shipped (thaw-js is the default engine).
@@ -16,7 +16,7 @@ Interpreter share is `interp_ms / wall_ms` of that total line.
 ## Files
 
 - `collect.sh OUT_DIR`: fetch (`thaw add`), Node reference, both builds, timed rounds, profiled run. Its fetch
-  and comparison steps are those of `tools/quickjs-removal/measure.sh`; it is a separate script so the shared
+  and comparison steps are those of `tools/corpus/measure.sh`; it is a separate script so the shared
   harness is not changed.
 - `run.py LOGS_DIR [--out-dir DIR]`: stdlib only. Writes `jit-coverage.tsv` (one row per program and variant)
   and `jit-coverage.md` (per-program table and corpus-level numbers), and prints the Markdown.

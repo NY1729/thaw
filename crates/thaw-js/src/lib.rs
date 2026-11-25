@@ -3311,8 +3311,8 @@ impl Interp {
                 // an inherited or own read-only data property refuses the write
                 let mut cur = Some(o.clone());
                 while let Some(c) = cur {
-                    if let Some(p) = c.raw_props.borrow().iter().find(|p| &*p.key == key) {
-                        if !p.writable {
+                    if let Some(w) = c.position(key).map(|i| c.raw_props.borrow()[i].writable) {
+                        if !w {
                             return self.refuse_write(strict, o, key, Refusal::ReadOnly);
                         }
                         break;
@@ -6864,6 +6864,10 @@ mod napi_symbols_tests;
 mod native_recursion_tests;
 #[cfg(test)]
 mod net_tests;
+#[cfg(all(test, unix))]
+mod node_twin_rest_tests;
+#[cfg(test)]
+mod node_twin_tests;
 #[cfg(test)]
 mod process_env_tests;
 #[cfg(test)]
@@ -6876,10 +6880,6 @@ mod prop_configurable_tests;
 mod prop_get_tests;
 #[cfg(test)]
 mod proxy_trap_tests;
-#[cfg(all(test, unix))]
-mod quickjs_twin_rest_tests;
-#[cfg(test)]
-mod quickjs_twin_tests;
 #[cfg(test)]
 mod regexp_proto_tests;
 #[cfg(test)]

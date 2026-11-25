@@ -480,7 +480,7 @@ pub(crate) fn enabled() -> bool {
 
 /// The automatic trigger's floor: a collection is due once a registry list holds this many live nodes (then at
 /// `max(floor, 2 x live)` after each attempt, so a growing live set collects O(log n) times).
-const AUTO_FLOOR: usize = 50_000;
+const AUTO_FLOOR: usize = 15_000;
 
 /// `THAW_JS_GC` and `THAW_JS_GC_STRESS`, read once per process.
 fn env_policy() -> (bool, Option<u32>) {

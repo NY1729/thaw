@@ -375,3 +375,27 @@ fn gc_trigger_stress_seven_flat_probes() {
         check_invariants().unwrap();
     }
 }
+
+#[test]
+fn gc_trigger_default_floor_collects_cycles_and_keeps_live_data() {
+    force_enabled();
+    let mut it = Interp::new();
+    stress_for_test(None);
+    // Re-arm at the production floor so a lower floor is exercised, not a test-set threshold.
+    arm(15_000);
+    let c0 = collections();
+    run(
+        &mut it,
+        "var keep=[]; for(let i=0;i<20;i++) keep.push({i, self:null}); keep.forEach(o=>o.self=o);
+         function mk(){ var o={}; o.f=()=>o; return o } for(let i=0;i<100000;i++) mk();",
+    );
+    assert!(collections() > c0, "the lowered floor never collected");
+    let (objs, _) = counts();
+    assert!(objs < 60_000, "cycles were not freed: {objs} live objects");
+    assert_eq!(num(&run(&mut it, "keep.length")), 20.0);
+    assert_eq!(
+        num(&run(&mut it, "keep.every((o,i)=>o.i===i&&o.self===o)?1:0")),
+        1.0
+    );
+    check_invariants().unwrap();
+}

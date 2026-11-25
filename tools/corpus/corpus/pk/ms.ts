@@ -1,6 +1,6 @@
 import ms from "ms";
 // default import: ms is CJS with a default-only export (measure.sh sed rewrite does not apply).
-// Workload N calibrated on Node (~8 ms in-process workload); QuickJS ratio is an estimate, no QuickJS run possible.
+// Workload N calibrated on Node (~8 ms in-process workload).
 function line(label: string, v: unknown): void {
   console.log(label + ":" + (typeof v === "string" ? v : JSON.stringify(v)));
 }
