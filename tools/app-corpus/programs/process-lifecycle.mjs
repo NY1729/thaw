@@ -1,0 +1,21 @@
+// Process lifecycle: exit hooks, exitCode, stderr output, env, argv, cwd, hrtime, memoryUsage shape.
+process.on('exit', (code) => console.log('exit hook, code', code, process.exitCode));
+process.on('beforeExit', () => console.log('beforeExit'));
+console.log(process.argv.length, typeof process.argv[0], process.argv.slice(2));
+console.log(typeof process.pid, process.platform, typeof process.version, process.versions.node.split('.').length);
+console.log(process.env.TZ, process.env.DEFINITELY_UNSET, 'HOME' in process.env);
+process.env.FOO = 42;
+console.log(typeof process.env.FOO, process.env.FOO, delete process.env.FOO, process.env.FOO);
+const t = process.hrtime.bigint();
+console.log(typeof t, process.hrtime()[0] >= 0, typeof process.uptime(), Object.keys(process.memoryUsage()).sort());
+console.error('this goes to stderr');
+console.warn('so does this');
+process.stdout.write('no newline');
+process.stdout.write(' -- then newline\n');
+console.table([{ a: 1, b: 'x' }, { a: 2, b: 'y' }]);
+console.group('group');
+console.log('indented');
+console.groupEnd();
+console.assert(1 === 2, 'assertion shown on stderr');
+process.exitCode = 3;
+setTimeout(() => console.log('timer before exit'), 10);

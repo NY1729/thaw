@@ -1,0 +1,115 @@
+name: app-corpus
+
+# Non-gating: application-style programs (tools/app-corpus) built with `thaw build` and compared with Node 22.
+# Reports NEW failures against tools/app-corpus/known-gaps.tsv and the BUILD-FAIL count in the step summary; nothing
+# here fails a build. Runs on demand, or on a pull request carrying the `thaw-js-measure` label. Two shards
+# keep each job well under 15 minutes of program time; the build steps follow pkg-size.yml.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-corpus-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app-corpus:
+    name: App corpus vs Node (shard ${{ matrix.shard }}/2)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update reported an error (a broken mirror?), trying the install with the cached package lists" >&2;
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev time; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-${{ runner.arch }}-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: jsengine-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            jsengine-corpus-${{ runner.os }}-
+      - name: Build thaw CLI (release)
+        run: cargo build --release -p thaw-cli
+      - name: Driver selftest
+        run: bash tools/app-corpus/selftest.sh
+      - name: Run the corpus (non-gating: a failing step is shown as a warning, the job stays green)
+        continue-on-error: true
+        env:
+          THAW: ${{ github.workspace }}/target/release/thaw
+          APP_CORPUS_OUT: ${{ runner.temp }}/app-corpus-out
+        run: bash tools/app-corpus/run.sh --shard ${{ matrix.shard }}/2
+      - name: Print summary
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/app-corpus-out"
+          {
+            echo "### app-corpus shard ${{ matrix.shard }}/2"
+            echo '```'; cat "$out/summary.txt" 2>/dev/null; echo '```'
+            echo '```'; column -t -s$'\t' "$out/report.tsv" 2>/dev/null; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-corpus-${{ matrix.shard }}
+          path: ${{ runner.temp }}/app-corpus-out
+          if-no-files-found: ignore

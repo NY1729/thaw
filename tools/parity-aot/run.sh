@@ -9,7 +9,7 @@
 #   PARITY_AOT_BUILD_WRAP  optional command prefix for each build, e.g. a systemd-run slice with MemoryMax
 #   PARITY_AOT_RUN_TIMEOUT / PARITY_AOT_BUILD_TIMEOUT  seconds (defaults 20 / 900)
 #   PARITY_AOT_FAMILIES  optional comma list: generate only these families (CI shards); coverage then skips its ratchet
-#   PARITY_AOT_SUITE     ecmascript (default: gen_probes.py) or modules (gen_modules.py: node:* exports, no coverage run)
+#   PARITY_AOT_SUITE     ecmascript (default: gen_probes.py), boundary (gen_boundary.py) or modules (gen_modules.py: node:* exports, no coverage run)
 #   PARITY_AOT_DTS_DIR   modules only: dump of the module d.ts files (THAW_DUMP_DTS_DIR, see README "Module surface")
 #   PARITY_AOT_MODULES   modules only: module list file (default tools/parity-aot/modules.txt; a CI shard passes its subset)
 # Exit 0: harness ran (gaps and rejects are reported, not gated). Exit 2: harness error.
@@ -41,8 +41,21 @@ if [ "$SUITE" = modules ]; then
   rc=$?
   echo "summary: $OUT/summary.md"
   exit "$rc"
+elif [ "$SUITE" = boundary ]; then
+  # Boundary-value matrix (gen_boundary.py): node:* functions x argument shape x value origin. PARITY_AOT_MODULES is a
+  # comma list of module keys here (default all), PARITY_AOT_BOUNDARY_PROFILE full|ci. Own known-gaps file.
+  python3 "$HERE/gen_boundary.py" "$OUT/programs" ${PARITY_AOT_MODULES:+--modules "$PARITY_AOT_MODULES"} \
+    --profile "${PARITY_AOT_BOUNDARY_PROFILE:-full}" > "$OUT/gen_boundary.log" 2>&1 \
+    || { echo "harness error: gen_boundary.py failed (see $OUT/gen_boundary.log)" >&2; exit 2; }
+  PARITY_AOT_RLIMIT_AS_MB=${PARITY_AOT_RLIMIT_AS_MB:-8192} python3 "$HERE/aot_run.py" --programs "$OUT/programs" \
+    --out "$OUT" --thaw "$THAW" --node "$NODE" --engines "$ENGINES" --jobs "$JOBS" \
+    --baseline "$HERE/known-gaps-boundary.json" "${WRITE[@]}"
+  rc=$?
+  python3 "$HERE/boundary_report.py" "$OUT" > "$OUT/boundary_report.log" 2>&1 || echo "boundary_report: exit $?" >&2
+  echo "summary: $OUT/boundary.md"
+  exit "$rc"
 elif [ "$SUITE" != ecmascript ]; then
-  echo "harness error: PARITY_AOT_SUITE must be ecmascript or modules" >&2; exit 2
+  echo "harness error: PARITY_AOT_SUITE must be ecmascript, modules or boundary" >&2; exit 2
 fi
 
 python3 "$HERE/gen_probes.py" "$OUT/programs" ${PARITY_AOT_FAMILIES:+--families "$PARITY_AOT_FAMILIES"} || { echo "harness error: gen_probes.py failed" >&2; exit 2; }

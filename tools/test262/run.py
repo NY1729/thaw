@@ -17,9 +17,14 @@ SKIP = {'Atomics.waitAsync', 'resizable-arraybuffer', 'Temporal', 'ShadowRealm',
         'async-iteration-x', 'host-gc-required', 'import-attributes', 'source-phase-imports', 'json-modules',
         'Intl.DurationFormat'}
 SKIP_SRC = ['$262.agent', 'createRealm', 'IsHTMLDDA']
+# NOTE: $262.evalScript is an indirect eval: thaw-js-node runs the test as a plain script (no `require`, no `vm` global), so a real Script
+# evaluation (global lexical declarations persisting across calls) is not available; the few tests that need it (global-code/script-decl-*)
+# are recorded as known failures in the baseline until the runner gets a native evalScript.
 PRE = ("var print=console.log;var $262={global:globalThis,gc:function(){},evalScript:function(s){return (0,eval)(s)},"
        "detachArrayBuffer:function(b){b.transfer()},agent:{},createRealm:function(){throw new Error('no realm')},"
-       "IsHTMLDDA:undefined};\n")
+       "IsHTMLDDA:undefined};\n"
+       # an unhandled rejection is not a test failure in the test262 host model (Node 22 would exit 1 on it)
+       "process.on('unhandledRejection',function(){});\n")
 T = os.environ.get('TEST262_DIR')
 HC = {}
 
