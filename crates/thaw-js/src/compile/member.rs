@@ -11,7 +11,7 @@ use super::expr::{self, combine, mk_ex};
 use super::gen::{reject, Gen, CG};
 use super::num::{self, Side};
 use super::{bx, Ex, Frame, CR};
-use crate::{bigint, put, Interp, Value, R};
+use crate::{bigint, Interp, Value, R};
 
 /// The property of a member expression or literal, decided at compile time.
 pub(crate) enum PropKey {
@@ -264,7 +264,7 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
             if *name_it {
                 crate::name_anonymous_fn(&v, &it.fn_name_of_key(&k));
             }
-            put(&obj, &k, v);
+            crate::put_rc(&obj, &k, v);
         }
         Ok(Value::Object(obj))
     }))

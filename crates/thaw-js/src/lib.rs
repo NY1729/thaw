@@ -1511,6 +1511,8 @@ pub struct Interp {
     /// so re-executing a declaration reuses one allocation. Per Interp: never shared across threads.
     // ponytail: grows with distinct declared names; eval-generated names are unbounded, cap it if that shows.
     names: std::collections::HashSet<Rc<str>, std::hash::BuildHasherDefault<FxHasher>>,
+    /// The shared `"prototype"` key: a function expression clones it instead of allocating.
+    proto_key: Rc<str>,
     /// Distinguishes source positions of different `run` calls (spans restart at 1 per parse).
     run_id: u32,
     /// Native bundles registered in this realm (`__thaw_register_native_bundle`); the next id is this + 1.
@@ -1705,6 +1707,7 @@ impl Interp {
             sources: FxMap::default(),
             loop_captures: FxMap::default(),
             names: Default::default(),
+            proto_key: Rc::from("prototype"),
             run_id: 0,
             native_bundles: 0,
             ident_hints: vec![hints::HintSlot::default()],
@@ -3758,7 +3761,7 @@ impl Interp {
                 &f,
                 &mut f.raw_props.borrow_mut(),
                 Prop {
-                    key: "prototype".into(),
+                    key: self.proto_key.clone(),
                     slot,
                     enumerable: false,
                     writable: true,
@@ -6471,6 +6474,16 @@ fn host_thread_stack_has_room(_sp: usize) -> bool {
 }
 
 pub(crate) fn put(o: &Obj, key: &str, value: Value) {
+    put_key(o, key, || key.into(), value)
+}
+
+/// `put` for a key that is already an `Rc<str>`: a new property shares it instead of allocating a copy.
+pub(crate) fn put_rc(o: &Obj, key: &Rc<str>, value: Value) {
+    put_key(o, key, || key.clone(), value)
+}
+
+#[inline]
+fn put_key(o: &Obj, key: &str, mk: impl FnOnce() -> Rc<str>, value: Value) {
     let pos = o.position(key);
     let mut props = o.raw_props.borrow_mut();
     match pos.map(|i| &mut props[i]) {
@@ -6479,7 +6492,7 @@ pub(crate) fn put(o: &Obj, key: &str, value: Value) {
             o,
             &mut props,
             Prop {
-                key: key.into(),
+                key: mk(),
                 slot: Slot::Data(value),
                 enumerable: true,
                 writable: true,
