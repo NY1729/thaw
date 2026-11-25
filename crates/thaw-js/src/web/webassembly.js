@@ -89,17 +89,16 @@
   };
 
   // ---- argument conversion -----------------------------------------------------------------------
-  const toCount = (value, label) => {
+  // WebIDL [EnforceRange] unsigned long: ToNumber (a BigInt throws), then a finite value in 0..2^32-1 truncated toward zero.
+  const { trunc: mathTrunc } = Math, numberIsFinite = Number.isFinite; // captured: a user valueOf may patch the globals
+  const enforceU32 = (value, fail) => {
+    if (typeof value === 'bigint') throw new TypeError(fail);
     const n = Number(value);
-    if (!Number.isFinite(n)) throw new TypeError(`${label} must be convertible to a valid number`);
-    if (n < 0) throw new TypeError(`${label} must be non-negative`);
-    return Math.trunc(n);
+    if (!numberIsFinite(n) || n <= -1 || n > 4294967295) throw new TypeError(fail);
+    return mathTrunc(n) + 0;
   };
-  const toU32 = (value, name, prefix) => {
-    const n = Number(value);
-    if (!Number.isFinite(n) || n < 0 || n > 4294967295) throw new TypeError(`${prefix}: Property '${name}' must be in the unsigned long range`);
-    return Math.trunc(n);
-  };
+  const toCount = (value, label) => enforceU32(value, `${label} must be convertible to a valid number`);
+  const toU32 = (value, name, prefix) => enforceU32(value, `${prefix}: Property '${name}' must be in the unsigned long range`);
   // Node's BufferSource is an ArrayBuffer or a TypedArray (not a DataView).
   const isBufferSource = (v) => v instanceof ArrayBuffer || (ArrayBuffer.isView(v) && !(v instanceof DataView));
   const bufferArg = (bytes, prefix) => {
@@ -303,11 +302,12 @@
     newCheck(new.target, 'Memory');
     const prefix = 'WebAssembly.Memory()';
     if (!isObject(descriptor)) throw new TypeError(`${prefix}: Argument 0 must be a memory descriptor`);
-    if (descriptor.initial === undefined) throw new TypeError(`${prefix}: Property 'initial' is required`);
-    const initial = toU32(descriptor.initial, 'initial', prefix);
+    const initialValue = descriptor.initial, maximumValue = descriptor.maximum, sharedValue = descriptor.shared;
+    if (initialValue === undefined) throw new TypeError(`${prefix}: Property 'initial' is required`);
+    const initial = toU32(initialValue, 'initial', prefix);
     if (initial > 65536) throw new RangeError(`${prefix}: Property 'initial': value ${initial} is above the upper bound 65536`);
-    const maximum = descriptor.maximum === undefined ? undefined : toU32(descriptor.maximum, 'maximum', prefix);
-    if (descriptor.shared === true && maximum === undefined) throw new TypeError(`${prefix}: If shared is true, maximum property should be defined.`);
+    const maximum = maximumValue === undefined ? undefined : toU32(maximumValue, 'maximum', prefix);
+    if (sharedValue === true && maximum === undefined) throw new TypeError(`${prefix}: If shared is true, maximum property should be defined.`);
     if (maximum !== undefined && maximum < initial) throw new RangeError(`${prefix}: Property 'maximum': value ${maximum} is below the lower bound ${initial}`);
     const handle = nat.memoryCreate(initial, maximum);
     memories.set(this, { handle });
@@ -349,9 +349,10 @@
     const prefix = 'WebAssembly.Table()';
     if (!isObject(descriptor)) throw new TypeError(`${prefix}: Argument 0 must be a table descriptor`);
     const element = elementType(String(descriptor.element));
-    if (descriptor.initial === undefined) throw new TypeError(`${prefix}: Property 'initial' is required`);
-    const initial = toU32(descriptor.initial, 'initial', prefix);
-    const maximum = descriptor.maximum === undefined ? undefined : toU32(descriptor.maximum, 'maximum', prefix);
+    const initialValue = descriptor.initial, maximumValue = descriptor.maximum;
+    if (initialValue === undefined) throw new TypeError(`${prefix}: Property 'initial' is required`);
+    const initial = toU32(initialValue, 'initial', prefix);
+    const maximum = maximumValue === undefined ? undefined : toU32(maximumValue, 'maximum', prefix);
     let init = arguments[1];
     if (element === 'anyfunc') init = funcArg(init === undefined ? null : init, `${prefix}: Argument 2 is invalid: ${FUNC_ARG}`);
     const handle = nat.tableCreate(element, initial, maximum, init);
@@ -367,13 +368,13 @@
     grow(delta) {
       const { handle, element } = tableOf(this, 'WebAssembly.Table.grow()');
       const count = toCount(delta, 'WebAssembly.Table.grow(): Argument 0');
-      const init = element === 'anyfunc' ? funcArg(arguments[1] === undefined ? null : arguments[1], `WebAssembly.Table.grow(): Argument 1 is invalid: ${FUNC_ARG}`) : arguments[1];
+      const init = element === 'anyfunc' ? funcArg(arguments.length < 2 ? null : arguments[1], `WebAssembly.Table.grow(): Argument 1 is invalid: ${FUNC_ARG}`) : arguments[1];
       return nat.tableGrow(handle, count, init);
     },
     set(index) {
       const { handle, element } = tableOf(this, 'WebAssembly.Table.set()');
       const at = toCount(index, 'WebAssembly.Table.set(): Argument 0');
-      const value = element === 'anyfunc' ? funcArg(arguments[1] === undefined ? null : arguments[1], `WebAssembly.Table.set(): Argument 1 is invalid for table: ${FUNC_ARG}`) : arguments[1];
+      const value = element === 'anyfunc' ? funcArg(arguments.length < 2 ? null : arguments[1], `WebAssembly.Table.set(): Argument 1 is invalid for table: ${FUNC_ARG}`) : arguments[1];
       nat.tableSet(handle, at, value);
       return undefined;
     },
@@ -406,9 +407,10 @@
     newCheck(new.target, 'Global');
     const prefix = 'WebAssembly.Global()';
     if (!isObject(descriptor)) throw new TypeError(`${prefix}: Argument 0 must be a global descriptor`);
+    const mutable = Boolean(descriptor.mutable);
     const type = elementType(String(descriptor.value));
     const value = type === 'anyfunc' ? funcArg(arguments[1] === undefined ? null : arguments[1], `${prefix}: ${FUNC_ARG}`) : arguments[1];
-    const handle = nat.globalCreate(type, Boolean(descriptor.mutable), value);
+    const handle = nat.globalCreate(type, mutable, value);
     globals.set(this, { handle, type });
     globalCache.set(handle, this);
   }
