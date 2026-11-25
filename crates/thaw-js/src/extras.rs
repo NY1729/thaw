@@ -635,8 +635,10 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       if (seen.has(v)) return seen.get(v);
       if (isPort(v)) throw cloneErr(v.__thawClosed ? 'Cannot clone object of unsupported type.' : 'Object that needs transfer was found in message but not listed in transferList');
       var out;
-      if (__thaw_is_proxy(v)) throw dataCloneError((Array.isArray(v) ? '[object Array]' : '#<Object>') + ' could not be cloned.');
-      if (v instanceof WeakMap || v instanceof WeakSet || v instanceof WeakRef || v instanceof Promise) throw dataCloneError('#<' + v.constructor.name + '> could not be cloned.');
+      if (__thaw_is_proxy(v)) { var pa = false; try { pa = Array.isArray(v); } catch (e) {} throw dataCloneError((pa ? '[object Array]' : '#<Object>') + ' could not be cloned.'); }
+      // brand checks (not instanceof / .constructor): a reset prototype or a getter must neither hide nor be read
+      var vb = __thaw_brand(v);
+      if (vb === 'WeakMap' || vb === 'WeakSet' || vb === 'WeakRef' || vb === 'Promise') throw dataCloneError((Object.getPrototypeOf(v) === null ? '[object ' + (vb === 'WeakMap' || vb === 'WeakSet' ? vb : 'Object') + ']' : '#<' + vb + '>') + ' could not be cloned.');
       var boxed = v instanceof Number ? Number.prototype.valueOf : v instanceof String ? String.prototype.valueOf : v instanceof Boolean ? Boolean.prototype.valueOf : v instanceof BigInt ? BigInt.prototype.valueOf : null;
       if (boxed) { out = Object(boxed.call(v)); seen.set(v, out); return out; }
       if (Array.isArray(v)) { out = []; seen.set(v, out); for (var i = 0; i < v.length; i++) out[i] = clone(v[i]); return out; }
@@ -644,6 +646,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       if (v instanceof RegExp) { out = new RegExp(v.source, v.flags); seen.set(v, out); return out; }
       if (v instanceof Map) { out = new Map(); seen.set(v, out); v.forEach(function (x, k) { out.set(clone(k), clone(x)); }); return out; }
       if (v instanceof Set) { out = new Set(); seen.set(v, out); v.forEach(function (x) { out.add(clone(x)); }); return out; }
+      if (typeof globalThis.__thaw_blob_clone === 'function') { out = globalThis.__thaw_blob_clone(v); if (out) { seen.set(v, out); return out; } }
       var backing = v instanceof DataView || ArrayBuffer.isView(v) ? v.buffer : v;
       if (backing instanceof ArrayBuffer && detGet.call(backing)) {
         var dce = typeof DOMException === 'function' ? new DOMException('An ArrayBuffer is detached and could not be cloned.', 'DataCloneError') : new Error('An ArrayBuffer is detached and could not be cloned.');
@@ -657,10 +660,13 @@ pub(crate) const EXTRAS_LATE: &str = r#"
         seen.set(v, out); return out;
       }
       if (v instanceof DataView) { var cb = clone(v.buffer); out = new DataView(cb, v.byteOffset, v.__track ? undefined : v.byteLength); seen.set(v, out); return out; }
-      if (ArrayBuffer.isView(v) && v.buffer instanceof SharedArrayBuffer) { out = new v.constructor(clone(v.buffer), v.byteOffset, v.length); seen.set(v, out); return out; }
-      // a view over a resizable buffer keeps its length tracking (the clone's buffer is resizable too)
-      if (ArrayBuffer.isView(v) && v.buffer instanceof ArrayBuffer && v.buffer.resizable) { out = new v.constructor(clone(v.buffer), v.byteOffset, __thaw_ta_track(v) ? undefined : v.length); seen.set(v, out); return out; }
-      if (ArrayBuffer.isView(v)) { out = new v.constructor(v); seen.set(v, out); return out; }
+      // a typed array clones to the intrinsic type (a Buffer becomes a Uint8Array) over the clone of its whole backing
+      // buffer, so views of one buffer keep sharing a single copy; a view over a resizable buffer keeps its tracking
+      if (ArrayBuffer.isView(v)) {
+        var Ctor = globalThis[vb] || v.constructor;
+        var track = v.buffer instanceof ArrayBuffer && v.buffer.resizable && __thaw_ta_track(v);
+        out = new Ctor(clone(v.buffer), v.byteOffset, track ? undefined : v.length); seen.set(v, out); return out;
+      }
       // an uncloneable object is refused as a plain object or an Error (Node: the Date, Map, Array, RegExp, typed-array,
       // ArrayBuffer and boxed-primitive cases still clone)
       if (v instanceof Error) {

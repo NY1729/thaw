@@ -230,3 +230,16 @@ fn set_property_graph_writes_the_napi_wire_lone_surrogate() {
     assert!(result.error.is_null());
     assert_eq!(eval("NapiSetTarget.k.length === 1"), "true");
 }
+
+#[test]
+fn graph_bigint_token_needs_the_full_canonical_decimal() {
+    // a lenient string-to-BigInt parse would accept whitespace, line terminators, a plus sign and leading zeros
+    assert_eq!(
+        eval(
+            r#"(() => { const decode = text => __thaw_json_graph_decode({ root: { bi: text }, nodes: [] });
+  const bad = ['1\n', '1\r', '1 ', '01', '-0', '+1', '', '-', ' 1'].map(t => { try { decode(t); return false; } catch (e) { return e instanceof TypeError; } });
+  return [String(decode('9007199254740993')), String(decode('-12')), String(decode('0')), ...bad]; })()"#
+        ),
+        r#"["9007199254740993","-12","0",true,true,true,true,true,true,true,true,true]"#
+    );
+}

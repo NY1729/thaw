@@ -136,15 +136,20 @@ impl Callbacks<'_> {
             0 => Ok(Vec::new()),
             1 => Ok(vec![to_wasm(self.it, &self.shared.rt, &ret, results[0])?]),
             n => {
-                if !matches!(ret, Value::Object(_)) {
+                // any iterable yields the results, drained once (not an array-like)
+                let Some(items) = self.it.iter_protocol(&ret)? else {
                     return self
                         .it
                         .throw_error("TypeError", "multi-return value must be iterable");
+                };
+                if items.len() != n {
+                    return self
+                        .it
+                        .throw_error("TypeError", "multi-return length mismatch");
                 }
                 let mut out = Vec::with_capacity(n);
-                for (i, ty) in results.iter().enumerate() {
-                    let item = self.it.get(&ret, &i.to_string())?;
-                    out.push(to_wasm(self.it, &self.shared.rt, &item, *ty)?);
+                for (item, ty) in items.iter().zip(results.iter()) {
+                    out.push(to_wasm(self.it, &self.shared.rt, item, *ty)?);
                 }
                 Ok(out)
             }
@@ -285,10 +290,10 @@ fn wrap_i64(big: &BigInt) -> i64 {
 /// callers must not hold a store or `Rt` borrow across this.
 fn to_wasm(it: &mut Interp, rt: &RefCell<Rt>, v: &Value, ty: ValType) -> R<Val> {
     Ok(match ty {
-        ValType::I32 => Val::I32(to_int32(it.num(v))),
+        ValType::I32 => Val::I32(to_int32(it.tonum(v)?)),
         ValType::I64 => Val::I64(wrap_i64(&it.bigint_element_of(v)?)),
-        ValType::F32 => Val::F32(it.num(v) as f32),
-        ValType::F64 => Val::F64(it.num(v)),
+        ValType::F32 => Val::F32(it.tonum(v)? as f32),
+        ValType::F64 => Val::F64(it.tonum(v)?),
         ValType::V128 => return it.throw_error("TypeError", INCOMPAT),
         ValType::FuncRef => match v {
             Value::Null => Val::FuncRef(None),

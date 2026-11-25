@@ -161,7 +161,18 @@
         if (callback == null) return;
         const listeners = liveRecords(this, name);
         if (apply(arraySome, listeners,
-          [entry => entry.callback === callback && entry.capture === capture])) return;
+          [entry => entry.callback === callback && entry.capture === capture])) {
+          // Node still arms the signal: aborting it removes the equal (callback, capture) listener already registered
+          // ponytail: the abort algorithm stays on the signal until it fires (no bookkeeping to cancel it)
+          if (signalState) {
+            eventListenerSignalBridge.add(signalState, () => {
+              const existing = apply(arrayFind, liveRecords(this, name),
+                [item => item.callback === callback && item.capture === capture]);
+              if (existing) removeEventListenerRecord(this, name, existing);
+            });
+          }
+          return;
+        }
         const entry = { callback, capture, once, passive };
         if (!mapRead(this.__thawListeners, name)) mapWrite(this.__thawListeners, name, listeners);
         apply(arrayPush, listeners, [entry]);
@@ -185,7 +196,10 @@
         if (!(event instanceof Event)) throw new TypeError('expected an Event');
         const state = eventStateOf(event);
         if (state.dispatching) {
-          throw new NativeDOMException('The event is already being dispatched', 'InvalidStateError');
+          // Node: a plain Error (code ERR_EVENT_RECURSION), not a DOMException
+          const recursion = new Error(`The event "${event.type}" is already being dispatched`);
+          recursion.code = 'ERR_EVENT_RECURSION';
+          throw recursion;
         }
         state.dispatching = true;
         let result;
@@ -194,10 +208,12 @@
         try {
           const type = event.type;
           state.target = this;
-          state.immediateStopped = false;
           const listeners = apply(arraySlice, liveRecords(this, type), []);
           for (const entry of listeners) {
             // ponytail: scan the live list; use removal flags if dispatch lists grow large.
+            // Node keeps the stop-immediately flag across dispatches of one event object, so a stopped event
+            // runs no listener when it is dispatched again
+            if (state.immediateStopped) break;
             if (!apply(arrayIncludes, liveRecords(this, type), [entry])) continue;
             if (entry.once) removeEventListenerRecord(this, type, entry);
             state.inPassiveListener = entry.passive;
@@ -213,7 +229,6 @@
           thrown = true;
           firstError = error;
         } finally {
-          state.immediateStopped = false;
           state.inPassiveListener = false;
           state.dispatching = false;
         }

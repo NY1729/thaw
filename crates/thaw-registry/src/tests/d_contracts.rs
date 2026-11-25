@@ -357,6 +357,25 @@ return out;
 }
 
 #[test]
+fn d_child_kill_accepts_only_the_linux_signal_table() {
+    // expected: node22
+    assert_eq!(
+        p2c_run("d_child_kill_signals", r#####"const cp = require('node:child_process');
+const out = {};
+const c = cp.spawn('sleep', ['5']); c.on('error', () => {});
+const tryKill = (key, s) => { try { out[key] = c.kill(s); } catch (e) { out[key] = e.name + ':' + e.code + ':' + e.message; } };
+tryKill('n64', 64); tryKill('n65', 65); tryKill('n32', 32); tryKill('frac', 1.5); tryKill('neg', -1); tryKill('numstr', '0'); tryKill('nul', null); tryKill('bool', true); tryKill('foo', 'SIGFOO');
+tryKill('zero', 0); tryKill('winch', 'SIGWINCH'); tryKill('lower', 'sigwinch'); tryKill('n28', 28); tryKill('urg', 'SIGURG'); tryKill('undef', undefined === 1 ? 0 : 'SIGCONT');
+const closed = new Promise(res => c.on('exit', (code, sig) => res(sig)));
+tryKill('kill', 'SIGKILL');
+out.exitSignal = await closed;
+return out;
+"#####),
+        r#####"{"n64":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: 64","n65":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: 65","n32":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: 32","frac":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: 1.5","neg":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: -1","numstr":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: 0","nul":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: null","bool":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: true","foo":"TypeError:ERR_UNKNOWN_SIGNAL:Unknown signal: SIGFOO","zero":true,"winch":true,"lower":true,"n28":true,"urg":true,"undef":true,"kill":true,"exitSignal":"SIGKILL"}"#####
+    );
+}
+
+#[test]
 fn d_tty() {
     // expected: node22
     assert_eq!(

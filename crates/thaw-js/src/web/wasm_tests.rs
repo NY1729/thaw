@@ -661,3 +661,66 @@ fn wasi_options_import_links_preview1_and_proc_exit_becomes_wasi_exit() {
     );
     assert_eq!(run(&src), "WASI exited with code 6 6");
 }
+
+#[test]
+fn webassembly_arguments_are_converted_by_declared_parameter_type() {
+    // expectation: real Node 22 output of the same program
+    assert_eq!(
+        run(r##"        function wasmArgumentTypes() {
+            const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,21,4,96,1,111,1,111,96,1,127,1,127,96,1,126,1,126,96,1,124,1,124,3,5,4,0,1,2,3,7,28,4,3,114,101,102,0,0,3,105,110,116,0,1,4,119,105,100,101,0,2,5,102,108,111,97,116,0,3,10,21,4,4,0,32,0,11,4,0,32,0,11,4,0,32,0,11,4,0,32,0,11]);
+            const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+            const rejects = action => { try { action(); return false; } catch (e) { return e instanceof TypeError; } };
+            let coercions = 0;
+            const object = { valueOf() { coercions++; return 7; } };
+            const refs = [0, 1, 7n, undefined, null, object].map(value => exports.ref(value) === value);
+            const values = [exports.int('7'), exports.float(object), exports.int(4294967297), exports.int(), exports.int(9, Symbol('ignored')), exports.wide('18446744073709551617').toString()];
+            return [refs, values, coercions, rejects(() => exports.int(1n)), rejects(() => exports.wide(1)), rejects(() => exports.float({ valueOf() { return 1n; } }))];
+        }
+    
+console.log(JSON.stringify(wasmArgumentTypes()));"##),
+        r##"[[true,true,true,true,true,true],[7,7,1,0,9,"1"],1,true,true,true]"##
+    );
+}
+
+#[test]
+fn webassembly_start_trap_is_a_runtime_error_and_import_mismatch_a_link_error() {
+    // expectation: real Node 22 output of the same program
+    assert_eq!(
+        run(r##"        function wasmStartErrorKind() {
+            const trap = new Uint8Array([0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,8,1,0,10,5,1,3,0,0,11,0,15,4,110,97,109,101,1,8,1,0,5,115,116,97,114,116]);
+            const wrongImport = new Uint8Array([0,97,115,109,1,0,0,0,2,16,1,4,104,111,115,116,6,109,101,109,111,114,121,2,0,2]);
+            let runtime = false, link = false;
+            try { new WebAssembly.Instance(new WebAssembly.Module(trap)); }
+            catch (error) { runtime = error instanceof WebAssembly.RuntimeError && !(error instanceof WebAssembly.LinkError); }
+            try { new WebAssembly.Instance(new WebAssembly.Module(wrongImport), { host: { memory: new WebAssembly.Memory({ initial: 1, maximum: 1 }) } }); }
+            catch (error) { link = error instanceof WebAssembly.LinkError && !(error instanceof WebAssembly.RuntimeError); }
+            return [runtime, link];
+        }
+    
+console.log(JSON.stringify(wasmStartErrorKind()));"##),
+        r##"[true,true]"##
+    );
+}
+
+#[test]
+fn webassembly_import_with_multiple_results_accepts_any_iterable() {
+    // expectation: real Node 22 output of the same program
+    assert_eq!(
+        run(r##"        function wasmIterableResults() {
+            const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,0,2,127,127,2,15,1,4,104,111,115,116,6,118,97,108,117,101,115,0,0,3,2,1,0,7,8,1,4,114,101,97,100,0,1,10,6,1,4,0,16,0,11,0,16,4,110,97,109,101,1,9,1,0,6,118,97,108,117,101,115]);
+            const module = new WebAssembly.Module(bytes);
+            let iterations = 0;
+            const instance = new WebAssembly.Instance(module, { host: { values() {
+                return { *[Symbol.iterator]() { iterations++; yield 42; yield 73; } };
+            } } });
+            const values = instance.exports.read();
+            const bad = new WebAssembly.Instance(module, { host: { values() { return { 0: 1, 1: 2, length: 2 }; } } });
+            let rejected = false;
+            try { bad.exports.read(); } catch (error) { rejected = error instanceof TypeError; }
+            return [values, iterations, rejected, Object.keys(WebAssembly.Module.imports(module)[0]).sort()];
+        }
+    
+console.log(JSON.stringify(wasmIterableResults()));"##),
+        r##"[[42,73],1,true,["kind","module","name"]]"##
+    );
+}

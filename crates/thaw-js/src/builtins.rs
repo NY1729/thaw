@@ -392,6 +392,9 @@ fn plain_brand(o: &Obj) -> &'static str {
             _ => {}
         }
     }
+    if hidden("__target") {
+        return "WeakRef";
+    }
     if hidden("__buf") {
         return "DataView";
     }

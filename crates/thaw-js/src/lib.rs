@@ -6911,6 +6911,8 @@ mod tests;
 #[cfg(test)]
 mod timers_shape_tests;
 #[cfg(test)]
+mod twin_audit_gap_tests;
+#[cfg(test)]
 mod websocket_tests;
 
 #[cfg(test)]
