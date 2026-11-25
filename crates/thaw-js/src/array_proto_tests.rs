@@ -126,20 +126,38 @@ fn sort_comparator_is_stable_and_coerces() {
         one("var a=[]; for(var i=0;i<40;i++) a.push({k:i%3,i:i}); a.sort((x,y)=>x.k-y.k); var ok=true; for(var i=1;i<40;i++) if(a[i-1].k>a[i].k||(a[i-1].k==a[i].k&&a[i-1].i>a[i].i)) ok=false; console.log(ok);"),
         "true"
     );
-    assert_eq!(one("console.log([3,1,2].sort(()=>NaN).join(), [3,1,2].sort((a,b)=>String(a-b)).join());"), "3,1,2 1,2,3");
+    assert_eq!(
+        one("console.log([3,1,2].sort(()=>NaN).join(), [3,1,2].sort((a,b)=>String(a-b)).join());"),
+        "3,1,2 1,2,3"
+    );
 }
 
 #[test]
 fn sort_exceptions_and_mutation() {
-    assert_eq!(one("try{[2,1].sort(()=>{throw new Error('boom')})}catch(e){console.log(e.message)}"), "boom");
-    assert_eq!(one("try{[{toString(){throw new Error('ts')}},1].sort()}catch(e){console.log(e.message)}"), "ts");
-    assert_eq!(one("try{[1].sort(5)}catch(e){console.log(e.constructor.name)}"), "TypeError");
+    assert_eq!(
+        one("try{[2,1].sort(()=>{throw new Error('boom')})}catch(e){console.log(e.message)}"),
+        "boom"
+    );
+    assert_eq!(
+        one("try{[{toString(){throw new Error('ts')}},1].sort()}catch(e){console.log(e.message)}"),
+        "ts"
+    );
+    assert_eq!(
+        one("try{[1].sort(5)}catch(e){console.log(e.constructor.name)}"),
+        "TypeError"
+    );
     assert_eq!(one("var a=[3,2,1]; a.sort((x,y)=>{a.length=0; return x-y}); console.log(a.join(), a.length)"), "1,2,3 3");
-    assert_eq!(one("var a=[5,4,3,2,1,0]; console.log(a.sort(()=>Math.random()-0.5).length)"), "6");
+    assert_eq!(
+        one("var a=[5,4,3,2,1,0]; console.log(a.sort(()=>Math.random()-0.5).length)"),
+        "6"
+    );
 }
 
 #[test]
 fn sort_array_likes_and_big() {
-    assert_eq!(one("var o={0:'b',1:'a',length:2}; Array.prototype.sort.call(o); console.log(o[0],o[1])"), "a b");
+    assert_eq!(
+        one("var o={0:'b',1:'a',length:2}; Array.prototype.sort.call(o); console.log(o[0],o[1])"),
+        "a b"
+    );
     assert_eq!(one("var a=[]; for(var i=0;i<50000;i++) a.push((i*7919)%50000); a.sort((x,y)=>x-y); var ok=true; for(var i=0;i<50000;i++) if(a[i]!==i) ok=false; console.log(ok)"), "true");
 }
