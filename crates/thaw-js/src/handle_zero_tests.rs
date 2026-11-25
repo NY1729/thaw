@@ -63,6 +63,7 @@ const TABLE: &[(&str, Policy)] = &[
         Policy::Lenient,
     ),
     ("thaw_tjs_capture_handle_graph_result", Policy::Lenient),
+    ("thaw_tjs_exception_report_text", Policy::Lenient),
     ("thaw_tjs_class_call", Policy::Lenient),
     (
         "thaw_tjs_construct_handle_graph_args_result",
