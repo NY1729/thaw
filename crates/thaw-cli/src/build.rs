@@ -1056,16 +1056,14 @@ fn build_with_native_mode_routed(
     runtime_features.extend(module_graph::runtime_features(input, &user_source)?);
     runtime_features.extend(thaw_bridge::required_runtime_features(&shim_source));
     if icu4c { runtime_features.extend(["intl", "icu4c"]); }
-    // `--shared-rt` links `libthaw_rt.so.1`, the core runtime (no JS engine, default
-    // features). Anything else falls back to the static archives, with a notice.
-    let shared_rt_active = shared_rt
-        && !static_link
-        && !uses_napi
-        && !compiler.uses_thaw_js()
-        && runtime_features.is_empty();
+    // `--shared-rt` links `libthaw_rt.so.1`: the core runtime, or with thaw-js too (one image,
+    // one arena) when the program uses the JS engine. Default features only; napi and
+    // runtime features fall back to the static archives, with a notice.
+    let shared_rt_active = shared_rt && !static_link && !uses_napi && runtime_features.is_empty();
+    let shared_rt_js = shared_rt_active && compiler.uses_thaw_js();
     if shared_rt && !shared_rt_active {
-        let reason = if uses_napi || compiler.uses_thaw_js() {
-            "JS engine in use"
+        let reason = if uses_napi {
+            "native addon in use"
         } else {
             "runtime feature in use"
         };
@@ -1099,7 +1097,7 @@ fn build_with_native_mode_routed(
     // thaw-js backs `loadScript`/`callDynamic` (docs/design/bridge.md
     // section 7). It is built and
     // linked only when LLVM found a call into that host.
-    let shared_rt_lib = shared_rt_active.then(build_rt_shared_library).transpose()?;
+    let shared_rt_lib = shared_rt_active.then(|| build_rt_shared_library(shared_rt_js)).transpose()?;
     let static_rt_libs = match shared_rt_lib {
         Some(_) => None,
         None => Some((
@@ -1128,8 +1126,7 @@ fn build_with_native_mode_routed(
         .into_iter()
         .filter_map(|(on, feature)| on.then_some(feature))
         .collect();
-    let thaw_js_lib = compiler
-        .uses_thaw_js()
+    let thaw_js_lib = (compiler.uses_thaw_js() && !shared_rt_js)
         .then(|| {
             if thaw_js_features.is_empty() {
                 build_staticlib("thaw-js")
@@ -1245,12 +1242,12 @@ fn build_with_native_mode_routed(
             // TLS/WASM/runtime sections alive and bloats dynamic symbol tables.
             linker.args(napi_export_args());
         }
-        if compiler.uses_thaw_js() {
+        if compiler.uses_thaw_js() && !shared_rt_js {
             // Promise-valued native callbacks poll these through RTLD_DEFAULT
             // while they reenter the active thaw-js or thaw-js context.
             linker.args(js_callback_export_args());
         }
-        if thaw_js_drain_export_needed(compiler.uses_thaw_js()) {
+        if thaw_js_drain_export_needed(compiler.uses_thaw_js()) && !shared_rt_js {
             // The thaw-js loop drains compiled native continuations through RTLD_DEFAULT (host.rs).
             linker.args(thaw_js_extra_export_args());
             linker.args(thaw_js_ready_export_args());
@@ -2027,11 +2024,15 @@ fn cargo_build_staticlib(
 
 /// `--shared-rt`: the core runtime as `libthaw_rt.so.1` (crate `thaw-rt-dylib`), copied into
 /// `thaw-libs/cache/<fingerprint>/shared/<rt_abi_hash>/` so the program can `rpath` it.
-fn build_rt_shared_library() -> Result<PathBuf, String> {
+fn build_rt_shared_library(with_js: bool) -> Result<PathBuf, String> {
     // The crate is a staticlib: rustc's own cdylib version script would export every
     // `#[no_mangle]` symbol of the dependencies, so the shared object is linked here, with
     // `thaw_rt.map` as the only version script.
-    let archive = build_staticlib("thaw-rt-dylib")?;
+    let archive = if with_js {
+        build_staticlib_with_features("thaw-rt-dylib", &["thaw-js"])?
+    } else {
+        build_staticlib("thaw-rt-dylib")?
+    };
     let bytes = std::fs::read(&archive)
         .map_err(|e| format!("failed to read `{}`: {e}", archive.display()))?;
     let abi_hash = rt_abi_hash_of_bytes(&bytes)?;

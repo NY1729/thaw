@@ -7,5 +7,7 @@ pub mod cabi;
 // their items directly.
 pub use thaw_arena as _arena;
 pub use thaw_jit as _jit;
+#[cfg(feature = "thaw-js")]
+pub use thaw_js as _js;
 pub use thaw_runtime as _runtime;
 pub use thaw_std as _std;
