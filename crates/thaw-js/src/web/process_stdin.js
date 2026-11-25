@@ -1,4 +1,4 @@
-// process.stdin for the main realm (port of thaw-quickjs runtime.js). Rust reads the terminal on a reader
+// process.stdin for the main realm. Rust reads the terminal on a reader
 // thread (sysio.rs) and the event loop hands each batch to globalThis.__thaw_stdin_dispatch.
 (function () {
   const stdinListeners = new Map();

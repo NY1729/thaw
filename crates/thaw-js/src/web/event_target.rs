@@ -1,4 +1,4 @@
-//! `Event` / `EventTarget` (ported from thaw-quickjs `platform_globals/workers/blob_events.js`).
+//! `Event` / `EventTarget`.
 //! `install` evaluates the port once; `AbortSignal` (abort.rs) builds on it.
 
 use crate::Interp;

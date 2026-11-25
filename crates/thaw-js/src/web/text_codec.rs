@@ -1,4 +1,4 @@
-//! `TextEncoder` / `TextDecoder` (ported from thaw-quickjs `platform_globals/text_encoding.js`).
+//! `TextEncoder` / `TextDecoder`.
 //! Plain JS on top of the typed-array and DataView intrinsics; `install` evaluates it once.
 
 use crate::Interp;
