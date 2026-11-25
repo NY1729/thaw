@@ -344,14 +344,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.context.create_string_attribute("frame-pointer", "all"),
             );
             function.set_section(Some(STACK_FRAME_SECTION));
-            // Inlined into the C entry point, `main` would lose its frame (that code is not in the section).
-            if function.get_name().to_bytes() == USER_MAIN_SYMBOL.as_bytes() {
-                let noinline = inkwell::attributes::Attribute::get_named_enum_kind_id("noinline");
-                function.add_attribute(
-                    inkwell::attributes::AttributeLoc::Function,
-                    self.context.create_enum_attribute(noinline, 0),
-                );
-            }
+            // Stack traces walk native frame pointers over this section, so a frame must survive the mid-end:
+            // an inlined callee, or a caller whose call became a tail call, would drop out of `Error.stack`
+            // (and `main` inlined into the C entry point would lose its frame, that code is not in the section).
+            let noinline = inkwell::attributes::Attribute::get_named_enum_kind_id("noinline");
+            function.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                self.context.create_enum_attribute(noinline, 0),
+            );
+            function.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                self.context.create_string_attribute("disable-tail-calls", "true"),
+            );
         }
     }
 

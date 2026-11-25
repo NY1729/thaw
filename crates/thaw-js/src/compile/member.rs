@@ -246,8 +246,9 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
         };
         fields.push(field);
     }
+    let n_fields = fields.len();
     Ok(mk_ex(move |it, f| {
-        let obj = it.plain();
+        let obj = it.plain_with_capacity(n_fields);
         for (k, v, name_it) in &fields {
             let k = match k {
                 PropKey::Name(n) => n.clone(),

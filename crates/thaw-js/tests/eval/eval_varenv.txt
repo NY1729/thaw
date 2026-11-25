@@ -1,0 +1,5 @@
+param-var-arguments-later-param THROW SyntaxError
+param-var-other 5
+arrow-param-var-arguments-named THROW SyntaxError
+body-var-arguments 7
+simple-param-var-arguments 7

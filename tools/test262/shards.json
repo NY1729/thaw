@@ -1,0 +1,8 @@
+{
+ "lang-expressions": {"dirs": "test/language/expressions"},
+ "lang-statements": {"dirs": "test/language/statements"},
+ "lang-rest": {"dirs": "test/language", "exclude": "test/language/expressions,test/language/statements"},
+ "builtins-array-typed": {"dirs": "test/built-ins/Array,test/built-ins/TypedArray,test/built-ins/TypedArrayConstructors,test/built-ins/ArrayBuffer,test/built-ins/DataView"},
+ "builtins-object-string-regexp": {"dirs": "test/built-ins/Object,test/built-ins/String,test/built-ins/RegExp,test/built-ins/Promise"},
+ "builtins-rest-annexb": {"dirs": "test/built-ins,test/annexB", "exclude": "test/built-ins/Array,test/built-ins/TypedArray,test/built-ins/TypedArrayConstructors,test/built-ins/ArrayBuffer,test/built-ins/DataView,test/built-ins/Object,test/built-ins/String,test/built-ins/RegExp,test/built-ins/Promise"}
+}

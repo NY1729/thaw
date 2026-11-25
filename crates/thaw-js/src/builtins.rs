@@ -150,7 +150,9 @@ pub(crate) const PRELUDE: &str = r#"
     if (s < e && Array.isArray(this) && Object.isFrozen(this)) throw new TypeError("Cannot assign to read only property '" + s + "' of object '[object Array]'");
     for (var i = s; i < e; i++) this[i] = v; return this;
   });
-  def(AP, 'sort', function (cmp) {
+  // native stable sort for plain dense arrays; it returns undefined (before touching anything) for any other receiver
+  var nativeSort = AP.sort;
+  var slowSort = function (cmp) {
     'use strict';
     var a = this, defined = [], undef = 0, holes = 0;
     if (a.length > 1 && Array.isArray(a) && Object.isFrozen(a)) throw new TypeError("Cannot assign to read only property '0' of object '[object Array]'");
@@ -173,6 +175,12 @@ pub(crate) const PRELUDE: &str = r#"
     for (var u = 0; u < undef; u++) a[n + u] = undefined;
     for (var h = 0; h < holes; h++) delete a[n + undef + h];
     return a;
+  };
+  def(AP, 'sort', function sort(cmp) {
+    'use strict';
+    if (cmp !== undefined && typeof cmp !== 'function') throw new TypeError('The comparison function must be either a function or undefined');
+    var r = nativeSort.call(this, cmp);
+    return r === undefined ? slowSort.call(this, cmp) : r;
   });
   def(Object, 'fromEntries', function (entries) { var o = {}; for (var e of entries) o[e[0]] = e[1]; return o; });
   // Missing members: Annex B `Object.prototype` accessors, unscopables, Symbol/Date/DataView members.
@@ -1405,7 +1413,15 @@ impl Interp {
             return Ok(true);
         }
         // globals are scope bindings: a defined data property must be visible as an identifier
-        if let (Kind::Global, Some(v)) = (&*o.kind.borrow(), &d.value) {
+        // a data descriptor without a value creates the property as `undefined`
+        let new_global_value = (d.value.is_none() && d.get.is_none() && d.set.is_none())
+            .then(|| !self.global.vars.borrow().contains_key(key))
+            .filter(|new| *new && matches!(&*o.kind.borrow(), Kind::Global))
+            .map(|_| Value::Undefined);
+        if let (Kind::Global, Some(v)) = (
+            &*o.kind.borrow(),
+            d.value.as_ref().or(new_global_value.as_ref()),
+        ) {
             // a new configurable property (or one already deletable) stays removable by `delete`
             let deletable = d.configurable.as_ref().is_some_and(Value::truthy)
                 && self
@@ -1414,15 +1430,22 @@ impl Interp {
                     .borrow()
                     .get(key)
                     .is_none_or(|b| matches!(b.origin, Origin::Defined));
-            self.global.declare(
-                key,
-                v.clone(),
-                d.writable.as_ref().is_some_and(Value::truthy),
-            );
+            // the descriptor's flags, defaulting to the existing property's (false for a new one)
+            let had = self.global_prop(key);
+            let flag = |f: &Option<Value>, old: Option<bool>| {
+                f.as_ref().map_or(old.unwrap_or(false), Value::truthy)
+            };
+            let enumerable = flag(&d.enumerable, had.as_ref().map(|p| p.enumerable));
+            let configurable = flag(&d.configurable, had.as_ref().map(|p| p.configurable));
+            let writable = flag(&d.writable, had.as_ref().map(|p| p.writable));
+            self.global.declare(key, v.clone(), writable);
             // a data descriptor ends a Node accessor global's accessor form (`node_accessor`).
             // ponytail: only a descriptor with a value redefines; a writable-only one keeps the accessor form.
             self.global.set_redefined(key);
-            if deletable {
+            if enumerable || !configurable {
+                self.global
+                    .set_origin(key, Origin::Attrs(enumerable, configurable));
+            } else if deletable || had.is_none() || configurable {
                 self.global.set_origin(key, Origin::Defined);
             }
             self.publish_global(key);
@@ -2362,7 +2385,10 @@ impl Interp {
         g.declare("Function", function, true);
         // The indirect (global-scope) form; a direct call is recognised by the interpreter's Call arm.
         let eval = self.native(|it, _, args| match arg(args, 0) {
-            Value::Str(src) => it.run_sloppy(&src),
+            Value::Str(src) => {
+                let global = it.global.clone();
+                it.direct_eval(&src, &global)
+            }
             other => Ok(other),
         });
         if let Value::Object(o) = &eval {
@@ -2406,43 +2432,47 @@ impl Interp {
             self.set_native(o, "of", |it, _, args| Ok(it.array(args.to_vec())));
             self.set_native(o, "from", |it, _, args| {
                 let src = arg(args, 0);
-                let mut items = match &src {
-                    Value::Str(s) => str_code_points(s)
-                        .into_iter()
-                        .map(|c| Value::Str(c.into()))
-                        .collect(),
-                    Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)) => {
-                        it.sparse_unsupported(&src)?;
-                        it.array_items(&src)
-                    }
-                    Value::Object(_) => match it.iter_protocol(&src)? {
-                        Some(items) => items,
-                        None => {
-                            let n = it.get(&src, "length")?;
-                            let n = it.num(&n);
-                            // ArrayCreate(len): a length past 2^32 - 1 is a RangeError before any element is read
-                            if n > 4294967295.0 {
-                                return it.throw_error("RangeError", "Invalid array length");
-                            }
-                            let mut v = Vec::new();
-                            for i in 0..(if n.is_nan() { 0 } else { n as usize }) {
-                                v.push(it.get(&src, &i.to_string())?);
-                            }
-                            v
-                        }
-                    },
-                    _ => Vec::new(),
+                let (map_fn, this_arg) = (arg(args, 1), arg(args, 2));
+                if !matches!(map_fn, Value::Undefined) && !map_fn.is_callable() {
+                    let shown = it.inspect(&map_fn, false);
+                    return it.throw_error("TypeError", &format!("{shown} is not a function"));
+                }
+                let mapped = !matches!(map_fn, Value::Undefined);
+                let mut out: Vec<Value> = Vec::new();
+                let mut push = |it: &mut Interp, v: Value| -> R<()> {
+                    let v = if mapped {
+                        let i = Value::Number(out.len() as f64);
+                        it.call(&map_fn, &this_arg, &[v, i])?
+                    } else {
+                        v
+                    };
+                    out.push(v);
+                    Ok(())
                 };
-                if arg(args, 1).is_callable() {
-                    for (i, item) in items.iter_mut().enumerate() {
-                        *item = it.call(
-                            &arg(args, 1),
-                            &Value::Undefined,
-                            &[item.clone(), Value::Number(i as f64)],
-                        )?;
+                let is_array =
+                    matches!(&src, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
+                if is_array && it.array_iter_intact() {
+                    it.sparse_unsupported(&src)?;
+                    for v in it.array_items(&src) {
+                        push(it, v)?;
+                    }
+                } else if matches!(src, Value::Str(_) | Value::Object(_))
+                    && !it.for_each_iterated(&src, &mut push)?
+                {
+                    {
+                        let n = it.get(&src, "length")?;
+                        let n = it.num(&n);
+                        // ArrayCreate(len): a length past 2^32 - 1 is a RangeError before any element is read
+                        if n > 4294967295.0 {
+                            return it.throw_error("RangeError", "Invalid array length");
+                        }
+                        for i in 0..(if n.is_nan() { 0 } else { n as usize }) {
+                            let v = it.get(&src, &i.to_string())?;
+                            push(it, v)?;
+                        }
                     }
                 }
-                Ok(it.array(items))
+                Ok(it.array(out))
             });
         }
         g.declare("Array", array, true);
@@ -2568,6 +2598,48 @@ impl Interp {
                 }
             }
             Ok(Value::Undefined)
+        });
+        self.set_native(&ap, "sort", |it, this, args| {
+            let Value::Object(o) = this else {
+                return Ok(Value::Undefined);
+            };
+            let ok = matches!(&*o.kind.borrow(), Kind::Array(items) if !items.iter().any(|v| matches!(v, Value::Hole)))
+                && !restricted(o)
+                && !array_snapshot_unsafe(o);
+            if !ok {
+                return Ok(Value::Undefined);
+            }
+            let cmp = arg(args, 0);
+            let mut vals = it.array_items_raw(this);
+            let total = vals.len();
+            vals.retain(|v| !matches!(v, Value::Undefined));
+            let n = vals.len();
+            if matches!(cmp, Value::Undefined) {
+                // ToString once per element (not per comparison), then a stable sort on UTF-16 order
+                let mut keyed = Vec::with_capacity(n);
+                for v in vals {
+                    keyed.push((it.try_to_str(&v)?, v));
+                }
+                keyed.sort_by(|a, b| cmp_utf16(&a.0, &b.0));
+                vals = keyed.into_iter().map(|(_, v)| v).collect();
+            } else {
+                vals = merge_sort(it, vals, &cmp)?;
+            }
+            vals.resize(total, Value::Undefined);
+            // the comparator may have changed the array: write through the generic path then
+            let plain = matches!(this, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(cur) if cur.len() == total) && !restricted(o) && !array_snapshot_unsafe(o));
+            if plain {
+                if let Value::Object(o) = this {
+                    if let Kind::Array(items) = &mut *o.kind.borrow_mut() {
+                        *items = vals;
+                    }
+                }
+            } else {
+                for (i, v) in vals.into_iter().enumerate() {
+                    it.set_index(this, i, v, true)?;
+                }
+            }
+            Ok(this.clone())
         });
         self.set_native(&ap, "reverse", |it, this, _| {
             it.sparse_unsupported(this)?;
@@ -3948,6 +4020,11 @@ impl Interp {
             return Ok(self.get(&d, "enumerable")?.truthy());
         }
         let key = self.key_of(key);
+        if matches!(target, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Global)) {
+            if let Some(p) = self.global_prop(&key) {
+                return Ok(p.enumerable);
+            }
+        }
         Ok(match target {
             Value::Object(o) => crate::typed::typed_own_key(o, &key).unwrap_or_else(|| {
                 find_own(o, &key).is_some_and(|(_, e)| e)
@@ -4453,6 +4530,72 @@ pub(crate) fn sloppy_ordinary_obj(o: &Obj) -> bool {
         Kind::Closure { def, scope }
             if !def.strict && !scope.strict.get() && !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype && def.class.is_none()
     )
+}
+
+/// Orders two strings by UTF-16 code units (the engine stores astral chars whole and lone surrogates in a
+/// private range, so a plain `str` compare is wrong only when an astral char meets one in E000..FFFF).
+pub(crate) fn cmp_utf16(a: &str, b: &str) -> std::cmp::Ordering {
+    let i = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    let mut i = i.min(a.len()).min(b.len());
+    while !a.is_char_boundary(i) {
+        i -= 1;
+    }
+    let big = |s: &str| s[i..].chars().next().is_some_and(|c| c as u32 >= 0x10000);
+    if big(a) || big(b) {
+        str_units(a).cmp(&str_units(b))
+    } else {
+        a.cmp(b)
+    }
+}
+
+/// Stable bottom-up merge sort with a user comparator. Every step is bounded, so an inconsistent
+/// comparator only yields some order; a throw (or a throwing `valueOf` on its result) propagates.
+fn merge_sort(it: &mut Interp, vals: Vec<Value>, cmp: &Value) -> R<Vec<Value>> {
+    let n = vals.len();
+    let (mut src, mut dst) = (vals, vec![Value::Undefined; n]);
+    let mut w = 1;
+    while w < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = (lo + w).min(n);
+            let hi = (lo + 2 * w).min(n);
+            let (mut i, mut j, mut k) = (lo, mid, lo);
+            while i < mid && j < hi {
+                let mut a = [src[j].clone(), src[i].clone()];
+                let r = it.call_direct_owned(cmp, &Value::Undefined, &mut a)?;
+                let r = match r {
+                    Value::Number(x) => x,
+                    Value::Object(_) => {
+                        let p = it.primitive_of(&r, extras::Hint::Number)?;
+                        it.num(&p)
+                    }
+                    r => it.num(&r),
+                };
+                if r < 0.0 {
+                    dst[k] = src[j].clone();
+                    j += 1;
+                } else {
+                    dst[k] = src[i].clone();
+                    i += 1;
+                }
+                k += 1;
+            }
+            while i < mid {
+                dst[k] = src[i].clone();
+                i += 1;
+                k += 1;
+            }
+            while j < hi {
+                dst[k] = src[j].clone();
+                j += 1;
+                k += 1;
+            }
+            lo += 2 * w;
+        }
+        std::mem::swap(&mut src, &mut dst);
+        w *= 2;
+    }
+    Ok(src)
 }
 
 /// `indexOf` / `lastIndexOf` over `items` (a hole never `===`); `from` is the converted `fromIndex`, if any.

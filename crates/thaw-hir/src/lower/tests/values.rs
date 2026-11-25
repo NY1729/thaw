@@ -4323,3 +4323,53 @@ fn read_dynamic_value_of_a_json_operand_is_the_operand() {
     let main = program.functions.iter().find(|function| function.name == "main").unwrap();
     assert!(!format!("{:?}", main.body).contains("readDynamicValue"), "{:?}", main.body);
 }
+
+/// Whether every binding wrapper (`(__thaw_object_field_N) => ...)(value)`) in the initializer's
+/// chain is compiled in place instead of allocating a closure.
+fn binding_chain_is_inlined(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Lambda(..)) => {
+            let HirExpr::Lambda(_, _, _, body) = callee.as_ref() else { unreachable!() };
+            crate::is_inlinable_iife(callee, args) && binding_chain_is_inlined(body)
+        }
+        _ => true,
+    }
+}
+
+fn first_let_initializer(source: &str) -> HirExpr {
+    let program = lower(source);
+    let main = program.functions.iter().find(|function| function.name == "main").expect("main");
+    main.body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Let(name, _, value) if name == "p" => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no `p` let in {:?}", main.body))
+}
+
+#[test]
+fn plain_object_literal_field_bindings_are_inlined_not_closures() {
+    let value = first_let_initializer(
+        "function main(): void { let i = 1; const p = { x: i, y: i * 2, z: i + 1 }; console.log(p.x); }",
+    );
+    assert!(matches!(&value, HirExpr::Call(..)), "{value:?}");
+    assert!(binding_chain_is_inlined(&value), "{value:?}");
+}
+
+#[test]
+fn object_literal_with_call_fields_keeps_source_order_bindings_inlined() {
+    let value = first_let_initializer(
+        "function f(n: number): number { return n; }\n\
+         function main(): void { const p = { a: f(1), b: f(2) }; console.log(p.a); }",
+    );
+    assert!(binding_chain_is_inlined(&value), "{value:?}");
+}
+
+#[test]
+fn object_literal_with_getter_keeps_the_closure_path() {
+    let value = first_let_initializer(
+        "function main(): void { let i = 1; const p = { x: i, get y() { return i; } }; console.log(p.x); }",
+    );
+    assert!(!binding_chain_is_inlined(&value), "{value:?}");
+}

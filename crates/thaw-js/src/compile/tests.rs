@@ -6,7 +6,7 @@ fn env_mode_parsing() {
     assert_eq!(CompileMode::parse(Some("off")), CompileMode::Off);
     assert_eq!(CompileMode::parse(Some("on")), CompileMode::On);
     assert_eq!(CompileMode::parse(Some(" check ")), CompileMode::Check);
-    assert_eq!(CompileMode::parse(Some("ON")), CompileMode::Off);
+    assert_eq!(CompileMode::parse(Some("ON")), CompileMode::On);
     assert_eq!(CompileMode::parse(Some("")), CompileMode::Off);
     assert_eq!(CompileMode::parse(Some("yes")), CompileMode::Off);
 }

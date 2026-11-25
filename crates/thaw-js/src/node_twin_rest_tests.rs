@@ -470,11 +470,11 @@ fn twin_worker_late_ref_keeps_queued_terminal_events_alive_until_poll() {
       (async () => {
         const w = new wt.Worker(`const { parentPort } = require('node:worker_threads'); parentPort.postMessage('queued');`, { eval: true });
         w.on('message', (m) => console.log('msg ' + m));
-        w.on('exit', (c) => console.log('exit ' + c));
+        const exited = new Promise((r) => w.on('exit', (c) => { console.log('exit ' + c); r(); }));
         w.unref();
         await new Promise((r) => setTimeout(r, 100));
         w.ref();
-        await new Promise((r) => setTimeout(r, 1500));
+        let guard; await Promise.race([exited, new Promise((r) => { guard = setTimeout(r, 30000); })]); clearTimeout(guard);
         console.log('done');
       })().catch((e) => console.log('failed ' + e));";
     assert_eq!(lines(src), ["msg queued", "exit 0", "done"]);

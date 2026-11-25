@@ -1,0 +1,25 @@
+program	class	first error line
+async-iter-processor.mjs	BUILD-FAIL	error: unsupported on thaw-js: argument 1 of `__thaw_typed_tjs_247374617469636d6574686f64246e6f64653a73747265616d3a3a5265616461626c652466726f6d246f7665726c6f61643024617269747931` is invalid: cannot co
+binary-parse.mjs	BUILD-FAIL	error: unsupported on thaw-js: Promise callback has parameters [Dynamic] and rest None, expected a prefix of [Object([("id", F64), ("name", Str), ("score", F64), ("flags", F64)])]
+build-copy-tree.mjs	DIFF	tree line 1: node=d dist thaw=d file:
+build-gzip.mjs	RUN-FAIL	Uncaught: TypeError: The "callback" argument must be of type function. Received undefined
+build-manifest-hash.mjs	BUILD-FAIL	error: unsupported on thaw-js: generator return type Dynamic has no default value
+cli-parseargs.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.map()` requires a homogeneous array, got Json
+cli-readline-file.mjs	BUILD-FAIL	error: unsupported on thaw-js: unknown variable `__thaw_namespace_1000001`
+config-loader.mjs	BUILD-FAIL	error: unsupported on thaw-js: `for...of` currently requires a typed array
+dates-intl.mjs	BUILD-FAIL	error: unsupported on thaw-js: parameter `dt` needs an explicit type annotation (no type inference for params)
+domain-model.mjs	BUILD-FAIL	error: unsupported on thaw-js: class `__thawmod0_Entity` field `__thaw_private___thawmod0_Entity_id` needs a type annotation
+fs-ops.mjs	RUN-FAIL	Uncaught: TypeError: Invalid JavaScript method receiver
+fsm-emitter.mjs	BUILD-FAIL	error: unsupported on thaw-js: class `__thawmod0_Machine` field `__thaw_private___thawmod0_Machine_state` needs a type annotation
+idle-game-sim.mjs	BUILD-FAIL	error: unsupported on thaw-js: parameter `g` needs an explicit type annotation (no type inference for params)
+log-pipeline.mjs	BUILD-FAIL	error: unsupported on thaw-js: class `__thawmod0_LineSplit` extends the external JavaScript class `node:stream::Transform`, which AOT classes cannot subclass yet (supported builtin bases: Map, Set, Ar
+mini-test-runner.mjs	BUILD-FAIL	error: unsupported on thaw-js: parameter `name` needs an explicit type annotation (no type inference for params)
+server-rest-json.mjs	BUILD-FAIL	error: unsupported on thaw-js: parameter `status` needs an explicit type annotation (no type inference for params)
+server-static.mjs	BUILD-FAIL	error: unsupported on thaw-js: method `<expression>.end` expects at least 1 argument(s), got 0
+task-runner.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot infer Promise type from resolve argument: unknown variable `code`
+text-templating.mjs	BUILD-FAIL	error: unsupported on thaw-js: parameter `s` needs an explicit type annotation (no type inference for params)
+timers-scheduler.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.push()` value is not safe for every array union member: value has type Str, expected F64
+ts-inventory.ts	BUILD-FAIL	error: unsupported on thaw-js: unsupported type annotation TsTypeQuery(TsTypeQuery { span: 30222..30237, expr_name: TsEntityName(Ident(Ident { span: 30229..30237, ctxt: #0, sym: "Category", optional: 
+url-router.mjs	BUILD-FAIL	error: unsupported on thaw-js: parameter `method` needs an explicit type annotation (no type inference for params)
+worker-eval-channel.mjs	DIFF	stdout line 1: node=[ { echo: 2 }, { echo: 4 }, { echo: 6 }, { echo: 8 } ] 10 0 thaw=[] 0 undefined
+worker-fanout.mjs	BUILD-FAIL	error: unsupported on thaw-js: numeric conversion is not defined for native type Dynamic

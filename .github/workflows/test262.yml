@@ -1,0 +1,92 @@
+name: test262
+
+# Non-gating test262 conformance ratchet for thaw-js-node (tools/test262). Runs on demand, or on a pull request
+# that carries the `thaw-js-measure` label. Each shard runs a slice of test262 (tools/test262/shards.json), then
+# compares against the committed baseline (tools/test262/baseline.json + failing.txt.gz): a test that passes in the
+# baseline and fails now is a regression. continue-on-error: read the job summary; nothing here is a required check.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test262-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: build thaw-js-node
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      shards: ${{ steps.m.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        run: echo "shards=$(jq -c 'keys' tools/test262/shards.json)" >> "$GITHUB_OUTPUT"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: test262-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-arena/**') }}
+          restore-keys: |
+            test262-${{ runner.os }}-
+      - run: cargo build --release -p thaw-js --bin thaw-js-node
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thaw-js-node
+          path: target/release/thaw-js-node
+          retention-days: 1
+
+  shard:
+    name: test262 ${{ matrix.shard }}
+    needs: build
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.build.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: thaw-js-node
+          path: ${{ runner.temp }}/bin
+      - name: Fetch test262 at the pinned commit
+        run: bash tools/test262/fetch.sh "$RUNNER_TEMP/test262"
+      - name: Run shard
+        env:
+          TEST262_DIR: ${{ runner.temp }}/test262
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/thaw-js-node"
+          export THAW_JS_NODE="$RUNNER_TEMP/bin/thaw-js-node"
+          bash tools/test262/run-shard.sh "${{ matrix.shard }}" "$RUNNER_TEMP/results.jsonl" 4
+      - name: Ratchet against the baseline
+        env:
+          TEST262_DIR: ${{ runner.temp }}/test262
+        run: |
+          export THAW_JS_NODE="$RUNNER_TEMP/bin/thaw-js-node"
+          rc=0
+          python3 -I tools/test262/compare.py "$RUNNER_TEMP/results.jsonl" > "$RUNNER_TEMP/ratchet.md" || rc=$?
+          { echo "### shard ${{ matrix.shard }}: ratchet exit $rc (non-gating)"; cat "$RUNNER_TEMP/ratchet.md"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" != 0 ]; then echo "::warning title=test262 ratchet::shard ${{ matrix.shard }} has regressions vs the baseline (non-gating, see the job summary)"; fi
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test262-results-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results.jsonl
+          if-no-files-found: ignore

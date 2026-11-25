@@ -6,5 +6,12 @@ members = ["crates/thaw-llvm", "crates/thaw-parser", "crates/thaw-hir", "crates/
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+# Runtime archives shipped by `thaw prepare` (see `runtime_lto` in thaw-cli/src/build.rs).
+[profile.thaw-rt]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
 [patch.crates-io]
 regress = { path = "vendor/regress" }
+swc_ecma_parser = { path = "vendor/swc_ecma_parser" }
