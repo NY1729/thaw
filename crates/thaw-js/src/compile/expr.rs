@@ -408,7 +408,11 @@ fn logical(op: a::BinaryOp, l: Ex, r: Ex) -> Ex {
 /// `typeof`, `!`, `-`, `+`, `~`, `void`. `delete` stays on the AST.
 fn unary(g: &mut Gen, op: a::UnaryOp, arg: &a::Expr) -> CG<Ex> {
     use a::UnaryOp as U;
-    if let (U::TypeOf, a::Expr::Ident(i)) = (op, arg) {
+    let mut typeof_arg = arg;
+    while let a::Expr::Paren(p) = typeof_arg {
+        typeof_arg = &p.expr;
+    }
+    if let (U::TypeOf, a::Expr::Ident(i)) = (op, typeof_arg) {
         // an undeclared name is "undefined", not a ReferenceError (as `eval_unary`)
         let p = Place::of(g, i);
         return Ok(mk_ex(move |it, f| {

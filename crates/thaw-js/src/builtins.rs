@@ -1413,7 +1413,15 @@ impl Interp {
             return Ok(true);
         }
         // globals are scope bindings: a defined data property must be visible as an identifier
-        if let (Kind::Global, Some(v)) = (&*o.kind.borrow(), &d.value) {
+        // a data descriptor without a value creates the property as `undefined`
+        let new_global_value = (d.value.is_none() && d.get.is_none() && d.set.is_none())
+            .then(|| !self.global.vars.borrow().contains_key(key))
+            .filter(|new| *new && matches!(&*o.kind.borrow(), Kind::Global))
+            .map(|_| Value::Undefined);
+        if let (Kind::Global, Some(v)) = (
+            &*o.kind.borrow(),
+            d.value.as_ref().or(new_global_value.as_ref()),
+        ) {
             // a new configurable property (or one already deletable) stays removable by `delete`
             let deletable = d.configurable.as_ref().is_some_and(Value::truthy)
                 && self
