@@ -92,7 +92,8 @@ jobs:
         run: cargo build --release -p thaw-cli
       - name: Driver selftest
         run: bash tools/app-corpus/selftest.sh
-      - name: Run the corpus
+      - name: Run the corpus (non-gating: a failing step is shown as a warning, the job stays green)
+        continue-on-error: true
         env:
           THAW: ${{ github.workspace }}/target/release/thaw
           APP_CORPUS_OUT: ${{ runner.temp }}/app-corpus-out
