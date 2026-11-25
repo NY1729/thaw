@@ -351,6 +351,11 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = hoist_class_expressions(&normalized);
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
+    let normalized = if crate::lower::implicit_any() {
+        declare_assigned_class_fields(&normalized)
+    } else {
+        normalized
+    };
     let normalized = normalize_constructor_functions(&normalized)?;
     let normalized = resolve_class_value_aliases(&normalized);
     let normalized = specialize_new_target_functions(&normalized);
@@ -2290,6 +2295,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             global_types.get(&class_static_field_symbol(owner, member)).cloned()
                         })
                     })
+                    .or_else(|| crate::lower::implicit_any().then_some(HirType::Json))
                     .ok_or_else(|| {
                         format!(
                             "class `{class_name}` static field `{field}` needs a type annotation"
@@ -2580,6 +2586,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 .count()
         })
         .sum();
+    // Signatures whose return type is still being inferred: a parameter that later widens to `any`
+    // invalidates a return type inferred from an earlier, narrower parameter.
+    let ret_inferred: HashSet<Symbol> = signatures
+        .iter()
+        .filter(|(_, signature)| hir_type_contains_dynamic(&signature.ret))
+        .map(|(name, _)| name.clone())
+        .collect();
     for _ in 0..=((fn_decls.len() + global_types.len() + class_method_count) * 2 + 1) {
         let mut changed = false;
         let call_constraints = RefCell::new(Vec::new());
@@ -2730,6 +2743,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     } else if *param == HirType::Json && actual == HirType::JsValue {
                         *param = HirType::JsValue;
                         changed = true;
+                    } else if crate::lower::implicit_any() && *param == HirType::Json {
+                        // Already `any`: every call site coerces into it.
+                    } else if crate::lower::implicit_any() && *param != actual {
+                        // Polymorphic call sites in untyped JS: the parameter is `any`.
+                        *param = HirType::Json;
+                        changed = true;
+                        if ret_inferred.contains(&callee) {
+                            signatures.get_mut(&callee).unwrap().ret = HirType::Dynamic;
+                        }
                     } else if *param != actual {
                         return Err(format!(
                             "conflicting inferred types for parameter {} of `{callee}`: {param:?} and {actual:?} at bytes {}..{}",
@@ -2763,6 +2785,18 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 )
             {
                 *ty = HirType::Json;
+            }
+        }
+    }
+    if crate::lower::implicit_any() {
+        // A parameter no call site constrains (uncalled, or called only through values) is `any`.
+        for signature in signatures.values_mut() {
+            if !signature.is_extern && signature.generic_type_params.is_empty() {
+                for ty in &mut signature.params {
+                    if *ty == HirType::Dynamic {
+                        *ty = HirType::Json;
+                    }
+                }
             }
         }
     }

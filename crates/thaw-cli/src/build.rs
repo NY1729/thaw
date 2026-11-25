@@ -1001,6 +1001,10 @@ fn build_with_native_mode_routed(
     }
     // `SHARE_ENV` shares the environment table with a worker: `process.env.NAME` must read that table
     thaw_hir::set_shared_env_program(user_source.contains("SHARE_ENV"));
+    thaw_hir::set_implicit_any(matches!(
+        input.extension().and_then(|extension| extension.to_str()),
+        Some("js" | "mjs" | "cjs")
+    ));
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         let param_count = program

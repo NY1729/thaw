@@ -3569,7 +3569,14 @@ impl<'a> FnLowerer<'a> {
                     }
                     HirType::Json => {
                         let key = self.lower_expr(&computed.expr)?;
-                        let key_type = self.infer_expr_type(&key)?;
+                        let mut key_type = self.infer_expr_type(&key)?;
+                        // An `any` key is a property key by ToPropertyKey: its string form.
+                        let key = if key_type == HirType::Json {
+                            key_type = HirType::Str;
+                            self.coerce_primitive_to_string(key)?
+                        } else {
+                            key
+                        };
                         if !matches!(obj, HirExpr::NonArrowThis { .. }) {
                             return match key_type {
                                 HirType::Str | HirType::Symbol => {

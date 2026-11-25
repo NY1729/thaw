@@ -185,6 +185,24 @@ fn unannotated_callback_in_a_plain_object_literal_still_needs_an_annotation() {
 }
 
 #[test]
+fn implicit_any_program_lowers_untyped_params_and_fields_as_any() {
+    // JavaScript entries: no annotation and no inferable type is `any`, not an error.
+    let module = thaw_parser::parse_typescript(
+        r#"
+        class Box { constructor(v) { this.v = v; } }
+        function main(): void {
+            const o = { f: (x) => x };
+        }
+        "#,
+    )
+    .expect("parse error");
+    crate::set_implicit_any(true);
+    let result = lower_module(&module);
+    crate::set_implicit_any(false);
+    result.expect("implicit any lowers");
+}
+
+#[test]
 fn unannotated_callback_in_an_object_argument_of_a_typed_call_keeps_its_contextual_json_parameters() {
     // A typed (non-dynamic) callee supplies the callback's parameter types: the new
     // dynamic-receiver rule must not change this path.

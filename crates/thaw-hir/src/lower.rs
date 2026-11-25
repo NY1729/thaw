@@ -41,6 +41,18 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 thread_local! {
     static NATIVE_TIMERS: Cell<bool> = const { Cell::new(false) };
     static SHARED_ENV_PROGRAM: Cell<bool> = const { Cell::new(false) };
+    static IMPLICIT_ANY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// JavaScript programs have no annotations: a parameter, class field or call-site conflict that
+/// inference cannot resolve is `any` (`Json`) instead of a build error, as TypeScript's
+/// `noImplicitAny` would require. Set by the CLI for `.js`/`.mjs`/`.cjs` entries.
+pub fn set_implicit_any(enabled: bool) {
+    IMPLICIT_ANY.with(|flag| flag.set(enabled));
+}
+
+pub(crate) fn implicit_any() -> bool {
+    IMPLICIT_ANY.with(Cell::get)
 }
 
 /// The program names `SHARE_ENV`: its `process.env.NAME` reads go through the `process.env` object (whose table a
@@ -494,6 +506,7 @@ include!("lower/normalize.rs");
 
 include!("lower/classes/normalization.rs");
 include!("lower/classes/local_classes.rs");
+include!("lower/classes/implicit_fields.rs");
 include!("lower/classes/generic_classes.rs");
 include!("lower/classes/generic_methods.rs");
 
