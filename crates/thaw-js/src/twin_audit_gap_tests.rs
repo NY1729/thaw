@@ -32,7 +32,7 @@ P('blobNull', () => new Blob(null)); P('blobArrayLike', () => new Blob({ length:
 P('empty', () => [new Blob().size, new Blob(undefined).size]);
 P('blobNum', () => new Blob(5)); P('blobStr', () => new Blob('abc').size);
 let closed = 0; const S = {};
-P('closing', () => { try { new Blob({ *[Symbol.iterator]() { try { yield { toString() { throw S; } }; yield 'u'; } finally { closed++; } } }); } catch (e) { return [e === S, closed]; } });
+P('closing', () => { try { new Blob({ *[Symbol.iterator]() { try { yield { toString() { throw S; } }; yield 'u'; } finally { closed++; } } }); } catch (e) { return [e === S, closed]; } return ['noerr', closed, Blob.toString().length, Blob.toString().slice(0,200), String(Object.getOwnPropertyNames(Blob.prototype))]; });
 const order = [];
 P('order', () => { new File([{ toString() { order.push('parts'); return 'x'; } }], { toString() { order.push('name'); return 'n'; } }, {
   get endings() { order.push('endings-get'); return { toString() { order.push('endings-convert'); return 'transparent'; } }; },
