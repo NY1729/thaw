@@ -152,6 +152,21 @@ fn js_exception_report_text(handle: u64) -> Option<Vec<u8>> {
     (!text.is_null()).then(|| unsafe { CStr::from_ptr(text) }.to_bytes().to_vec())
 }
 
+type JsExceptionTextFn = extern "C" fn(u64) -> *const c_char;
+
+thread_local! {
+    /// thaw-js's renderer of a thrown value, registered with the job hooks (None without thaw-js).
+    static JS_EXCEPTION_TEXT: Cell<Option<JsExceptionTextFn>> = const { Cell::new(None) };
+}
+
+/// The console rendering of a thrown thaw-js value (tag 7: the packet's i64 slot holds its handle id).
+fn js_exception_report_text(handle: u64) -> Option<Vec<u8>> {
+    let render = JS_EXCEPTION_TEXT.with(Cell::get)?;
+    let text = render(handle);
+    // SAFETY: the renderer returns a NUL-terminated string it owns until its next call, or null.
+    (!text.is_null()).then(|| unsafe { CStr::from_ptr(text) }.to_bytes().to_vec())
+}
+
 /// Copies a terminal exception into owned report text before a listener can
 /// reenter generated code. The public Promise rejection ABI permits opaque
 /// pointers, so only an exact producer-supplied native-text pointer is read.
