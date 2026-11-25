@@ -995,7 +995,7 @@ fn throwing_an_unsupported_value_is_a_compile_error_not_a_crash() {
         "throw_unsupported_value",
     );
     assert_eq!((stdout.as_str(), status), ("", Some(1)), "{stderr}");
-    assert!(stderr.starts_with("Uncaught:"), "{stderr}");
+    assert!(stderr.starts_with("[exception value]"), "{stderr}");
 }
 
 /// `const g: any = gen();` (coercing a generator's own internal
