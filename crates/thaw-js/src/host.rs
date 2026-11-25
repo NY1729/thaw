@@ -2945,6 +2945,58 @@ pub extern "C" fn thaw_tjs_exception_native_token(handle: u64) -> u64 {
     .unwrap_or(0)
 }
 
+/// How an uncaught thaw-js throw prints: an Error as `Name: message` plus its own enumerable props in
+/// Node's `{ k: v, ... }` form, anything else as `console.log` would.
+fn uncaught_report_text(it: &mut Interp, v: &Value) -> String {
+    let (Ok(Value::Str(name)), Ok(Value::Str(message))) = (it.get(v, "name"), it.get(v, "message"))
+    else {
+        return console_text(it, v);
+    };
+    let mut text = if message.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}: {message}")
+    };
+    let mut props = Vec::new();
+    for key in it.own_keys(v) {
+        if matches!(&*key, "stack" | "message")
+            || !it.own_enumerable(v, &Value::str(&key)).unwrap_or(false)
+        {
+            continue;
+        }
+        let value = it.get(v, &key).unwrap_or(Value::Undefined);
+        props.push(format!("  {key}: {}", it.inspect(&value, false)));
+    }
+    if !props.is_empty() {
+        text.push_str(&format!(" {{\n{}\n}}", props.join(",\n")));
+    }
+    text
+}
+
+thread_local! {
+    /// Backing store of the last `thaw_tjs_exception_report_text` result (valid until the next call).
+    static EXCEPTION_REPORT_TEXT: std::cell::RefCell<std::ffi::CString> = std::cell::RefCell::new(std::ffi::CString::default());
+}
+
+/// The console rendering of a thrown thaw-js value, for the compiled runtime's uncaught-exception
+/// report (registered with the job hooks, so a program without thaw-js keeps its generic text).
+/// The NUL-terminated text is owned by this thread until the next call; null if `handle` names no
+/// live value.
+pub(crate) extern "C" fn thaw_tjs_exception_report_text(handle: u64) -> *const c_char {
+    if handle == 0 {
+        return ptr::null();
+    }
+    let Ok(text) = on_handle(handle, |p, _owner, v| {
+        Ok(uncaught_report_text(&mut p.interp, &v))
+    }) else {
+        return ptr::null();
+    };
+    EXCEPTION_REPORT_TEXT.with(|slot| {
+        *slot.borrow_mut() = std::ffi::CString::new(text.replace('\0', "")).unwrap_or_default();
+        slot.borrow().as_ptr()
+    })
+}
+
 /// Graph-wire builder for a result value. `plain` copies arrays and objects deeply (symbols become
 /// `undefined`, and functions too unless `live_functions`; `toJSON` is honored) like the retired-engine
 /// result lane; `receiver` is the value that stays a live handle wherever it recurs.
@@ -6420,8 +6472,18 @@ fn register_js_job_hooks() {
         let hooks = RUNTIME_HOOKS.with(|h| h.as_ptr());
         std::mem::transmute::<
             *mut c_void,
-            extern "C" fn(extern "C" fn() -> u64, extern "C" fn(u64), *mut RuntimeHooks),
-        >(sym)(queue_js_job_barrier, drain_js_job_barrier, hooks);
+            extern "C" fn(
+                extern "C" fn() -> u64,
+                extern "C" fn(u64),
+                *mut RuntimeHooks,
+                extern "C" fn(u64) -> *const c_char,
+            ),
+        >(sym)(
+            queue_js_job_barrier,
+            drain_js_job_barrier,
+            hooks,
+            thaw_tjs_exception_report_text,
+        );
     }
 }
 

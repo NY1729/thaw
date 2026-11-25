@@ -131,6 +131,21 @@ pub unsafe extern "C" fn thaw_runtime_report_unhandled_rejection(error: *const c
     );
 }
 
+type JsExceptionTextFn = extern "C" fn(u64) -> *const c_char;
+
+thread_local! {
+    /// thaw-js's renderer of a thrown value, registered with the job hooks (None without thaw-js).
+    static JS_EXCEPTION_TEXT: Cell<Option<JsExceptionTextFn>> = const { Cell::new(None) };
+}
+
+/// The console rendering of a thrown thaw-js value (tag 7: the packet's i64 slot holds its handle id).
+fn js_exception_report_text(handle: u64) -> Option<Vec<u8>> {
+    let render = JS_EXCEPTION_TEXT.with(Cell::get)?;
+    let text = render(handle);
+    // SAFETY: the renderer returns a NUL-terminated string it owns until its next call, or null.
+    (!text.is_null()).then(|| unsafe { CStr::from_ptr(text) }.to_bytes().to_vec())
+}
+
 /// Copies a terminal exception into owned report text before a listener can
 /// reenter generated code. The public Promise rejection ABI permits opaque
 /// pointers, so only an exact producer-supplied native-text pointer is read.
@@ -161,6 +176,8 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
             5 => b"undefined".to_vec(),
             6 => b"null".to_vec(),
             4 => b"Uncaught opaque string exception".to_vec(),
+            7 => js_exception_report_text(i64_value as u64)
+                .unwrap_or_else(|| b"Uncaught opaque exception".to_vec()),
             _ => b"Uncaught opaque exception".to_vec(),
         }
     };
@@ -759,8 +776,10 @@ pub unsafe extern "C" fn thaw_runtime_set_js_job_hooks(
     queue: extern "C" fn() -> u64,
     drain: extern "C" fn(u64),
     hooks: *mut RuntimeHooks,
+    exception_text: JsExceptionTextFn,
 ) {
     JS_JOB_HOOKS.with(|slot| slot.set(Some((queue, drain))));
+    JS_EXCEPTION_TEXT.with(|slot| slot.set(Some(exception_text)));
     if !hooks.is_null() {
         // SAFETY: the engine passes a pointer to its own slot, valid for this call.
         unsafe {

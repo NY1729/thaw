@@ -1,0 +1,1257 @@
+{
+ "note": "expected non-MATCH cases; may only shrink. Regenerate: run.sh --write-baseline after a fix.",
+ "gaps": [
+  {
+   "id": "uncaught.error",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.typeerror",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.rangeerror",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.subclass",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.subclass-code",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.string",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.number",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.bool",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.bigint",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.object",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.array",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.null",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.undefined",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.symbol",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.custom-tostring",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.cause",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.cause-string",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.cause-chain",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.aggregate",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.domexception",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.empty-message",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.multiline-message",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.extra-props",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.name-changed",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.stdout-before",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.in-function",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.rethrow-finally",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.throw-in-catch",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.error-nostack",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.error-customstack",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.promise-like",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.function",
+   "kind": "DIFF"
+  },
+  {
+   "id": "uncaught.date",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.queuemicrotask",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.then",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.async-fn",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.async-await",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.reject-error",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.reject-subclass",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.reject-string",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.reject-number",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.reject-undefined",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.reject-null",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.reject-object",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.reject-symbol",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.promise-all",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.late-catch",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.event-handler-throw",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.emitter-error-noerr",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.emitter-error-string",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.emitter-error-undefined",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.emitter-error-object",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.eventtarget-listener",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.stream-error-nolistener",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.stream-error-code",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.stream-read-throws",
+   "kind": "DIFF"
+  },
+  {
+   "id": "async.writable-final-error",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.ue-handler-sync",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.ue-handler-throws",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.ur-handler",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.ur-handler-undefined",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "handlers.ur-handler-throws",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.ur-only-ue-handler",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.ur-only-ue-handler-string",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.ur-warning-mode",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.exit-code-then-throw",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.exit-float",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.exit-nan",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.exit-undefined-after-code",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.exit-listener-async",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.beforeexit-not-on-uncaught",
+   "kind": "DIFF"
+  },
+  {
+   "id": "handlers.beforeexit-throws",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.big-stdout-exit",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.big-stderr-exit",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.big-one-write",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.big-then-throw",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.big-async-exit",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.log-then-throw-merged",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.log-then-reject-merged",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.exit-handler-output-merged",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.write-bad-arg",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.fs-writesync-1",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.stdout-end-write",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.epipe-write",
+   "kind": "RUN-FAIL"
+  },
+  {
+   "id": "stdio.epipe-error-listener",
+   "kind": "DIFF"
+  },
+  {
+   "id": "stdio.epipe-async",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "stdio.epipe-exit-listener",
+   "kind": "RUN-FAIL"
+  },
+  {
+   "id": "inspect.error-cause",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-cause-string",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-cause-chain",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-percent-s",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-subclass",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-subclass-code",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-domexception",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-nostack",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-name-changed-class",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-symbol-key",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "inspect.inspect-error-props",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.inspect-error-depth0",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.inspect-error-colors",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.inspect-error-nostack",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "inspect.inspect-error-cause-depth",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.format-error",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.tostring-edge",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.own-keys",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "inspect.own-keys-nocause",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "inspect.error-is-error",
+   "kind": "DIFF"
+  },
+  {
+   "id": "inspect.error-ctor-props",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "inspect.domexception-props",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-ebadf",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "syserr.fs-ebadf-close",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-eloop",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-eisdir-rm",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-invalid-arg-null",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "syserr.fs-invalid-arg-obj",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "syserr.fs-invalid-path-nul",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-invalid-encoding",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-invalid-flag",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-stream-enoent-nolistener",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-uncaught-enoent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-uncaught-eisdir",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-uncaught-promises",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.fs-uncaught-stream",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.json-uncaught",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.url-bad-base",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.url-empty-host",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.url-uncaught",
+   "kind": "DIFF"
+  },
+  {
+   "id": "syserr.url-uncaught-base",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.read-null-computed",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.read-undefined-index",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.write-undefined",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.write-null",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.call-undefined-member",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.call-undefined-nested",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.call-number",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.call-string-member",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.call-null-prop-call",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.call-array-elem",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.call-result",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.new-nonctor",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.new-arrow",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.new-undefined-member",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.super-before-this",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.destructure-undefined",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.destructure-null",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.destructure-param",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.destructure-array-undefined",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.destructure-array-number",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.spread-undefined-array",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.spread-number",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.forof-number",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.forof-object",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.new-set-number",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.new-map-bad-entry",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.promise-all-number",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.promise-call-no-new",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.in-string",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.in-undefined",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.bigint-div-zero",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.symbol-to-string",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.symbol-to-number",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.symbol-new",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.frozen-assign",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.frozen-add",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.frozen-delete",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.getter-only-assign",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.object-create-bad",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.object-keys-null",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.object-fromentries-bad",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.reflect-ownkeys-prim",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.weakmap-bad-key",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.weakset-bad",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.array-length-set",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.array-length-float",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.array-reduce-empty",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.array-from-bad",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.array-toSorted-comparefn",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.array-sort-bad-comparefn",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.arraybuffer-negative",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.typedarray-bad-offset",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.typedarray-bad-length",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.dataview-oob",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.string-repeat-neg",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.string-repeat-inf",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.string-repeat-huge",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.string-normalize",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.string-fromcodepoint",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.string-padstart-huge",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.number-proto-call",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.regexp-unterminated",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.regexp-nothing-repeat",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.regexp-bad-escape-u",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.regexp-bad-class",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.intl-bad-currency",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.function-ctor-syntax",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.eval-ref",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.eval-syntax",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.tdz",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.structuredclone-fn",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.structuredclone-symbol",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.structuredclone-noarg",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.atob-bad",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.btoa-bad",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.buffer-alloc-str",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.buffer-from-obj",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.buffer-from-badenc",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.buffer-concat-bad",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.require-missing",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.process-hrtime-bad",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.process-emitwarning-bad",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.process-setuid-bad",
+   "kind": "DIFF"
+  },
+  {
+   "id": "messages.process-exitcode-bad",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.process-exitcode-float",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "messages.process-exit-str-bad",
+   "kind": "DIFF"
+  },
+  {
+   "id": "limits.recursion-uncaught",
+   "kind": "DIFF"
+  },
+  {
+   "id": "limits.mutual-recursion-caught",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "limits.recursion-in-async",
+   "kind": "DIFF"
+  },
+  {
+   "id": "limits.array-push-limit",
+   "kind": "DIFF"
+  },
+  {
+   "id": "limits.string-huge",
+   "kind": "DIFF"
+  },
+  {
+   "id": "limits.string-concat-huge",
+   "kind": "DIFF"
+  },
+  {
+   "id": "limits.array-fill-huge-len",
+   "kind": "DIFF"
+  },
+  {
+   "id": "limits.buffer-huge",
+   "kind": "DIFF"
+  },
+  {
+   "id": "limits.setlength-huge",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "assert.deepstrict-obj",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-arr",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-types",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-missing-key",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-nested",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-multiline-str",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-map-set",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-proto",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-date",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-error",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepstrict-message",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.deepequal-loose",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.strictequal",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.strictequal-str",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.strictequal-obj",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.strictequal-long-str",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.equal-loose",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.notstrictequal",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.notdeepstrict",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.ok-false",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.ok-expr",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.ok-message",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.assert-call",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.assert-undefined",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "assert.fail",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.fail-msg",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.throws-nothrow",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.throws-wrong-class",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.throws-regex-mismatch",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.throws-obj-mismatch",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.doesnotthrow",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.ifError",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.match",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.doesnotmatch",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.match-nonstring",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.strict-ns-equal",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.rejects-resolves",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "assert.rejects-wrong",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "assert.rejects-notpromise",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.doesnotreject",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "assert.assertionerror-props",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.uncaught-strictequal",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.uncaught-deepstrict",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.uncaught-ok",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.uncaught-fail",
+   "kind": "DIFF"
+  },
+  {
+   "id": "assert.uncaught-async",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.error-to-parent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.typeerror-to-parent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.string-to-parent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.object-to-parent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.null-to-parent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.props-to-parent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.cause-to-parent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.stack-to-parent",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.noerror-listener-uncaught",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.noerror-listener-ue-handler",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.exit-code",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.exit-code-exitcode",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.unhandled-rejection-in-worker",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.reject-string-in-worker",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.ue-handler-in-worker",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.terminate",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.message-ok",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.workerdata",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.postmessage-uncloneable",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.worker-syntax-error",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.worker-stdout",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.worker-main-exit",
+   "kind": "DIFF"
+  },
+  {
+   "id": "worker.worker-errorevent-once",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.main-finally",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.main-await-reject",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.await-in-loop-throw",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.promise-race",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "idioms.promise-any-aggregate",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.rethrow-in-catch-async",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.thenable-throws",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.unhandled-in-thenable-chain",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.catch-rethrow",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.finally-throws",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.http-listen-eaddrinuse",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "idioms.http-listen-noerr-listener",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "idioms.http-request-refused",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "idioms.http-request-noerr-listener",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "idioms.fetch-refused",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "idioms.fetch-bad-url",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "idioms.fetch-uncaught",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.dns-notfound",
+   "kind": "BUILD-FAIL"
+  },
+  {
+   "id": "idioms.spawn-enoent-noerr-listener",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.exec-callback-fail",
+   "kind": "DIFF"
+  },
+  {
+   "id": "idioms.assert-main",
+   "kind": "BUILD-FAIL"
+  }
+ ]
+}

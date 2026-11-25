@@ -2055,3 +2055,31 @@ fn bare_namespace_value_builds_and_runs_for_os_and_url() {
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "function object true /a/b\n");
 }
+
+/// Uncaught throws/rejections print Node's value text (Error name+message and own props, `x`,
+/// `{ a: 1 }`) instead of "Uncaught opaque exception", also for a thaw-js-created error (fs ENOENT).
+#[test]
+fn top_level_uncaught_values_report_like_node() {
+    let cases: [(&str, &str, &str); 4] = [
+        ("import { readFile } from 'node:fs/promises';\nawait readFile('/nonexistent-thaw-dir/x');\n", "Uncaught: Error: ENOENT: no such file or directory, open '/nonexistent-thaw-dir/x'", "ENOENT"),
+        ("throw new Error('x');\n", "Uncaught: Error: x\n", ""),
+        ("await Promise.reject(new Error('e'));\n", "Uncaught: Error: e\n", ""),
+        ("throw { a: 1 };\n", "Uncaught: { a: 1 }\n", ""),
+    ];
+    for (index, (source, expected, extra)) in cases.iter().enumerate() {
+        let dir = std::env::temp_dir().join(format!("thaw-cli-uncaught_values_report_like_node-{}-{index}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.mjs");
+        std::fs::write(&entry, source).unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.starts_with(expected), "{stderr}");
+        assert!(stderr.contains(extra), "{stderr}");
+        assert!(!stderr.contains("opaque"), "{stderr}");
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
