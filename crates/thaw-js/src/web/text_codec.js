@@ -22,13 +22,7 @@
   const __thawTextSharedBufferLength = __thawTextSharedArrayBuffer
     ? __thawTextGetter(__thawTextSharedArrayBuffer.prototype, 'byteLength') : undefined;
   const __thawTextErr = (Ctor, code, message) => { const e = new Ctor(message); e.code = code; return e; };
-  // thaw-js strings hold code points but String.fromCodePoint(>0xffff) yields two U+FFFD (pinned by
-  // lang/builtins_probe); JSON.parse joins a \u surrogate-pair escape into the real char.
-  const __thawTextCp = code => {
-    if (code <= 0xffff) return String.fromCharCode(code);
-    const c = code - 0x10000;
-    return JSON.parse(`"\\u${(0xd800 + (c >> 10)).toString(16)}\\u${(0xdc00 + (c & 0x3ff)).toString(16)}"`);
-  };
+  const __thawTextCp = code => String.fromCodePoint(code);
   const __thawTextNativeTypeError = (error) => error instanceof __thawTextTypeError;
   const __thawTextIsArrayBuffer = value => {
     try { __thawTextApply(__thawTextArrayBufferLength, value, []); return true; }

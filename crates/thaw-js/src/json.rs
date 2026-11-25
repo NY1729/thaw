@@ -464,15 +464,17 @@ impl Parser<'_> {
                                     self.i += 6;
                                 }
                             }
-                            // a lone surrogate unit is the private-use char the engine's strings keep it as
-                            let ch = if (0xD800..0xE000).contains(&code) {
-                                char::from_u32(crate::builtins::LONE + code - 0xD800)
+                            // a lone surrogate unit (and a real U+10F800.. pair) is kept in the engine's stored form
+                            let mut s = String::new();
+                            if (0xD800..0xE000).contains(&code) {
+                                s.push(crate::builtins::lone_char(code));
                             } else {
-                                char::from_u32(code)
+                                crate::builtins::push_scalar(
+                                    &mut s,
+                                    char::from_u32(code).unwrap_or('\u{FFFD}'),
+                                );
                             }
-                            .unwrap_or('\u{FFFD}');
-                            let mut buf = [0u8; 4];
-                            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                            out.extend_from_slice(s.as_bytes());
                         }
                         _ => {
                             self.i -= 1;

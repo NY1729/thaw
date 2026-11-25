@@ -216,7 +216,7 @@ pub(crate) fn array(g: &mut Gen, arr: &a::ArrayLit) -> CG<Ex> {
 fn prop_name(g: &mut Gen, k: &a::PropName) -> CG<PropKey> {
     Ok(match k {
         a::PropName::Ident(i) => PropKey::Name(Rc::from(i.sym.as_ref())),
-        a::PropName::Str(s) => PropKey::Name(Rc::from(s.value.as_str().unwrap_or(""))),
+        a::PropName::Str(s) => PropKey::Name(Rc::from(crate::builtins::wtf8_to_str(&s.value))),
         a::PropName::Num(n) => PropKey::Name(Rc::from(crate::number_to_string(n.value).as_str())),
         a::PropName::Computed(c) => PropKey::Computed(expr::compile(g, &c.expr)?),
         _ => return reject(),

@@ -3271,6 +3271,7 @@ dependencies = [
  "sha1",
  "sha2",
  "signature 2.2.0",
+ "swc_atoms",
  "swc_ecma_visit",
  "thaw-arena",
  "thaw-hir",
