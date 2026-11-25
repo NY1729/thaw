@@ -25,6 +25,14 @@ def split_id(pid):
     return mod, fn, slot, shape, origin
 
 
+def kind_of(line):
+    """Coarse kind of a first output line: `THROW name/code` or the value type word (a REJECT detail keeps 60 chars)."""
+    m = re.match(r"THROW (\S+)", line)
+    if m:
+        return "THROW " + m.group(1)
+    return line.split(" ", 1)[0][:60] if not line.startswith("error") else line[:60]
+
+
 def first(block, n=2):
     return " / ".join((block or "").split("\n")[:n])[:120]
 
@@ -43,9 +51,10 @@ def main(out):
         if os.path.exists(path):
             thaw.update(pdiff.load_blocks(path))
     gp = os.path.join(out, "thaw-js", "gaps.json")
+    known = {g["id"] for g in json.load(open(os.path.join(HERE, "known-gaps-boundary.json")))["gaps"]}
     new = set()
     if os.path.exists(gp):
-        new = {g["id"] for g in json.load(open(gp))["gaps"]}
+        new = {g["probe"] for g in json.load(open(gp))["gaps"] if g["id"] not in known}
     rows = []
     for pid, c in sorted(classes.items()):
         mod, fn, slot, shape, origin = split_id(pid)
@@ -79,13 +88,13 @@ def main(out):
     fam = {}
     for r in rows:
         if r[4] in FAIL + ("WRONG-TREE",):
-            key = (r[4], re.sub(r"\d+", "N", r[6])[:70], re.sub(r"\d+", "N", r[7])[:70])
+            key = (r[4], r[0].split(".")[0], kind_of(r[6]), kind_of(r[7]))
             fam.setdefault(key, []).append(r)
     md += ["## failure families (class, node, thaw), by size", ""]
     for key, rs in sorted(fam.items(), key=lambda kv: -len(kv[1]))[:30]:
         ex = rs[0]
-        md.append(f"- {len(rs)}x {key[0]}: node `{key[1]}` thaw `{key[2]}`; e.g. {ex[0]} {ex[2]}/{ex[3]}; shapes "
-                  f"{sorted({r[2] for r in rs})[:6]}")
+        md.append(f"- {len(rs)}x {key[0]} in {key[1]}: node `{key[2]}` thaw `{key[3]}`; e.g. {ex[0]} {ex[2]}/{ex[3]}; "
+                  f"{len({r[0] for r in rs})} fns, shapes {sorted({r[2] for r in rs})[:6]}")
     md.append("")
     open(os.path.join(out, "boundary.md"), "w", encoding="utf-8").write("\n".join(md) + "\n")
     print("\n".join(md[:60]))

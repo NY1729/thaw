@@ -74,7 +74,7 @@ SHAPES = {
     "undefined": lambda k, s: "undefined",
     "array": lambda k, s: f"[{s}]",
     "plainobj": lambda k, s: f"({{ a: 1, path: {s} }})",
-    "classgetter": lambda k, s: f"new (class G {{ get path() {{ return {s}; }} }})()",
+    "classgetter": lambda k, s: f"new __G({s})",  # class declared in the prelude: a class expression cannot capture `d`
     "fn": lambda k, s: f"(() => {s})",
     "number": lambda k, s: "987654" if k == "P" else "5",  # a path slot reads a number as a (bad) fd
 }
@@ -154,7 +154,7 @@ def fs_specs():
     sync("rmSync_missing", "fs.rmSync($0, { force: true })", "P:new")
     # callback and stream forms of the slot values
     def cb(i, call, k):
-        A(("fs", i, "await new Promise((r: any) => { " + call + " })", (k,)))
+        A(("fs", i, "await new Promise<any>((r: any) => { " + call + " })", (k,)))
     R = '(e: any, v: any) => r(e ? "E" + e.name + "/" + e.code : v)'
     cb("readFile_cb", f'fs.readFile($0, "utf8", {R});', "P:src")
     cb("writeFile_cb", f'fs.writeFile($0, "x", {R});', "P:new")
@@ -338,9 +338,14 @@ DEFAULT_MODULES = ["fs", "fsp", "path", "nurl", "buffer", "sd", "util", "os", "c
 ORIGINS = ("direct", "any", "box", "json", "clone", "eval")
 
 BOUNDARY_PRELUDE = r'''
+class __G {
+  v: any;
+  constructor(v: any) { this.v = v; }
+  get path(): any { return this.v; }
+}
 const __Q: any[] = [];
 let __N: number = 0;
-function p(name: string, f: (d: string) => any): void { __Q.push([name, f]); }
+function p(name: string, f: any): void { __Q.push([name, f]); }
 function __tree(d: string, rel: string, out: string[]): void {
   const names: string[] = __fs.readdirSync(d + rel).sort();
   for (let i = 0; i < names.length; i++) {
@@ -357,6 +362,7 @@ async function __runAll(): Promise<void> {
   const root: string = String(process.env.PA_TMP);
   for (let i = 0; i < __Q.length; i++) {
     const name: string = __Q[i][0];
+    const fn: any = __Q[i][1];
     const d: string = root + "/t" + (++__N);
     console.log("@@ " + name);
     let line: string = "";
@@ -368,7 +374,7 @@ async function __runAll(): Promise<void> {
       __fs.symlinkSync("f.txt", d + "/ln");
       process.chdir(d);
       try {
-        line = show(await __Q[i][1](d), 0);
+        line = show(await fn(d), 0);
       } catch (e: any) {
         line = "THROW " + String(e.name) + "/" + String(e.code) + ": ";
       }
