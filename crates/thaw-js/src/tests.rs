@@ -13449,3 +13449,49 @@ fn a_json_stringify_property_list_reads_a_proxy_through_its_get_trap() {
         "{\"a\":1} {\"a\":1,\"z\":0}"
     );
 }
+
+#[test]
+fn array_natives_in_place_keep_snapshot_and_hole_semantics() {
+    // fromIndex.valueOf mutating the array: length and elements come from before the conversion
+    assert_eq!(
+        one("var a=[1,2,3]; var r=a.indexOf(3,{valueOf(){a.length=0;return 0}}); console.log(r,a.length)"),
+        "2 0"
+    );
+    assert_eq!(
+        one("var a=[1,2,3]; var s=a.slice({valueOf(){a.length=0;return 1}}); console.log(s.join(),a.length)"),
+        "2,3 0"
+    );
+    // holes: indexOf never matches one, includes sees undefined, slice keeps the hole
+    assert_eq!(
+        one("var a=[1,,3]; var s=a.slice(0,3); console.log(a.indexOf(undefined),a.includes(undefined),1 in s,s.length,a.lastIndexOf(3),a.indexOf(3,-1),[NaN].includes(NaN),[NaN].indexOf(NaN))"),
+        "-1 true false 3 2 2 true -1"
+    );
+    assert_eq!(
+        one("var a=[1,2,3,4]; console.log(a.slice(-2).join(),a.slice(1,-1).join(),a.slice(9).length,a.lastIndexOf(1,-4),a.lastIndexOf(4,-1),a.includes(4,-1),a.includes(1,-1))"),
+        "3,4 2,3 0 0 3 true false"
+    );
+    assert_eq!(
+        one("var a=[1,2]; var b=a.concat([3,,5],[6]); console.log(b.length,3 in b,b.join())"),
+        "6 false 1,2,3,,5,6"
+    );
+}
+
+#[test]
+fn writing_existing_property_respects_order_readonly_and_setters() {
+    assert_eq!(
+        one("var o={}; for(var i=0;i<40;i++) o['k'+i]=i; o.k7=70; o.k0=-1; console.log(Object.keys(o).slice(0,3).join(),o.k7,o.k0,Object.keys(o).length)"),
+        "k0,k1,k2 70 -1 40"
+    );
+    assert_eq!(
+        one("'use strict'; var o={}; for(var i=0;i<40;i++) o['k'+i]=i; Object.defineProperty(o,'k20',{writable:false}); var e; try{o.k20=1}catch(x){e=x.constructor.name} console.log(e,o.k20)"),
+        "TypeError 20"
+    );
+    assert_eq!(
+        one("var log=[]; var p={set x(v){log.push(v)}}; var o=Object.create(p); for(var i=0;i<40;i++) o['k'+i]=i; o.x=5; var q=Object.create(Object.defineProperty({},'y',{value:1,writable:false})); for(var i=0;i<40;i++) q['k'+i]=i; q.y=2; console.log(log.join(),Object.keys(o).includes('x'),q.y,Object.keys(q).includes('y'))"),
+        "5 false 1 false"
+    );
+    assert_eq!(
+        one("var o=Object.freeze({a:1}); o.a=2; console.log(o.a)"),
+        "1"
+    );
+}

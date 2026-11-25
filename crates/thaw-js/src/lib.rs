@@ -3311,8 +3311,8 @@ impl Interp {
                 // an inherited or own read-only data property refuses the write
                 let mut cur = Some(o.clone());
                 while let Some(c) = cur {
-                    if let Some(p) = c.raw_props.borrow().iter().find(|p| &*p.key == key) {
-                        if !p.writable {
+                    if let Some(w) = c.position(key).map(|i| c.raw_props.borrow()[i].writable) {
+                        if !w {
                             return self.refuse_write(strict, o, key, Refusal::ReadOnly);
                         }
                         break;
