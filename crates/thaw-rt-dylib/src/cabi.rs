@@ -95,6 +95,19 @@ mod tests {
     }
 
     #[test]
+    fn js_exports_file_is_sorted_and_disjoint_from_core() {
+        let core: Vec<&str> = include_str!("../exports.txt").lines().collect();
+        let js: Vec<&str> = include_str!("../exports-js.txt").lines().collect();
+        assert!(
+            js.windows(2).all(|w| w[0] < w[1]),
+            "exports-js.txt must be sorted and unique"
+        );
+        assert!(js
+            .iter()
+            .all(|n| n.starts_with("thaw_") && !core.contains(n)));
+    }
+
+    #[test]
     fn abi_hash_is_16_hex_and_stable() {
         let a = unsafe { CStr::from_ptr(thaw_rt_abi_hash()) }
             .to_str()

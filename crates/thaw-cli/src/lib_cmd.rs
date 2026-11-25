@@ -213,7 +213,7 @@ fn lib_build(
     }
 
     // The runtime: built once (cached next to the compiler), copied into the store.
-    let rt_cached = build_rt_shared_library()?;
+    let rt_cached = build_rt_shared_library(false)?;
     let rt_hash = rt_cached
         .parent()
         .and_then(Path::file_name)

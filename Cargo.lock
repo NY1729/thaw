@@ -3314,6 +3314,7 @@ dependencies = [
  "sha2",
  "thaw-arena",
  "thaw-jit",
+ "thaw-js",
  "thaw-runtime",
  "thaw-std",
 ]

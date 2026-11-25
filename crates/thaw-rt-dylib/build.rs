@@ -29,9 +29,20 @@ fn main() {
     let mut hasher = Sha256::new();
     hasher.update(exports.as_bytes());
     hasher.update(b"THAW_ABI_VERSION=1\n");
-    hasher.update(b"variant=core;engine=none\n");
+    let js = std::env::var_os("CARGO_FEATURE_THAW_JS").is_some();
+    if js {
+        println!("cargo:rerun-if-changed=exports-js.txt");
+        hasher.update(b"variant=js;engine=thaw-js\n");
+        hasher.update(std::fs::read(manifest_dir.join("exports-js.txt")).unwrap());
+    } else {
+        hasher.update(b"variant=core;engine=none\n");
+    }
     hasher.update(b"jsvalue_layout=-\n");
-    for dir in ["thaw-arena", "thaw-jit", "thaw-runtime", "thaw-std"] {
+    let mut dirs = vec!["thaw-arena", "thaw-jit", "thaw-runtime", "thaw-std"];
+    if js {
+        dirs.extend(["thaw-js", "thaw-parser", "thaw-node-builtins"]);
+    }
+    for dir in dirs {
         let path = manifest_dir.join("..").join(dir);
         println!("cargo:rerun-if-changed={}", path.display());
         hash_tree(&path, &mut hasher);

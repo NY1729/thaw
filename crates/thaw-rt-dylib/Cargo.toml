@@ -16,11 +16,12 @@ thaw-arena = { path = "../thaw-arena" }
 thaw-jit = { path = "../thaw-jit" }
 thaw-runtime = { path = "../thaw-runtime" }
 thaw-std = { path = "../thaw-std" }
+thaw-js = { path = "../thaw-js", optional = true }
 
 [build-dependencies]
 sha2 = "0.10"
 
 [features]
 default = []
-# Reserved for the thaw-js variant (M6). Declared empty, not wired.
-thaw-js = []
+# One image with thaw-js too (`--shared-rt` for programs that use the JS engine): one arena, one TLS set.
+thaw-js = ["dep:thaw-js"]
