@@ -1453,10 +1453,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 let element_llvm_type = self.basic_type(&element)?;
+                // The runtime writes `width` bytes (8 for a bool element, whose
+                // LLVM type is a single byte), so the slot must be that large.
                 let out_slot = self
                     .builder
-                    .build_alloca(element_llvm_type, "array_remove_value")
+                    .build_alloca(
+                        self.context.i8_type().array_type(width.max(8) as u32),
+                        "array_remove_value",
+                    )
                     .map_err(|error| error.to_string())?;
+                out_slot
+                    .as_instruction()
+                    .and_then(|slot| slot.set_alignment(8).ok());
                 let runtime = if is_shift {
                     "thaw_array_shift"
                 } else {
