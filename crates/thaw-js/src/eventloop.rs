@@ -2355,7 +2355,11 @@ impl Interp {
                     &format!("ENOENT: no such file or directory, chdir '{cwd}' -> '{dest}'"),
                 )?;
                 if let Value::Object(o) = &e {
+                    put(o, "errno", Value::Number(-2.0));
                     put(o, "code", Value::str("ENOENT"));
+                    put(o, "syscall", Value::str("chdir"));
+                    put(o, "path", Value::str(&cwd));
+                    put(o, "dest", Value::str(&dest));
                 }
                 return Err(Ctl::Throw(e));
             }

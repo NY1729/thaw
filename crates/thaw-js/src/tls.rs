@@ -55,12 +55,12 @@ struct TlsCertificates {
     chain_verified: bool,
 }
 
-struct RecordingServerVerifier {
-    roots: RootCertStore,
-    defer_name: bool,
-    allow_invalid: bool,
-    result: Arc<Mutex<Option<String>>>,
-    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+pub(crate) struct RecordingServerVerifier {
+    pub(crate) roots: RootCertStore,
+    pub(crate) defer_name: bool,
+    pub(crate) allow_invalid: bool,
+    pub(crate) result: Arc<Mutex<Option<String>>>,
+    pub(crate) algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
 }
 
 /// Node reports `socket.authorizationError` as the OpenSSL X509 verify code, not rustls's message.
@@ -270,7 +270,7 @@ pub(crate) struct TlsClientOptions<'a> {
     pub(crate) defer_name_verification: bool,
 }
 
-fn server_client_auth_status(
+pub(crate) fn server_client_auth_status(
     request_cert: bool,
     peer_present: bool,
     verifier_accepted: bool,
@@ -294,7 +294,7 @@ pub(crate) fn take_tls_stream_handle(next: &mut u32) -> Option<u32> {
     Some(handle)
 }
 
-fn tls_client_roots(ca_spec: Option<&str>) -> Result<RootCertStore, String> {
+pub(crate) fn tls_client_roots(ca_spec: Option<&str>) -> Result<RootCertStore, String> {
     match ca_spec {
         None => Ok(RootCertStore::from_iter(
             webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
@@ -303,7 +303,7 @@ fn tls_client_roots(ca_spec: Option<&str>) -> Result<RootCertStore, String> {
     }
 }
 
-fn tls_ca_roots(ca_spec: Option<&str>) -> Result<RootCertStore, String> {
+pub(crate) fn tls_ca_roots(ca_spec: Option<&str>) -> Result<RootCertStore, String> {
     let mut roots = RootCertStore::empty();
     let Some(spec) = ca_spec else {
         return Ok(roots);
@@ -1235,7 +1235,7 @@ pub(crate) fn tls_authorization(handle: u32) -> String {
     value.unwrap_or_else(|| serde_json::json!({"authorized": false, "authorizationError": "TLS socket is closed", "chainVerified": false})).to_string()
 }
 
-fn certificate_metadata(bytes: &[u8]) -> String {
+pub(crate) fn certificate_metadata(bytes: &[u8]) -> String {
     let Ok((_, certificate)) = x509_parser::parse_x509_certificate(bytes) else {
         return "{}".to_string();
     };
