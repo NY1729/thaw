@@ -778,6 +778,22 @@ impl Access<'_, '_> {
             Ok(instance) => instance,
             Err(error) => {
                 sync_memories(self.ctx.data(), &self.ctx);
+                // an import whose type does not match the module's is a LinkError; everything else that
+                // fails here (a segment out of bounds, the start function trapping) is a runtime failure
+                if let wasmi::errors::ErrorKind::Instantiation(inst) = error.kind() {
+                    use wasmi::errors::InstantiationError as I;
+                    if matches!(
+                        inst,
+                        I::InvalidNumberOfImports { .. }
+                            | I::ImportsExternalsMismatch { .. }
+                            | I::GlobalTypeMismatch { .. }
+                            | I::FuncTypeMismatch { .. }
+                            | I::TableTypeMismatch { .. }
+                            | I::MemoryTypeMismatch { .. }
+                    ) {
+                        return Err(link_error(false, inst.to_string()));
+                    }
+                }
                 return Err(InstantiateError::Call(map_error(error)));
             }
         };

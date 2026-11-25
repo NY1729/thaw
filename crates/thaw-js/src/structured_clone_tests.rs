@@ -175,3 +175,35 @@ setTimeout(()=>{c.port1.close(); c.port2.close(); quiet.port1.close(); quiet.por
         r##"object false false function function function function|before start|got true true message 0 true true true true|got true true message 0 true true true true"##
     );
 }
+
+#[test]
+fn structured_clone_views_share_one_buffer_copy_and_brands_ignore_prototypes() {
+    assert_eq!(
+        one(
+            r##"const input = new ArrayBuffer(8); const src = new Uint8Array(input); src.set([10,11,12,13,14,15,16,17]);
+const u8 = new Uint8Array(input, 2, 4), u16 = new Uint16Array(input, 2, 2), dv = new DataView(input, 3, 2);
+const c = structuredClone({ u8, u16, dv, empty: new Uint8Array(input, 8, 0), buffer: input, buf: Buffer.from('ab') });
+console.log([c.u8.buffer === c.buffer, c.u16.buffer === c.buffer, c.dv.buffer === c.buffer, c.empty.buffer === c.buffer, c.buffer !== input].join());
+console.log([c.u8.byteOffset, c.u8.length, c.u16.byteOffset, c.dv.byteOffset, c.dv.byteLength, c.empty.byteOffset, c.buf.constructor.name, c.buf.length].join());
+c.dv.setUint8(0, 99); console.log(c.u8[1], src[3]);
+const b2 = structuredClone({ u8, again: u8 }); console.log(b2.again === b2.u8);
+const brands = [Promise.resolve(1), new WeakMap(), new WeakSet(), new WeakRef({})];
+let reads = 0;
+for (const v of brands) Object.defineProperty(v, 'constructor', { get() { reads++; return 1; } });
+const protos = brands.map(v => Object.getPrototypeOf(v));
+const res = [];
+for (const v of brands) { for (const form of [v, { n: v }, [v]]) { try { structuredClone(form); res.push('ok'); } catch (e) { res.push(e instanceof DOMException && e.name); } } }
+console.log(res.join(), reads);
+for (const v of brands) Object.setPrototypeOf(v, null);
+const res2 = [];
+for (const v of brands) { try { structuredClone(v); res2.push('ok'); } catch (e) { res2.push(e.name + ':' + e.message); } }
+console.log(res2.join('|'));
+let traps = 0; const h = { get() { traps++; throw 1; }, ownKeys() { traps++; throw 1; }, getPrototypeOf() { traps++; throw 1; } };
+const rv = Proxy.revocable({}, h); rv.revoke();
+const res3 = [];
+for (const p of [new Proxy({}, h), rv.proxy]) { try { structuredClone(p); res3.push('ok'); } catch (e) { res3.push(e.name); } }
+console.log(res3.join(), traps);"##
+        ),
+        r##"true,true,true,true,true|2,4,2,3,2,8,Uint8Array,2|99 13|true|DataCloneError,DataCloneError,DataCloneError,DataCloneError,DataCloneError,DataCloneError,DataCloneError,DataCloneError,DataCloneError,DataCloneError,DataCloneError,DataCloneError 0|DataCloneError:[object Object] could not be cloned.|DataCloneError:[object WeakMap] could not be cloned.|DataCloneError:[object WeakSet] could not be cloned.|DataCloneError:[object Object] could not be cloned.|DataCloneError,DataCloneError 0"##
+    );
+}

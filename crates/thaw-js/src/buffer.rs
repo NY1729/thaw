@@ -7,7 +7,8 @@ impl Interp {
         let g = self.global.clone();
         let f = self.native(|it, _, a| {
             let s = it.to_str(&arg(a, 0));
-            Ok(it.u8_from_vec(s.as_bytes().to_vec()))
+            // a lone surrogate is U+FFFD in UTF-8 (the string layer keeps it as a private-use char)
+            Ok(it.u8_from_vec(crate::builtins::lossy_out(&s).as_bytes().to_vec()))
         });
         g.declare("__thaw_utf8_encode", f, true);
         // (bytes, start, end, fatal) -> string, or `undefined` when `fatal` and the input is not UTF-8
@@ -251,13 +252,6 @@ const BUFFER_PRELUDE: &str = r#"
   def(P, 'toJSON', function () { return { type: 'Buffer', data: Array.from(this) }; });
   def(P, 'equals', function (o) { return Buffer.compare(this, o) === 0; });
   def(P, 'compare', function (o) { return Buffer.compare(this, o); });
-  def(P, 'write', function (s, off, len, enc) {
-    if (typeof off === 'string') { enc = off; off = 0; len = undefined; } else if (typeof len === 'string') { enc = len; len = undefined; }
-    off = off === undefined ? 0 : off;
-    var bytes = fromString(String(s), enc), n = Math.min(bytes.length, this.length - off, len === undefined ? Infinity : len);
-    for (var i = 0; i < n; i++) this[off + i] = bytes[i];
-    return n;
-  });
   def(P, 'fill', function (v, start, end, enc) {
     if (typeof start === 'string') { enc = start; start = 0; end = this.length; }
     start = start === undefined ? 0 : start; end = end === undefined ? this.length : end;
@@ -547,6 +541,24 @@ const BUFFER_PRELUDE: &str = r#"
   def(P, 'utf8Write', function utf8Write(string, ...r) { return writeOf(this, 'utf8', string, r[0], r[1]); });
   def(P, 'latin1Write', function latin1Write(string, ...r) { return writeOf(this, 'latin1', string, r[0], r[1]); });
   def(P, 'asciiWrite', function asciiWrite(string, ...r) { return writeOf(this, 'ascii', string, r[0], r[1]); });
+  // validateInteger(value, name, 0, buf.length), as lib/buffer.js write() does for offset and length
+  function validateOffset(v, name, max) {
+    validateNumber(v, name);
+    if (!Number.isInteger(v)) throw outOfRange(name, 'an integer', v);
+    if (v < 0 || v > max) throw outOfRange(name, '>= 0 && <= ' + max, v);
+  }
+  def(P, 'write', function write(string, offset, length, encoding) {
+    if (offset === undefined) { offset = 0; length = this.length; }
+    else if (length === undefined && typeof offset === 'string') { encoding = offset; length = this.length; offset = 0; }
+    else {
+      validateOffset(offset, 'offset', this.length);
+      var remaining = this.length - offset;
+      if (length === undefined) length = remaining;
+      else if (typeof length === 'string') { encoding = length; length = remaining; }
+      else { validateOffset(length, 'length', this.length); if (length > remaining) length = remaining; }
+    }
+    return writeOf(this, normEnc(encoding || 'utf8'), string, offset, length);
+  });
 
   def(P, 'subarray', function subarray(start, end) { return U8.prototype.subarray.call(this, start, end); });
   def(P, 'toLocaleString', P.toString);

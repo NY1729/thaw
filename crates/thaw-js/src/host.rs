@@ -2197,11 +2197,24 @@ pub(crate) fn graph_token(
             Ok(Value::str(&crate::builtins::units_str(&units)))
         }
         ("r", Native::Number(i)) => graph_node(it, *i as usize, nodes, cx),
-        ("bi", Native::Str(decimal)) => Ok(Value::BigInt(Rc::new(
-            crate::bigint::parse_bigint(decimal).ok_or("malformed graph bigint")?,
-        ))),
+        ("bi", Native::Str(decimal)) => graph_bigint(decimal),
         _ => Err(format!("unsupported graph token `{key}`")),
     }
+}
+
+/// A graph `bi` token is the canonical decimal the encoder writes (`-?(0|[1-9][0-9]*)`, no `-0`): the lenient
+/// BigInt string parser would also take whitespace, line terminators, a sign or leading zeros.
+fn graph_bigint(decimal: &str) -> Result<Value, String> {
+    let digits = decimal.strip_prefix('-').unwrap_or(decimal);
+    let canonical = !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" && decimal == "0" || !digits.starts_with('0'));
+    if !canonical {
+        return Err("malformed graph bigint".into());
+    }
+    Ok(Value::BigInt(Rc::new(
+        crate::bigint::parse_bigint(decimal).ok_or("malformed graph bigint")?,
+    )))
 }
 
 /// `new <global ctor>(args)`.
@@ -2433,9 +2446,7 @@ fn graph_node(
             v
         }
         [(k, ms)] if k == "d" => new_date(it, ms)?,
-        [(k, Native::Str(decimal))] if k == "bi" => Value::BigInt(Rc::new(
-            crate::bigint::parse_bigint(decimal).ok_or("malformed graph bigint")?,
-        )),
+        [(k, Native::Str(decimal))] if k == "bi" => graph_bigint(decimal)?,
         [(k, Native::Array(parts))] if k == "re" => {
             let (Some(Native::Str(source)), Some(Native::Str(flags))) =
                 (parts.first(), parts.get(1))
