@@ -106,7 +106,7 @@ pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
         } else {
             unsafe { CStr::from_ptr(rendered) }.to_string_lossy()
         };
-        eprint_line(&format!("Uncaught: {text}"));
+        eprint_line(&text);
     }
 }
 

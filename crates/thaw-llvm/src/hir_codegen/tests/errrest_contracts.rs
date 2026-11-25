@@ -326,7 +326,7 @@ function main(): void {
     );
 }
 
-/// An uncaught throw exits 1 and reports `Uncaught: <inspected value>`. Node prints the source line
+/// An uncaught throw exits 1 and reports `<inspected value>` on stderr. Node prints the source line
 /// excerpt first (skipped here: a native binary has no source positions) and then the value the
 /// way `util.inspect` shows it; an Error with a `cause` or own properties prints in the same
 /// nested form as `console.log` (without frames, so the header is bracketed like a stackless
@@ -334,28 +334,28 @@ function main(): void {
 #[test]
 fn errrest_uncaught_throw_reports_inspected_value() {
     let cases: [(&str, &str, &str); 8] = [
-        ("function main(): void { throw new Error(\"boom\"); }", "Uncaught: Error: boom\n", "error"),
+        ("function main(): void { throw new Error(\"boom\"); }", "Error: boom\n", "error"),
         (
             "class AppError extends Error { constructor(m: string) { super(m); this.name = \"AppError\"; } }\nfunction main(): void { throw new AppError(\"bad\"); }",
-            "Uncaught: AppError: bad\n",
+            "AppError: bad\n",
             "subclass",
         ),
-        ("function main(): void { throw \"plain string\"; }", "Uncaught: plain string\n", "string"),
+        ("function main(): void { throw \"plain string\"; }", "plain string\n", "string"),
         (
             "function main(): void { throw { code: 5, msg: \"obj\" }; }",
-            "Uncaught: { code: 5, msg: 'obj' }\n",
+            "{ code: 5, msg: 'obj' }\n",
             "object",
         ),
-        ("function main(): void { throw 42; }", "Uncaught: 42\n", "number"),
-        ("function main(): void { throw null; }", "Uncaught: null\n", "null"),
+        ("function main(): void { throw 42; }", "42\n", "number"),
+        ("function main(): void { throw null; }", "null\n", "null"),
         (
             "function main(): void { throw new TypeError(\"tt\", { cause: new Error(\"root\") }); }",
-            "Uncaught: [TypeError: tt] { [cause]: [Error: root] }\n",
+            "[TypeError: tt] { [cause]: [Error: root] }\n",
             "cause",
         ),
         (
             "function main(): void { const e: any = new Error(\"withprops\"); e.code = \"E_X\"; throw e; }",
-            "Uncaught: [Error: withprops] { code: 'E_X' }\n",
+            "[Error: withprops] { code: 'E_X' }\n",
             "props",
         ),
     ];

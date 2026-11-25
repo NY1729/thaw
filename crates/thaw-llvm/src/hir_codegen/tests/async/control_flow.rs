@@ -489,7 +489,7 @@ fn frame_split_propagates_async_rejection_through_await_chain() {
     // Node prints "before", reports the unhandled rejection and exits 1.
     let (stdout, stderr, code) = compile_and_run_failing(source, "async_rejection_chain");
     assert_eq!(stdout, "before\n");
-    assert!(stderr.contains("Uncaught: boom"), "{stderr}");
+    assert!(stderr.contains("boom"), "{stderr}");
     assert_eq!(code, Some(1));
 }
 
@@ -585,7 +585,7 @@ fn frame_split_rethrows_after_await_in_catch() {
     // Node reports the unhandled rejection of `main` and exits 1.
     let (stdout, stderr, code) = compile_and_run_failing(source, "async_catch_rethrow");
     assert_eq!(stdout, "before\noriginal\nrethrowing\n");
-    assert!(stderr.contains("Uncaught: wrapped"), "{stderr}");
+    assert!(stderr.contains("wrapped"), "{stderr}");
     assert_eq!(code, Some(1));
 }
 

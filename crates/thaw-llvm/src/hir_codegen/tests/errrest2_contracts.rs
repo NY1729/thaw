@@ -130,13 +130,13 @@ fn errrest2_unhandled_rejections_and_timer_throws_report_like_node() {
         format!("UnhandledPromiseRejection: This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"{text}\". {{\n  code: 'ERR_UNHANDLED_REJECTION'\n}}\n")
     };
     let cases: [(&str, String, &str); 7] = [
-        ("function main(): void { Promise.reject(\"plain reason\"); }", format!("Uncaught: plain reason\n{}", reason("plain reason")), "string"),
-        ("function main(): void { Promise.reject({ code: 5 }); }", format!("Uncaught: {{ code: 5 }}\n{}", reason("#<Object>")), "object"),
-        ("function main(): void { Promise.reject(undefined); }", format!("Uncaught: undefined\n{}", reason("undefined")), "undefined"),
-        ("function main(): void { Promise.reject(new Error(\"rej\")); }", "Uncaught: Error: rej\n".to_string(), "error"),
+        ("function main(): void { Promise.reject(\"plain reason\"); }", format!("plain reason\n{}", reason("plain reason")), "string"),
+        ("function main(): void { Promise.reject({ code: 5 }); }", format!("{{ code: 5 }}\n{}", reason("#<Object>")), "object"),
+        ("function main(): void { Promise.reject(undefined); }", format!("undefined\n{}", reason("undefined")), "undefined"),
+        ("function main(): void { Promise.reject(new Error(\"rej\")); }", "Error: rej\n".to_string(), "error"),
         ("function main(): void { setTimeout(() => { throw new Error(\"timer\"); }, 0); }", "Error: timer\n".to_string(), "timer"),
         ("function main(): void { setTimeout(() => { throw \"str\"; }, 0); }", "str\n".to_string(), "timer_string"),
-        ("async function main(): Promise<void> { await Promise.resolve(); throw new RangeError(\"late\"); }", "Uncaught: RangeError: late\n".to_string(), "async"),
+        ("async function main(): Promise<void> { await Promise.resolve(); throw new RangeError(\"late\"); }", "RangeError: late\n".to_string(), "async"),
     ];
     for (source, expected, label) in cases {
         let (stdout, stderr, code) = compile_and_run_failing(source, &format!("errrest2_reject_{label}"));
