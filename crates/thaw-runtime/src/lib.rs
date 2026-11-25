@@ -64,6 +64,12 @@ unsafe extern "C" {
     fn thaw_error_inspect(value: *const c_char) -> *const c_char;
 }
 
+/// One line on stderr; unlike `eprintln!` a closed pipe (EPIPE) is ignored instead of panicking, which aborts
+/// inside an `extern "C"` fn.
+fn eprint_line(line: &str) {
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("{line}\n").as_bytes());
+}
+
 /// Prints an uncaught compiled exception before the process exits
 /// unsuccessfully.
 ///
@@ -100,7 +106,7 @@ pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
         } else {
             unsafe { CStr::from_ptr(rendered) }.to_string_lossy()
         };
-        eprintln!("Uncaught: {text}");
+        eprint_line(&format!("Uncaught: {text}"));
     }
 }
 
@@ -126,9 +132,9 @@ pub unsafe extern "C" fn thaw_runtime_report_unhandled_rejection(error: *const c
     } else {
         text.into_owned()
     };
-    eprintln!(
+    eprint_line(&format!(
         "UnhandledPromiseRejection: This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"{reason}\". {{\n  code: 'ERR_UNHANDLED_REJECTION'\n}}"
-    );
+    ));
 }
 
 /// Copies a terminal exception into owned report text before a listener can

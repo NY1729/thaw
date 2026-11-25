@@ -195,6 +195,9 @@ pub(crate) struct Rt {
     pub(crate) capture_fn: Option<Value>,
     /// `process.finalization` callbacks not yet run (see process_members.rs `run_finalizers`).
     pub(crate) finalizers: Vec<crate::process_members::Finalizer>,
+    /// A write to stdout/stderr failed with EPIPE (the reader closed): `.0` is set by the writer, `.1` once the
+    /// stream's `error` event was queued; later writes are dropped (Node destroys the stream).
+    pub(crate) epipe: (bool, bool),
 }
 
 impl Rt {
@@ -410,7 +413,8 @@ impl Interp {
             let line = &*crate::builtins::lossy_out(&line[..line.len() - 1]);
             if self.rt.stream {
                 if !crate::worker::capture_line(self, 1, &format!("{line}\n")) {
-                    println!("{line}");
+                    // Node's console swallows write errors; a failed pipe write must not panic.
+                    self.write_fd(false, format!("{line}\n").as_bytes());
                 }
             } else {
                 self.out.push(line.to_string());
@@ -422,7 +426,7 @@ impl Interp {
     pub(crate) fn emit_err(&mut self, line: &str) {
         if self.rt.stream {
             if !crate::worker::capture_line(self, 2, &format!("{line}\n")) {
-                eprintln!("{line}");
+                self.write_fd(true, format!("{line}\n").as_bytes());
             }
         } else {
             self.err.push(line.to_string());
@@ -432,15 +436,31 @@ impl Interp {
     /// `process.stderr.write` on the main thread: the bytes as written (no added newline), after any partial stdout line.
     pub(crate) fn emit_err_raw(&mut self, bytes: &[u8]) {
         self.flush_partial();
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), bytes);
+        self.write_fd(true, bytes);
+    }
+
+    /// Writes and flushes `bytes` on fd 1 or 2; a failure (EPIPE: the reader closed) is recorded in `rt.epipe`
+    /// instead of panicking like `println!`.
+    pub(crate) fn write_fd(&mut self, err: bool, bytes: &[u8]) {
+        if !err && self.rt.epipe.1 {
+            return;
+        }
+        let result = if err {
+            let mut o = std::io::stderr().lock();
+            std::io::Write::write_all(&mut o, bytes).and_then(|()| std::io::Write::flush(&mut o))
+        } else {
+            let mut o = std::io::stdout().lock();
+            std::io::Write::write_all(&mut o, bytes).and_then(|()| std::io::Write::flush(&mut o))
+        };
+        if !err && matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe) {
+            self.rt.epipe.0 = true;
+        }
     }
 
     /// `process.stdout.write` of a typed array or ArrayBuffer on the main thread: the bytes as they are, flushed now.
     pub(crate) fn emit_out_raw(&mut self, bytes: &[u8]) {
         self.flush_partial();
-        let mut out = std::io::stdout().lock();
-        let _ = std::io::Write::write_all(&mut out, bytes)
-            .and_then(|()| std::io::Write::flush(&mut out));
+        self.write_fd(false, bytes);
     }
 
     /// `process.stdout/stderr.write` in a worker: the bytes as written (no line split, no added newline), to the parent
@@ -1919,9 +1939,8 @@ impl Interp {
         }
         if self.rt.stream {
             if !crate::worker::capture_line(self, 1, &rest) {
-                print!("{rest}");
-                // A partial line has no newline, so Rust's stdout buffer would keep it past the C `main` exit.
-                let _ = std::io::Write::flush(&mut std::io::stdout());
+                // flushed at once: a partial line would stay in Rust's stdout buffer past the C `main` exit
+                self.write_fd(false, rest.as_bytes());
             }
         } else {
             self.out.push(rest);
@@ -2610,8 +2629,14 @@ impl Interp {
             Ok(Value::Undefined)
         });
         self.install_process_events(&p);
+        // the streams are emitters (`process.stdout.on('error', ..)`): they inherit the EventEmitter base
+        let emitter_base = p.proto.borrow().as_ref().and_then(|pp| pp.proto.borrow().clone());
         for (name, is_err) in [("stdout", false), ("stderr", true)] {
             let s = self.plain();
+            if let Some(base) = &emitter_base {
+                *s.proto.borrow_mut() = Some(base.clone());
+            }
+            let stream_for_error = Value::Object(s.clone());
             self.set_native(&s, "write", move |it, _, a| {
                 // a typed array or ArrayBuffer carries bytes; anything else is text
                 let chunk = arg(a, 0);
@@ -2645,6 +2670,23 @@ impl Interp {
                     if direct {
                         it.flush_partial();
                     }
+                }
+                // The reader closed: Node emits `error` (EPIPE) on the stream on a later tick, uncaught without a listener.
+                if !is_err && it.rt.epipe.0 && !it.rt.epipe.1 {
+                    it.rt.epipe.1 = true;
+                    let stream = stream_for_error.clone();
+                    let cb = it.native(move |it, _, _| {
+                        let err = it.make_error("Error", "write EPIPE")?;
+                        if let Value::Object(o) = &err {
+                            put(o, "errno", Value::Number(-32.0));
+                            put(o, "code", Value::str("EPIPE"));
+                            put(o, "syscall", Value::str("write"));
+                        }
+                        let emit = it.get(&stream, "emit")?;
+                        it.call(&emit, &stream, &[Value::str("error"), err])?;
+                        Ok(Value::Undefined)
+                    });
+                    it.rt.ticks.push_back((it.rt.actx.clone(), cb, vec![]));
                 }
                 // Node: write(chunk[, encoding][, callback]) calls the trailing callback on a later tick
                 if let Some(cb) = a
