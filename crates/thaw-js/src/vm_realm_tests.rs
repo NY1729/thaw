@@ -53,8 +53,11 @@ fn vm_300_contexts_run_once_each_finish_fast() {
     assert_eq!(small_out, vec!["8555".to_string()]);
     let (out, large) = run_many_contexts(300);
     assert_eq!(out, vec!["8955050".to_string()]);
+    // Debug builds on a loaded/swapping host (4 parallel threads, `intl`) measured 235 s for what
+    // takes ~25 s on an idle machine, so the hang guard is generous outside release builds.
+    let hang_guard = if cfg!(debug_assertions) { 900 } else { 120 };
     assert!(
-        large < Duration::from_secs(120),
+        large < Duration::from_secs(hang_guard),
         "300 contexts took {large:?} (hang guard)"
     );
     // 10x the contexts, a fixed per-run setup cost on top: allow 15x the 30-context time

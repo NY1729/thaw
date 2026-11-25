@@ -704,7 +704,20 @@ function main(): void {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let mut client = spawn_with_log(&mut Command::new(&client_output), &dir);
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // Wait until the expected output appears (or the client exits) instead of a
+    // fixed delay; the assertions below report the captured output on timeout.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        let stderr = read_log(&client.stderr_log);
+        if ["ack:hello", "hello", "disconnected"]
+            .iter()
+            .all(|want| stderr.lines().any(|line| line == *want))
+            || client.try_wait().unwrap().is_some()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     if client.try_wait().unwrap().is_none() {
         client.kill().unwrap();
     }
