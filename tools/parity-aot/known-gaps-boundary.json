@@ -1,0 +1,4 @@
+{
+ "note": "boundary-value matrix gaps (tools/parity-aot/gen_boundary.py); gaps may only shrink; regenerate with PARITY_AOT_SUITE=boundary run.sh --write-baseline after a fix",
+ "gaps": []
+}

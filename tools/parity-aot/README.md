@@ -170,3 +170,39 @@ checks the report on a synthetic shard.
 copied from a dump. Other modules are NO-DTS-FILE skips in that run. `selftest_gen.sh` checks determinism, the
 universe accounting (every Object.keys id probed or skipped), the argument pool, valid TypeScript and node runs of
 the programs, and the coverage of module ids.
+
+## Boundary-value matrix
+
+`gen_boundary.py` generates probes for the class of bug where a value made in AOT-compiled code crosses into a node:*
+builtin (engine prelude or native) with an argument shape the other probes never use. Example: an AOT-made `URL`
+passed to `fs/promises.rm` failed the prelude's `instanceof URL` check, was read as a string and created a stray
+`file:` directory. The probes run on the existing `aot_run.py` runner (same classes, isolation and known-gaps format).
+
+- Cells: module function template (`SPECS` in the script: fs and fs/promises incl. callback and stream forms, path, url,
+  buffer, string_decoder, util, os, crypto hash/hmac/randomBytes/pbkdf2, zlib sync, events, querystring, timers) x
+  parameter slot x shape x origin. One slot varies, the others keep a valid value. Kinds: `P` path (from the temp dir),
+  `T` data, `U` URL text, `N` number, `S` string, `A` any-typed parameter.
+- Shapes: string, Buffer, Uint8Array, DataView, ArrayBuffer, `new URL('file://...')`, `file://` string, object with
+  `toString`, with `valueOf`, Date, Map, Set, Symbol, BigInt, null, undefined, array, plain object, class instance with a
+  getter, function, number (a path slot gets a bad fd number).
+- Origins (probe id suffix): `direct` (typed, only shapes the TS signature takes; other cells would be TS errors),
+  `any` (declared `any`, forces dynamic paths), `box` (array element through a `map` callback), `json`
+  (`JSON.parse`, JSON-expressible shapes), `clone` (`structuredClone`, cloneable shapes), `eval` (built in a
+  `new Function` body, i.e. engine code). The `ci` profile limits box/json/clone/eval to the url, u8 and null shapes.
+- Probe id: `<module>.<fn>.<slot>.<shape>.<origin>`; modules keys `fs fsp path nurl buffer sd util os crypto zlib events qs timers`.
+- Each probe runs in a fresh dir `PA_TMP/t<N>` (cwd inside it) holding `f.txt`, `sub/g.txt` and a symlink `ln`, and prints the
+  result or `THROW name/code` followed by a `TREE` snapshot of the dir (paths shown as `<d>`). A stray `file:` directory,
+  a missing copy or a different file content is a WRONG-VALUE (report class WRONG-TREE when the result line matches).
+- Skipped (never probed): interactive (readline, tty), network (net, http, dns, tls, dgram), process state (exit, kill,
+  setPriority, chown), non-deterministic (fs.watch, cpus, uptime, random bytes content, mkdtemp names, times), child
+  processes. Recorded in `skips.json`.
+
+Run: `PARITY_AOT_SUITE=boundary THAW=... tools/parity-aot/run.sh [OUT]` (`PARITY_AOT_MODULES=fs,fsp`,
+`PARITY_AOT_BOUNDARY_PROFILE=ci|full`, `PARITY_AOT_RLIMIT_AS_MB`, default 8192 for the probe binaries). Output: the usual
+summary plus `boundary.tsv` (one row per probe: fn, slot, shape, origin, class, node and thaw first lines, new) and
+`boundary.md` (tables by module, shape and origin, failure families; `boundary_report.py`). A compile reject of a
+`direct` probe with a type diagnostic is shown as REJECT-TYPE (TypeScript refuses that shape; not a finding).
+`known-gaps-boundary.json` holds the current failures; `diff.py` reports gaps that are not in it. Write it with
+`run.sh --write-baseline` after a fix. `selftest_boundary.sh` (called by `selftest.sh`) checks determinism, id
+uniqueness, URL-shape coverage, that every program runs twice under node with identical output, and the workflow wiring.
+CI: label `parity-aot-boundary` (or dispatch `suite: boundary`) runs job `boundary-shards` (b1 to b3, ci profile).
