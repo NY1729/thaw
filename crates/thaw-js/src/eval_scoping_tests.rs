@@ -58,3 +58,62 @@ fn param_expression_eval_cannot_declare_arguments() {
         "no throw"
     );
 }
+
+#[test]
+fn strict_program_functions_are_strict_and_their_eval_vars_stay_local() {
+    assert_eq!(
+        lines("'use strict'; function a(){ var x = 0; eval('var x = 1'); return x; } function b(){ eval('var y = 1'); return typeof y; } console.log(a(), b(), typeof (function(){ return this; })());"),
+        "0 undefined undefined"
+    );
+    assert_eq!(
+        lines("'use strict'; function f(){ return this; } console.log(f());"),
+        "undefined"
+    );
+}
+
+#[test]
+fn indirect_eval_declares_configurable_global_vars_and_confines_lexicals() {
+    assert_eq!(
+        lines("(0,eval)('var iv = 9; function iff(){}'); var d = Object.getOwnPropertyDescriptor(globalThis, 'iv'); console.log(d.enumerable, d.configurable, globalThis.propertyIsEnumerable('iff'), delete globalThis.iv, typeof iv);"),
+        "true true true true undefined"
+    );
+    assert_eq!(
+        lines("(0,eval)('let il = 1; const ic = 2;'); (0,eval)('\"use strict\"; var sv = 1; function sf(){}'); console.log(typeof il, typeof ic, typeof sv, typeof sf, 'sv' in globalThis);"),
+        "undefined undefined undefined undefined false"
+    );
+    // an existing non-configurable global function keeps its attributes when eval redeclares it
+    assert_eq!(
+        lines("Object.defineProperty(globalThis, 'kept', { value: 1, writable: true, enumerable: true, configurable: false }); (0,eval)('function kept(){ return 2; }'); console.log(kept(), Object.getOwnPropertyDescriptor(globalThis, 'kept').configurable);"),
+        "2 false"
+    );
+}
+
+#[test]
+fn eval_global_declarations_follow_can_declare_global() {
+    // a function over a non-configurable, non-writable global is a TypeError and declares nothing
+    assert_eq!(
+        lines("try { eval('var neverDeclared; function NaN(){}'); } catch (e) { console.log(e.constructor.name, Object.getOwnPropertyDescriptor(globalThis, 'neverDeclared')); }"),
+        "TypeError undefined"
+    );
+    assert_eq!(
+        lines("try { (0,eval)('function Infinity(){}'); } catch (e) { console.log(e.constructor.name); }"),
+        "TypeError"
+    );
+    // a configurable property is replaced by an enumerable, writable, configurable one
+    assert_eq!(
+        lines("Object.defineProperty(globalThis, 'cf', { value: 1, enumerable: false, writable: false, configurable: true }); eval('function cf(){}'); var d = Object.getOwnPropertyDescriptor(globalThis, 'cf'); console.log(d.enumerable, d.writable, d.configurable);"),
+        "true true true"
+    );
+}
+
+#[test]
+fn define_property_on_global_keeps_the_requested_flags() {
+    assert_eq!(
+        lines("Object.defineProperty(globalThis, 'dp', { value: 1, enumerable: true, writable: true, configurable: false }); var d = Object.getOwnPropertyDescriptor(globalThis, 'dp'); console.log(d.enumerable, d.writable, d.configurable, delete globalThis.dp, dp);"),
+        "true true false false 1"
+    );
+    assert_eq!(
+        lines("Object.defineProperty(globalThis, 'dq', { value: 1, configurable: true }); var d = Object.getOwnPropertyDescriptor(globalThis, 'dq'); console.log(d.enumerable, d.configurable, delete globalThis.dq, typeof dq);"),
+        "false true true undefined"
+    );
+}

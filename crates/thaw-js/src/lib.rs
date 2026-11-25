@@ -662,6 +662,9 @@ enum Origin {
     Defined,
     /// top-level let/const/class: a scope binding only, not an own property of `globalThis`.
     Lexical,
+    /// created by `Object.defineProperty(globalThis, ...)` with an explicit `(enumerable, configurable)`
+    /// pair other than the `Defined` one.
+    Attrs(bool, bool),
 }
 
 /// Node 22's `globalThis` own properties, as `(name, e/w/c flags)` from the recorded surface (`-` where
@@ -882,6 +885,7 @@ fn global_view_flags(name: &str, b: &Binding) -> Option<(bool, bool, bool)> {
         Origin::Decl | Origin::Defined => Some((false, b.mutable, true)),
         Origin::Var => Some((true, b.mutable, false)),
         Origin::Prop => Some((true, b.mutable, true)),
+        Origin::Attrs(e, c) => Some((e, b.mutable, c)),
     }
 }
 
@@ -3931,13 +3935,13 @@ impl Interp {
                 Some(true)
             }
             Origin::Decl | Origin::Lexical => None,
-            Origin::Var => Some(false),
+            Origin::Var | Origin::Attrs(_, false) => Some(false),
             Origin::Prop => {
                 g.vars.borrow_mut().remove(name);
                 self.unpublish_global(name);
                 Some(true)
             }
-            Origin::Defined => {
+            Origin::Defined | Origin::Attrs(_, true) => {
                 g.vars.borrow_mut().remove(name);
                 self.global_object.remove_prop(name);
                 self.unpublish_global(name);
@@ -4219,19 +4223,31 @@ impl Interp {
         for name in &hoisted_names(stmts) {
             global.declare_global_var(name, origin);
         }
-        self.hoist_functions(stmts, &global)?;
+        // a program-level "use strict": its statements run in a strict child scope (its vars are the
+        // hoisted globals), and its functions close over that scope so their frames are strict too
+        let strict = starts_with_use_strict(stmts).then(|| {
+            let sc = Scope::new(Some(global.clone()));
+            sc.strict.set(true);
+            sc
+        });
+        match &strict {
+            None => self.hoist_functions(stmts, &global)?,
+            Some(sc) => {
+                for s in stmts {
+                    if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                        let name = self.intern(&f.ident.sym);
+                        let func = self.function_value(Some(name.clone()), &f.function, sc)?;
+                        global.declare_rc(name, func, true);
+                    }
+                }
+            }
+        }
         for s in stmts {
             if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
                 global.set_origin(&f.ident.sym, origin);
             }
         }
-        if starts_with_use_strict(stmts) {
-            // a program-level "use strict": its statements run in a strict child scope (its vars are the hoisted globals)
-            let strict = Scope::new(Some(global));
-            strict.strict.set(true);
-            return self.run_hoisted(stmts, &strict);
-        }
-        self.run_hoisted(stmts, &global)
+        self.run_hoisted(stmts, strict.as_ref().unwrap_or(&global))
     }
 
     /// `run` for builtin JS (a prelude, or a native's JS helper): the run id is recorded in `builtin_runs`, so
@@ -4488,7 +4504,7 @@ impl Interp {
     /// of the caller: `let`/`const`/`class` stay in it, a sloppy `var` or function goes to the caller's
     /// variable scope, a strict caller or `"use strict"` text gets its own. Its `this`, `arguments` and
     /// `new.target` are the caller's. Returns the completion value.
-    fn direct_eval(&mut self, src: &str, scope: &Rc<Scope>) -> R<Value> {
+    pub(crate) fn direct_eval(&mut self, src: &str, scope: &Rc<Scope>) -> R<Value> {
         let src = &*builtins::to_source(src);
         if too_nested(src) {
             return self.throw_error("RangeError", STACK_OVERFLOW);
@@ -4535,6 +4551,12 @@ impl Interp {
                 return self.throw_error("SyntaxError", &msg);
             }
         }
+        if !strict && Rc::ptr_eq(&var_scope, &self.global) {
+            if let Some(name) = self.undefinable_global(&stmts, &names) {
+                let msg = format!("Cannot declare global '{name}'");
+                return self.throw_error("TypeError", &msg);
+            }
+        }
         let saved_run = self.run_id;
         self.run_id = next_run_id();
         self.sources.insert(self.run_id, Rc::from(src));
@@ -4549,6 +4571,31 @@ impl Interp {
         outcome.map(|()| completion)
     }
 
+    /// The first name of sloppy eval code that CanDeclareGlobalVar / CanDeclareGlobalFunction refuses: a
+    /// new name on a non-extensible global object, or a function over a property that is neither
+    /// configurable nor a writable enumerable data property.
+    fn undefinable_global(&self, stmts: &[a::Stmt], names: &[Rc<str>]) -> Option<Rc<str>> {
+        let extensible = self.global_object.ext.get() == 0;
+        let fn_names: Vec<&str> = stmts
+            .iter()
+            .filter_map(|s| match s {
+                a::Stmt::Decl(a::Decl::Fn(f)) => Some(&*f.ident.sym),
+                _ => None,
+            })
+            .collect();
+        names.iter().find_map(|n| {
+            let ok = match self.global_prop(n) {
+                None => extensible,
+                Some(p) if fn_names.contains(&&**n) => {
+                    p.configurable
+                        || (p.enumerable && p.writable && matches!(p.slot, Slot::Data(_)))
+                }
+                Some(_) => true,
+            };
+            (!ok).then(|| n.clone())
+        })
+    }
+
     /// The declaration instantiation and the statements of a direct eval (see `direct_eval`).
     fn run_direct_eval(
         &mut self,
@@ -4559,6 +4606,7 @@ impl Interp {
         strict: bool,
     ) -> R<()> {
         let origin = if strict { Origin::Decl } else { Origin::Prop };
+        let is_global = Rc::ptr_eq(var_scope, &self.global);
         for name in names {
             if !var_scope.vars.borrow().contains_key(name) {
                 var_scope.declare_with(name.clone(), Value::Undefined, true, origin);
@@ -4568,7 +4616,31 @@ impl Interp {
             if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
                 let name = self.intern(&f.ident.sym);
                 let func = self.function_value(Some(name.clone()), &f.function, lex)?;
-                var_scope.declare_with(name, func, true, origin);
+                // an existing global binding keeps its attributes: only its value is replaced
+                let mut vars = var_scope.vars.borrow_mut();
+                match vars.get_mut(&name) {
+                    Some(b) => {
+                        b.value = func;
+                        // CreateGlobalFunctionBinding: a configurable global property becomes a plain
+                        // enumerable, writable, configurable data property
+                        if is_global
+                            && matches!(
+                                b.origin,
+                                Origin::Decl
+                                    | Origin::Defined
+                                    | Origin::Prop
+                                    | Origin::Attrs(_, true)
+                            )
+                        {
+                            b.origin = Origin::Prop;
+                            b.mutable = true;
+                        }
+                    }
+                    None => {
+                        drop(vars);
+                        var_scope.declare_with(name, func, true, origin);
+                    }
+                }
             }
         }
         for s in stmts {
