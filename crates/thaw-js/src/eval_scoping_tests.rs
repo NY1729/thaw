@@ -117,3 +117,102 @@ fn define_property_on_global_keeps_the_requested_flags() {
         "false true true undefined"
     );
 }
+
+#[test]
+fn annexb_block_function_assigns_its_var_when_evaluated() {
+    // the var exists (undefined) before the block runs and takes the function at the declaration
+    assert_eq!(
+        lines("function g(){ var before = typeof f; { before += typeof f; function f(){} before += typeof f; } return before + typeof f; } console.log(g());"),
+        "undefinedfunctionfunctionfunction"
+    );
+    // a later top-level function declaration is overwritten by the block function
+    assert_eq!(
+        lines("function g(){ { function f(){ return 'inner'; } } return f(); function f(){ return 'outer'; } } console.log(g());"),
+        "inner"
+    );
+    // switch cases and simple catch parameters
+    assert_eq!(
+        lines("function g(){ switch (1) { case 1: function f(){ return 1; } } return typeof f; } console.log(g());"),
+        "function"
+    );
+    assert_eq!(
+        lines("function g(){ try { throw 0; } catch (f) { { function f(){} } } return typeof f; } console.log(g());"),
+        "function"
+    );
+}
+
+#[test]
+fn annexb_block_function_is_skipped_on_conflicts() {
+    // an enclosing let, a parameter name and `arguments` get no var update
+    assert_eq!(
+        lines(
+            "function g(){ { let f = 1; { function f(){} } } return typeof f; } console.log(g());"
+        ),
+        "undefined"
+    );
+    assert_eq!(
+        lines("function g(f){ { function f(){} } return typeof f; } console.log(g(1));"),
+        "number"
+    );
+    assert_eq!(
+        lines(
+            "function g(){ { function arguments(){} } return typeof arguments; } console.log(g());"
+        ),
+        "object"
+    );
+    // strict code has no Annex B binding
+    assert_eq!(
+        lines(
+            "function g(){ 'use strict'; { function f(){} } return typeof f; } console.log(g());"
+        ),
+        "undefined"
+    );
+}
+
+#[test]
+fn annexb_in_eval_follows_the_enclosing_scopes() {
+    assert_eq!(
+        lines("function g(){ eval('{ function f(){} }'); return typeof f; } console.log(g());"),
+        "function"
+    );
+    // an enclosing let in the caller blocks the var; its value is untouched
+    assert_eq!(
+        lines("function g(){ let f = 5; eval('{ function f(){} }'); return f; } console.log(g());"),
+        "5"
+    );
+    // a global eval creates a configurable global
+    assert_eq!(
+        lines("eval('{ function ef(){} }'); var d = Object.getOwnPropertyDescriptor(globalThis, 'ef'); console.log(typeof ef, d.enumerable, d.configurable);"),
+        "function true true"
+    );
+    // not created at all when the lexical clash is inside the eval text
+    assert_eq!(
+        lines("function g(){ eval('{ let f = 1; { function f(){} } }'); return typeof f; } console.log(g());"),
+        "undefined"
+    );
+    // a var of the same name as a function in the caller is not a conflict
+    assert_eq!(
+        lines("function g(){ function h(){} eval('var h = 2'); return h; } console.log(g());"),
+        "2"
+    );
+}
+
+#[test]
+fn typeof_parenthesized_undeclared_name_is_undefined() {
+    assert_eq!(
+        lines("function g(){ return typeof (nope) + typeof ((nope2)); } console.log(g());"),
+        "undefinedundefined"
+    );
+    assert_eq!(
+        lines("function g(){ 'use strict'; eval('function fun(x){ return x }'); return typeof (fun); } console.log(g());"),
+        "undefined"
+    );
+}
+
+#[test]
+fn define_property_without_value_creates_an_undefined_global() {
+    assert_eq!(
+        lines("Object.defineProperty(globalThis, 'nv', { enumerable: true, writable: true, configurable: false }); (0,eval)('function nv(){ return 1; }'); var d = Object.getOwnPropertyDescriptor(globalThis, 'nv'); console.log(typeof nv, d.enumerable, d.configurable);"),
+        "function true false"
+    );
+}

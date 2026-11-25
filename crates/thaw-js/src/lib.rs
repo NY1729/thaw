@@ -16,7 +16,7 @@
 //! * integer-keyed object properties are not ordered first; arrays have no holes.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::{Rc, Weak};
 #[cfg(test)]
 use thaw_runtime as _;
@@ -1623,6 +1623,8 @@ pub struct Interp {
     pub(crate) intrinsic_eval: Option<Obj>,
     /// Completion value of the direct eval running at the given call depth (see `note_completion`).
     eval_completion: Option<(usize, Value)>,
+    /// `(run id, span.lo)` of the block-level functions whose evaluation assigns their `var` binding (Annex B.3.3).
+    annexb_ok: HashSet<(u32, u32)>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -1769,6 +1771,7 @@ impl Interp {
             symbols_made: Vec::new(),
             intrinsic_eval: None,
             eval_completion: None,
+            annexb_ok: HashSet::new(),
         };
         it.global.kind.set(SK_VAR);
         // a top-level script's `this` is globalThis (vm realms do the same in `vm::sub_realm`)
@@ -3707,6 +3710,8 @@ impl Interp {
         scope: &Rc<Scope>,
     ) -> Value {
         let self_run_id = self.run_id;
+        let inherit_strict = scope.strict.get();
+        let mut annexb_eligible = Vec::new();
         let def = self
             .fn_cache
             .entry((self.run_id, lo))
@@ -3719,7 +3724,22 @@ impl Interp {
                 params.visit_with(&mut finder);
                 let strict = matches!(&body, Body::Block(s) if starts_with_use_strict(s));
                 let hoisted = match &body {
-                    Body::Block(s) => hoisted_names(s),
+                    Body::Block(s) => {
+                        let mut pnames = Names(Vec::new());
+                        params.visit_with(&mut pnames);
+                        let mut pnames: Vec<Rc<str>> =
+                            pnames.0.iter().map(|n| Rc::from(n.as_str())).collect();
+                        if !arrow {
+                            pnames.push(Rc::from("arguments"));
+                        }
+                        let h = hoist_info(s, &pnames);
+                        let mut names = h.vars;
+                        if !strict && !inherit_strict {
+                            annexb_eligible = h.eligible;
+                            names.extend(h.annexb);
+                        }
+                        names
+                    }
                     Body::Expr(_) => Vec::new(),
                 };
                 let param_names = simple_param_names(&params);
@@ -3748,6 +3768,9 @@ impl Interp {
                 })
             })
             .clone();
+        for lo in annexb_eligible {
+            self.annexb_ok.insert((self_run_id, lo));
+        }
         self.closure_from_def(def, scope)
     }
 
@@ -4239,27 +4262,73 @@ impl Interp {
         self.run_global(&stmts, script)
     }
 
+    /// The `var` scope names of `stmts` (a function body, script or eval text). Sloppy code registers its Annex B
+    /// block functions as eligible to assign their var binding when evaluated. Returns `(vars, annexb)`.
+    fn hoist(
+        &mut self,
+        stmts: &[a::Stmt],
+        params: &[Rc<str>],
+        strict: bool,
+    ) -> (Vec<Rc<str>>, Vec<Rc<str>>) {
+        let h = hoist_info(stmts, params);
+        if strict {
+            return (h.vars, Vec::new());
+        }
+        for lo in h.eligible {
+            self.annexb_ok.insert((self.run_id, lo));
+        }
+        (h.vars, h.annexb)
+    }
+
+    /// CanDeclareGlobalFunction for a new Annex B name: a lexical global of that name, a non-extensible global
+    /// object, or a non-configurable property that is no writable enumerable data property refuses it.
+    fn annexb_global_ok(&self, name: &str) -> bool {
+        if self
+            .global
+            .vars
+            .borrow()
+            .get(name)
+            .is_some_and(|b| b.origin == Origin::Lexical)
+        {
+            return false;
+        }
+        match self.global_prop(name) {
+            None => self.global_object.ext.get() == 0,
+            Some(p) => {
+                p.configurable || (p.enumerable && p.writable && matches!(p.slot, Slot::Data(_)))
+            }
+        }
+    }
+
     /// Declares and hoists the top-level `stmts` in the global scope, then runs them.
     fn run_global(&mut self, stmts: &[a::Stmt], script: bool) -> R<Value> {
         let global = self.global.clone();
         let origin = if script { Origin::Var } else { Origin::Prop };
-        for name in &hoisted_names(stmts) {
+        let strict_program = starts_with_use_strict(stmts);
+        let (vars, annexb) = self.hoist(stmts, &[], strict_program);
+        for name in vars
+            .iter()
+            .chain(annexb.iter().filter(|n| self.annexb_global_ok(n)))
+        {
             global.declare_global_var(name, origin);
         }
-        // a program-level "use strict": its statements run in a strict child scope (its vars are the hoisted
-        // globals), and its functions close over that scope so they see its let/const/class
-        let run_scope = if starts_with_use_strict(stmts) {
-            let strict = Scope::new(Some(global.clone()));
-            strict.strict.set(true);
-            strict
-        } else {
-            global.clone()
-        };
-        for s in stmts {
-            if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
-                let name = self.intern(&f.ident.sym);
-                let func = self.function_value(Some(name.clone()), &f.function, &run_scope)?;
-                global.declare_rc(name, func, true);
+        // a program-level "use strict": its statements run in a strict child scope (its vars are the
+        // hoisted globals), and its functions close over that scope so their frames are strict too
+        let strict = strict_program.then(|| {
+            let sc = Scope::new(Some(global.clone()));
+            sc.strict.set(true);
+            sc
+        });
+        match &strict {
+            None => self.hoist_functions(stmts, &global)?,
+            Some(sc) => {
+                for s in stmts {
+                    if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                        let name = self.intern(&f.ident.sym);
+                        let func = self.function_value(Some(name.clone()), &f.function, sc)?;
+                        global.declare_rc(name, func, true);
+                    }
+                }
             }
         }
         for s in stmts {
@@ -4267,7 +4336,7 @@ impl Interp {
                 global.set_origin(&f.ident.sym, origin);
             }
         }
-        self.run_hoisted(stmts, &run_scope)
+        self.run_hoisted(stmts, strict.as_ref().unwrap_or(&global))
     }
 
     /// `run` for builtin JS (a prelude, or a native's JS helper): the run id is recorded in `builtin_runs`, so
@@ -4423,7 +4492,8 @@ impl Interp {
                 a::ModuleItem::ModuleDecl(_) => return unsupported("esm-syntax"),
             }
         }
-        let names = hoisted_names(&stmts);
+        let (mut names, annexb) = self.hoist(&stmts, &[], false);
+        names.extend(annexb);
         let lexicals = lexical_names(&stmts);
         // Redeclaration is an early error: checked before any of the script runs. A let/const/class conflicts with
         // any name the context's script scope or an earlier var/function holds; a var or function conflicts with an
@@ -4553,33 +4623,50 @@ impl Interp {
         } else {
             var_target(scope)
         };
-        let names = hoisted_names(&stmts);
+        let saved_run = self.run_id;
+        self.run_id = next_run_id();
+        self.sources.insert(self.run_id, Rc::from(src));
+        let (mut names, annexb) = self.hoist(&stmts, &[], strict);
+        let at_global = Rc::ptr_eq(&var_scope, &self.global);
         if !strict
             && var_scope.kind.get() & SK_PARAMS != 0
             && names.iter().any(|n| &**n == "arguments")
             && (var_scope.kind.get() & SK_FUNC != 0
                 || var_scope.mask.get() & name_bit("arguments") != 0)
         {
+            self.run_id = saved_run;
             return self.throw_error(
                 "SyntaxError",
                 "Identifier 'arguments' has already been declared",
             );
         }
         if !strict {
-            if let Some(name) = names.iter().find(|n| lexical_between(scope, &var_scope, n)) {
-                let msg = format!("Identifier '{name}' has already been declared");
-                return self.throw_error("SyntaxError", &msg);
+            let early = names
+                .iter()
+                .find(|n| lexical_between(scope, &var_scope, n))
+                .map(|name| {
+                    (
+                        "SyntaxError",
+                        format!("Identifier '{name}' has already been declared"),
+                    )
+                });
+            let early = early.or_else(|| {
+                if !at_global {
+                    return None;
+                }
+                self.undefinable_global(&stmts, &names)
+                    .map(|name| ("TypeError", format!("Cannot declare global '{name}'")))
+            });
+            if let Some((class, msg)) = early {
+                self.run_id = saved_run;
+                return self.throw_error(class, &msg);
             }
+            // B.3.3.3: a block function whose `var` would clash with an enclosing lexical binding (or
+            // cannot be declared on the global object) gets no var binding
+            names.extend(annexb.into_iter().filter(|n| {
+                !lexical_between(scope, &var_scope, n) && (!at_global || self.annexb_global_ok(n))
+            }));
         }
-        if !strict && Rc::ptr_eq(&var_scope, &self.global) {
-            if let Some(name) = self.undefinable_global(&stmts, &names) {
-                let msg = format!("Cannot declare global '{name}'");
-                return self.throw_error("TypeError", &msg);
-            }
-        }
-        let saved_run = self.run_id;
-        self.run_id = next_run_id();
-        self.sources.insert(self.run_id, Rc::from(src));
         let saved_completion = self.eval_completion.replace((self.depth, Value::Undefined));
         let outcome = self.run_direct_eval(&stmts, &names, &lex, &var_scope, strict);
         let completion = self
@@ -4781,47 +4868,73 @@ impl Interp {
         ))
     }
 
+    /// Declares the function declarations of `stmts` in `scope`.
     fn hoist_functions(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<()> {
-        self.hoist_functions_in(stmts, scope, false)
-    }
-
-    /// `in_block`: sloppy-mode Annex B also assigns a block-level function to the `var` of the
-    /// same name in the enclosing function.
-    fn hoist_functions_in(
-        &mut self,
-        stmts: &[a::Stmt],
-        scope: &Rc<Scope>,
-        in_block: bool,
-    ) -> R<()> {
         for s in stmts {
             if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
                 let name = self.intern(&f.ident.sym);
                 let func = self.function_value(Some(name.clone()), &f.function, scope)?;
-                if in_block && !scope.strict.get() {
-                    let mut cur = scope.parent.as_deref();
-                    while let Some(outer) = cur {
-                        if let Some(b) = outer.vars.borrow_mut().get_mut(&name) {
-                            if b.mutable {
-                                b.value = func.clone();
-                            }
-                            break;
-                        }
-                        // a context's var of this name is a property of its sandbox
-                        if let Some(sb) = outer
-                            .with
-                            .as_ref()
-                            .filter(|_| outer.kind.get() & SK_VMGLOBAL != 0)
-                        {
-                            let sb = sb.clone();
-                            if self.with_has(&sb, &name)? {
-                                self.set_impl(&Value::Object(sb), &name, func.clone(), false)?;
-                            }
-                            break;
-                        }
-                        cur = outer.parent.as_deref();
+                // a function declared at the top of a variable scope is var-like, not a lexical binding
+                let origin = if scope.kind.get() & SK_VAR != 0 {
+                    Origin::Decl
+                } else {
+                    Origin::Lexical
+                };
+                scope.declare_with(name, func, true, origin);
+            }
+        }
+        Ok(())
+    }
+
+    /// Annex B.3.3: evaluating a block-level function declaration copies the block's binding to the `var` binding
+    /// of the same name in the enclosing variable scope (when the declaration is eligible, see `hoist_info`).
+    fn annexb_assign(&mut self, f: &a::FnDecl, block: &Rc<Scope>) -> R<()> {
+        if block.strict.get()
+            || !self
+                .annexb_ok
+                .contains(&(self.run_id, f.function.span.lo.0))
+        {
+            return Ok(());
+        }
+        let name = self.intern(&f.ident.sym);
+        let Some(func) = block.vars.borrow().get(&name).map(|b| b.value.clone()) else {
+            return Ok(());
+        };
+        let mut cur = block.parent.as_deref();
+        while let Some(outer) = cur {
+            // a context's var of this name is a property of its sandbox
+            if let Some(sb) = outer
+                .with
+                .as_ref()
+                .filter(|_| outer.kind.get() & SK_VMGLOBAL != 0)
+            {
+                let sb = sb.clone();
+                if self.with_has(&sb, &name)? {
+                    self.set_impl(&Value::Object(sb), &name, func, false)?;
+                }
+                return Ok(());
+            }
+            if outer.kind.get() & SK_VAR != 0 {
+                if let Some(b) = outer.vars.borrow_mut().get_mut(&name) {
+                    if b.mutable && b.origin != Origin::Lexical {
+                        b.value = func;
                     }
                 }
-                scope.declare_rc(name, func, true);
+                return Ok(());
+            }
+            cur = outer.parent.as_deref();
+        }
+        Ok(())
+    }
+
+    /// The statements of a block-like body whose functions were hoisted into `scope` already (or are now):
+    /// runs each, assigning Annex B var bindings as the function declarations are evaluated.
+    fn exec_block_stmts(&mut self, stmts: &[a::Stmt], scope: &Rc<Scope>) -> R<()> {
+        for s in stmts {
+            if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                self.annexb_assign(f, scope)?;
+            } else {
+                self.exec(s, scope)?;
             }
         }
         Ok(())
@@ -4849,11 +4962,54 @@ impl Interp {
             return Ok(());
         }
         let inner = Scope::new(Some(scope.clone()));
-        self.hoist_functions_in(stmts, &inner, true)?;
-        for s in stmts {
-            self.exec(s, &inner)?;
+        self.hoist_functions(stmts, &inner)?;
+        self.exec_block_stmts(stmts, &inner)
+    }
+
+    #[inline(never)]
+    fn exec_switch(&mut self, sw: &a::SwitchStmt, scope: &Rc<Scope>) -> R<()> {
+        let d = self.eval(&sw.discriminant, scope)?;
+        let inner = Scope::new(Some(scope.clone()));
+        let mut matched = None;
+        for (i, case) in sw.cases.iter().enumerate() {
+            if let Some(t) = &case.test {
+                let tv = self.eval(t, &inner)?;
+                if strict_equals(&d, &tv) {
+                    matched = Some(i);
+                    break;
+                }
+            }
+        }
+        let start = matched.or_else(|| sw.cases.iter().position(|c| c.test.is_none()));
+        if let Some(start) = start {
+            for case in &sw.cases {
+                self.hoist_functions(&case.cons, &inner)?;
+            }
+            for case in &sw.cases[start..] {
+                match self.exec_block_stmts(&case.cons, &inner) {
+                    Err(Ctl::Break(None)) => return Ok(()),
+                    other => other?,
+                }
+            }
         }
         Ok(())
+    }
+
+    /// A `catch` clause body run with the thrown value `v`.
+    #[inline(never)]
+    fn exec_catch(&mut self, h: &a::CatchClause, v: &Value, scope: &Rc<Scope>) -> R<()> {
+        let catch_scope = Scope::new(Some(scope.clone()));
+        match &h.param {
+            // B.3.5: a simple catch parameter is no lexical conflict for an Annex B var
+            Some(a::Pat::Ident(id)) => {
+                let name = self.intern(&id.id.sym);
+                catch_scope.declare_with(name, v.clone(), true, Origin::Decl);
+            }
+            Some(p) => self.bind_pattern(p, v.clone(), &catch_scope, true)?,
+            None => {}
+        }
+        self.hoist_functions(&h.body.stmts, &catch_scope)?;
+        self.exec_block_stmts(&h.body.stmts, &catch_scope)
     }
 
     fn exec(&mut self, s: &a::Stmt, scope: &Rc<Scope>) -> R<()> {
@@ -4911,39 +5067,12 @@ impl Interp {
                 self.reset_completion();
                 self.exec_loop_labeled(s, scope, None)
             }
-            a::Stmt::Switch(sw) => {
-                let d = self.eval(&sw.discriminant, scope)?;
-                let inner = Scope::new(Some(scope.clone()));
-                let mut matched = None;
-                for (i, case) in sw.cases.iter().enumerate() {
-                    if let Some(t) = &case.test {
-                        let tv = self.eval(t, &inner)?;
-                        if strict_equals(&d, &tv) {
-                            matched = Some(i);
-                            break;
-                        }
-                    }
-                }
-                let start = matched.or_else(|| sw.cases.iter().position(|c| c.test.is_none()));
-                if let Some(start) = start {
-                    for case in &sw.cases[start..] {
-                        match self.exec_stmts(&case.cons, &inner) {
-                            Err(Ctl::Break(None)) => return Ok(()),
-                            other => other?,
-                        }
-                    }
-                }
-                Ok(())
-            }
+            a::Stmt::Switch(sw) => self.exec_switch(sw, scope),
             a::Stmt::Try(t) => {
                 let mut result = self.exec_block(&t.block.stmts, scope);
                 // a `node:vm` timeout cannot be caught by the script
                 if let (Err(Ctl::Throw(v)), Some(h), false) = (&result, &t.handler, self.dl_hit) {
-                    let catch_scope = Scope::new(Some(scope.clone()));
-                    if let Some(p) = &h.param {
-                        self.bind_pattern(p, v.clone(), &catch_scope, true)?;
-                    }
-                    result = self.exec_stmts(&h.body.stmts, &catch_scope);
+                    result = self.exec_catch(h, v, scope);
                 }
                 if let Some(f) = &t.finalizer {
                     self.exec_block(&f.stmts, scope)?; // an abrupt finalizer overrides, as in JS
@@ -5689,7 +5818,11 @@ impl Interp {
         match u.op {
             a::UnaryOp::TypeOf => {
                 // typeof of an undeclared identifier must not throw
-                let v = match &*u.arg {
+                let mut arg = &*u.arg;
+                while let a::Expr::Paren(p) = arg {
+                    arg = &p.expr;
+                }
+                let v = match arg {
                     a::Expr::Ident(i) if scope.in_with => self
                         .with_ref_get(scope, &i.sym)?
                         .map_or(Value::Undefined, |(v, _)| v),
@@ -6836,25 +6969,140 @@ fn lexical_between(scope: &Rc<Scope>, target: &Rc<Scope>, name: &str) -> bool {
 }
 
 fn hoisted_names(stmts: &[a::Stmt]) -> Vec<Rc<str>> {
-    struct Hoister(Vec<Rc<str>>);
-    impl Visit for Hoister {
+    let h = hoist_info(stmts, &[]);
+    let mut names = h.vars;
+    names.extend(h.annexb);
+    names
+}
+
+/// What a function body, script or eval text declares in its variable scope.
+#[derive(Default)]
+struct Hoist {
+    /// `var` names and top-level function declarations.
+    vars: Vec<Rc<str>>,
+    /// Annex B.3.3 names: block-level functions that also get a `var` binding, minus the `vars`.
+    annexb: Vec<Rc<str>>,
+    /// `span.lo` of each block-level function declaration that assigns its var binding when evaluated
+    /// (replacing it with `var f` would be no early error and `f` is not a parameter name).
+    eligible: Vec<u32>,
+}
+
+/// `hoisted_names` with the Annex B.3.3 conflict rules (`params`: the parameter names of a function).
+fn hoist_info(stmts: &[a::Stmt], params: &[Rc<str>]) -> Hoist {
+    struct Hoister<'a> {
+        out: Hoist,
+        top_lex: Vec<Rc<str>>,
+        params: &'a [Rc<str>],
+        /// the lexical names of each enclosing block-like scope, innermost last
+        stack: Vec<Vec<Rc<str>>>,
+    }
+    fn names_of(p: &a::Pat) -> Vec<Rc<str>> {
+        let mut names = Names(Vec::new());
+        p.visit_with(&mut names);
+        names.0.iter().map(|n| Rc::from(n.as_str())).collect()
+    }
+    fn decl_names(v: &a::VarDecl) -> Vec<Rc<str>> {
+        if matches!(v.kind, a::VarDeclKind::Var) {
+            return Vec::new();
+        }
+        v.decls.iter().flat_map(|d| names_of(&d.name)).collect()
+    }
+    /// The lexical names of a statement list: let/const/class and (block-level) functions.
+    fn block_lex(stmts: &[a::Stmt]) -> Vec<Rc<str>> {
+        let mut out = lexical_names(stmts);
+        for s in stmts {
+            if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                out.push(Rc::from(&*f.ident.sym));
+            }
+        }
+        out
+    }
+    impl Hoister<'_> {
+        fn scoped(&mut self, names: Vec<Rc<str>>, f: impl FnOnce(&mut Self)) {
+            self.stack.push(names);
+            f(self);
+            self.stack.pop();
+        }
+        fn known(&self, name: &str) -> bool {
+            self.out
+                .vars
+                .iter()
+                .chain(&self.out.annexb)
+                .any(|k| **k == *name)
+        }
+    }
+    impl Visit for Hoister<'_> {
         fn visit_function(&mut self, _: &a::Function) {}
         fn visit_arrow_expr(&mut self, _: &a::ArrowExpr) {}
         fn visit_class(&mut self, _: &a::Class) {}
-        // Annex B: a function declared in a nested block is also a `var` of the enclosing function.
+        fn visit_block_stmt(&mut self, n: &a::BlockStmt) {
+            self.scoped(block_lex(&n.stmts), |h| n.visit_children_with(h));
+        }
+        fn visit_switch_stmt(&mut self, n: &a::SwitchStmt) {
+            let names = n.cases.iter().flat_map(|c| block_lex(&c.cons)).collect();
+            self.scoped(names, |h| n.visit_children_with(h));
+        }
+        fn visit_for_stmt(&mut self, n: &a::ForStmt) {
+            let names = match &n.init {
+                Some(a::VarDeclOrExpr::VarDecl(v)) => decl_names(v),
+                _ => Vec::new(),
+            };
+            self.scoped(names, |h| n.visit_children_with(h));
+        }
+        fn visit_for_in_stmt(&mut self, n: &a::ForInStmt) {
+            let names = match &n.left {
+                a::ForHead::VarDecl(v) => decl_names(v),
+                _ => Vec::new(),
+            };
+            self.scoped(names, |h| n.visit_children_with(h));
+        }
+        fn visit_for_of_stmt(&mut self, n: &a::ForOfStmt) {
+            let names = match &n.left {
+                a::ForHead::VarDecl(v) => decl_names(v),
+                _ => Vec::new(),
+            };
+            self.scoped(names, |h| n.visit_children_with(h));
+        }
+        // B.3.5: a simple catch parameter does not conflict with a block function of the same name
+        fn visit_catch_clause(&mut self, n: &a::CatchClause) {
+            let names = match &n.param {
+                Some(p) if !matches!(p, a::Pat::Ident(_)) => names_of(p),
+                _ => Vec::new(),
+            };
+            self.scoped(names, |h| n.visit_children_with(h));
+        }
+        // `if (x) function f() {}`: the declaration sits in an implicit block of its own
+        fn visit_if_stmt(&mut self, n: &a::IfStmt) {
+            self.scoped(Vec::new(), |h| n.visit_children_with(h));
+        }
         fn visit_fn_decl(&mut self, n: &a::FnDecl) {
-            if !self.0.iter().any(|known| **known == *n.ident.sym) {
-                self.0.push(n.ident.sym.as_ref().into());
+            let name: Rc<str> = Rc::from(&*n.ident.sym);
+            if self.stack.is_empty() {
+                if !self.out.vars.contains(&name) {
+                    self.out.annexb.retain(|k| *k != name);
+                    self.out.vars.push(name);
+                }
+                return;
+            }
+            let outer = &self.stack[..self.stack.len() - 1];
+            let conflict = self.top_lex.contains(&name)
+                || self.params.contains(&name)
+                || outer.iter().any(|names| names.contains(&name));
+            if conflict {
+                return;
+            }
+            self.out.eligible.push(n.function.span.lo.0);
+            if !self.known(&name) {
+                self.out.annexb.push(name);
             }
         }
         fn visit_var_decl(&mut self, n: &a::VarDecl) {
             if matches!(n.kind, a::VarDeclKind::Var) {
                 for d in &n.decls {
-                    let mut names = Names(Vec::new());
-                    d.name.visit_with(&mut names);
-                    for name in names.0 {
-                        if !self.0.iter().any(|known| **known == *name) {
-                            self.0.push(name.as_str().into());
+                    for name in names_of(&d.name) {
+                        if !self.out.vars.contains(&name) {
+                            self.out.annexb.retain(|k| *k != name);
+                            self.out.vars.push(name);
                         }
                     }
                 }
@@ -6862,9 +7110,14 @@ fn hoisted_names(stmts: &[a::Stmt]) -> Vec<Rc<str>> {
             n.visit_children_with(self);
         }
     }
-    let mut h = Hoister(Vec::new());
+    let mut h = Hoister {
+        out: Hoist::default(),
+        top_lex: lexical_names(stmts),
+        params,
+        stack: Vec::new(),
+    };
     stmts.visit_with(&mut h);
-    h.0
+    h.out
 }
 
 /// The names bound by the top-level `let`/`const`/`class` of `stmts` (destructuring included).
