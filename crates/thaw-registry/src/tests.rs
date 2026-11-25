@@ -1533,7 +1533,7 @@ fn builtin_bundle_sha256(specifier: &str) -> String {
 fn node_util_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:util"),
-        "aa182efe54849dcf8054c4dc583778a24318acea8dd0ffe5d7c524d589b90037",
+        "bcabfb89af00306d8e1d797515bdac5cb4a15f3f0d6cf032978b9d10d030f0d5",
         "node:util bundle sha256"
     );
 }
@@ -1552,7 +1552,7 @@ fn node_url_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:url"),
         // node:url bundles node:path: the hash moved from ed14c972... when #958 dropped path's .default/__esModule
-        "10c719d53d93535d4a41544db230c588f2d3ae670507040500bd011ae12ae1b2",
+        "bff034e4789a94d1b47f8fcc11aff3667bd932755cc116a17c110481e9841a5f",
         "node:url bundle sha256"
     );
 }

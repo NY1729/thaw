@@ -1,20 +1,34 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "url" => Some(
-            "function pathToFileURL(path) {\n\
-             \x20\x20var raw = String(path), value = require('node:path').resolve(raw);\n\
+            "function received(value) {\n\
+             \x20\x20if (value === null || value === undefined) return String(value);\n\
+             \x20\x20if (typeof value === 'function') return 'function ' + value.name;\n\
+             \x20\x20if (typeof value === 'object') return value.constructor && value.constructor.name ? 'an instance of ' + value.constructor.name : '[Object: null prototype] {}';\n\
+             \x20\x20var text = typeof value === 'string' ? \"'\" + value + \"'\" : typeof value === 'bigint' ? String(value) + 'n' : Object.is(value, -0) ? '-0' : String(value);\n\
+             \x20\x20if (text.length > 28) text = text.slice(0, 25) + '...';\n\
+             \x20\x20return 'type ' + typeof value + ' (' + text + ')';\n\
+             }\n\
+             function codedError(Ctor, code, message) { var error = new Ctor(message); error.code = code; return error; }\n\
+             function argError(name, type, value) { return codedError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The \"' + name + '\" argument must be ' + type + '. Received ' + received(value)); }\n\
+             function pathToFileURL(path) {\n\
+             \x20\x20if (typeof path !== 'string') throw argError('path', 'of type string', path);\n\
+             \x20\x20var raw = path, value = require('node:path').resolve(raw);\n\
              \x20\x20if (raw.charAt(raw.length - 1) === '/' && value.charAt(value.length - 1) !== '/') value += '/';\n\
              \x20\x20var encoded = value.split('/').map(function(part) { return encodeURIComponent(part); }).join('/');\n\
              \x20\x20return new globalThis.URL('file://' + encoded);\n\
              }\n\
              function fileURLToPath(input) {\n\
-             \x20\x20var url = input instanceof globalThis.URL ? input : new globalThis.URL(input);\n\
-             \x20\x20if (url.protocol !== 'file:') throw new TypeError('URL must use the file: protocol');\n\
-             \x20\x20if (url.hostname !== '' && url.hostname !== 'localhost') throw new TypeError('file URL host must be empty or localhost');\n\
-             \x20\x20if (/%2f|%5c/i.test(url.pathname)) throw new TypeError('file URL path must not include encoded separators');\n\
+             \x20\x20if (typeof input === 'string') input = new globalThis.URL(input);\n\
+             \x20\x20else if (!(input !== null && typeof input === 'object' && input.href && input.protocol && input.auth === undefined && input.path === undefined)) throw argError('path', 'of type string or an instance of URL', input);\n\
+             \x20\x20var url = input;\n\
+             \x20\x20if (url.protocol !== 'file:') throw codedError(TypeError, 'ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');\n\
+             \x20\x20if (url.hostname !== '' && url.hostname !== 'localhost') throw codedError(TypeError, 'ERR_INVALID_FILE_URL_HOST', 'File URL host must be \"localhost\" or empty on linux');\n\
+             \x20\x20if (/%2f/i.test(url.pathname)) throw codedError(TypeError, 'ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters');\n\
              \x20\x20return decodeURIComponent(url.pathname);\n\
              }\n\
              function urlToHttpOptions(input) {\n\
+             \x20\x20if (input === null || typeof input !== 'object') throw argError('url', 'of type object', input);\n\
              \x20\x20var url = input instanceof globalThis.URL ? input : new globalThis.URL(input);\n\
              \x20\x20var options = { protocol: url.protocol, hostname: url.hostname, hash: url.hash, search: url.search, pathname: url.pathname, path: url.pathname + url.search, href: url.href };\n\
              \x20\x20if (url.port !== '') options.port = Number(url.port);\n\
@@ -46,7 +60,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20}).join('.');\n\
              }\n\
              function parse(input, parseQuery) {\n\
-             \x20\x20var source = String(input);\n\
+             \x20\x20if (typeof input !== 'string') throw argError('url', 'of type string', input);\n\
+             \x20\x20var source = input;\n\
              \x20\x20var absolute = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(source);\n\
              \x20\x20var url = new globalThis.URL(source, 'http://thaw.invalid');\n\
              \x20\x20return { protocol: absolute ? url.protocol : null, slashes: absolute && source.indexOf('//') >= 0, auth: url.username || url.password ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : null, host: absolute ? url.host : null, port: absolute && url.port ? url.port : null, hostname: absolute ? url.hostname : null, hash: url.hash || null, search: url.search || null, query: parseQuery ? queryObject(url.search) : url.search ? url.search.slice(1) : null, pathname: url.pathname, path: url.pathname + url.search, href: source };\n\
@@ -68,7 +83,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20if (hash && hash.charAt(0) !== '#') hash = '#' + hash;\n\
              \x20\x20return protocol + slashes + authority + pathname.replace(/[?#]/g, encodeURIComponent) + search.replace('#', '%23') + hash;\n\
              }\n\
-             function resolve(from, to) { var resolved = new globalThis.URL(String(to), new globalThis.URL(String(from), 'resolve://')); return resolved.protocol === 'resolve:' ? resolved.pathname + resolved.search + resolved.hash : resolved.href; }\n\
+             function resolve(from, to) { if (typeof from !== 'string') throw argError('url', 'of type string', from); if (typeof to !== 'string') throw argError('to', 'of type string', to); var resolved = new globalThis.URL(String(to), new globalThis.URL(String(from), 'resolve://')); return resolved.protocol === 'resolve:' ? resolved.pathname + resolved.search + resolved.hash : resolved.href; }\n\
              function domainToASCII(domain) { try { return new globalThis.URL('ws://' + domain).hostname; } catch (_) { return ''; } }\n\
              function domainToUnicode(domain) { var ascii = domainToASCII(domain); return punycodeToUnicode(ascii); }\n\
              module.exports = { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, resolve: resolve, domainToASCII: domainToASCII, domainToUnicode: domainToUnicode, parse: parse, format: format, pathToFileURL: pathToFileURL, fileURLToPath: fileURLToPath, urlToHttpOptions: urlToHttpOptions };\n\
@@ -109,7 +124,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              }\n\
              function parse(text, separator, assignment, options) {\n\
              \x20\x20var result = Object.create(null);\n\
-             \x20\x20var source = String(text);\n\
+             \x20\x20if (typeof text !== 'string' || text.length === 0) return result;\n\
+             \x20\x20var source = text;\n\
              \x20\x20separator = separator === undefined ? '&' : String(separator);\n\
              \x20\x20assignment = assignment === undefined ? '=' : String(assignment);\n\
              \x20\x20var decoder = options && typeof options.decodeURIComponent === 'function' ? options.decodeURIComponent : unescape, customDecoder = decoder !== unescape;\n\

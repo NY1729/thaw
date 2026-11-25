@@ -1,0 +1,94 @@
+stat0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
+readdir0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
+exists0 ok false
+rename0 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
+write0 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Array
+copy0 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
+basename0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Array
+join0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Array
+f2p0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of URL. Received an instance of Array
+p2f0 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Array
+strip0 TypeError ERR_INVALID_ARG_TYPE The "str" argument must be of type string. Received an instance of Array
+qs0 ok {}
+stat1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Date
+readdir1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Date
+exists1 ok false
+rename1 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received an instance of Date
+write1 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Date
+copy1 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received an instance of Date
+basename1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Date
+join1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Date
+f2p1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of URL. Received an instance of Date
+p2f1 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Date
+strip1 TypeError ERR_INVALID_ARG_TYPE The "str" argument must be of type string. Received an instance of Date
+qs1 ok {}
+stat2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Object
+readdir2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Object
+exists2 ok false
+rename2 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received an instance of Object
+write2 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Object
+copy2 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received an instance of Object
+basename2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Object
+join2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Object
+f2p2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of URL. Received an instance of Object
+p2f2 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received an instance of Object
+strip2 TypeError ERR_INVALID_ARG_TYPE The "str" argument must be of type string. Received an instance of Object
+qs2 ok {}
+stat3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type number (5)
+readdir3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type number (5)
+exists3 ok false
+rename3 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received type number (5)
+write3 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type number (5)
+copy3 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received type number (5)
+basename3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type number (5)
+join3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type number (5)
+f2p3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of URL. Received type number (5)
+p2f3 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type number (5)
+strip3 TypeError ERR_INVALID_ARG_TYPE The "str" argument must be of type string. Received type number (5)
+qs3 ok {}
+stat4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received null
+readdir4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received null
+exists4 ok false
+rename4 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received null
+write4 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received null
+copy4 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received null
+basename4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received null
+join4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received null
+f2p4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of URL. Received null
+p2f4 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received null
+strip4 TypeError ERR_INVALID_ARG_TYPE The "str" argument must be of type string. Received null
+qs4 ok {}
+stat5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received undefined
+readdir5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received undefined
+exists5 ok false
+rename5 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received undefined
+write5 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received undefined
+copy5 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received undefined
+basename5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received undefined
+join5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received undefined
+f2p5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of URL. Received undefined
+p2f5 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received undefined
+strip5 TypeError ERR_INVALID_ARG_TYPE The "str" argument must be of type string. Received undefined
+qs5 ok {}
+stat6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type bigint (5n)
+readdir6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type bigint (5n)
+exists6 ok false
+rename6 TypeError ERR_INVALID_ARG_TYPE The "newPath" argument must be of type string or an instance of Buffer or URL. Received type bigint (5n)
+write6 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type bigint (5n)
+copy6 TypeError ERR_INVALID_ARG_TYPE The "src" argument must be of type string or an instance of Buffer or URL. Received type bigint (5n)
+basename6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type bigint (5n)
+join6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type bigint (5n)
+f2p6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of URL. Received type bigint (5n)
+p2f6 TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string. Received type bigint (5n)
+strip6 TypeError ERR_INVALID_ARG_TYPE The "str" argument must be of type string. Received type bigint (5n)
+qs6 ok {}
+stat-u8 Error ENOENT ENOENT: no such file or directory, stat 'a'
+f2p-http TypeError ERR_INVALID_URL_SCHEME The URL must be of scheme file
+f2p-host TypeError ERR_INVALID_FILE_URL_HOST File URL host must be "localhost" or empty on linux
+f2p-slash TypeError ERR_INVALID_FILE_URL_PATH File URL path must not include encoded / characters
+f2p-ok ok /a/b
+nul TypeError ERR_INVALID_ARG_VALUE The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received 'a\x00b'
+cb TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
+rs TypeError ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
+fsp ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received an instance of Array
+fsp ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type bigint (5n)
