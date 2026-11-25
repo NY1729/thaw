@@ -6877,9 +6877,9 @@ mod prop_get_tests;
 #[cfg(test)]
 mod proxy_trap_tests;
 #[cfg(all(test, unix))]
-mod quickjs_twin_rest_tests;
+mod node_twin_rest_tests;
 #[cfg(test)]
-mod quickjs_twin_tests;
+mod node_twin_tests;
 #[cfg(test)]
 mod regexp_proto_tests;
 #[cfg(test)]

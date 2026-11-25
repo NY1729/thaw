@@ -4,7 +4,7 @@
 #   infer:   THAW_JS_INFER=1 at build time (AOT clones from the JS->HIR inference)
 # then times each binary (MEASURE_RUNS rounds, no profiling) and runs it once more with
 # THAW_JS_PROFILE=1 THAW_JIT_PROFILE=1 to capture the interpreter-entry and JIT-call counters.
-# The fetch, Node reference and stdout comparison are the steps of tools/quickjs-removal/measure.sh.
+# The fetch, Node reference and stdout comparison are the steps of tools/corpus/measure.sh.
 #
 # Writes per program and variant into OUT_DIR (read by run.py):
 #   <prog>.meta                 add_ok, node_ok
@@ -18,7 +18,7 @@
 # usage: collect.sh OUT_DIR
 # env:   THAW          thaw binary            (default: <repo>/target/release/thaw)
 #        SCRATCH       scratch root           (default: /home/fedora/work/thaw-tmp/jit-coverage)
-#        CORPUS        corpus root            (default: <repo>/tools/quickjs-removal/corpus)
+#        CORPUS        corpus root            (default: <repo>/tools/corpus/corpus)
 #        VERSIONS      pinned specs           (default: $CORPUS/versions.txt)
 #        PK_DIR        corpus programs        (default: $CORPUS/pk)
 #        ONLY          run one program only
@@ -29,7 +29,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
 THAW="${THAW:-$TARGET_DIR/release/thaw}"
 SCRATCH="${SCRATCH:-/home/fedora/work/thaw-tmp/jit-coverage}"
-CORPUS="${CORPUS:-$REPO/tools/quickjs-removal/corpus}"
+CORPUS="${CORPUS:-$REPO/tools/corpus/corpus}"
 VERSIONS="${VERSIONS:-$CORPUS/versions.txt}"
 PK_DIR="${PK_DIR:-$CORPUS/pk}"
 ONLY="${ONLY:-}"

@@ -13,7 +13,7 @@
 # env:   THAW        thaw binary            (default: $CARGO_TARGET_DIR/debug/thaw or <repo>/target/debug/thaw)
 #        THAW_SCAN   thaw-js-scan binary    (default: same dir as THAW)
 #        SCRATCH     scratch root           (default: /home/fedora/work/thaw-tmp/qjsq1-measure)
-#        CORPUS      corpus root            (default: <repo>/tools/quickjs-removal/corpus)
+#        CORPUS      corpus root            (default: <repo>/tools/corpus/corpus)
 #        VERSIONS    pinned specs           (default: $CORPUS/versions.txt; lines `name spec@ver ...`)
 #        PK_DIR      corpus programs        (default: $CORPUS/pk)
 #        JS_DIR      scan bundles           (default: $CORPUS/corpus; scan skipped if absent)
@@ -26,7 +26,7 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
 THAW="${THAW:-$TARGET_DIR/debug/thaw}"
 THAW_SCAN="${THAW_SCAN:-$(dirname "$THAW")/thaw-js-scan}"
 SCRATCH="${SCRATCH:-/home/fedora/work/thaw-tmp/qjsq1-measure}"
-CORPUS="${CORPUS:-$REPO/tools/quickjs-removal/corpus}"
+CORPUS="${CORPUS:-$REPO/tools/corpus/corpus}"
 VERSIONS="${VERSIONS:-$CORPUS/versions.txt}"
 PK_DIR="${PK_DIR:-$CORPUS/pk}"
 JS_DIR="${JS_DIR:-$CORPUS/corpus}"

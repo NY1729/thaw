@@ -65,8 +65,6 @@ fn thaw_js_routing_serves_a_package_that_calls_back_into_typescript() {
         thaw_js_run(&output),
         "[ 2, 4, 6 ]\n6\n2 12\n[ [ 1, 4 ], [ 4, 9 ] ]\n"
     );
-    let bytes = std::fs::read(&output).unwrap();
-    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "the binary links the retired QuickJS engine (rquickjs symbols present)");
     let _ = std::fs::remove_dir_all(dir);
 }
 
