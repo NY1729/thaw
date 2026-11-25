@@ -102,7 +102,7 @@ fn error_code(e: &std::io::Error) -> &'static str {
     }
 }
 
-fn id_opt(o: &Native, key: &str) -> Option<u32> {
+pub(crate) fn id_opt(o: &Native, key: &str) -> Option<u32> {
     opt_num(o, key).map(|n| n as i32 as u32)
 }
 
@@ -163,7 +163,7 @@ fn command(cmd: &str, args: &Native, o: &Native) -> Command {
     c
 }
 
-fn spawn_retrying(c: &mut Command) -> std::io::Result<std::process::Child> {
+pub(crate) fn spawn_retrying(c: &mut Command) -> std::io::Result<std::process::Child> {
     for _ in 0..50 {
         match c.spawn() {
             Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
@@ -335,7 +335,7 @@ fn start_error(it: &mut Interp, cmd: &str, e: &std::io::Error) -> Ctl {
     Ctl::Throw(err)
 }
 
-fn spawn(cmd: &str, args: &str, options: &str) -> Result<u32, std::io::Error> {
+pub(crate) fn spawn(cmd: &str, args: &str, options: &str) -> Result<u32, std::io::Error> {
     let (args, o) = (
         parse_native(args).unwrap_or(Native::Undefined),
         parse_native(options).unwrap_or(Native::Undefined),
@@ -488,7 +488,25 @@ pub(crate) fn active() -> bool {
     })
 }
 
-fn kill(handle: u32, sig: i32) -> bool {
+/// Queues `data` (hex) for the child's stdin, or closes it (`end`); the writer thread keeps the loop unblocked.
+pub(crate) fn send_stdin(handle: u32, data: &str, end: bool) {
+    TABLE.with(|t| {
+        if let Some(k) = t.borrow_mut().kids.get_mut(&handle) {
+            if end {
+                k.stdin = None;
+            } else if let Some(tx) = &k.stdin {
+                let _ = tx.send(unhex(data));
+            }
+        }
+    });
+}
+
+/// Whether the child `handle` keeps the event loop alive (`ref`/`unref`).
+pub(crate) fn set_ref(handle: u32, refd: bool) {
+    TABLE.with(|t| t.borrow_mut().kids.get_mut(&handle).map(|k| k.refd = refd));
+}
+
+pub(crate) fn kill(handle: u32, sig: i32) -> bool {
     TABLE.with(|t| {
         let mut t = t.borrow_mut();
         let Some(k) = t.kids.get_mut(&handle) else {
@@ -538,7 +556,7 @@ fn capture(
     cap
 }
 
-fn sync(cmd: &str, args: &str, options: &str) -> String {
+pub(crate) fn sync(cmd: &str, args: &str, options: &str) -> String {
     let (args, o) = (
         parse_native(args).unwrap_or(Native::Undefined),
         parse_native(options).unwrap_or(Native::Undefined),
@@ -552,6 +570,10 @@ fn sync(cmd: &str, args: &str, options: &str) -> String {
         )
     };
     if minus_one_id(&o) {
+        return fail(&std::io::Error::from_raw_os_error(libc::EINVAL), "EINVAL");
+    }
+    // A signal outside 0..=64 can never be delivered: refuse before spawning, like the retired-engine host.
+    if opt_num(&o, "killSignal").is_some_and(|n| !(0.0..=64.0).contains(&n)) {
         return fail(&std::io::Error::from_raw_os_error(libc::EINVAL), "EINVAL");
     }
     let mut c = command(cmd, &args, &o);
@@ -586,19 +608,44 @@ fn sync(cmd: &str, args: &str, options: &str) -> String {
     );
     let input = opt_str(&o, "input").map(unhex).unwrap_or_default();
     let mut stdin = child.stdin.take().expect("piped");
+    // 0 = writing, 1 = done, 2 = the write failed (EPIPE: the child stopped reading its input)
+    let writer = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let w = writer.clone();
     std::thread::spawn(move || {
-        let _ = stdin.write_all(&input);
+        w.store(
+            if stdin.write_all(&input).is_ok() {
+                1
+            } else {
+                2
+            },
+            Ordering::SeqCst,
+        );
     });
     let started = Instant::now();
     let (mut killed_at, mut timed_out) = (None, false);
+    let mut exit_seen: Option<Instant> = None;
     let status = loop {
+        // A write failure caused by our own kill is not an input error.
+        if killed_at.is_none() && writer.load(Ordering::SeqCst) == 2 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return format!(
+                "{{\"error\":{},\"code\":\"EPIPE\",\"pid\":{pid}}}",
+                q(&std::io::Error::from_raw_os_error(libc::EPIPE).to_string())
+            );
+        }
         if let Ok(Some(st)) = child.try_wait() {
             let both =
                 || out.finished.load(Ordering::SeqCst) && err.finished.load(Ordering::SeqCst);
             // A grandchild may hold the pipes open forever after we killed the child: stop waiting shortly.
             let abandon =
                 killed_at.is_some_and(|t: Instant| t.elapsed() > Duration::from_millis(100));
-            if both() || abandon {
+            // The writer settles within moments of the child's exit unless a grandchild still holds the stdin pipe open.
+            let seen = *exit_seen.get_or_insert_with(Instant::now);
+            let settled = writer.load(Ordering::SeqCst) != 0
+                || killed_at.is_some()
+                || seen.elapsed() > Duration::from_millis(200);
+            if (both() && settled) || abandon {
                 break st;
             }
         } else if killed_at.is_none() {
@@ -652,22 +699,13 @@ impl Interp {
         });
         g.declare("__thaw_child_process_kill", f, true);
         let f = self.native(|it, _, a| {
-            let (h, r) = (it.num(&arg(a, 0)) as u32, arg(a, 1).truthy());
-            TABLE.with(|t| t.borrow_mut().kids.get_mut(&h).map(|k| k.refd = r));
+            set_ref(it.num(&arg(a, 0)) as u32, arg(a, 1).truthy());
             Ok(Value::Undefined)
         });
         g.declare("__thaw_child_process_ref", f, true);
         let f = self.native(move |it, _, a| {
             let (h, data, end) = (it.num(&arg(a, 0)) as u32, s(a, 1, it), arg(a, 2).truthy());
-            TABLE.with(|t| {
-                if let Some(k) = t.borrow_mut().kids.get_mut(&h) {
-                    if end {
-                        k.stdin = None;
-                    } else if let Some(tx) = &k.stdin {
-                        let _ = tx.send(unhex(&data));
-                    }
-                }
-            });
+            send_stdin(h, &data, end);
             Ok(Value::Bool(true))
         });
         g.declare("__thaw_child_process_stdin", f, true);

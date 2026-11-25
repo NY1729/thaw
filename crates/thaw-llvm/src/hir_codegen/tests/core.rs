@@ -3809,7 +3809,7 @@ fn stored_json_alias_survives_nested_outer_js_call() {
         declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
         declare function __thaw_typed_js_766572696679(value: Json): boolean;
         let saved: Json = null;
-        function __thaw_typed_wrapper_js_user_store(value: Json): Json {
+        function __thaw_typed_wrapper_tjs_user_store(value: Json): Json {
             saved = value;
             return value;
         }
@@ -3818,7 +3818,7 @@ fn stored_json_alias_survives_nested_outer_js_call() {
             const sourceValue: JsValue = getDynamicValue("source");
             const key: JsValue = Symbol("key");
             const returned: JsValue = __thaw_typed_js_70616972(
-                __thaw_typed_wrapper_js_user_store(sourceValue), key,
+                __thaw_typed_wrapper_tjs_user_store(sourceValue), key,
             );
             console.log(__thaw_typed_js_766572696679(saved));
             releaseDynamicValue(returned);

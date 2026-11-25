@@ -189,12 +189,13 @@ pub(crate) const EXTRAS: &str = r#"
     return c !== c ? undefined : c;
   });
   var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  function b64error(msg) { return typeof DOMException === 'function' ? new DOMException(msg, 'InvalidCharacterError') : new Error(msg); }
   btoa = function (s) {
     s = String(s);
     var out = '';
     for (var i = 0; i < s.length; i += 3) {
       var a = s.charCodeAt(i), b = s.charCodeAt(i + 1), c = s.charCodeAt(i + 2);
-      if (a > 255 || b > 255 || c > 255) throw new Error('Invalid character');
+      if (a > 255 || b > 255 || c > 255) throw b64error('Invalid character');
       var n = (a << 16) | ((b || 0) << 8) | (c || 0);
       out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + (i + 1 < s.length ? B64[(n >> 6) & 63] : '=') + (i + 2 < s.length ? B64[n & 63] : '=');
     }
@@ -203,7 +204,7 @@ pub(crate) const EXTRAS: &str = r#"
   atob = function (s) {
     s = String(s).replace(/[\t\n\f\r ]/g, '');
     if (s.length % 4 === 0) s = s.replace(/==?$/, '');
-    if (s.length % 4 === 1 || /[^A-Za-z0-9+\/]/.test(s)) throw new Error('The string to be decoded is not correctly encoded.');
+    if (s.length % 4 === 1 || /[^A-Za-z0-9+\/]/.test(s)) throw b64error('The string to be decoded is not correctly encoded.');
     var out = '', bits = 0, acc = 0;
     for (var i = 0; i < s.length; i++) {
       acc = (acc << 6) | B64.indexOf(s[i]); bits += 6;
@@ -845,7 +846,10 @@ pub(crate) const EXTRAS_LATE: &str = r#"
       if (!done) {
         done = true;
         var c = cur && cur();
-        if (c) closeIt(c);
+        if (c) {
+          // an inner close error wins, but the outer source is still closed (its own error is suppressed)
+          try { closeIt(c); } catch (e) { try { closeIt(under); } catch (_) {} throw e; }
+        }
         closeIt(under);
       }
       return { value: undefined, done: true };
@@ -1115,7 +1119,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     return { async: true, value: promise };
   });
   def(Atomics, 'notify', function (ta, i, count) {
-    if (!(ta instanceof Int32Array)) throw new TypeError('Atomics.notify requires an Int32Array');
+    if (!(ta instanceof Int32Array) && !(typeof BigInt64Array === 'function' && ta instanceof BigInt64Array)) throw new TypeError('Atomics.notify requires an Int32Array or BigInt64Array');
     var k = atomicIndex(ta, i);
     var c = count === undefined ? Infinity : toInt(count);
     if (!isShared(ta)) return 0;

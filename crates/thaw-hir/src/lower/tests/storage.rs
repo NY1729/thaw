@@ -658,7 +658,7 @@ fn storage_handoff_typed_js_rest_wrapper_uses_logical_argument_types() {
     let module = thaw_parser::parse_typescript(r#"
         declare function __thaw_typed_tjs_6a6f696e__arity_2(first: Json, second: Json): string;
         declare function __thaw_typed_tjs_6a6f696e__arity_5(first: Json, second: Json, third: Json, fourth: Json, fifth: Json): string;
-        function __thaw_typed_wrapper_js_6a6f696e(...inputs: Json[]): string {
+        function __thaw_typed_wrapper_tjs_6a6f696e(...inputs: Json[]): string {
             if (inputs.length === 5) {
                 return __thaw_typed_tjs_6a6f696e__arity_5(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
             }
@@ -667,7 +667,7 @@ fn storage_handoff_typed_js_rest_wrapper_uses_logical_argument_types() {
             }
             return __thaw_typed_tjs_6a6f696e__arity_2(inputs[0], inputs[1]);
         }
-        function main(): string { return __thaw_typed_wrapper_js_6a6f696e("a", "b"); }
+        function main(): string { return __thaw_typed_wrapper_tjs_6a6f696e("a", "b"); }
     "#).unwrap();
     lower_module(&module).unwrap();
 
