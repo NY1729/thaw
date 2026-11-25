@@ -2707,7 +2707,9 @@ impl Interp {
             if is_array {
                 it.sparse_unsupported(this)?;
                 // primitive bounds run no user code: copy just the window in place
-                if !matches!(arg(args, 0), Value::Object(_)) && !matches!(arg(args, 1), Value::Object(_)) {
+                if !matches!(arg(args, 0), Value::Object(_))
+                    && !matches!(arg(args, 1), Value::Object(_))
+                {
                     if let Value::Object(o) = this {
                         let len = match &*o.kind.borrow() {
                             Kind::Array(items) => items.len(),
@@ -4462,21 +4464,35 @@ fn index_search(items: &[Value], last: bool, needle: &Value, from: Option<f64>) 
             None => len - 1.0,
             Some(n) => {
                 let n = norm(n);
-                if n < 0.0 { len + n } else { n.min(len - 1.0) }
+                if n < 0.0 {
+                    len + n
+                } else {
+                    n.min(len - 1.0)
+                }
             }
         };
         if from < 0.0 {
             return None;
         }
-        items[..=(from as usize)].iter().rposition(|v| strict_equals(v, needle))
+        items[..=(from as usize)]
+            .iter()
+            .rposition(|v| strict_equals(v, needle))
     } else {
         let from = match from {
             None => 0.0,
             Some(n) => {
                 let n = norm(n);
-                if n < 0.0 { (len + n).max(0.0) } else { n }
+                if n < 0.0 {
+                    (len + n).max(0.0)
+                } else {
+                    n
+                }
             }
         } as usize;
-        items.iter().skip(from).position(|v| strict_equals(v, needle)).map(|p| p + from)
+        items
+            .iter()
+            .skip(from)
+            .position(|v| strict_equals(v, needle))
+            .map(|p| p + from)
     }
 }
