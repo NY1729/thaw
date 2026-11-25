@@ -66,7 +66,7 @@ use super::{Ctl, FuncDef, Interp, Scope, Value, R};
 pub(crate) use analyze::analyze;
 use analyze::has_loop;
 
-/// `THAW_JS_COMPILE=off|on|check`. Unknown values mean `Off`.
+/// `THAW_JS_COMPILE=off|on|check` (also `0|false` and `1|true`, case-insensitive).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompileMode {
     Off,
@@ -75,11 +75,26 @@ pub enum CompileMode {
 }
 
 impl CompileMode {
+    /// `None` for unset, empty or unknown values (the caller picks the default).
+    pub(crate) fn parse_opt(v: Option<&str>) -> Option<CompileMode> {
+        match v?.trim().to_ascii_lowercase().as_str() {
+            "on" | "1" | "true" => Some(CompileMode::On),
+            "check" => Some(CompileMode::Check),
+            "off" | "0" | "false" => Some(CompileMode::Off),
+            _ => None,
+        }
+    }
+
     pub(crate) fn parse(v: Option<&str>) -> CompileMode {
-        match v.map(str::trim) {
-            Some("on") => CompileMode::On,
-            Some("check") => CompileMode::Check,
-            _ => CompileMode::Off,
+        CompileMode::parse_opt(v).unwrap_or(CompileMode::Off)
+    }
+
+    /// One-line stderr warning for a set, non-empty value that `parse_opt` does not know.
+    pub(crate) fn warn_unknown(v: Option<&str>) {
+        if let Some(s) = v.filter(|s| !s.trim().is_empty()) {
+            if CompileMode::parse_opt(Some(s)).is_none() {
+                eprintln!("thaw-js: unknown THAW_JS_COMPILE={s:?} (expected on|off|check); using the default");
+            }
         }
     }
 }
@@ -654,6 +669,31 @@ impl Stats {
         self.calls_rejected[reason as usize]
     }
 
+    /// One machine-readable TSV line (header `thaw-js-compile-stats`), empty when nothing was counted:
+    /// functions analysed/eligible/rejected, compiled functions, compiled vs interpreted calls, rejected
+    /// functions by reason as `reason=n`.
+    pub(crate) fn tsv(&self) -> String {
+        let rejected: u64 = self.rejected.iter().sum();
+        if self.calls == 0 && self.eligible + rejected == 0 {
+            return String::new();
+        }
+        let mut out = format!(
+            "thaw-js-compile-stats\tanalysed={}\teligible={}\trejected={rejected}\tcompiled={}\tcalls={}\tcompiled_calls={}\tinterpreted_calls={}",
+            self.eligible + rejected,
+            self.eligible,
+            self.compiled,
+            self.calls,
+            self.compiled_calls,
+            self.calls - self.compiled_calls.min(self.calls)
+        );
+        for (i, reason) in FallbackReason::ALL.iter().enumerate() {
+            if self.rejected[i] > 0 {
+                out += &format!("\t{}={}", reason.name(), self.rejected[i]);
+            }
+        }
+        out + "\n"
+    }
+
     /// The per-reason report; empty when no function was called or analysed.
     pub(crate) fn report(&self) -> String {
         let analysed = self.eligible + self.rejected.iter().sum::<u64>();
@@ -727,7 +767,7 @@ impl Drop for Stats {
     /// The exit-time report. `Interp` owns the stats, so dropping the realm prints them (when enabled).
     fn drop(&mut self) {
         if self.level > 0 {
-            eprint!("{}", self.report());
+            eprint!("{}{}", self.report(), self.tsv());
         }
     }
 }
@@ -825,7 +865,7 @@ impl Interp {
         tune_malloc();
         let mut it = Interp::new();
         // unset or empty means the shipped default (a workflow cannot unset a variable, only blank it)
-        if std::env::var("THAW_JS_COMPILE").map_or(true, |v| v.trim().is_empty()) {
+        if CompileMode::parse_opt(std::env::var("THAW_JS_COMPILE").ok().as_deref()).is_none() {
             it.compile_mode = CompileMode::On;
         }
         it

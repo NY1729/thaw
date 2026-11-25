@@ -1884,8 +1884,9 @@ impl Interp {
         // accessor, so only a redefinition by user code counts (`node_accessor`)
         it.global.clear_redefined();
         // user code only: the env turns the compiler on after the preludes ran (`Interp::with_compile_mode` overrides)
-        it.compile_mode =
-            compile::CompileMode::parse(std::env::var("THAW_JS_COMPILE").ok().as_deref());
+        let env_mode = std::env::var("THAW_JS_COMPILE").ok();
+        compile::CompileMode::warn_unknown(env_mode.as_deref());
+        it.compile_mode = compile::CompileMode::parse(env_mode.as_deref());
         it.compile_after =
             compile::parse_after(std::env::var("THAW_JS_COMPILE_AFTER").ok().as_deref());
         crate::mem_trace::mem_trace_report("after-build");
