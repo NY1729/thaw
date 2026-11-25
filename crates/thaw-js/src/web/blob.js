@@ -14,7 +14,9 @@ function Blob(parts, options) {
   var out = new Uint8Array(n), at = 0;
   for (i = 0; i < chunks.length; i++) { out.set(chunks[i], at); at += chunks[i].length; }
   def(this, '_bytes', out);
-  def(this, '_type', options && options.type !== undefined ? String(options.type).toLowerCase() : '');
+  var type = options !== undefined && options !== null ? options.type : undefined;
+  type = type !== undefined ? `${type}` : '';
+  def(this, '_type', /^[\x20-\x7e]*$/.test(type) ? type.toLowerCase() : '');
 }
 Object.defineProperty(Blob.prototype, 'size', { get: function () { return this._bytes.length; }, configurable: true });
 Object.defineProperty(Blob.prototype, 'type', { get: function () { return this._type; }, configurable: true });

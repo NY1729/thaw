@@ -286,7 +286,39 @@ fn report_object(it: &mut Interp) -> Obj {
     let o = it.plain();
     let write = it.native(|_, _, _| Ok(Value::str("")));
     put(&o, "writeReport", write);
-    let get = it.native(|it, _, _| Ok(Value::Object(it.plain())));
+    let get = it.native(|it, _, _| {
+        let report = it.plain();
+        let header = it.plain();
+        put(&header, "reportVersion", Value::Number(3.0));
+        put(&header, "event", Value::str("JavaScript API"));
+        put(&header, "trigger", Value::str("GetReport"));
+        put(&header, "nodejsVersion", Value::str("v22.23.1"));
+        // SAFETY: gnu_get_libc_version returns a static NUL-terminated string.
+        let glibc = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) }
+            .to_string_lossy()
+            .into_owned();
+        put(&header, "glibcVersionRuntime", Value::str(&glibc));
+        put(&header, "glibcVersionCompiler", Value::str(&glibc));
+        put(
+            &header,
+            "arch",
+            Value::str(if cfg!(target_arch = "aarch64") {
+                "arm64"
+            } else {
+                "x64"
+            }),
+        );
+        put(&header, "platform", Value::str("linux"));
+        put(&report, "header", Value::Object(header));
+        let stack = it.plain();
+        put(&stack, "message", Value::str("No stack."));
+        put(&stack, "stack", it.array(vec![]));
+        put(&report, "javascriptStack", Value::Object(stack));
+        for k in ["nativeStack", "libuv", "workers", "sharedObjects"] {
+            put(&report, k, it.array(vec![]));
+        }
+        Ok(Value::Object(report))
+    });
     put(&o, "getReport", get);
     put(&o, "directory", Value::str(""));
     put(&o, "filename", Value::str(""));
