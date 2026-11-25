@@ -10,6 +10,8 @@ const ERRORS_JS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/eval/eval_er
 const ERRORS_TXT: &str = include_str!("../tests/eval/eval_errors.txt");
 const MISC_JS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/eval/eval_misc.js");
 const MISC_TXT: &str = include_str!("../tests/eval/eval_misc.txt");
+const VARENV_JS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/eval/eval_varenv.js");
+const VARENV_TXT: &str = include_str!("../tests/eval/eval_varenv.txt");
 
 /// The console lines the probe at `path` prints (event loop included).
 fn probe_output(path: &str) -> Vec<String> {
@@ -175,4 +177,9 @@ fn direct_eval_errors_golden() {
 #[test]
 fn direct_eval_misc_golden() {
     check_golden(MISC_JS, MISC_TXT, &[]);
+}
+
+#[test]
+fn direct_eval_varenv_golden() {
+    check_golden(VARENV_JS, VARENV_TXT, &[]);
 }

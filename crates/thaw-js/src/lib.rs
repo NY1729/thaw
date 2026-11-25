@@ -1160,6 +1160,9 @@ const SK_FIELD: u8 = 4;
 /// The `with` scope of a vm context's sandbox (vm.rs): the global object's record, not a user `with`, so a call it
 /// resolves has no `this` object.
 const SK_VMGLOBAL: u8 = 8;
+/// A call frame whose parameter expressions are being evaluated: a direct eval there sees the
+/// parameter environment (`arguments` and the parameters are bound outside the body's var scope).
+const SK_PARAMS: u8 = 16;
 
 impl Scope {
     fn new(parent: Option<Rc<Scope>>) -> Rc<Scope> {
@@ -3544,6 +3547,7 @@ impl Interp {
                 frame.declare("arguments", self.array(args.to_vec()), true);
             }
         }
+        let mut in_params = false;
         for (i, p) in def.params.iter().enumerate() {
             if let Some(Some(name)) = def.param_names.get(i) {
                 let value = args.get(i).cloned().unwrap_or(Value::Undefined);
@@ -3559,9 +3563,13 @@ impl Interp {
                     },
                 );
             } else if let a::Pat::Rest(r) = p {
+                in_params = true;
+                frame.kind.set(frame.kind.get() | SK_PARAMS);
                 let rest = self.array(args.get(i..).unwrap_or(&[]).to_vec());
                 self.bind_pattern(&r.arg, rest, &frame, true)?;
             } else {
+                in_params = true;
+                frame.kind.set(frame.kind.get() | SK_PARAMS);
                 self.bind_pattern(
                     p,
                     args.get(i).cloned().unwrap_or(Value::Undefined),
@@ -3569,6 +3577,9 @@ impl Interp {
                     true,
                 )?;
             }
+        }
+        if in_params {
+            frame.kind.set(frame.kind.get() & !SK_PARAMS);
         }
         Ok(frame)
     }
@@ -4507,6 +4518,17 @@ impl Interp {
             var_target(scope)
         };
         let names = hoisted_names(&stmts);
+        if !strict
+            && var_scope.kind.get() & SK_PARAMS != 0
+            && names.iter().any(|n| &**n == "arguments")
+            && (var_scope.kind.get() & SK_FUNC != 0
+                || var_scope.mask.get() & name_bit("arguments") != 0)
+        {
+            return self.throw_error(
+                "SyntaxError",
+                "Identifier 'arguments' has already been declared",
+            );
+        }
         if !strict {
             if let Some(name) = names.iter().find(|n| lexical_between(scope, &var_scope, n)) {
                 let msg = format!("Identifier '{name}' has already been declared");
@@ -6810,6 +6832,8 @@ mod dynamic_helper_contract_tests;
 mod errors_stack_tests;
 #[cfg(test)]
 mod esm_private_tests;
+#[cfg(test)]
+mod eval_scoping_tests;
 #[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]
