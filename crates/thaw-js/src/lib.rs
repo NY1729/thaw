@@ -6909,6 +6909,8 @@ mod sysio_stdin_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod text_codec_native_tests;
+#[cfg(test)]
 mod timers_shape_tests;
 #[cfg(test)]
 mod twin_audit_gap_tests;

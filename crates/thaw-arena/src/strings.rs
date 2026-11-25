@@ -3,11 +3,36 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+/// Multiplicative hasher for pointer keys (no DoS exposure: keys are addresses).
+#[derive(Default)]
+pub(crate) struct PtrHasher(u64);
+
+impl Hasher for PtrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (self.0.rotate_left(5) ^ n as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type PtrMap<V> = HashMap<usize, V, BuildHasherDefault<PtrHasher>>;
+
+/// Set once any owned NUL-embedded string exists; until then reads skip the global lock.
+static OWNED_USED: AtomicBool = AtomicBool::new(false);
+
 thread_local! {
-    static LENGTHS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
+    static LENGTHS: RefCell<PtrMap<(usize, bool)>> = RefCell::new(PtrMap::default());
     static OWNED_EXCEPTIONS: RefCell<HashMap<usize, Rc<crate::exception::ExceptionPacket>>> = RefCell::new(HashMap::new());
     static NATIVE_ERROR_ALIASES: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
 }
@@ -90,10 +115,10 @@ pub fn unregister_exception_bytes(pointer: *const c_char) {
     }
 }
 
-fn owned_lengths() -> &'static Mutex<HashMap<usize, usize>> {
+fn owned_lengths() -> &'static Mutex<PtrMap<usize>> {
     // ponytail: one process-wide lock for owned lengths; shard only if allocation contention is measured.
-    static OWNED: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
-    OWNED.get_or_init(|| Mutex::new(HashMap::new()))
+    static OWNED: OnceLock<Mutex<PtrMap<usize>>> = OnceLock::new();
+    OWNED.get_or_init(|| Mutex::new(PtrMap::default()))
 }
 
 fn graph_transfers() -> &'static Mutex<HashMap<usize, Vec<u8>>> {
@@ -165,6 +190,9 @@ impl<'a> NativeStr<'a> {
                     .map(|&(length, _)| length)
             })
             .or_else(|| {
+                if !OWNED_USED.load(Ordering::Relaxed) {
+                    return None;
+                }
                 owned_lengths()
                     .lock()
                     .unwrap()
@@ -326,6 +354,7 @@ pub fn owned_string(bytes: impl AsRef<[u8]>) -> *mut c_char {
     let mut buffer = bytes.to_vec();
     buffer.push(0);
     let pointer = Box::into_raw(buffer.into_boxed_slice()) as *mut u8;
+    OWNED_USED.store(true, Ordering::Relaxed);
     owned_lengths()
         .lock()
         .unwrap()
@@ -348,7 +377,12 @@ pub unsafe fn destroy_string(pointer: *const c_char) {
         .lock()
         .unwrap()
         .remove(&(pointer as usize));
-    if let Some(length) = owned_lengths().lock().unwrap().remove(&(pointer as usize)) {
+    let length = if OWNED_USED.load(Ordering::Relaxed) {
+        owned_lengths().lock().unwrap().remove(&(pointer as usize))
+    } else {
+        None
+    };
+    if let Some(length) = length {
         unsafe {
             drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
                 pointer.cast::<u8>(),

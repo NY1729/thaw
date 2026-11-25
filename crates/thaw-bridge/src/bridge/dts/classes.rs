@@ -21,6 +21,12 @@ fn scoped_exported_import_equals_aliases(module: &Module) -> Vec<(String, String
 pub fn parse_dts_classes_named(
     source: &str, filename: &thaw_parser::common::FileName,
 ) -> Result<Vec<DtsClass>, String> {
+    dts_memo("classes", source, filename, || parse_dts_classes_named_uncached(source, filename))
+}
+
+fn parse_dts_classes_named_uncached(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> Result<Vec<DtsClass>, String> {
     let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     let scoped_class_decls = scoped_class_decls(&module);

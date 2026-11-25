@@ -93,7 +93,7 @@ fn shared_rt_default_off_manifest_is_unchanged() {
 fn shared_rt_c_abi_v1_links_and_runs_from_c() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-shared-rt-c-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let lib = build_rt_shared_library().unwrap();
+    let lib = build_rt_shared_library(false).unwrap();
     std::fs::write(
         dir.join("abi.c"),
         "#include <stdint.h>\n\
@@ -150,6 +150,24 @@ fn shared_rt_runtime_typeof_compares_by_content() {
     let shared_out = Command::new(&shared).output().unwrap().stdout;
     assert_eq!(String::from_utf8_lossy(&shared_out), "Q:default1 true\n");
     assert_eq!(inline_out, shared_out);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn shared_rt_thaw_js_timer_promise_matches_inline() {
+    // One image with thaw-js: a single arena, so native callbacks and timers work as when static.
+    let dir = std::env::temp_dir().join(format!("thaw-cli-shared-rt-js-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = "const f = new Function(\"a\", \"return a * 2\");\n\
+                  setTimeout(() => console.log(\"timer\", f(21)), 5);\n\
+                  Promise.resolve(1).then((v) => console.log(\"then\", v));\n";
+    let inline = shared_rt_build(&dir, "inline", source, false).unwrap();
+    let shared = shared_rt_build(&dir, "shared", source, true).unwrap();
+    let shared_out = Command::new(&shared).output().unwrap().stdout;
+    assert_eq!(String::from_utf8_lossy(&shared_out), "then 1\ntimer 42\n");
+    assert_eq!(Command::new(&inline).output().unwrap().stdout, shared_out);
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&shared).unwrap()).unwrap();
+    assert_eq!(manifest["shared_rt"], true);
     let _ = std::fs::remove_dir_all(dir);
 }
 
