@@ -2157,7 +2157,7 @@ fn unreferenced_net_server_does_not_hold_the_event_loop_open() {
 
 /// End-to-end confirmation that `dns.lookup`'s new native resolution
 /// path (`dns_lookup_json_resolves_localhost_via_the_real_os_resolver`
-/// in thaw-quickjs covers the mechanism hermetically) is actually wired
+/// in thaw-js covers the mechanism hermetically) is actually wired
 /// through the JS `node:dns` builtin correctly: a real hostname other
 /// than `"localhost"` (which has its own hardcoded fast path,
 /// unaffected either way) now resolves to real addresses instead of

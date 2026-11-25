@@ -1,5 +1,5 @@
 #[test]
-fn optional_aggregates_use_jit_without_quickjs() {
+fn optional_aggregates_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-aggregate-{}",
         std::process::id()
@@ -154,7 +154,7 @@ fn fixed_object_union_result_builds_native_storage() {
 }
 
 #[test]
-fn fixed_tuple_unions_use_jit_without_quickjs() {
+fn fixed_tuple_unions_use_jit_without_legacy_engine() {
     let declarations = thaw_bridge::parse_dts(
         "export interface Item { label: string; }\nexport declare function describe(value: [number, string] | string): string;\nexport declare function make(value: boolean): [number, string] | string;\nexport declare function mixed(value: Item | [number, string]): string;\nexport declare function makeMixed(value: boolean): Item | [number, string];\nexport declare function size(value: number[] | [number, string] | Item): number;\nexport declare function firstNumber(value: number[] | [number, number] | Item): number;\nexport declare function firstBoolean(value: boolean[] | [boolean, boolean] | Item): boolean;\nexport declare function firstString(value: string[] | [string, string] | Item): string;\nexport declare function joinNumbers(value: number[] | [number, number]): string;\nexport declare function hasBoolean(value: boolean[] | [boolean, boolean]): boolean;\nexport declare function atString(value: string[] | [string, string]): string;\nexport declare function sliceNumbers(value: number[] | [number, number]): number[];\nexport declare function indexNumber(value: number[] | [number, number], needle: number): number;\nexport declare function lastString(value: string[] | [string, string], needle: string): number;\nexport declare function concatNumbers(value: number[] | [number, number]): number[];\nexport declare function reversedNumbers(value: number[] | [number, number]): number[];\nexport declare function reverseFlags(value: boolean[] | [boolean, boolean]): boolean[];\nexport declare function sortedNumbers(value: number[] | [number, number]): number[];\nexport declare function sortStrings(value: string[] | [string, string]): string[];\n",
     )
@@ -361,7 +361,7 @@ fn array_union_copy_methods_dispatch_once_and_preserve_layout() {
 }
 
 #[test]
-fn tuple_union_array_updates_use_jit_without_quickjs() {
+fn tuple_union_array_updates_use_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function fillNumbers(value: number[] | [number, number], replacement: number): number[];\n",
         "export declare function copyNumbers(value: number[] | [number, number]): number[];\n",
@@ -437,7 +437,7 @@ fn tuple_union_array_updates_use_jit_without_quickjs() {
 }
 
 #[test]
-fn tuple_union_array_length_changes_use_jit_without_quickjs() {
+fn tuple_union_array_length_changes_use_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function append(value: number[] | [number, number], item: number): number;\n",
         "export declare function prepend(value: number[] | [number, number], item: number): number;\n",
@@ -505,7 +505,7 @@ fn tuple_union_array_length_changes_use_jit_without_quickjs() {
 }
 
 #[test]
-fn tuple_union_array_predicates_use_jit_without_quickjs() {
+fn tuple_union_array_predicates_use_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function someAbove(value: number[] | [number, number], threshold: number): boolean;\n",
         "export declare function everyPositive(value: number[] | [number, number]): boolean;\n",
@@ -593,7 +593,7 @@ fn tuple_union_array_predicates_use_jit_without_quickjs() {
 }
 
 #[test]
-fn tuple_union_array_transforms_use_jit_without_quickjs() {
+fn tuple_union_array_transforms_use_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function scale(value: number[] | [number, number], factor: number): number[];\n",
         "export declare function sum(value: number[] | [number, number], initial: number): number;\n",
@@ -657,7 +657,7 @@ fn tuple_union_array_transforms_use_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_tuple_union_callbacks_use_jit_without_quickjs() {
+fn primitive_tuple_union_callbacks_use_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function anyFlag(value: boolean[] | [boolean, boolean]): boolean;\n",
         "export declare function allFlags(value: boolean[] | [boolean, boolean]): boolean;\n",
@@ -765,7 +765,7 @@ fn primitive_tuple_union_callbacks_use_jit_without_quickjs() {
 }
 
 #[test]
-fn tuple_union_callback_context_uses_jit_without_quickjs() {
+fn tuple_union_callback_context_uses_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function mapContext(value: number[] | [number, number], factor: number, offset: number): number[];\n",
         "export declare function filterContext(value: number[] | [number, number], minimum: number, bonus: number): number[];\n",
@@ -848,7 +848,7 @@ fn tuple_union_callback_context_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn tuple_union_reducers_without_initial_use_jit_without_quickjs() {
+fn tuple_union_reducers_without_initial_use_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function foldLeft(value: number[] | [number, number]): number;\n",
         "export declare function foldRight(value: number[] | [number, number]): number;\n",
@@ -914,7 +914,7 @@ fn tuple_union_reducers_without_initial_use_jit_without_quickjs() {
 }
 
 #[test]
-fn tuple_union_iteration_and_spread_use_jit_without_quickjs() {
+fn tuple_union_iteration_and_spread_use_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function spreadCopy(value: number[] | [number, number]): number[];\n",
         "export declare function sumForOf(value: number[] | [number, number]): number;\n",
@@ -978,7 +978,7 @@ fn tuple_union_iteration_and_spread_use_jit_without_quickjs() {
 }
 
 #[test]
-fn tuple_union_destructuring_uses_jit_without_quickjs() {
+fn tuple_union_destructuring_uses_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function numberPair(value: number[] | [number, number]): number;\n",
         "export declare function stringEnds(value: string[] | [string, string, string]): string;\n",

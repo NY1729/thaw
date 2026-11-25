@@ -1,4 +1,4 @@
-//! Twins of thaw-quickjs `tests.rs` cases. Each one replays the original JS snippet (same function, same
+//! Twins of retired-engine `tests.rs` cases. Each one replays the original JS snippet (same function, same
 //! JSON arguments) on thaw-js and asserts the result; every expectation was cross-checked against Node 22.
 //! WebAssembly snippets were assembled from their WAT text to binary (Node never accepts text).
 
@@ -13,7 +13,7 @@ fn json_str(s: &str) -> String {
     format!("{s:?}")
 }
 
-/// Run the steps like the thaw-quickjs `load`/`call` helpers: `Load` evaluates a script, `Call` invokes a
+/// Run the steps like the retired-engine `load`/`call` helpers: `Load` evaluates a script, `Call` invokes a
 /// global function with JSON arguments, awaits its promise and returns `JSON.stringify` of the value.
 fn twin(steps: &[Step]) {
     let mut it = Interp::new();

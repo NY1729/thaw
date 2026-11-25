@@ -438,7 +438,7 @@ const DYNAMIC_HELPERS: &str = r#"
 "#;
 
 /// `os.networkInterfaces()` as JSON: IPv4/IPv6 entries grouped by interface name (POSIX `getifaddrs`; the
-/// MAC comes from `/sys/class/net/<name>/address`, all zero when absent), the shape thaw-quickjs returns.
+/// MAC comes from `/sys/class/net/<name>/address`, all zero when absent), the shape the retired engine returns.
 #[cfg(unix)]
 fn network_interfaces_json() -> Result<String, String> {
     use std::ffi::CStr;
@@ -659,7 +659,7 @@ pub(crate) fn fd_is_tty(fd: i32) -> bool {
 }
 
 // ----- process.stdin on the main thread: a reader thread feeds the loop through `poll_stdin` -----
-// Port of thaw-quickjs processes.rs (`start_host_stdin` / `poll_host_stdin`) and filesystem.rs state.
+// Port of the retired engine processes.rs (`start_host_stdin` / `poll_host_stdin`) and filesystem.rs state.
 
 enum StdinEvent {
     Data(Vec<u8>),

@@ -290,7 +290,7 @@ fn thaw_js_newly_allowlisted_builtins_route_to_thaw_js() {
 }
 
 #[test]
-fn package_embedding_quickjs_worker_threads_routes_to_thaw_js() {
+fn package_embedding_legacy_engine_worker_threads_routes_to_thaw_js() {
     // The registry's real thaw-js `node:worker_threads` factory (builtins/system/workers.rs), embedded in a package
     // bundle the way bundle/render.rs embeds a builtin the package requires: an entry `pkg/index.js` requires it.
     let qjs = thaw_registry::builtin_bundle_with("node:worker_threads", &[]).unwrap();
@@ -368,7 +368,7 @@ fn thaw_js_package_eligible_accepts_a_native_addon_package_with_a_clean_bundle()
 }
 
 #[test]
-fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
+fn thaw_js_routing_serves_a_plain_data_package_without_linking_legacy_engine() {
     let (dir, registry, entry) = thaw_js_fixture(
         "plain",
         "import { describe, add } from 'tjs-kit';\n\
@@ -388,13 +388,13 @@ fn thaw_js_routing_serves_a_plain_data_package_without_linking_quickjs() {
     let bytes = std::fs::read(&output).unwrap();
     assert!(
         !bytes.windows(8).any(|window| window == b"rquickjs"),
-        "QuickJS was linked"
+        "the binary links the retired QuickJS engine (rquickjs symbols present)"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
-fn thaw_js_routing_carries_dates_both_ways_without_linking_quickjs() {
+fn thaw_js_routing_carries_dates_both_ways_without_linking_legacy_engine() {
     let (dir, registry, entry) = thaw_js_fixture(
         "dates",
         "import { shift, iso } from 'tjs-kit';\n\
@@ -412,7 +412,7 @@ fn thaw_js_routing_carries_dates_both_ways_without_linking_quickjs() {
 }
 
 #[test]
-fn thaw_js_routing_decodes_a_nested_array_result_without_linking_quickjs() {
+fn thaw_js_routing_decodes_a_nested_array_result_without_linking_legacy_engine() {
     // A typed `string[][]` result is decoded from plain JSON: no interned-native-owner query (which
     // would need the thaw-js realm) may be compiled into a thaw-js build.
     let main = "import { pairs } from 'tjs-kit';\nfunction main(): void { const p = pairs(['a', 'b', 'c']); console.log(p.length, p[0][1], p[1][0]); }\n";
@@ -429,7 +429,7 @@ fn thaw_js_prints_a_plain_object_result_like_node() {
     // The package's `any` result is a live JS object; `console.log` must inspect it like Node
     // (not `String(value)`, which printed `[object Object]`).
     let main = "import { describe } from 'tjs-kit';\nfunction main(): void { console.log(describe(['a', 'b', 'a'], 'x')); }\n";
-    let (dir, registry, entry) = thaw_js_fixture("quickjs-print", main);
+    let (dir, registry, entry) = thaw_js_fixture("engine-print", main);
     let output = dir.join("plain");
     thaw_js_build(&entry, &output, &registry);
     assert_eq!(
@@ -440,7 +440,7 @@ fn thaw_js_prints_a_plain_object_result_like_node() {
 }
 
 #[test]
-fn thaw_js_routing_serves_a_callback_through_thaw_js_without_quickjs() {
+fn thaw_js_routing_serves_a_callback_through_thaw_js_without_legacy_engine() {
     let (dir, registry, entry) = thaw_js_fixture(
         "callback",
         "import { apply } from 'tjs-kit';\nfunction main(): void { console.log(apply([1, 2, 3], (x: number): number => x * 2).join(',')); }\n",
@@ -831,7 +831,7 @@ fn thaw_js_fallback_error_mode_fails_the_build_with_every_refusal() {
 }
 
 #[test]
-fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_quickjs() {
+fn thaw_js_fallback_error_mode_fails_only_when_the_build_links_legacy_engine() {
     // node:crypto's typed `randomFillSync` declaration is refused per function, yet the program still ends up
     // on thaw-js: an `error` build must succeed, since nothing links thaw-js.
     let (dir, registry, entry) = thaw_js_class_fixture(
@@ -1547,7 +1547,7 @@ fn routed_node_http_keeps_the_native_create_server_declaration() {
 }
 
 #[test]
-fn thaw_js_routed_node_http_server_only_links_no_quickjs() {
+fn thaw_js_routed_node_http_server_only_links_no_legacy_engine() {
     // Server-only: no thaw-js http client in the program. The listen callback reports the bound port and closes.
     let (dir, registry, entry) = thaw_js_fixture(
         "node-http-create-server",
@@ -2212,7 +2212,7 @@ fn thaw_js_nested_namespace_class_is_not_a_routing_blocker() {
 }
 
 #[test]
-fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_quickjs() {
+fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_legacy_engine() {
     // A `.d.ts` `export declare namespace kdf { class OpenSSL }`: the program builds a dotted class path on thaw-js.
     let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-nested-alias-{}", std::process::id()));
     let registry = dir.join("modules");
@@ -2261,7 +2261,7 @@ fn nested_namespace_alias_class_routes_to_thaw_js_without_linking_quickjs() {
     let bytes = std::fs::read(&output).unwrap();
     assert!(
         !bytes.windows(8).any(|window| window == b"rquickjs"),
-        "QuickJS was linked"
+        "the binary links the retired QuickJS engine (rquickjs symbols present)"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2305,7 +2305,7 @@ fn builtin_defined_methods_make_graphql_and_socket_io_shaped_packages_eligible()
 }
 
 #[test]
-fn unmapped_require_of_an_installed_peer_keeps_a_package_on_quickjs() {
+fn unmapped_require_of_an_installed_peer_keeps_a_package_on_legacy_engine() {
     // drizzle-orm's neon driver requires its peer `@neondatabase/serverless`, which the bundle does not map. While the
     // peer is not installed the require is a MODULE_NOT_FOUND at run time, as on Node: the package is served. Once the
     // peer is installed (a bundler gap or a peer added after the bundle) thaw-js could not serve it: thaw-js keeps it.

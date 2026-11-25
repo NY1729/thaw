@@ -1,6 +1,6 @@
 //! Eval and reference calls of the N-API engine seam: `eval_json`, the calls through the
 //! `__thaw_napi_reference_<id>` globals, the exception-capturing `this`-call and the graph pair check.
-//! Each mirrors the same-named `thaw_js_*` function of thaw-quickjs.
+//! Each mirrors the same-named `thaw_js_*` function of the retired engine.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::io::Read;

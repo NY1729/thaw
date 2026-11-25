@@ -489,7 +489,7 @@ mod native_timers_retry_tests {
     use super::*;
 
     #[test]
-    fn native_timers_conflict_retries_without_the_quickjs_fallback() {
+    fn native_timers_conflict_retries_without_the_legacy_engine_fallback() {
         // the conflict is not a routed failure: the retry keeps the routing (thaw-js or thaw-js by
         // the program's own needs) instead of recording a "fell back to thaw-js" blocker
         assert!(!routed_failure_falls_back(NATIVE_TIMERS_NEED_ENGINE));
@@ -1679,7 +1679,7 @@ fn zstd_marker_selects_the_zstd_feature_only_for_zstd_users() {
 }
 
 #[test]
-fn quickjs_callbacks_export_only_their_runtime_poll_symbols() {
+fn legacy_engine_callbacks_export_only_their_runtime_poll_symbols() {
     assert_eq!(
         js_callback_export_args(),
         [
@@ -2458,7 +2458,7 @@ mod staticlib_memo_tests {
             std::fs::write(&archive, b"archive").map_err(|e| e.to_string())?;
             Ok(archive.clone())
         };
-        let key = staticlib_build_key("thaw-fake", true, &["quickjs"]);
+        let key = staticlib_build_key("thaw-fake", true, &["intl"]);
 
         let first = memoized_staticlib(&memo, key.clone(), build).unwrap();
         let second = memoized_staticlib(&memo, key.clone(), build).unwrap();

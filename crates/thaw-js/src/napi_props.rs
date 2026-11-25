@@ -1,7 +1,7 @@
 //! Exception-capturing property operations of the N-API engine seam (PR 2 of the stage 2 plan). A JS
 //! throw from a getter, setter, proxy trap or coercion is retained as a handle, the thrown value
 //! itself, so its identity survives; a key may be a string handle or a Symbol handle. Each mirrors
-//! the same-named `thaw_js_*` function of thaw-quickjs.
+//! the same-named `thaw_js_*` function of the retired engine.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};

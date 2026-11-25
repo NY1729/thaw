@@ -1,4 +1,4 @@
-//! Twins of the thaw-quickjs host tests (processes, filesystem, os parsers, networking, ciphers) that check
+//! Twins of the retired-engine host tests (processes, filesystem, os parsers, networking, ciphers) that check
 //! Node-visible behaviour, run against the thaw-js implementation with the same inputs and expected values. Named
 //! `twin_<theme>_<what>`; the engine-internal tests of the retired crate (C-API glue, handle leases) have no twin.
 

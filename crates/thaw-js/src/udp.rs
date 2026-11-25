@@ -1,5 +1,5 @@
 //! `node:dgram` host (UDP): the `__thaw_udp_*` natives the registry's dgram shim calls. Same wire protocol as the retired-engine
-//! host (crates/thaw-quickjs/src/quickjs/networking.rs): `ok|...` / `pending` / `err|CODE|message`, payloads as hex.
+//! host (the retired engine's networking.rs): `ok|...` / `pending` / `err|CODE|message`, payloads as hex.
 //!
 //! Liveness is not handled here. The shim's receive pump is a timer that re-arms itself while the socket is open, so an
 //! open socket keeps the event loop alive exactly as long as that timer is ref'd; `socket.unref()` unrefs the timer.

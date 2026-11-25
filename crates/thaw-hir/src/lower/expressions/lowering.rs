@@ -6162,7 +6162,7 @@ impl<'a> FnLowerer<'a> {
                 // the exact same `getDynamicValue`/`constructDynamicValue`
                 // mechanism, just with a dotted name (`"Intl.
                 // DateTimeFormat"`) that `thaw_js_get_global`
-                // (`crates/thaw-quickjs/src/quickjs/api.rs`) resolves by
+                // resolves by
                 // walking nested object properties instead of a single
                 // flat global lookup.
                 if let Expr::Member(member) = new_expr.callee.as_ref() {

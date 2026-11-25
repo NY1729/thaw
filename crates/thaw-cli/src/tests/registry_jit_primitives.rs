@@ -1,5 +1,5 @@
 #[test]
-fn pure_numeric_registry_export_uses_jit_without_quickjs() {
+fn pure_numeric_registry_export_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-{}",
         std::process::id()
@@ -144,7 +144,7 @@ fn pure_numeric_registry_export_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_number_boolean_callable_tables_use_jit_without_quickjs() {
+fn mixed_number_boolean_callable_tables_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-mixed-callables-{}",
         std::process::id()
@@ -185,7 +185,7 @@ fn mixed_number_boolean_callable_tables_use_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_number_string_callable_tables_use_tagged_jit_without_quickjs() {
+fn mixed_number_string_callable_tables_use_tagged_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-tagged-callables-{}",
         std::process::id()
@@ -226,7 +226,7 @@ fn mixed_number_string_callable_tables_use_tagged_jit_without_quickjs() {
 }
 
 #[test]
-fn boolean_primitive_unions_use_tagged_jit_without_quickjs() {
+fn boolean_primitive_unions_use_tagged_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-tagged-booleans-{}",
         std::process::id()
@@ -267,7 +267,7 @@ fn boolean_primitive_unions_use_tagged_jit_without_quickjs() {
 }
 
 #[test]
-fn dynamic_primitive_loop_locals_narrow_without_quickjs() {
+fn dynamic_primitive_loop_locals_narrow_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-dynamic-loop-{}",
         std::process::id()
@@ -305,7 +305,7 @@ fn dynamic_primitive_loop_locals_narrow_without_quickjs() {
 }
 
 #[test]
-fn dynamic_primitive_numeric_operators_use_jit_without_quickjs() {
+fn dynamic_primitive_numeric_operators_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-dynamic-operators-{}",
         std::process::id()
@@ -346,7 +346,7 @@ fn dynamic_primitive_numeric_operators_use_jit_without_quickjs() {
 }
 
 #[test]
-fn aggregate_unions_round_trip_through_jit_without_quickjs() {
+fn aggregate_unions_round_trip_through_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-aggregate-unions-{}",
         std::process::id()
@@ -510,7 +510,7 @@ fn aggregate_union_narrows_array_then_dictionary_in_jit() {
 }
 
 #[test]
-fn mixed_array_default_sort_uses_jit_without_quickjs() {
+fn mixed_array_default_sort_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-mixed-array-sort-{}",
         std::process::id()
@@ -554,7 +554,7 @@ fn mixed_array_default_sort_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_array_range_updates_use_jit_without_quickjs() {
+fn mixed_array_range_updates_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-mixed-array-range-{}",
         std::process::id()
@@ -598,7 +598,7 @@ fn mixed_array_range_updates_use_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_array_truthy_scans_use_jit_without_quickjs() {
+fn mixed_array_truthy_scans_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-mixed-array-truthy-{}",
         std::process::id()
@@ -642,7 +642,7 @@ fn mixed_array_truthy_scans_use_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_array_comparison_scans_use_jit_without_quickjs() {
+fn mixed_array_comparison_scans_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-mixed-array-comparison-{}",
         std::process::id()
@@ -683,7 +683,7 @@ fn mixed_array_comparison_scans_use_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_array_conversion_maps_use_jit_without_quickjs() {
+fn mixed_array_conversion_maps_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-mixed-array-map-{}",
         std::process::id()
@@ -723,7 +723,7 @@ fn mixed_array_conversion_maps_use_jit_without_quickjs() {
 }
 
 #[test]
-fn dynamic_number_sources_use_jit_without_quickjs() {
+fn dynamic_number_sources_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-random-{}",
         std::process::id()
@@ -764,7 +764,7 @@ fn dynamic_number_sources_use_jit_without_quickjs() {
 }
 
 #[test]
-fn numeric_predicates_use_jit_without_quickjs() {
+fn numeric_predicates_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-predicates-{}",
         std::process::id()
@@ -805,7 +805,7 @@ fn numeric_predicates_use_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_hypot_uses_jit_without_quickjs() {
+fn mixed_hypot_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-mixed-hypot-{}",
         std::process::id()
@@ -843,7 +843,7 @@ fn mixed_hypot_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn arithmetic_array_callbacks_use_jit_without_quickjs() {
+fn arithmetic_array_callbacks_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-reduce-{}",
         std::process::id()
@@ -884,7 +884,7 @@ fn arithmetic_array_callbacks_use_jit_without_quickjs() {
 }
 
 #[test]
-fn local_map_callbacks_use_jit_without_quickjs() {
+fn local_map_callbacks_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-local-map-{}",
         std::process::id()
@@ -925,7 +925,7 @@ fn local_map_callbacks_use_jit_without_quickjs() {
 }
 
 #[test]
-fn composed_numeric_maps_use_jit_callbacks_without_quickjs() {
+fn composed_numeric_maps_use_jit_callbacks_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-composed-map-{}",
         std::process::id()
@@ -963,7 +963,7 @@ fn composed_numeric_maps_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
-fn composed_numeric_predicates_use_jit_callbacks_without_quickjs() {
+fn composed_numeric_predicates_use_jit_callbacks_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-composed-predicate-{}",
         std::process::id()
@@ -1004,7 +1004,7 @@ fn composed_numeric_predicates_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
-fn composed_primitive_predicates_use_jit_callbacks_without_quickjs() {
+fn composed_primitive_predicates_use_jit_callbacks_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-composed-primitive-predicate-{}",
         std::process::id()
@@ -1045,7 +1045,7 @@ fn composed_primitive_predicates_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
-fn composed_primitive_maps_use_jit_callbacks_without_quickjs() {
+fn composed_primitive_maps_use_jit_callbacks_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-composed-primitive-map-{}",
         std::process::id()
@@ -1086,7 +1086,7 @@ fn composed_primitive_maps_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
-fn composed_numeric_reducers_use_jit_callbacks_without_quickjs() {
+fn composed_numeric_reducers_use_jit_callbacks_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-composed-reducer-{}",
         std::process::id()
@@ -1127,7 +1127,7 @@ fn composed_numeric_reducers_use_jit_callbacks_without_quickjs() {
 }
 
 #[test]
-fn array_jit_callbacks_capture_typed_outer_values_without_quickjs() {
+fn array_jit_callbacks_capture_typed_outer_values_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-captures-{}",
         std::process::id()
@@ -1168,7 +1168,7 @@ fn array_jit_callbacks_capture_typed_outer_values_without_quickjs() {
 }
 
 #[test]
-fn primitive_array_comparisons_use_jit_without_quickjs() {
+fn primitive_array_comparisons_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-primitive-comparisons-{}",
         std::process::id()
@@ -1209,7 +1209,7 @@ fn primitive_array_comparisons_use_jit_without_quickjs() {
 }
 
 #[test]
-fn typed_typeof_uses_jit_without_quickjs() {
+fn typed_typeof_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-typeof-{}",
         std::process::id()
@@ -1250,7 +1250,7 @@ fn typed_typeof_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn default_parameters_use_jit_without_quickjs() {
+fn default_parameters_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-defaults-{}",
         std::process::id()
@@ -1291,7 +1291,7 @@ fn default_parameters_use_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_string_coercion_uses_jit_without_quickjs() {
+fn primitive_string_coercion_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-coercion-{}",
         std::process::id()
@@ -1328,7 +1328,7 @@ fn primitive_string_coercion_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn unicode_normalization_uses_jit_without_quickjs() {
+fn unicode_normalization_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-normalize-{}",
         std::process::id()
@@ -1362,7 +1362,7 @@ fn unicode_normalization_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn string_split_uses_jit_without_quickjs() {
+fn string_split_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-split-{}",
         std::process::id()
@@ -1396,7 +1396,7 @@ fn string_split_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_array_copies_use_jit_without_quickjs() {
+fn primitive_array_copies_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-slice-{}",
         std::process::id()
@@ -1433,7 +1433,7 @@ fn primitive_array_copies_use_jit_without_quickjs() {
 }
 
 #[test]
-fn numeric_comparator_sorts_use_jit_without_quickjs() {
+fn numeric_comparator_sorts_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-numeric-sort-{}",
         std::process::id()
@@ -1474,7 +1474,7 @@ fn numeric_comparator_sorts_use_jit_without_quickjs() {
 }
 
 #[test]
-fn string_comparator_sorts_use_jit_without_quickjs() {
+fn string_comparator_sorts_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-string-sort-{}",
         std::process::id()
@@ -1515,7 +1515,7 @@ fn string_comparator_sorts_use_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_array_constructors_use_jit_without_quickjs() {
+fn primitive_array_constructors_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-constructors-{}",
         std::process::id()
@@ -1552,7 +1552,7 @@ fn primitive_array_constructors_use_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_array_mutation_uses_jit_without_quickjs() {
+fn primitive_array_mutation_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-mutation-{}",
         std::process::id()
@@ -1589,7 +1589,7 @@ fn primitive_array_mutation_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_array_element_assignment_uses_jit_without_quickjs() {
+fn primitive_array_element_assignment_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-set-{}",
         std::process::id()
@@ -1630,7 +1630,7 @@ fn primitive_array_element_assignment_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_array_removal_uses_jit_without_quickjs() {
+fn primitive_array_removal_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-removal-{}",
         std::process::id()
@@ -1667,7 +1667,7 @@ fn primitive_array_removal_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_array_splice_uses_jit_without_quickjs() {
+fn primitive_array_splice_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-array-splice-{}",
         std::process::id()
@@ -1708,7 +1708,7 @@ fn primitive_array_splice_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn string_truthiness_uses_jit_without_quickjs() {
+fn string_truthiness_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-truthiness-{}",
         std::process::id()
@@ -1745,7 +1745,7 @@ fn string_truthiness_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn mixed_primitive_comparisons_use_jit_without_quickjs() {
+fn mixed_primitive_comparisons_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-comparison-{}",
         std::process::id()
@@ -1782,7 +1782,7 @@ fn mixed_primitive_comparisons_use_jit_without_quickjs() {
 }
 
 #[test]
-fn optional_string_results_use_jit_without_quickjs() {
+fn optional_string_results_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-{}",
         std::process::id()
@@ -1817,7 +1817,7 @@ fn optional_string_results_use_jit_without_quickjs() {
 
 
 #[test]
-fn set_operations_use_jit_without_quickjs() {
+fn set_operations_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-set-{}",
         std::process::id()
@@ -1936,7 +1936,7 @@ fn set_composition_accepts_an_opaque_set_like_object() {
 }
 
 #[test]
-fn set_size_uses_jit_without_quickjs() {
+fn set_size_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-set-size-{}",
         std::process::id()
@@ -1970,7 +1970,7 @@ fn set_size_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn set_for_of_uses_jit_without_quickjs() {
+fn set_for_of_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-set-forof-{}",
         std::process::id()
@@ -2004,7 +2004,7 @@ fn set_for_of_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn set_from_iterable_uses_jit_without_quickjs() {
+fn set_from_iterable_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-set-from-{}",
         std::process::id()
@@ -2200,7 +2200,7 @@ fn mixed_map_key_types_use_js_fallback_with_same_value_zero() {
 }
 
 #[test]
-fn deeply_nested_pure_arithmetic_uses_jit_without_quickjs() {
+fn deeply_nested_pure_arithmetic_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-deep-arithmetic-{}",
         std::process::id()

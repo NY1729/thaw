@@ -162,7 +162,7 @@ requires general JavaScript semantics runs on the Thaw-native JavaScript evaluat
 (`thaw-js`), the only engine; see [thaw-js](#thaw-js). A package or program thaw-js cannot
 serve fails the build with `unsupported on thaw-js: ...` listing every refusal; there is no QuickJS
 fallback and no environment opt-out.
-`thaw inspect` reports whether QuickJS or N-API is present, which packages were
+`thaw inspect` reports whether N-API is present, which packages were
 routed to thaw-js, and explains known fallback reasons.
 
 Native strings preserve embedded NULs and UTF-16 lone surrogates. Their C ABI
@@ -202,7 +202,7 @@ Programs whose values remain native keep their unboxed storage. A registry packa
 whose arguments or result cross a dynamic-storage boundary (for example an `any` value passed
 to a `number[]` or `Record<string, number>` parameter, or a `number[]` that the program also
 exposes as `any` while the function mutates it)
-runs through QuickJS instead of the JIT, because the JIT's dense arrays and dictionaries cannot
+runs on thaw-js instead of the JIT, because the JIT's dense arrays and dictionaries cannot
 share storage with dynamic values; its output is unchanged. Public native FFI layouts
 stay fixed; incompatible dynamic arguments throw `TypeError` before native code is invoked.
 Compatible JavaScript-owned `Map` and `Set` arguments are copied into temporary native
@@ -291,13 +291,13 @@ Some routed modules are still refused (the build fails) when the program uses sp
   `process.stdin` without constructing a `Worker`.
 
 The program's own `eval`/`new Function` is served on thaw-js. `THAW_JS_RUNTIME_DEBUG=1` names the
-compiled functions that still call into QuickJS in a refused build. `thaw inspect <executable>` prints
+compiled functions that a refused build could not serve. `thaw inspect <executable>` prints
 a `thaw-js-routed:` list of packages served by thaw-js, `thaw-js-blocker:` lines, and `thaw-js: package=... eligible=true|false blockers=...` lines.
 
 Known thaw-js limitations on current main:
 
-- Packages with a native N-API add-on stay on QuickJS.
-- `node:cluster` is not routed and stays on QuickJS.
+- Packages with a native N-API add-on are refused (the build fails with `unsupported on thaw-js`).
+- `node:cluster` is not routed and is refused (the build fails with `unsupported on thaw-js`).
 - `node:crypto` covers hashing, HMAC, random bytes and AES-CBC/ECB/CTR/GCM ciphers. Other
   ciphers, including those listed by `getCiphers()` (CCM, OCB, ChaCha20), are rejected with
   `ERR_CRYPTO_UNKNOWN_CIPHER`. Cipher streams (the Transform API) are missing, KeyObject

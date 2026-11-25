@@ -1,6 +1,6 @@
 //! `node:zlib` host: `__thaw_zlib_hex` (one-shot), `__thaw_zlib_stream_*` (web CompressionStream) and the
 //! `__thaw_zlib_async_*` job table the registry shim polls. Same wire protocol as the retired-engine host
-//! (crates/thaw-quickjs compression.rs); pure-Rust flate2 (zlib-rs) + brotli.
+//! (the retired engine's compression.rs); pure-Rust flate2 (zlib-rs) + brotli.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};

@@ -1427,9 +1427,9 @@ function main(): void {
 /// encoding. Both fixed generally: `generate_module_init` (thaw-bridge)
 /// now re-emits whichever markers a bundle's *raw* source contains as
 /// plain uncompressed comment text before compressing it, and
-/// `tls_finish` (thaw-quickjs) now treats `UnexpectedEof` as a clean
+/// `tls_finish` now treats `UnexpectedEof` as a clean
 /// close. A third gap -- the fetch polyfill's own `Content-Encoding: br`
-/// support needs thaw-quickjs's optional Brotli decoder, but the
+/// support needs the optional Brotli decoder, but the
 /// literal word "brotli"/"Brotli" never appears anywhere in the shim or
 /// a typical bundle (only the short code `'br'` does), so `source_uses_
 /// brotli` never fired for *any* real Brotli response, including a
@@ -2288,7 +2288,7 @@ function main(): void {
 /// the HS256 test above, added alongside `node:crypto`'s new RSA/ECDSA
 /// `createSign`/`createVerify` support (see
 /// `crypto_rsa_and_ecdsa_sign_and_verify_interoperate_with_real_openssl`
-/// in thaw-quickjs's own tests for the synthetic, network-free
+/// in thaw-js's own tests for the synthetic, network-free
 /// reproduction and full root-cause/interop writeup). `ecdsa-sig-
 /// formatter` (a real jsonwebtoken dependency, converts ES256's raw
 /// JOSE r||s signature format to/from the DER format `crypto.sign`/

@@ -2245,8 +2245,8 @@ pub unsafe extern "C" fn thaw_promise_set_exception_native(
 pub type PromiseUnhandledFn = extern "C" fn(*const u8) -> u8;
 pub type PromiseRejectionHandledFn = extern "C" fn();
 
-/// Same C layout as thaw-quickjs::ThawHandleResult; keep runtime independent
-/// of the retired-engine crate. `error` is an owned C string, null on success.
+/// Same C layout as the engine's `ThawHandleResult`; keep runtime independent
+/// of the engine crates. `error` is an owned C string, null on success.
 #[repr(C)]
 pub struct PromiseReportResult {
     pub value: u64,

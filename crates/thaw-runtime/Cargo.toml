@@ -26,7 +26,7 @@ regex = "1" # Also used by Date/Temporal parsers in this crate.
 regress = { version = "0.11.1", features = ["utf16"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 # Timezone database + civil-time arithmetic for the native Temporal
-# `ZonedDateTime` support (thaw-quickjs uses the same crate for `Intl`).
+# `ZonedDateTime` support (thaw-intl uses the same crate for `Intl`).
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 # Non-ISO calendar systems for Temporal's `PlainDate`-family `calendarId`
 # (`hebrew`, `japanese`, `islamic-*`, ...). jiff is ISO-only.

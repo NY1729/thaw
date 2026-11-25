@@ -1,6 +1,5 @@
 //! Password-based KDFs for `node:crypto`: PBKDF2 (RFC 8018) over the `digest.rs` HMAC, and
-//! scrypt (RFC 7914) through the `scrypt` crate. Copied from thaw-quickjs (lib.rs `pbkdf2_bytes`,
-//! quickjs/context.rs `scrypt_hex`), which stays the oracle until retired-engine is removed.
+//! scrypt (RFC 7914) through the `scrypt` crate. Copied from the retired engine (`pbkdf2_bytes`, `scrypt_hex`); the retired engine is gone.
 
 use super::digest::{digest_bytes, hmac_bytes};
 

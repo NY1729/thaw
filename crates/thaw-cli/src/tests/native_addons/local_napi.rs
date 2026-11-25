@@ -1162,7 +1162,7 @@ fn native_addon_main_default_uv_loop_timer_progresses_through_close() {
 /// A Buffer returned by a native addon (`napi_create_buffer_copy`) must reach JS as a real Buffer,
 /// and a Buffer passed back into the addon must still satisfy `napi_is_buffer`.
 #[test]
-#[ignore = "a native-created Buffer that escapes a native call fails with `invalid JavaScript handle: released or never allocated` on both the QuickJS and thaw-js engines, before decodeValue runs: fixture handle-scope shape or an upstream escaping bug; to be investigated separately"]
+#[ignore = "a native-created Buffer that escapes a native call fails with `invalid JavaScript handle: released or never allocated` on thaw-js, before decodeValue runs: fixture handle-scope shape or an upstream escaping bug; to be investigated separately"]
 fn native_returned_buffer_is_a_real_buffer_end_to_end() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-native-buffer-{}", std::process::id()));
     let registry = dir.join("modules");
