@@ -113,7 +113,7 @@ impl<'a> FnLowerer<'a> {
                 | "toSpliced" | "at" | "with" | "flat" | "flatMap" | "map" | "filter"
                 | "forEach" | "slice" | "subarray" | "substring" | "substr" | "hasOwnProperty"
                 | "propertyIsEnumerable" | "isPrototypeOf" | "deref" | "group" | "groupToMap"
-                | "copyWithin" | "fill" | "reverse" | "join"
+                | "copyWithin" | "fill" | "reverse" | "join" | "swap16" | "swap32" | "swap64"
                 | "push"
                 | "pop" | "shift" | "unshift" | "splice" | "indexOf" | "lastIndexOf"
                 | "next" | "return" | "throw"
@@ -386,7 +386,19 @@ impl<'a> FnLowerer<'a> {
             type_args: None,
         };
         let property = swc_ecma_ast::IdentName::new(name.into(), span);
-        let typed = self.lower_native_instance_builtin(&member, &property, &call)?;
+        let typed = if matches!(name, "swap16" | "swap32" | "swap64") && args.is_empty() {
+            // The snippet lowering wants byte-buffer syntax on the receiver: `(recv as Buffer)`.
+            let module = thaw_parser::parse_typescript(&format!("({bytes_name} as Buffer).{name}();"))?;
+            let Some(swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(statement))) = module.body.first() else {
+                return Err("internal: swap call did not parse".into());
+            };
+            let Expr::Call(swap_call) = statement.expr.as_ref() else {
+                return Err("internal: swap call shape".into());
+            };
+            self.try_lower_snippet_builtin(swap_call)?.ok_or("swap snippet unavailable")?
+        } else {
+            self.lower_native_instance_builtin(&member, &property, &call)?
+        };
         let typed_type = self.infer_expr_type(&typed)?;
         let json = HirExpr::Var(json_name.to_string());
         // A detached copy of the wrapper's `data`, as `Buffer.from(number[])` makes.
@@ -731,6 +743,12 @@ impl<'a> FnLowerer<'a> {
         } else {
             non_array
         };
+        // A Buffer-shaped wrapper is an object, so it lands in the non-array branch: give the
+        // byte mutators (`sort`, `reverse`, `fill`, `copyWithin`) their Buffer lowering there.
+        let non_array = match buffer_method_mutates(name) {
+            Some(mutates) => self.buffer_aware_select(&receiver_name, name, &call.args, member.span, mutates, non_array)?,
+            None => non_array,
+        };
         let (array_branch, dynamic, ty) = (array_branch, non_array, HirType::Json);
         // A host-owned array (a live view of a native array, or a JS array) is mutated in place
         // by the live dynamic call; only a plain JSON array takes the copy-and-write-back path.
@@ -907,6 +925,9 @@ impl<'a> FnLowerer<'a> {
             other if Self::dataview_accessor(other).is_some() => {
                 self.lower_native_dataview_access(member, property, call)
             }
+            // Lowered by `try_lower_snippet_builtin` on a byte-buffer receiver; any other receiver
+            // (an `any` value) takes the Buffer-aware dynamic call.
+            "swap16" | "swap32" | "swap64" => Err(format!("`.{}()` needs a Buffer receiver", property.sym)),
             _ => unreachable!("native instance builtin dispatch was checked before lowering"),
         }
     }
@@ -944,7 +965,7 @@ impl<'a> FnLowerer<'a> {
 /// the mutators, whose bytes are written back); `None` for every other name.
 fn buffer_method_mutates(name: &str) -> Option<bool> {
     match name {
-        "fill" | "set" | "copy" | "reverse" | "copyWithin" | "swap16" | "swap32" | "swap64" => Some(true),
+        "fill" | "set" | "copy" | "reverse" | "sort" | "copyWithin" | "swap16" | "swap32" | "swap64" => Some(true),
         _ if name.starts_with("write") => Some(true),
         _ => None,
     }
