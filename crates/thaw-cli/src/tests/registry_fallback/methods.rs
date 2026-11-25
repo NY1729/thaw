@@ -379,7 +379,7 @@ function main(): void {
 ///
 /// Fixed by wiring `.property` syntax on a `JsValue` receiver to the
 /// existing `getDynamicProperty` intrinsic (`thaw_js_get_property_
-/// result`, thaw-quickjs) -- previously only a manual escape hatch,
+/// result`) -- previously only a manual escape hatch,
 /// unused by ordinary syntax, the same way `callDynamicMethod` was
 /// before *it* got wired up. Reads the property by plain lookup, not by
 /// enumeration, so it finds a non-enumerable property correctly.

@@ -1,6 +1,6 @@
 //! `node:net` host (plain TCP): the `__thaw_net_*` / `__thaw_async_*` functions the registry shim calls, plus
 //! the small hosts the http stack needs (HPACK huffman, hash, timer refs).
-//! Same wire protocol and logic as crates/thaw-quickjs networking.rs; sockets are tables owned by the
+//! Same wire protocol and logic as the retired engine's networking.rs; sockets are tables owned by the
 //! interpreter thread, slow work (connect) runs on a worker thread and is collected by `__thaw_async_poll`.
 
 use std::collections::HashMap;

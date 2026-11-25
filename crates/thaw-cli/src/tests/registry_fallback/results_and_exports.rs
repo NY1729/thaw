@@ -1182,7 +1182,7 @@ function main(): void {
 /// Fixed by asking the engine directly, the same way `typeof` on a
 /// `JsValue` already does (`__thaw_typeof_dynamic_value`): a new
 /// bootstrap-registered `__thaw_is_undefined_dynamic_value = value =>
-/// value === undefined` (`crates/thaw-quickjs/src/thaw-js/
+/// value === undefined` (the retired engine's `thaw-js/
 /// platform_globals/runtime.js`), invoked through the same
 /// `callDynamicValueWithValue` mechanism.
 ///
@@ -1483,7 +1483,7 @@ function main(): void {
 /// function is compiled unconditionally. Fixed by recognizing a
 /// `Promise<T>` member as a supported member whenever `T` itself is a
 /// plain scalar: a dynamic call's real JS `Promise` result is always
-/// already fully resolved by thaw-quickjs's own `resolve_value_impl`/
+/// already fully resolved by the retired engine's own `resolve_value_impl`/
 /// `resolve_promise_value` before it ever reaches this decoder, so the
 /// raw JSON value looks exactly like the plain-scalar member either way
 /// -- decoded the same way, then wrapped into a genuine (already-
@@ -1701,7 +1701,7 @@ function main(): void {
 
 /// A Fallback function whose real JS implementation genuinely returns
 /// `undefined` used to have that result marshaled back indistinguishably
-/// from a real `null` (`resolve_value_impl`, `crates/thaw-quickjs/src/
+/// from a real `null` (`resolve_value_impl`, the retired engine's `src/
 /// thaw-js/api.rs`, substituted the literal text `"null"` whenever
 /// `JSON.stringify` reported the result as unrepresentable -- exactly
 /// what a genuine `undefined` looks like). For an `Optional`-typed

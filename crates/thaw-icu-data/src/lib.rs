@@ -21,7 +21,7 @@
 //! generated once via the separate `icu4x-datagen` CLI and committed as
 //! plain Rust source -- the same "fetch/generate once, commit the result,
 //! no runtime file, no build-time network access" shape already used by
-//! `jiff`'s `tzdb-bundle-always` feature (see `crates/thaw-quickjs/Cargo.
+//! `jiff`'s `tzdb-bundle-always` feature (see `crates/thaw-runtime/Cargo.
 //! toml`) and by `intl_time_zone_names.rs`'s own hand-extracted table.
 //!
 //! # How this was generated (2026-09-12, `icu4x-datagen` 2.3.0)
@@ -30,7 +30,7 @@
 //!    2.3.0 --locked --features unstable` (the `unstable` feature is
 //!    required to export `icu_experimental::relativetime`'s markers for
 //!    `Intl.RelativeTimeFormat`; the *runtime* dependency on
-//!    `icu_experimental` in `crates/thaw-quickjs/Cargo.toml` stays
+//!    `icu_experimental` in `crates/thaw-intl/Cargo.toml` stays
 //!    pinned tightly regardless, since that crate's own API can move in
 //!    a semver-*minor* release).
 //! 2. Built a throwaway probe binary (not part of this workspace) that
@@ -162,7 +162,7 @@
 //!     (same `--use-separate-crates`, `-m`, curated locale list without
 //!     `fa`) for `Intl.NumberFormat`'s `notation: 'compact'`, and
 //!     `icu_decimal` now enables its `unstable` feature in both this
-//!     crate and `thaw-quickjs` (`CompactDecimalFormatter` is unstable).
+//!     crate and `thaw-intl` (`CompactDecimalFormatter` is unstable).
 //!     icu4x rounds compact mantissas half-to-even while ECMA-402's
 //!     default is `halfExpand`, so exact ties differ -- a documented
 //!     divergence in `thaw-intl/src/intl_number.rs`.
@@ -173,7 +173,7 @@
 //!     `availableFormats` + `dateFormats`/`timeFormats` tables, mirroring
 //!     ICU's `DateTimePatternGenerator` `PatternMap` construction
 //!     (canonical items, `override=false` base-skeleton de-dup, available
-//!     formats) for `thaw-quickjs`'s runtime UTS-35 skeleton matching
+//!     formats) for the runtime UTS-35 skeleton matching
 //!     (which icu4x only implements behind its `datagen` feature). Re-run
 //!     it against the same `cldr-48.2.1-json-full.zip` cached under
 //!     `/tmp/icu4x-source-cache/...` (or the release zip) when the

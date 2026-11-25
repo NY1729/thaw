@@ -12,7 +12,5 @@ benchmarks/jsengine/run.sh [-n RUNS] [-o OUT.tsv]
 
 - Builds `thaw-js-node` in release unless `THAW_JS_RUN` points at a prebuilt runner. It runs plain
   scripts like `node` does; `thaw-js-run` only loads registry bundles.
-- `QJS=/path/to/qjs` adds the QuickJS reference column. Unset, the column is `-`.
 - Times are best-of-`RUNS` (default 3) wall-clock milliseconds per script.
-- Output is TSV `benchmark  thaw_js_ms  quickjs_ms  ratio`, then a `geomean` row (thaw-js / QuickJS).
-- A checksum mismatch between the two engines is reported on stderr.
+- Output is TSV `benchmark  thaw_js_ms`.

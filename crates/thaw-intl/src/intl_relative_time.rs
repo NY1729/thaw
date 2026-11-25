@@ -4,7 +4,7 @@
 // deliberately-unstable dependency in this whole effort (icu4x's own
 // docs warn it "may change at any time, in breaking or non-breaking
 // ways, including in SemVer minor releases") -- pinned tightly
-// (`=0.6.0` in `crates/thaw-quickjs/Cargo.toml`) for exactly that
+// (`=0.6.0` in `crates/thaw-intl/Cargo.toml`) for exactly that
 // reason. Every other milestone in this effort sits on stable icu4x
 // components.
 //

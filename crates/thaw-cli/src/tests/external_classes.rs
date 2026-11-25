@@ -1831,7 +1831,7 @@ fn static_rewrite_still_rejects_literal_that_omits_a_required_object_field() {
 }
 
 #[test]
-fn thaw_js_routed_static_factory_with_optional_object_fields_builds_without_quickjs() {
+fn thaw_js_routed_static_factory_with_optional_object_fields_builds_without_legacy_engine() {
     // luxon shape: a class with a private constructor whose static `fromObject` takes an all-optional object.
     // Under `THAW_JS_FALLBACK=error` the build must route to thaw-js (no thaw-js) and print what Node prints.
     let dir = std::env::temp_dir().join(format!("thaw-cli-static-optional-{}", std::process::id()));

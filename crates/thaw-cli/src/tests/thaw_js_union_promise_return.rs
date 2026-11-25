@@ -48,17 +48,17 @@ fn thaw_js_union_promise_method_key_carries_the_await_suffix_only_on_thaw_js() {
         thaw_js.contains(&("plain".into(), "$method$Hono$plain$overload0$arity0".into())),
         "{thaw_js:?}"
     );
-    let quickjs = keys(false);
+    let legacy = keys(false);
     assert!(
-        quickjs.contains(&(
+        legacy.contains(&(
             "request".into(),
             "$method$Hono$request$overload0$arity1".into()
         )),
-        "{quickjs:?}"
+        "{legacy:?}"
     );
     assert!(
-        quickjs.iter().all(|(_, key)| !key.ends_with("$await")),
-        "{quickjs:?}"
+        legacy.iter().all(|(_, key)| !key.ends_with("$await")),
+        "{legacy:?}"
     );
 }
 

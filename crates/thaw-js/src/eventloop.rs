@@ -2329,7 +2329,7 @@ impl Interp {
             Value::str("https://nodejs.org/download/release/v22.23.1/node-v22.23.1-headers.tar.gz"),
         );
         put(&p, "release", Value::Object(release));
-        // Mirrors thaw-quickjs context.rs: argv[0] is the host binary, then the forwarded arguments.
+        // Mirrors the retired engine context.rs: argv[0] is the host binary, then the forwarded arguments.
         let (node_argv, node_exec_argv) = node_argv_split(&arguments);
         let argv = self.array(node_argv.iter().map(|a| Value::str(a)).collect());
         put(&p, "argv", argv);
@@ -2838,7 +2838,7 @@ const PROMISE_PRELUDE: &str = r#"
 })();
 "#;
 
-/// Index of the `-e` flag among leading flags, the same rule as thaw-quickjs `cli_eval`.
+/// Index of the `-e` flag among leading flags, the same rule as the retired engine `cli_eval`.
 pub(crate) fn cli_eval_index(arguments: &[String]) -> Option<usize> {
     arguments
         .iter()
@@ -2849,7 +2849,7 @@ pub(crate) fn cli_eval_index(arguments: &[String]) -> Option<usize> {
 }
 
 /// The script a `node [flags] file.js [args]` start runs: the first non-flag argument, when it is a
-/// `.js`/`.cjs` file that exists (the same rule as thaw-quickjs `cli_script`).
+/// `.js`/`.cjs` file that exists (the same rule as the retired engine `cli_script`).
 pub(crate) fn cli_script_index(arguments: &[String]) -> Option<usize> {
     let index = arguments
         .iter()
@@ -2866,7 +2866,7 @@ pub(crate) fn cli_script_index(arguments: &[String]) -> Option<usize> {
     .filter(|_| path.is_file())
 }
 
-/// `(process.argv, process.execArgv)` for the process arguments, matching thaw-quickjs context.rs:
+/// `(process.argv, process.execArgv)` for the process arguments, matching the retired engine context.rs:
 /// `-e SRC` keeps `-e SRC` in execArgv and drops it from argv; a script keeps its path first in argv
 /// and the flags before it in execArgv; otherwise argv is every argument.
 pub(crate) fn node_argv_split(arguments: &[String]) -> (Vec<String>, Vec<String>) {

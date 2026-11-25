@@ -1,5 +1,5 @@
 #[test]
-fn nested_object_destructuring_uses_jit_without_quickjs() {
+fn nested_object_destructuring_uses_jit_without_legacy_engine() {
     let dts = concat!(
         "export declare function unpack(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }): string;\n",
         "export declare function reassign(value: { count: number; meta: { label: string; enabled: boolean }; pair: [number, string]; values: number[] }): string;\n",
@@ -255,7 +255,7 @@ fn nested_object_destructuring_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn aggregate_catch_uses_collection_throw_values_without_quickjs() {
+fn aggregate_catch_uses_collection_throw_values_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-aggregate-collection-catch-{}",
         std::process::id()
@@ -311,7 +311,7 @@ fn aggregate_catch_uses_collection_throw_values_without_quickjs() {
 }
 
 #[test]
-fn optional_fixed_object_unions_use_jit_without_quickjs() {
+fn optional_fixed_object_unions_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-object-union-{}",
         std::process::id()
@@ -352,7 +352,7 @@ fn optional_fixed_object_unions_use_jit_without_quickjs() {
 }
 
 #[test]
-fn finite_computed_object_keys_use_jit_without_quickjs() {
+fn finite_computed_object_keys_use_jit_without_legacy_engine() {
     let declarations = thaw_bridge::parse_dts(
         "export interface Pair { left: number; right: number; }\nexport declare function pick(value: Pair | string, right: boolean): number;\nexport declare function pickRuntime(value: Pair | string, key: string): number;\nexport declare function set(value: Pair | string, right: boolean, next: number): number;\nexport declare function add(value: Pair | string, right: boolean, amount: number): number;\nexport declare function postIncrement(value: Pair | string, right: boolean): number;\nexport declare function preDecrement(value: Pair | string, right: boolean): number;\nexport declare function orAssign(value: Pair | string, right: boolean, next: number): number;\nexport declare function andAssign(value: Pair | string, right: boolean, next: number): number;\n",
     )
@@ -409,7 +409,7 @@ fn finite_computed_object_keys_use_jit_without_quickjs() {
 }
 
 #[test]
-fn object_dictionary_unions_use_jit_without_quickjs() {
+fn object_dictionary_unions_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-object-dictionary-union-{}",
         std::process::id()
@@ -450,7 +450,7 @@ fn object_dictionary_unions_use_jit_without_quickjs() {
 }
 
 #[test]
-fn nested_tuple_fields_use_jit_without_quickjs() {
+fn nested_tuple_fields_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-nested-tuple-field-{}",
         std::process::id()
@@ -513,7 +513,7 @@ fn nested_tuple_fields_use_jit_without_quickjs() {
 }
 
 #[test]
-fn optional_object_fields_use_jit_without_quickjs() {
+fn optional_object_fields_use_jit_without_legacy_engine() {
     let functions = thaw_bridge::parse_dts(
         "export interface Item { name?: string; score?: number; enabled?: boolean; }\nexport declare function make(full: boolean): Item | string;\n",
     )
@@ -565,7 +565,7 @@ fn optional_object_fields_use_jit_without_quickjs() {
 }
 
 #[test]
-fn tagged_object_field_assignments_use_jit_without_quickjs() {
+fn tagged_object_field_assignments_use_jit_without_legacy_engine() {
     let declarations = thaw_bridge::parse_dts(
         "export interface Item { optional?: number; nullable: number | null; nullish: number | null | undefined; }\nexport declare function setOptional(value: Item | string, next: number): number;\nexport declare function setNullable(value: Item | string, next: number): number;\nexport declare function setNullish(value: Item | string, next: number): number;\nexport declare function postOptional(value: Item | string): number;\nexport declare function preNullable(value: Item | string): number;\nexport declare function postNullish(value: Item | string): number;\nexport declare function preNullish(value: Item | string): number;\nexport declare function addOptional(value: Item | string, next: number): number;\nexport declare function addNullable(value: Item | string, next: number): number;\nexport declare function addNullish(value: Item | string, next: number): number;\nexport declare function defaultOptional(value: Item | string, next: number): number;\nexport declare function defaultNullable(value: Item | string, next: number): number;\nexport declare function defaultNullish(value: Item | string, next: number): number;\nexport declare function defaultFrom(value: Item | string, source: Item | string): number;\nexport declare function orOptional(value: Item | string, next: number): number;\nexport declare function orNullish(value: Item | string, next: number): number;\nexport declare function andNullable(value: Item | string, next: number): number | null;\nexport declare function andNullish(value: Item | string, next: number): number | null | undefined;\n",
     )

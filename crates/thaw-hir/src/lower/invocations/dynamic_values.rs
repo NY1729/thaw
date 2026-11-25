@@ -728,8 +728,8 @@ impl<'a> FnLowerer<'a> {
     /// own doc comment for why re-lowering it here would risk double-
     /// evaluating a side-effecting receiver expression) is already known
     /// to be `HirType::JsValue`-typed. Reuses the existing
-    /// `getDynamicProperty` intrinsic (`thaw_js_get_property_result`,
-    /// thaw-quickjs), previously only a manual escape hatch nobody
+    /// `getDynamicProperty` intrinsic (`thaw_js_get_property_result`),
+    /// previously only a manual escape hatch nobody
     /// actually wired up to ordinary `.property` syntax, the same way
     /// `callDynamicMethod` was before it got wired up to `.method()`.
     /// Reads the property by plain lookup, not by enumeration --

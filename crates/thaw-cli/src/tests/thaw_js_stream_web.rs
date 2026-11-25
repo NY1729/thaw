@@ -8,7 +8,7 @@ fn thaw_js_stream_web_is_allowlisted() {
 }
 
 #[test]
-fn thaw_js_routing_serves_a_writable_with_a_write_callback_without_linking_quickjs() {
+fn thaw_js_routing_serves_a_writable_with_a_write_callback_without_linking_legacy_engine() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-thaw-js-writable-{}", std::process::id()));
     let registry = dir.join("modules");
     std::fs::create_dir_all(&registry).unwrap();
@@ -30,7 +30,7 @@ fn thaw_js_routing_serves_a_writable_with_a_write_callback_without_linking_quick
     // Same text real Node prints for the equivalent JavaScript.
     assert_eq!(thaw_js_run_guarded(&output), "a\n");
     let bytes = std::fs::read(&output).unwrap();
-    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "QuickJS was linked");
+    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "the binary links the retired QuickJS engine (rquickjs symbols present)");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -57,7 +57,7 @@ fn thaw_js_writable_method_output(tag: &str, write_method: &str) -> String {
     thaw_js_build(&entry, &output, &registry);
     let stdout = thaw_js_run_guarded(&output);
     let bytes = std::fs::read(&output).unwrap();
-    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "QuickJS was linked");
+    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "the binary links the retired QuickJS engine (rquickjs symbols present)");
     let _ = std::fs::remove_dir_all(dir);
     stdout
 }
@@ -105,7 +105,7 @@ fn thaw_js_stream_program_output(tag: &str, imports: &str, body: &str) -> String
     thaw_js_build(&entry, &output, &registry);
     let stdout = thaw_js_run_guarded(&output);
     let bytes = std::fs::read(&output).unwrap();
-    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "QuickJS was linked");
+    assert!(!bytes.windows(8).any(|window| window == b"rquickjs"), "the binary links the retired QuickJS engine (rquickjs symbols present)");
     let _ = std::fs::remove_dir_all(dir);
     stdout
 }

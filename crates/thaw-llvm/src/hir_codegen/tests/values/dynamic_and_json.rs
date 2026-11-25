@@ -674,7 +674,7 @@ fn json_stringify_of_the_literal_undefined_keyword_prints_the_word_undefined() {
 /// Fixed by reusing the exact same `getDynamicValue`/
 /// `constructDynamicValue` mechanism those already use, just with a
 /// dotted name (`"Intl.DateTimeFormat"`); `thaw_js_get_global`
-/// (`crates/thaw-quickjs/src/quickjs/api.rs`) now walks nested object
+/// now walks nested object
 /// properties for a dotted path instead of only a single flat global
 /// lookup.
 #[test]

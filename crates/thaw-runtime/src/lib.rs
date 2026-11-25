@@ -709,7 +709,7 @@ pub extern "C" fn thaw_runtime_adopt_ready() {
 }
 
 thread_local! {
-    /// retired-engine job barrier hooks, registered by `thaw-quickjs` on context
+    /// retired-engine job barrier hooks, registered by the retired engine on context
     /// creation (see `thaw_runtime_set_js_job_hooks`).
     static JS_JOB_HOOKS: Cell<Option<(extern "C" fn() -> u64, extern "C" fn(u64))>> =
         const { Cell::new(None) };
@@ -717,7 +717,7 @@ thread_local! {
 
 /// Registers the retired-engine job barrier hooks for this thread: `queue` returns a
 /// barrier id for the jobs pending now (0 if none), `drain` runs jobs until
-/// that barrier ran. Called once by `thaw-quickjs` when its context is created.
+/// that barrier ran. Called once by the retired engine when its context is created.
 /// # Safety
 /// `hooks` must be null or point to writable `RuntimeHooks` storage.
 #[no_mangle]

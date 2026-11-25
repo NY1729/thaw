@@ -5288,8 +5288,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// Asks the live JS engine engine a yes/no question about a `JsValue`
-    /// by calling one of the small bootstrap-registered globals in
-    /// `crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js`
+    /// by calling one of the small bootstrap-registered globals
     /// (`__thaw_typeof_dynamic_value`'s siblings), the same way `typeof`
     /// on a `JsValue` already does. Shared by `dynamic_value_is_undefined`/
     /// `dynamic_value_is_null`/`dynamic_value_is_nullish` below -- see
@@ -5323,7 +5322,7 @@ impl<'a> FnLowerer<'a> {
     /// instanceof` above) rather than `dynamic_value_check`'s simpler
     /// one-handle call, since this needs *two* arguments of different
     /// kinds: `class_name` (positional JSON) and `value` (a live
-    /// handle) -- `invoke_mixed` (thaw-quickjs's `api.rs`) appends
+    /// handle) -- `invoke_mixed` appends
     /// JSON-parsed positional arguments before handle arguments, so the
     /// JS side's own parameter order is `(name, value)`.
     fn dynamic_value_check_by_name(

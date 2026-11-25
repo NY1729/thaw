@@ -395,7 +395,7 @@ fn a_zlib_streams_subclass_overriding_transform_is_actually_called() {
 /// runtime.rs`: `ZlibTransform` now allocates a real incremental
 /// compression stream via the same native `__thaw_zlib_stream_create`/
 /// `_write`/`_drop` bridge the Web `CompressionStream` API already uses
-/// (`WebZlibStream`, thaw-quickjs), and exposes it through `._handle`
+/// (`WebZlibStream`), and exposes it through `._handle`
 /// (a harmless `{ close: fn() {} }` stub -- there's no real native
 /// handle to actually own) and `._processChunk`. Also added `zlib.Unzip`/
 /// `createUnzip` (real Node's auto-detecting gzip-or-deflate decompressor,

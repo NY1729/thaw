@@ -1,5 +1,5 @@
 //! `node:dns` host: the `__thaw_dns_*` functions the registry shim calls. The resolver client (`dns_client` below, UDP with
-//! TCP retry, Node's record shapes) is a verbatim copy of crates/thaw-quickjs/src/quickjs/dns_client.rs; queries run on
+//! TCP retry, Node's record shapes) is a port of the retired engine's DNS client; queries run on
 //! worker threads through `async_op_start` and are collected by `__thaw_async_poll`.
 
 use std::io::{self, Read, Write};

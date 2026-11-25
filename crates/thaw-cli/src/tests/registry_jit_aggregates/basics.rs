@@ -208,7 +208,7 @@ fn bare_imports_automatically_resolve_registry_packages() {
 }
 
 #[test]
-fn nested_primitive_objects_use_jit_without_quickjs() {
+fn nested_primitive_objects_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-object-fields-{}",
         std::process::id()
@@ -249,7 +249,7 @@ fn nested_primitive_objects_use_jit_without_quickjs() {
 }
 
 #[test]
-fn fixed_aggregate_results_use_jit_without_quickjs() {
+fn fixed_aggregate_results_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-object-results-{}",
         std::process::id()
@@ -290,7 +290,7 @@ fn fixed_aggregate_results_use_jit_without_quickjs() {
 }
 
 #[test]
-fn logical_expressions_short_circuit_in_jit_without_quickjs() {
+fn logical_expressions_short_circuit_in_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-logical-{}",
         std::process::id()
@@ -331,7 +331,7 @@ fn logical_expressions_short_circuit_in_jit_without_quickjs() {
 }
 
 #[test]
-fn optional_operation_receivers_use_jit_without_quickjs() {
+fn optional_operation_receivers_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-result-{}",
         std::process::id()
@@ -372,7 +372,7 @@ fn optional_operation_receivers_use_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_recursion_uses_jit_without_quickjs() {
+fn primitive_recursion_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-recursion-{}",
         std::process::id()
@@ -413,7 +413,7 @@ fn primitive_recursion_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn primitive_dictionaries_use_jit_without_quickjs() {
+fn primitive_dictionaries_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-dictionary-{}",
         std::process::id()
@@ -479,7 +479,7 @@ fn primitive_dictionaries_use_jit_without_quickjs() {
 }
 
 #[test]
-fn object_from_entries_uses_jit_without_quickjs() {
+fn object_from_entries_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-from-entries-{}",
         std::process::id()
@@ -597,7 +597,7 @@ fn dictionary_nullish_operations_fall_back_for_dynamic_record_values() {
 }
 
 #[test]
-fn object_assign_uses_jit_without_quickjs() {
+fn object_assign_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-object-assign-{}",
         std::process::id()
@@ -647,7 +647,7 @@ fn object_assign_uses_jit_without_quickjs() {
 }
 
 #[test]
-fn dictionary_key_queries_use_jit_without_quickjs() {
+fn dictionary_key_queries_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-key-queries-{}",
         std::process::id()
@@ -697,7 +697,7 @@ fn dictionary_key_queries_use_jit_without_quickjs() {
 }
 
 #[test]
-fn returning_switch_uses_jit_without_quickjs() {
+fn returning_switch_uses_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-switch-{}",
         std::process::id()

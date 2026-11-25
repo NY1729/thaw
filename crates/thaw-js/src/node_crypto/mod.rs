@@ -1,5 +1,5 @@
 //! `node:crypto` natives for thaw-js: digests, HMAC and OS randomness. The JS half is
-//! `web/node_crypto.js`; the digest code is copied from thaw-quickjs (see `digest.rs`).
+//! `web/node_crypto.js`; the digest code is copied from the retired engine (see `digest.rs`).
 
 mod asym;
 pub(crate) mod cipher;

@@ -1,5 +1,5 @@
 #[test]
-fn nullable_and_nullish_parameters_round_trip_without_quickjs() {
+fn nullable_and_nullish_parameters_round_trip_without_legacy_engine() {
     let declarations = thaw_bridge::parse_dts(
         "export declare function nullable(value: number | null): number | null;\nexport declare function nullish(value: number | null | undefined): number | null | undefined;\n",
     )
@@ -44,7 +44,7 @@ fn nullable_and_nullish_parameters_round_trip_without_quickjs() {
 }
 
 #[test]
-fn nullable_and_nullish_collections_round_trip_without_quickjs() {
+fn nullable_and_nullish_collections_round_trip_without_legacy_engine() {
     let declarations = thaw_bridge::parse_dts(
         "export declare function nullable(value: number[] | null): number[] | null;\nexport declare function nullish(value: Record<string, number> | null | undefined): Record<string, number> | null | undefined;\n",
     )
@@ -92,7 +92,7 @@ fn nullable_and_nullish_collections_round_trip_without_quickjs() {
 }
 
 #[test]
-fn nullable_and_nullish_aggregates_use_jit_without_quickjs() {
+fn nullable_and_nullish_aggregates_use_jit_without_legacy_engine() {
     let declarations = thaw_bridge::parse_dts(
         "export interface Item { label: string; score: number; }\nexport declare function object(value: Item | null): string;\nexport declare function tuple(value: [number, string] | null | undefined): string;\n",
     )
@@ -136,7 +136,7 @@ fn nullable_and_nullish_aggregates_use_jit_without_quickjs() {
 }
 
 #[test]
-fn nullable_and_nullish_aggregate_results_use_jit_without_quickjs() {
+fn nullable_and_nullish_aggregate_results_use_jit_without_legacy_engine() {
     let declarations = thaw_bridge::parse_dts(
         "export interface Item { label: string; score: number; }\nexport declare function object(value: boolean): Item | null;\nexport declare function tuple(value: number): [number, string] | null | undefined;\n",
     )
@@ -179,7 +179,7 @@ fn nullable_and_nullish_aggregate_results_use_jit_without_quickjs() {
 }
 
 #[test]
-fn optional_tuple_elements_use_jit_without_quickjs() {
+fn optional_tuple_elements_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-tuple-element-{}",
         std::process::id()
@@ -220,7 +220,7 @@ fn optional_tuple_elements_use_jit_without_quickjs() {
 }
 
 #[test]
-fn nullable_aggregate_fields_use_jit_without_quickjs() {
+fn nullable_aggregate_fields_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-nullable-aggregate-field-{}",
         std::process::id()
@@ -261,7 +261,7 @@ fn nullable_aggregate_fields_use_jit_without_quickjs() {
 }
 
 #[test]
-fn nullish_aggregate_fields_use_jit_without_quickjs() {
+fn nullish_aggregate_fields_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-nullish-aggregate-field-{}",
         std::process::id()
@@ -302,7 +302,7 @@ fn nullish_aggregate_fields_use_jit_without_quickjs() {
 }
 
 #[test]
-fn nested_tagged_aggregate_fields_use_jit_without_quickjs() {
+fn nested_tagged_aggregate_fields_use_jit_without_legacy_engine() {
     let declarations = thaw_bridge::parse_dts(
         "export interface Item { child?: { label: string }; nullable: { score: number } | null; pair: [number, string] | null | undefined; }\nexport declare function label(value: Item | string): string;\nexport declare function score(value: Item | string): number;\nexport declare function numberValue(value: Item | string): number;\nexport declare function stringValue(value: Item | string): string;\nexport declare function make(full: boolean): Item | string;\n",
     )
@@ -357,7 +357,7 @@ fn nested_tagged_aggregate_fields_use_jit_without_quickjs() {
 }
 
 #[test]
-fn tagged_array_and_dictionary_fields_use_jit_without_quickjs() {
+fn tagged_array_and_dictionary_fields_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-tagged-collections-{}",
         std::process::id()
@@ -398,7 +398,7 @@ fn tagged_array_and_dictionary_fields_use_jit_without_quickjs() {
 }
 
 #[test]
-fn optional_dictionary_unions_use_jit_without_quickjs() {
+fn optional_dictionary_unions_use_jit_without_legacy_engine() {
     let dir = std::env::temp_dir().join(format!(
         "thaw-cli-registry-jit-optional-dictionary-union-{}",
         std::process::id()

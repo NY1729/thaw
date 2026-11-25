@@ -3,8 +3,8 @@
 // capability. `String.prototype.localeCompare` (`thaw-runtime`'s
 // `thaw_string_compare`, plain UTF-16 codepoint ordering) is
 // deliberately left untouched: `thaw-runtime` is linked into *every*
-// compiled program unconditionally (unlike `thaw-quickjs`, only linked
-// when a program actually uses the QuickJS fallback path), and
+// compiled program unconditionally (unlike the engine crates, only linked
+// when a program actually needs them), and
 // `thaw-icu-data` bundles every vendored marker as one crate --
 // pulling collation data into `thaw-runtime` would drag in the whole
 // dataset (including the multi-megabyte segmenter dictionaries) into

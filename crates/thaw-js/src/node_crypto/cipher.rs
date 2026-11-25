@@ -1,5 +1,5 @@
 //! AES-{128,192,256} for `node:crypto` ciphers: CBC/ECB block modes, a stateless CTR keystream
-//! (CTR, and the GCM payload) and the GCM tag. Copied from thaw-quickjs (quickjs/symmetric_cipher.rs,
+//! (CTR, and the GCM payload) and the GCM tag. Copied from the retired engine (its symmetric_cipher.rs,
 //! the oracle until retired-engine is removed); only the RIPEMD-160 part stays in `digest.rs`.
 
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};

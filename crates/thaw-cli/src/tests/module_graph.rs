@@ -1445,7 +1445,7 @@ fn registry_transform_receives_each_module_path_for_source_maps() {
 }
 
 #[test]
-fn lambda_trace_header_reaches_warm_quickjs_string_and_json_handlers() {
+fn lambda_trace_header_reaches_warm_legacy_engine_string_and_json_handlers() {
     for (name, source, expected_bodies) in [
         (
             "trace-string",

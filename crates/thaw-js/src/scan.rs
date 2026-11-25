@@ -170,7 +170,7 @@ pub fn worker_urls_to_keys<'a>(
 
 /// The thaw-js form of `node:worker_threads`: the main-thread module the thaw-js prelude exports
 /// (`web/worker_threads.js`). Package bundles embed the retired-engine form of that builtin (natives that exist
-/// only in thaw-quickjs), so [`parse_bundle`] substitutes this one for every such embedded factory.
+/// only in the retired engine), so [`parse_bundle`] substitutes this one for every such embedded factory.
 /// A worker realm defines `__thaw_worker_side_exports` (`web/worker_bootstrap.js`) and gets that; the main
 /// realm has it undefined and gets the main-thread module.
 pub const WORKER_THREADS_THAW_JS_FORM: &str =

@@ -2,8 +2,8 @@ name: route-all
 
 # Non-gating measurement of the QuickJS-free routing (THAW_JS_ROUTE_ALL=1 is the default now; this workflow keeps the
 # per-case measurement). The engine-tests and npm-integration legs were removed: the default CI runs them routed
-# (with THAW_JS_FALLBACK warn/error), so they only duplicated it. Reports, per case, whether the built binary still links QuickJS, the recorded
-# quickjsReasons, and the cases whose output or classification differs from Node. Nothing here fails
+# (with THAW_JS_FALLBACK warn/error), so they only duplicated it. Reports, per case, the recorded
+# blockers, and the cases whose output or classification differs from Node. Nothing here fails
 # a build or belongs in a required-checks list. Runs on demand (workflow_dispatch), or on a pull request
 # that carries the `route-all-measure` label.
 
@@ -84,7 +84,7 @@ jobs:
             ~/.cargo/git
             target/release
             target/thaw-*
-          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
       - name: Restore LLVM 22 cache
@@ -214,8 +214,8 @@ jobs:
           if-no-files-found: ignore
 
   corpus:
-    # Same corpus and measure.sh as jsengine-bench's corpus-ratio job, with THAW_JS_ROUTE_ALL=1.
-    # Reports pass/fail counts and the links-QuickjS count only (no ratios).
+    # Same corpus and measure.sh as jit-coverage, with THAW_JS_ROUTE_ALL=1.
+    # Reports pass/fail counts only (no ratios).
     if: (github.event_name == 'workflow_dispatch' && inputs.corpus) || (github.event_name == 'pull_request' && false)
     continue-on-error: true
     runs-on: ubuntu-latest
@@ -278,7 +278,7 @@ jobs:
             ~/.cargo/git
             target/release
             target/thaw-*
-          key: route-all-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          key: route-all-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             route-all-corpus-${{ runner.os }}-
       - name: Build thaw CLI and thaw-js-scan (release)
@@ -315,7 +315,7 @@ jobs:
           {
             echo "### route-all corpus (thaw-js, THAW_JS_ROUTE_ALL=1)"
             if [ ! -s "$tsv" ]; then
-              echo "No corpus.tsv was produced; see the jsengine-corpus-logs artifact."
+              echo "No corpus.tsv was produced; see the route-all-corpus-logs artifact."
             else
               awk -F'\t' '
                 $1 == "program" && $3 == "thaw-js" { v[$2 SUBSEP $4] = $5; if (!($2 in seen)) { seen[$2] = 1; n++ } }

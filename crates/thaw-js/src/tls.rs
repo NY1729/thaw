@@ -1,6 +1,6 @@
 //! `node:tls` host (client and server) over rustls: the `__thaw_tls_*` functions the registry shim calls.
-//! Ported from thaw-quickjs networking.rs (same wire protocol); rustls/ring is linked exactly as
-//! thaw-quickjs links it next to thaw-runtime's own copy. Tables are process-wide (see net.rs).
+//! Ported from the retired engine networking.rs (same wire protocol); rustls/ring is linked exactly as
+//! the retired engine linked it next to thaw-runtime's own copy. Tables are process-wide (see net.rs).
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
