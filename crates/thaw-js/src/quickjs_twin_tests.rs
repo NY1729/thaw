@@ -115,13 +115,16 @@ fn twin_exposes_the_node_global_alias() {
 
 #[test]
 fn twin_process_env_reads_the_host_environment() {
+    // the expectation is the host's own PATH (the CI runner's differs from a developer machine's)
+    let path = std::env::var("PATH").expect("PATH is set");
+    assert!(
+        path.is_ascii(),
+        "the JSON quoting below assumes an ASCII PATH"
+    );
+    let expected: &'static str = Box::leak(json_str(&path).into_boxed_str());
     twin(&[
         Step::Load(r#"function hostPath() { return process.env.PATH; }"#),
-        Step::Call(
-            "hostPath",
-            r#"[]"#,
-            r#""/home/fedora/.npm-global/bin:/home/fedora/.sdkman/candidates/java/current/bin:/usr/local/cuda/bin:/home/fedora/.opencode/bin:/home/fedora/.local/bin:/home/fedora/.bun/bin:/home/fedora/.mozbuild/bin:/home/fedora/.local/bin:/home/fedora/.opencode/bin:/home/fedora/.bun/bin:/home/fedora/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/home/fedora/Android/Sdk/emulator:/home/fedora/Android/Sdk/platform-tools:/home/fedora/Android/Sdk/cmdline-tools/latest/bin:/home/fedora/work/iOS""#,
-        ),
+        Step::Call("hostPath", r#"[]"#, expected),
     ]);
 }
 
