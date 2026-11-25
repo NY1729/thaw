@@ -394,6 +394,10 @@ fn is_plain_value_expr(expr: &HirExpr) -> bool {
         HirExpr::IndexAssign(array, index, value) => {
             is_plain_value_expr(array) && is_plain_value_expr(index) && is_plain_value_expr(value)
         }
+        // The per-field evaluation-order bindings of an object literal (`{ x: f(), y: g() }`)
+        // end in the literal itself; with plain fields it is a value like any other, so the
+        // binding chain inlines instead of allocating one closure per field.
+        HirExpr::ObjectLit(fields) => fields.iter().all(|(_, value)| is_plain_value_expr(value)),
         HirExpr::Call(callee, args) => {
             let callee_ok = match callee.as_ref() {
                 HirExpr::Var(_) => true,
