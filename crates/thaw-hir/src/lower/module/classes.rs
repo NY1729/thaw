@@ -283,6 +283,8 @@ fn collect_native_classes<'a>(
                             }),
                         })
                     })
+                    // An untyped field with no inferable initializer is `any`.
+                    .or_else(|| crate::lower::implicit_any().then_some(HirType::Json))
                     .ok_or_else(|| {
                         format!("class `{name}` field `{field_name}` needs a type annotation")
                     })?,

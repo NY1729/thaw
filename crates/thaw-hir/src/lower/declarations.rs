@@ -1800,6 +1800,8 @@ fn lower_param(
             &mut Vec::new(),
         )?,
         None if allow_inference => HirType::Dynamic,
+        // No annotation and no call-site inference: the parameter is `any`.
+        None if crate::lower::implicit_any() => HirType::Json,
         None => {
             return Err(format!(
             "parameter `{name}` needs an explicit type annotation (no type inference for params)"
