@@ -70,7 +70,7 @@
 
   function casing(self, name, locales, lower) {
     if (self === null || self === undefined) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
-    const s = String(self);
+    const s = `${self}`;
     const lang = casingLanguage(locales);
     if (lang === 'tr' || lang === 'az') return lower ? lowerTr(s) : upperTr(s);
     if (lang === 'lt') return lower ? lowerLt(s) : upperLt(s);
@@ -100,8 +100,9 @@
   const stringMethods = {
     localeCompare(that, ...args) {
       if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
-      const s = String(this);
-      const t = String(that);
+      // ToString (a template literal), not String(): a Symbol must throw TypeError like Node
+      const s = `${this}`;
+      const t = `${that}`;
       if (args[0] === undefined && args[1] === undefined) {
         if (defaultCollator === undefined) defaultCollator = new Collator();
         return defaultCollator.compare(s, t);
