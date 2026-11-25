@@ -1,0 +1,124 @@
+name: failure-conformance
+
+# Non-gating Node-vs-thaw differential of process-level failure behaviour (tools/failure-conformance): uncaught
+# errors, exit codes, signals, stdio flushing/EPIPE, error formatting and V8 message texts. Node 22 is the oracle.
+# Nothing here fails a build or belongs in a required-checks list: read the step summary. Runs on demand, or on a
+# pull request that carries the `thaw-js-measure` label. The job skeleton follows pkg-size.yml.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      only:
+        description: run only case ids containing this text (empty = all)
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: failure-conformance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  failure-conformance:
+    name: Failure behaviour, thaw vs Node (non-gating)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # `thaw add` runs npm.
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          df -h /
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update reported an error (a broken mirror?), trying the install with the cached package lists" >&2;
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Restore LLVM 22 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-22
+          key: llvm-22.1.8-${{ runner.arch }}-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+      - name: Install LLVM 22
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          prefix="$HOME/llvm-22"
+          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
+            # Extract into a scratch directory and move it into place, so an
+            # interrupted download or extraction never leaves a partial tree
+            # that the cache would then save.
+            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
+            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
+            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
+            mkdir "$work/extract"
+            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
+            rm -f "$work/llvm.tar.xz"
+            rm -rf "$prefix"
+            mv "$work/extract" "$prefix"
+            rm -rf "$work"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+      - name: Cache cargo registry and release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          key: jsengine-corpus-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            jsengine-corpus-${{ runner.os }}-
+      - name: Build thaw CLI (release)
+        run: |
+          cargo build --release -p thaw-cli
+      - name: Harness self-test
+        continue-on-error: true
+        run: bash tools/failure-conformance/selftest.sh
+      - name: Run the failure-conformance matrix
+        # run.sh exits 2 only on a harness error; gaps are findings in the summary.
+        env:
+          THAW: ${{ github.workspace }}/target/release/thaw
+          FC_OUT: ${{ runner.temp }}/failure-conformance-out
+          FC_JOBS: "4"
+        run: |
+          bash tools/failure-conformance/run.sh ${{ inputs.only && format('--only {0}', inputs.only) || '' }} > "$RUNNER_TEMP/fc.log" 2>&1 || true
+          tail -n 20 "$RUNNER_TEMP/fc.log"
+          test -s "$FC_OUT/summary.md"
+      - name: Job summary
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/failure-conformance-out"
+          if [ -s "$out/summary.md" ]; then head -c 60000 "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"; else echo "no summary.md produced" >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: failure-conformance
+          path: |
+            ${{ runner.temp }}/failure-conformance-out/summary.md
+            ${{ runner.temp }}/failure-conformance-out/report.tsv
+            ${{ runner.temp }}/failure-conformance-out/results
+          if-no-files-found: ignore
