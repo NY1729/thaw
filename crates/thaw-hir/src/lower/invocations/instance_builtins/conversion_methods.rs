@@ -476,7 +476,17 @@ impl<'a> FnLowerer<'a> {
                         }
                         let encoding = match call.args.first() {
                             Some(argument) => {
-                                let encoding = self.lower_expr(&argument.expr)?;
+                                // `toString("bogus" as any)`: the literal is checked whatever its cast type.
+                                let mut literal = argument.expr.as_ref();
+                                while let Expr::TsAs(inner) = literal {
+                                    literal = inner.expr.as_ref();
+                                }
+                                let encoding = match literal {
+                                    Expr::Lit(swc_ecma_ast::Lit::Str(text)) => {
+                                        HirExpr::Lit(HirLit::Str(text.value.to_string_lossy().into_owned()))
+                                    }
+                                    _ => self.lower_expr(&argument.expr)?,
+                                };
                                 self.checked_buffer_encoding_argument(encoding, true)?
                             }
                             None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
