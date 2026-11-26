@@ -523,7 +523,7 @@ impl Visit for Walk {
         self.fn_depth += 1;
         self.nonarrow_depth += 1;
         self.shadow.push(shadow_names(
-            &f.params,
+            &f.params.iter().map(|p| &p.pat).collect::<Vec<_>>(),
             f.body.as_ref().map(|b| b.stmts.as_slice()),
         ));
         for p in &f.params {
@@ -550,7 +550,8 @@ impl Visit for Walk {
             a::ArrowFunctionBody::FunctionBody(b) => Some(b.stmts.as_slice()),
             a::ArrowFunctionBody::Expr(_) => None,
         };
-        self.shadow.push(shadow_names(&n.params, body));
+        self.shadow
+            .push(shadow_names(&n.params.iter().collect::<Vec<_>>(), body));
         for p in &n.params {
             p.visit_with(self);
         }
@@ -1140,7 +1141,7 @@ impl Visit for VarOnly {
 /// Names a nested function binds in a scope that covers its whole body: its parameters, and (when the parameters
 /// are plain names, so there is no separate scope for default expressions) its `var`s, top-level function
 /// declarations and top-level `let`/`const`/`class`. A block-level name is left out: it covers only its block.
-fn shadow_names(params: &[a::Pat], body: Option<&[a::Stmt]>) -> BTreeSet<String> {
+fn shadow_names(params: &[&a::Pat], body: Option<&[a::Stmt]>) -> BTreeSet<String> {
     let mut names = Vec::new();
     for p in params {
         pat_names(p, &mut names);
