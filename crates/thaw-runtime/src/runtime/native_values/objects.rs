@@ -34,56 +34,11 @@ thread_local! {
 
 #[derive(Default)]
 struct ObjectClassMetadata {
-    ancestry: Option<std::rc::Rc<str>>,
-    hidden_markers: MarkerSet,
+    ancestry: Option<String>,
+    hidden_markers: std::collections::HashSet<String>,
     // None keeps the static field-order fallback for ordinary fixed objects.
     // A copied object's physical slots can precede their actual creation.
     own_key_order: Option<Vec<String>>,
-}
-
-/// Hidden compiler marker names of one object, shared per class: every instance of a class carries
-/// the same one or two marker strings, so an instance holds refcounted handles into `INTERNED`
-/// rather than its own hash set and copies (about 400 B and four mallocs per `new`).
-#[derive(Clone, Default)]
-struct MarkerSet(Vec<std::rc::Rc<str>>);
-
-impl MarkerSet {
-    fn contains(&self, marker: &str) -> bool {
-        self.0.iter().any(|known| &**known == marker)
-    }
-    fn insert(&mut self, marker: std::rc::Rc<str>) {
-        if !self.contains(&marker) {
-            self.0.push(marker);
-        }
-    }
-    fn remove(&mut self, marker: &str) -> bool {
-        let before = self.0.len();
-        self.0.retain(|known| &**known != marker);
-        self.0.len() != before
-    }
-    fn extend(&mut self, markers: MarkerSet) {
-        for marker in markers.0 {
-            self.insert(marker);
-        }
-    }
-}
-
-thread_local! {
-    static INTERNED: RefCell<std::collections::HashSet<std::rc::Rc<str>>> =
-        RefCell::new(std::collections::HashSet::new());
-}
-
-/// One shared allocation per distinct marker/ancestry text.
-fn intern(text: &str) -> std::rc::Rc<str> {
-    INTERNED.with(|set| {
-        let mut set = set.borrow_mut();
-        if let Some(known) = set.get(text) {
-            return known.clone();
-        }
-        let known: std::rc::Rc<str> = text.into();
-        set.insert(known.clone());
-        known
-    })
 }
 
 const NON_EXTENSIBLE: u8 = 1;
@@ -105,18 +60,10 @@ fn object_can_set_property_flags(object: *const u8, property: &str, requested: u
         || (current & PROPERTY_WRITABLE == 0 && requested & PROPERTY_WRITABLE != 0))
 }
 
-/// True while no descriptor flag or integrity state was ever recorded, i.e. every field has the
-/// default flags. Plain field writes ask this on every store, so it must stay two `is_empty` probes.
-fn object_flag_tables_empty() -> bool {
-    OBJECT_PROPERTY_FLAGS.with(|stored| stored.borrow().is_empty())
-        && OBJECT_STATES.with(|states| states.borrow().is_empty())
-}
-
 /// Effective descriptor flags for one physically present native data field.
 /// A zero result is a valid fully restricted property; callers establish
 /// existence from the allocation's trusted field layout before querying.
 fn object_property_flags(object: *const u8, property: &str) -> u8 {
-    if object_flag_tables_empty() { return PROPERTY_DEFAULT; }
     let mut flags = OBJECT_PROPERTY_FLAGS.with(|stored| stored.borrow()
         .get(&(object as usize)).and_then(|fields| fields.get(property)).copied()
         .unwrap_or(PROPERTY_DEFAULT));
@@ -132,7 +79,6 @@ fn object_property_flags(object: *const u8, property: &str) -> u8 {
 /// `property` points to a live native string; `object` is an opaque identity.
 pub unsafe extern "C" fn thaw_object_property_flags(object: *const u8, property: *const c_char) -> u8 {
     if object.is_null() || property.is_null() { return 0; }
-    if object_flag_tables_empty() { return PROPERTY_DEFAULT; }
     let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else { return 0; };
     object_property_flags(object, property)
 }
@@ -201,8 +147,8 @@ pub unsafe extern "C" fn thaw_object_set_class_identity(
     OBJECT_CLASS_IDENTITIES.with(|stored| {
         let mut stored = stored.borrow_mut();
         let metadata = stored.entry(object as usize).or_default();
-        metadata.ancestry = Some(intern(identities));
-        metadata.hidden_markers.insert(intern(marker));
+        metadata.ancestry = Some(identities.to_owned());
+        metadata.hidden_markers.insert(marker.to_owned());
         if let Some(order) = metadata.own_key_order.as_mut() {
             order.retain(|name| name != marker);
         }
@@ -294,7 +240,7 @@ pub unsafe extern "C" fn thaw_object_hide_marker(
     OBJECT_CLASS_IDENTITIES.with(|stored| {
         let mut stored = stored.borrow_mut();
         let metadata = stored.entry(object as usize).or_default();
-        metadata.hidden_markers.insert(intern(marker));
+        metadata.hidden_markers.insert(marker.to_owned());
         if let Some(order) = metadata.own_key_order.as_mut() {
             order.retain(|name| name != marker);
         }
@@ -524,10 +470,6 @@ pub unsafe extern "C" fn thaw_object_accessor(
     setter: bool,
 ) -> *mut u8 {
     if object.is_null() || property.is_null() {
-        return std::ptr::null_mut();
-    }
-    // Every native field read/write asks; most programs never register an accessor.
-    if OBJECT_ACCESSORS.with(|accessors| accessors.borrow().is_empty()) {
         return std::ptr::null_mut();
     }
     let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else {
