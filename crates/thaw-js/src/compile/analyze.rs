@@ -59,6 +59,18 @@ impl NameClass {
     }
 }
 
+impl NamePlan {
+    /// Whether a captured name of this kind compiles: function-level names, and the `let`/`const` at the top of
+    /// the body, which the interpreter declares in the call's own scope too. Anything deeper needs a scope per
+    /// block.
+    pub(crate) fn scoped_ok(&self) -> bool {
+        matches!(
+            self.kind,
+            DeclKind::Param | DeclKind::Var | DeclKind::SelfName | DeclKind::FnDecl
+        ) || (self.level == 1 && matches!(self.kind, DeclKind::Let | DeclKind::Const))
+    }
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // read by the tests and by C2+ only
 pub(crate) struct NamePlan {
@@ -291,6 +303,8 @@ impl Walk {
             match s {
                 a::Stmt::Decl(a::Decl::Fn(f)) => {
                     self.bound(&f.ident.sym);
+                    // a declaration at the top of a body is hoisted into the frame (compiled as a prologue)
+                    self.ok_fn = true;
                     f.function.visit_with(self);
                 }
                 _ => s.visit_with(self),
@@ -305,11 +319,15 @@ impl Walk {
         match p {
             a::Pat::Ident(b) => self.bound(&b.id.sym),
             a::Pat::Array(ap) => {
+                // the iterator protocol runs user code
+                self.impure = true;
                 for e in ap.elems.iter().flatten() {
                     self.pat_refs(e);
                 }
             }
             a::Pat::Object(op) => {
+                // property reads can run getters
+                self.impure = true;
                 for prop in &op.props {
                     match prop {
                         a::ObjectPatProp::KeyValue(kv) => {
@@ -339,6 +357,8 @@ impl Walk {
     /// `for (let x of e) body` / `for (x in e) body`: the head scope covers the right-hand side, so a
     /// head binding is in effect only from the body on.
     fn for_loop(&mut self, left: &a::ForHead, right: &a::Expr, body: &a::Stmt) {
+        // iterators, getters and proxies run user code
+        self.impure = true;
         self.frames.push(Vec::new());
         let top = self.frames.len() - 1;
         let body_lo = body.span().lo.0;
@@ -373,7 +393,7 @@ impl Walk {
 }
 
 /// Bound names of a pattern, in source order.
-fn pat_names(p: &a::Pat, out: &mut Vec<String>) {
+pub(crate) fn pat_names(p: &a::Pat, out: &mut Vec<String>) {
     match p {
         a::Pat::Ident(b) => out.push(b.id.sym.to_string()),
         a::Pat::Array(ap) => {
@@ -463,9 +483,6 @@ impl Visit for Walk {
     fn visit_var_declarator(&mut self, d: &a::VarDeclarator) {
         if let Some(init) = &d.init {
             init.visit_with(self);
-        }
-        if !matches!(d.name, a::Pat::Ident(_)) {
-            self.block(FallbackReason::Destructuring);
         }
         self.pat_refs(&d.name);
     }
@@ -676,7 +693,11 @@ impl Visit for Walk {
             }
             a::Prop::Assign(_) => self.block(FallbackReason::Unsupported),
             a::Prop::Method(_) | a::Prop::Getter(_) | a::Prop::Setter(_) => {
-                self.block(FallbackReason::ObjectMethod)
+                // the method's function is created (not called) here: `ok_fn` lets `visit_function` take it
+                self.ok_fn = true;
+                p.visit_children_with(self);
+                self.ok_fn = false;
+                return;
             }
             a::Prop::Shorthand(_) => {}
         }
@@ -684,13 +705,15 @@ impl Visit for Walk {
     }
 
     fn visit_spread_element(&mut self, n: &a::SpreadElement) {
-        self.block(FallbackReason::Spread);
+        // getters and proxies run user code
+        self.impure = true;
         n.visit_children_with(self);
     }
 
     fn visit_expr_or_spread(&mut self, n: &a::ExprOrSpread) {
         if n.spread.is_some() {
-            self.block(FallbackReason::Spread);
+            // the iterator protocol runs user code
+            self.impure = true;
         }
         n.visit_children_with(self);
     }
@@ -751,7 +774,6 @@ impl Visit for Walk {
     }
 
     fn visit_try_stmt(&mut self, n: &a::TryStmt) {
-        self.block(FallbackReason::Try);
         n.visit_children_with(self);
     }
 
@@ -762,6 +784,13 @@ impl Visit for Walk {
             let mut names = Vec::new();
             pat_names(p, &mut names);
             for name in names {
+                // `var e` in the body assigns the catch binding in the interpreter's scopes
+                if self.frames[0]
+                    .iter()
+                    .any(|&i| self.decls[i].name == name && self.decls[i].kind == DeclKind::Var)
+                {
+                    self.block(FallbackReason::Try);
+                }
                 self.declare(top, &name, DeclKind::Catch, 0, false);
             }
             self.pat_refs(p);
@@ -798,16 +827,13 @@ impl Visit for Walk {
     }
 
     fn visit_for_in_stmt(&mut self, n: &a::ForInStmt) {
-        self.block(FallbackReason::ForIn);
         self.for_loop(&n.left, &n.right, &n.body);
     }
 
     fn visit_for_of_stmt(&mut self, n: &a::ForOfStmt) {
-        self.block(if n.is_await {
-            FallbackReason::ForAwait
-        } else {
-            FallbackReason::ForOf
-        });
+        if n.is_await {
+            self.block(FallbackReason::ForAwait);
+        }
         self.for_loop(&n.left, &n.right, &n.body);
     }
 
@@ -830,7 +856,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     if def.is_async {
         w.block(FallbackReason::Async);
     }
-    for p in &def.params {
+    for (i, p) in def.params.iter().enumerate() {
         let mut names = Vec::new();
         pat_names(p, &mut names);
         for name in names {
@@ -838,9 +864,12 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         }
         match p {
             a::Pat::Ident(_) => {}
-            a::Pat::Assign(_) => w.block(FallbackReason::DefaultParam),
-            a::Pat::Rest(_) => w.block(FallbackReason::RestParam),
-            _ => w.block(FallbackReason::Destructuring),
+            a::Pat::Assign(_) if !pattern_param_ok(def, i) => w.block(FallbackReason::DefaultParam),
+            a::Pat::Assign(_) => {}
+            a::Pat::Rest(_) if !pattern_param_ok(def, i) => w.block(FallbackReason::RestParam),
+            a::Pat::Rest(_) => {}
+            _ if !pattern_param_ok(def, i) => w.block(FallbackReason::Destructuring),
+            _ => {}
         }
     }
     // The self name is a slot only when the body mentions it (plan 1.3). It is declared after the parameters
@@ -948,12 +977,11 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     {
         blockers |= FallbackReason::ScopedBlock.bit();
     }
-    // A captured name is compiled only as a parameter or a `var` (function level). Any other captured name
-    // (lexical, block-level, catch, self, class) keeps the function on the AST.
-    if names.iter().any(|n| {
-        n.class == NameClass::Scoped
-            && !matches!(n.kind, DeclKind::Param | DeclKind::Var | DeclKind::SelfName)
-    }) {
+    // Any captured name `scoped_ok` refuses (block-level, catch, class) keeps the function on the AST.
+    if names
+        .iter()
+        .any(|n| n.class == NameClass::Scoped && !n.scoped_ok())
+    {
         blockers |= FallbackReason::InnerFunction.bit();
         if reason.is_none_or(|cur| FallbackReason::InnerFunction.priority() > cur.priority()) {
             reason = Some(FallbackReason::InnerFunction);
@@ -1009,4 +1037,64 @@ impl Visit for LoopFinder {
     fn visit_do_while_stmt(&mut self, _: &a::DoWhileStmt) {
         self.0 = true;
     }
+}
+
+/// Identifiers in the expressions of a pattern (defaults, computed keys), not its bound names.
+fn pat_expr_idents(p: &a::Pat, out: &mut IdentNames) {
+    match p {
+        a::Pat::Array(ap) => {
+            for e in ap.elems.iter().flatten() {
+                pat_expr_idents(e, out);
+            }
+        }
+        a::Pat::Object(op) => {
+            for prop in &op.props {
+                match prop {
+                    a::ObjectPatProp::KeyValue(kv) => {
+                        if let a::PropName::Computed(c) = &kv.key {
+                            c.expr.visit_with(out);
+                        }
+                        pat_expr_idents(&kv.value, out);
+                    }
+                    a::ObjectPatProp::Assign(ap) => {
+                        if let Some(v) = &ap.value {
+                            v.visit_with(out);
+                        }
+                    }
+                    a::ObjectPatProp::Rest(r) => pat_expr_idents(&r.arg, out),
+                }
+            }
+        }
+        a::Pat::Assign(ap) => {
+            ap.right.visit_with(out);
+            pat_expr_idents(&ap.left, out);
+        }
+        a::Pat::Rest(r) => pat_expr_idents(&r.arg, out),
+        a::Pat::Expr(e) => e.visit_with(out),
+        a::Pat::Ident(_) | a::Pat::Invalid(_) => {}
+    }
+}
+
+/// Whether parameter `i` can be a compiled pattern or default: its expressions must not name anything that is
+/// bound later (a later parameter, a `var`, a function declaration), because compiled frames declare those
+/// first while the interpreter binds parameters in order against the outer scope. Pattern kinds `Pat::Expr`
+/// and invalid ones are never bound.
+fn pattern_param_ok(def: &FuncDef, i: usize) -> bool {
+    let mut used = IdentNames(Default::default());
+    pat_expr_idents(&def.params[i], &mut used);
+    if used.0.is_empty() {
+        return true;
+    }
+    let mut later = Vec::new();
+    for p in &def.params[i..] {
+        pat_names(p, &mut later);
+    }
+    if let Body::Block(stmts) = &def.body {
+        let mut vars = VarNames(Vec::new());
+        for s in stmts {
+            s.visit_with(&mut vars);
+        }
+        later.extend(vars.0);
+    }
+    !later.iter().any(|n| used.0.contains(n))
 }

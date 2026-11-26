@@ -28,15 +28,21 @@ mod diff_tests_elem;
 #[cfg(test)]
 mod diff_tests_elemw;
 #[cfg(test)]
+mod diff_tests_fndecl;
+#[cfg(test)]
 mod diff_tests_inner;
 #[cfg(test)]
 mod diff_tests_inre;
+#[cfg(test)]
+mod diff_tests_loops;
 #[cfg(test)]
 mod diff_tests_mem;
 #[cfg(test)]
 mod diff_tests_names;
 #[cfg(test)]
 mod diff_tests_num2;
+#[cfg(test)]
+mod diff_tests_pat;
 #[cfg(test)]
 mod diff_tests_self;
 #[cfg(test)]
@@ -54,6 +60,7 @@ mod member;
 mod num;
 #[cfg(test)]
 mod num_tests;
+mod pat;
 #[cfg(test)]
 mod pool_tests;
 mod run;
@@ -65,8 +72,8 @@ use std::rc::Rc;
 
 use super::{Ctl, FuncDef, Interp, Scope, Value, R};
 
-pub(crate) use analyze::analyze;
 use analyze::has_loop;
+pub(crate) use analyze::{analyze, pat_names};
 
 /// `THAW_JS_COMPILE=off|on|check` (also `0|false` and `1|true`, case-insensitive).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -835,6 +842,8 @@ pub(crate) struct CompiledFn {
     pub(crate) self_slot: Option<u32>,
     /// Per parameter position, the slot of that parameter name (a duplicate name shares its slot).
     pub(crate) param_slots: Vec<Option<u32>>,
+    /// Pattern parameters: (argument index, is a rest parameter, binder), run in order once the frame exists.
+    pub(crate) param_binds: Vec<(usize, bool, pat::Bind)>,
     /// Block body statements (empty for an expression body).
     pub(crate) body: Vec<St>,
     /// Arrow functions with an expression body.

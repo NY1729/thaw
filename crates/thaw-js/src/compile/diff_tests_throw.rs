@@ -127,7 +127,7 @@ fn rethrow_through_compiled_frames_is_caught_by_ast_caller() {
 #[test]
 fn compiled_caller_of_throwing_ast_function() {
     let src = r#"
-        function thrower(x) { try { throw x } catch (e) { if (e > 5) throw e + 1; return -1 } }
+        function thrower(x) { with ({}) { try { throw x } catch (e) { if (e > 5) throw e + 1; return -1 } } }
         function go(x) { return thrower(x) + 100 }
         console.log(go(1));
         try { go(9) } catch (e) { console.log('got', e) }
@@ -135,18 +135,17 @@ fn compiled_caller_of_throwing_ast_function() {
     let out = same(src, 1);
     assert_eq!(out, lines(&["99", "got 10"]));
     let (_, _, it) = run_mode(src, CompileMode::On);
-    assert!(it.cstats.rejected(FallbackReason::Try) >= 1);
+    assert!(it.cstats.rejected(FallbackReason::With) >= 1);
 }
 
-/// Negative control: a `try` inside the function still keeps it on the AST, and the output is unchanged.
+/// A `try` inside the function compiles it, and the output is unchanged.
 #[test]
-fn try_inside_the_function_still_blocks_it() {
+fn try_inside_the_function_compiles() {
     let src = "function t() { try { throw 1 } catch (e) { return 'c' } } console.log(t()); console.log(t());";
-    let out = same(src, 0);
+    let out = same(src, 1);
     assert_eq!(out, lines(&["c", "c"]));
     let (_, _, it) = run_mode(src, CompileMode::On);
-    assert_eq!(it.cstats.compiled(), 0);
-    assert_eq!(it.cstats.rejected(FallbackReason::Try), 1);
+    assert_eq!(it.cstats.rejected(FallbackReason::Try), 0);
 }
 
 /// A rethrow from an AST `catch` into a compiled callee and back: `finally` in the AST caller still runs.

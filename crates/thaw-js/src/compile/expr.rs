@@ -137,7 +137,7 @@ pub(crate) enum Place {
 }
 
 impl Place {
-    fn of(g: &Gen, id: &a::Ident) -> Place {
+    pub(crate) fn of(g: &Gen, id: &a::Ident) -> Place {
         match g.resolve(&id.sym) {
             Some(l) => Place::Slot {
                 k: l.slot,
@@ -156,7 +156,7 @@ impl Place {
     }
 
     /// Writes the name as `write_loc` does: a `const` throws, after the value was computed.
-    fn write(&self, it: &mut Interp, f: &mut Frame, v: Value) -> CR<()> {
+    pub(crate) fn write(&self, it: &mut Interp, f: &mut Frame, v: Value) -> CR<()> {
         match self {
             Place::Slot { k, mutable: true } => {
                 f.slots[*k as usize] = v;

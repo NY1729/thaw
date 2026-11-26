@@ -5190,7 +5190,46 @@ impl Interp {
                     self.assign_var(scope, &id.id.sym, value, scope.strict.get())?
                 }
                 pat if is_var => self.bind_pattern(pat, value, scope, false)?,
-                pat => self.bind_pattern(pat, value, scope, true)?,
+                pat => self.bind_lexical_pattern(pat, value, scope, mutable)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// The names a `for-in` visits: own enumerable keys, then inherited enumerable ones (shadowed names once).
+    pub(crate) fn for_in_keys(&mut self, target: &Value) -> Vec<Rc<str>> {
+        let mut keys = self.own_keys(target);
+        if let Value::Object(o) = target {
+            let mut cur = o.proto.borrow().clone();
+            while let Some(c) = cur {
+                for p in c.raw_props.borrow().iter().filter(|p| p.enumerable) {
+                    if !keys.contains(&p.key) {
+                        keys.push(p.key.clone());
+                    }
+                }
+                cur = c.proto.borrow().clone();
+            }
+        }
+        keys
+    }
+
+    /// `let`/`const` pattern: the names are declared, and the `const` ones are then frozen.
+    fn bind_lexical_pattern(
+        &mut self,
+        pat: &a::Pat,
+        value: Value,
+        scope: &Rc<Scope>,
+        mutable: bool,
+    ) -> R<()> {
+        self.bind_pattern(pat, value, scope, true)?;
+        if !mutable {
+            let mut names = Vec::new();
+            compile::pat_names(pat, &mut names);
+            let mut vars = scope.vars.borrow_mut();
+            for n in &names {
+                if let Some(b) = vars.get_mut(n) {
+                    b.mutable = false;
+                }
             }
         }
         Ok(())
@@ -5388,19 +5427,7 @@ impl Interp {
             }
             a::Stmt::ForIn(f) => {
                 let target = self.eval(&f.right, scope)?;
-                // own enumerable keys, then inherited enumerable ones (shadowed names once)
-                let mut keys = self.own_keys(&target);
-                if let Value::Object(o) = &target {
-                    let mut cur = o.proto.borrow().clone();
-                    while let Some(c) = cur {
-                        for p in c.raw_props.borrow().iter().filter(|p| p.enumerable) {
-                            if !keys.contains(&p.key) {
-                                keys.push(p.key.clone());
-                            }
-                        }
-                        cur = c.proto.borrow().clone();
-                    }
-                }
+                let keys = self.for_in_keys(&target);
                 for key in keys {
                     self.check_deadline()?;
                     let iter = Scope::new(Some(scope.clone()));
@@ -5421,7 +5448,12 @@ impl Interp {
                 Some(p) if matches!(v.kind, a::VarDeclKind::Var) => {
                     self.bind_pattern(p, value, scope, false)
                 }
-                Some(p) => self.bind_pattern(p, value, scope, true),
+                Some(p) => self.bind_lexical_pattern(
+                    p,
+                    value,
+                    scope,
+                    !matches!(v.kind, a::VarDeclKind::Const),
+                ),
                 None => unsupported("for-head"),
             },
             a::ForHead::Pat(p) => self.bind_pattern(p, value, scope, false),

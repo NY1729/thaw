@@ -151,7 +151,8 @@ fn cyclic_script_leaves_the_registry_equal_to_the_live_counts() {
 
 #[test]
 fn census_counts_the_captured_chain_against_the_free_names() {
-    let mut it = Interp::new();
+    // the AST interpreter's frames (the compiled tier keeps a captured top-level `let` in its call scope)
+    let mut it = Interp::with_compile_mode(crate::compile::CompileMode::Off);
     census_for_tests(true);
     let before = census_snapshot();
     // `outer` is declared in the global scope: its chain has no bindings. The inner closure captures
