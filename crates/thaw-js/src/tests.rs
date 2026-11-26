@@ -13495,3 +13495,35 @@ fn writing_existing_property_respects_order_readonly_and_setters() {
         "1"
     );
 }
+
+// Promise.resolve / reject honour their receiver (NewPromiseCapability); same output as Node.
+#[test]
+fn promise_resolve_reject_use_receiver_capability() {
+    let src = "let n=0,t={};function P(e){n++;return new Promise((_,rj)=>e(()=>{throw t},rj))}\
+        try{Promise.resolve.call(P,1)}catch(e){console.log('threw',e===t,n)}\
+        try{Promise.resolve.call(1)}catch(e){console.log(e instanceof TypeError)}\
+        const p=Promise.resolve(1);console.log(Promise.resolve(p)===p)";
+    assert_eq!(run_main_lines(src), "threw true 1|true|true");
+}
+
+// a Promise subclass's executor resolves the object `new X` returns, also when it resolves later
+#[test]
+fn promise_subclass_executor_resolves_the_instance() {
+    let src = "class M extends Promise {}\
+        let r; const p = new M(f => { r = f }); p.then(v => console.log('then', v, p instanceof M)); r(7);";
+    assert_eq!(run_main_lines(src), "then 7 true");
+}
+
+// Date setters / constructor / UTC / parse propagate ToNumber/ToString errors (same output as Node)
+#[test]
+fn date_conversions_propagate_abrupt_completions() {
+    let src = "const th={valueOf(){throw new RangeError('x')}};const d=new Date(0);\
+        for (const f of [()=>d.setDate(th),()=>d.setHours(1,th),()=>d.setTime(th),()=>d.setUTCFullYear(Symbol()),\
+        ()=>new Date(2000,th),()=>Date.UTC(1,th),()=>Date.parse(Symbol())]) {\
+        try{f();console.log('no')}catch(e){console.log(e.name)} }\
+        console.log(d.getTime())";
+    assert_eq!(
+        run_main_lines(src),
+        "RangeError|RangeError|RangeError|TypeError|RangeError|RangeError|TypeError|0"
+    );
+}

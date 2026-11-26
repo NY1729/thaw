@@ -732,6 +732,58 @@ impl Interp {
         Ok(p)
     }
 
+    /// `Promise.resolve/reject` receiver: TypeError unless an object; `None` for the intrinsic Promise.
+    fn capability_ctor(
+        &mut self,
+        this: &Value,
+        intrinsic: &Rc<RefCell<Option<Value>>>,
+    ) -> R<Option<Value>> {
+        if !matches!(this, Value::Object(_)) {
+            return self.throw_error("TypeError", "PromiseResolve called on non-object");
+        }
+        let same = intrinsic
+            .borrow()
+            .as_ref()
+            .is_some_and(|i| strict_equals(i, this));
+        Ok((!same).then(|| this.clone()))
+    }
+
+    /// NewPromiseCapability(C): `(promise, resolve, reject)`.
+    fn new_capability(&mut self, c: &Value) -> R<(Value, Value, Value)> {
+        if !c.is_callable() {
+            return self.throw_error(
+                "TypeError",
+                "Promise resolve or reject function is not callable",
+            );
+        }
+        let slot: Rc<RefCell<(Value, Value)>> =
+            Rc::new(RefCell::new((Value::Undefined, Value::Undefined)));
+        let exec = {
+            let slot = slot.clone();
+            self.native(move |it, _, a| {
+                let mut s = slot.borrow_mut();
+                if !matches!(s.0, Value::Undefined) || !matches!(s.1, Value::Undefined) {
+                    drop(s);
+                    return it.throw_error(
+                        "TypeError",
+                        "Promise executor has already been invoked with non-undefined arguments",
+                    );
+                }
+                *s = (arg(a, 0), arg(a, 1));
+                Ok(Value::Undefined)
+            })
+        };
+        let promise = self.construct(c, &[exec])?;
+        let (res, rej) = slot.borrow().clone();
+        if !res.is_callable() || !rej.is_callable() {
+            return self.throw_error(
+                "TypeError",
+                "Promise resolve or reject function is not callable",
+            );
+        }
+        Ok((promise, res, rej))
+    }
+
     /// Run `f` with `frame` as the current async-context frame; the previous frame is restored afterwards.
     pub(crate) fn in_frame<T>(
         &mut self,
@@ -2005,7 +2057,8 @@ impl Interp {
         self.rt.promise_proto = Some(promise_proto.clone());
 
         // ----- Promise -----
-        let ctor = self.native(|it, _, args| {
+        let intrinsic: Rc<RefCell<Option<Value>>> = Rc::default();
+        let ctor = self.native(|it, this, args| {
             let exec = arg(args, 0);
             if !exec.is_callable() {
                 let shown = it.inspect(&exec, false);
@@ -2014,7 +2067,30 @@ impl Interp {
                     &format!("Promise resolver {shown} is not a function"),
                 );
             }
-            let p = it.new_promise();
+            let mut p = it.new_promise();
+            // `class X extends Promise`: super() hands in the pre-allocated instance; settle that object, not a
+            // copy (the executor's resolve functions must reach what `new X` returns)
+            if let Value::Object(t) = this {
+                let mut proto = t.proto.borrow().clone();
+                let mut is_promise = false;
+                while let Some(o) = proto {
+                    if it
+                        .rt
+                        .promise_proto
+                        .as_ref()
+                        .is_some_and(|pp| Rc::ptr_eq(pp, &o))
+                    {
+                        is_promise = true;
+                        break;
+                    }
+                    proto = o.proto.borrow().clone();
+                }
+                if is_promise && matches!(&*t.kind.borrow(), Kind::Plain) {
+                    let k = std::mem::replace(&mut *p.kind.borrow_mut(), Kind::Plain);
+                    *t.kind.borrow_mut() = k;
+                    p = t.clone();
+                }
+            }
             let (res, rej) = it.resolvers(&p);
             match it.call(&exec, &Value::Undefined, &[res, rej.clone()]) {
                 Err(Ctl::Throw(e)) => {
@@ -2025,17 +2101,43 @@ impl Interp {
             }
             Ok(Value::Object(p))
         });
+        *intrinsic.borrow_mut() = Some(ctor.clone());
         if let Value::Object(c) = &ctor {
             put_hidden(c, "prototype", Value::Object(promise_proto.clone()));
             put_hidden(&promise_proto, "constructor", ctor.clone());
             put_hidden(c, "name", Value::str("Promise"));
-            self.set_native(c, "resolve", |it, _, a| {
-                Ok(Value::Object(it.promise_resolve_value(arg(a, 0))?))
+            self.set_native(c, "resolve", {
+                let intrinsic = intrinsic.clone();
+                move |it, this, a| {
+                    let x = arg(a, 0);
+                    match it.capability_ctor(this, &intrinsic)? {
+                        None => Ok(Value::Object(it.promise_resolve_value(x)?)),
+                        Some(c) => {
+                            if matches!(&x, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Promise(_)))
+                                && strict_equals(&it.get(&x, "constructor")?, &c)
+                            {
+                                return Ok(x);
+                            }
+                            let (promise, resolve, _) = it.new_capability(&c)?;
+                            it.call(&resolve, &Value::Undefined, &[x])?;
+                            Ok(promise)
+                        }
+                    }
+                }
             });
-            self.set_native(c, "reject", |it, _, a| {
-                let p = it.new_promise();
-                it.reject_promise(&p, arg(a, 0));
-                Ok(Value::Object(p))
+            self.set_native(c, "reject", move |it, this, a| {
+                match it.capability_ctor(this, &intrinsic)? {
+                    None => {
+                        let p = it.new_promise();
+                        it.reject_promise(&p, arg(a, 0));
+                        Ok(Value::Object(p))
+                    }
+                    Some(c) => {
+                        let (promise, _, reject) = it.new_capability(&c)?;
+                        it.call(&reject, &Value::Undefined, &[arg(a, 0)])?;
+                        Ok(promise)
+                    }
+                }
             });
         }
         self.set_native(&promise_proto, "then", |it, this, a| {

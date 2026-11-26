@@ -27,7 +27,7 @@ present in the results, so partial runs are fine, and `--update-baseline` only r
 
 ## Method
 
-Per test: harness prelude (`print`, a `$262` stub with `evalScript`/`detachArrayBuffer`/`gc`), `assert.js`, `sta.js`
+Per test: harness prelude (`print`, a `$262` stub with a native-Script `evalScript` (`__thaw_eval_script`)/`detachArrayBuffer`/`gc`), `assert.js`, `sta.js`
 (+ `doneprintHandle.js` for async), the `includes`, then the test. Default flags run sloppy then strict, both must pass;
 `raw`, `onlyStrict`, `noStrict` are honoured. Negative tests pass if the engine exits non-zero (parse phase) or prints
 the expected error type. 20 s wall timeout and a 2 GB `RLIMIT_AS` per engine process. Skipped (counted as `skip`):

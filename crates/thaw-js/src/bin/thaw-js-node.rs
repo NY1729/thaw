@@ -47,6 +47,7 @@ fn main() {
             };
             it.configure_stack(256 << 20);
             it.set_stream(true);
+            it.install_eval_script();
             let r = it.run_main(&source);
             it.flush_partial();
             match r {
