@@ -839,6 +839,14 @@ fn safepoint_reset() {
 /// `thaw-runtime` runs it once at every Lambda invocation boundary.
 #[no_mangle]
 pub extern "C" fn thaw_arena_reset() {
+    let started = stats::stats_enabled().then(std::time::Instant::now);
+    reset_inner();
+    if let Some(started) = started {
+        stats::RESET_NS.with(|c| c.set(c.get() + started.elapsed().as_nanos() as u64));
+    }
+}
+
+fn reset_inner() {
     let Some(_reset_guard) = ResetGuard::acquire() else {
         return;
     };
@@ -984,6 +992,11 @@ pub extern "C" fn thaw_arena_reset() {
         // Every record, old and fresh, in base order (a fresh record replaces a table record
         // with the same base): live ones form the new table, dead ones the reclaimed ranges.
         let mut survivors = Vec::new();
+        // Records come in base order, so the live starts are walked in step instead of hashed.
+        let mut live_sorted: Vec<usize> = live.iter().copied().collect();
+        live_sorted.sort_unstable();
+        let mut next_live = 0;
+        let mut after_survivor = true;
         RECLAIMED.with(|ranges| {
             let mut ranges = ranges.borrow_mut();
             ranges.clear();
@@ -1014,21 +1027,30 @@ pub extern "C" fn thaw_arena_reset() {
                     fresh_records.next()
                 }
                 .expect("peeked record");
-                if live.contains(&base) {
+                while next_live < live_sorted.len() && live_sorted[next_live] < base {
+                    next_live += 1;
+                }
+                if live_sorted.get(next_live) == Some(&base) {
                     survivors.push((base, record));
+                    after_survivor = true;
                 } else {
                     if stats::poison_enabled() {
                         // Dead memory: any later read through a stale pointer shows 0xDD.
                         unsafe { (base as *mut u8).write_bytes(0xDD, record.size) };
                     }
-                    ranges.push((base, base + record.size));
+                    // Dead records with no survivor between them form one range.
+                    match ranges.last_mut() {
+                        Some(last) if !after_survivor => last.1 = base + record.size,
+                        _ => ranges.push((base, base + record.size)),
+                    }
+                    after_survivor = false;
                 }
             }
         });
         let live_bytes: u64 = survivors.iter().map(|(_, r)| r.size as u64).sum();
         stats::LIVE_AFTER_RESET.with(|c| c.set(live_bytes));
         stats::RECLAIMED_BYTES
-            .with(|c| c.set(c.get() + ranges_bytes(&RECLAIMED.with(|r| r.borrow().clone()))));
+            .with(|c| c.set(c.get() + RECLAIMED.with(|r| ranges_bytes(&r.borrow()))));
         *allocations = survivors.into_iter().collect();
         RETAINED.with(|retained| {
             let mut retained = retained.borrow_mut();
@@ -1058,8 +1080,12 @@ pub extern "C" fn thaw_arena_reset() {
         });
     });
     strings::reset_lengths(true);
+    let hooks = stats::stats_enabled().then(std::time::Instant::now);
     run_metadata_reset_hooks(true);
     run_reset_hooks(true);
+    if let Some(hooks) = hooks {
+        stats::HOOK_NS.with(|c| c.set(c.get() + hooks.elapsed().as_nanos() as u64));
+    }
 }
 
 fn ranges_bytes(ranges: &[(usize, usize)]) -> u64 {
