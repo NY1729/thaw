@@ -716,7 +716,7 @@ impl NapiWireOut {
             }
         }
         let map = match &*o.kind.borrow() {
-            Kind::Map(m) => Some(m.entries.clone()),
+            Kind::Map(m) => Some(m.pairs()),
             _ => None,
         };
         if let Some(entries) = map {
@@ -729,7 +729,7 @@ impl NapiWireOut {
             return Ok(format!("{{\"m\":{t}}}"));
         }
         let set = match &*o.kind.borrow() {
-            Kind::Set(s) => Some(s.items.clone()),
+            Kind::Set(s) => Some(s.values()),
             _ => None,
         };
         if let Some(items) = set {

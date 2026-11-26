@@ -7256,6 +7256,8 @@ mod builtin_table_tests;
 #[cfg(test)]
 mod callsite_tests;
 #[cfg(test)]
+mod collections_delete_tests;
+#[cfg(test)]
 mod console_instance_tests;
 #[cfg(test)]
 mod direct_eval_tests;
