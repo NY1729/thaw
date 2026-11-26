@@ -1427,8 +1427,11 @@ pub unsafe extern "C" fn thaw_error_frames(error: *const c_char) -> *const c_cha
 /// The frame lines `stack_frames` appends, for the `stack` that `Error.captureStackTrace` builds
 /// on a plain object: `frame` and `ra` are the compiled caller's frame pointer and return address
 /// (see `caller_pcs`); without compiled frames it is V8's single anonymous frame.
+///
+/// # Safety
+/// `cut` must be null or a valid NUL-terminated string.
 #[no_mangle]
-pub extern "C" fn thaw_error_stack_frames(frame: usize, ra: usize, cut: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn thaw_error_stack_frames(frame: usize, ra: usize, cut: *const c_char) -> *const c_char {
     let limit = thaw_error_stack_trace_limit();
     let lines = if limit < 1.0 {
         String::new()
