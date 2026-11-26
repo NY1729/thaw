@@ -67,7 +67,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Install Rust components
         run: rustup component add rustfmt clippy
@@ -185,7 +186,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -319,7 +321,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Install system dependencies
         run: |
@@ -444,7 +447,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Install system dependencies
         run: |
@@ -558,24 +562,11 @@ jobs:
           if-no-files-found: ignore
 
   test:
+    # The workspace unit tests, minus the crates that have their own parallel jobs: thaw-js (test-thaw-js),
+    # thaw-registry (test-registry), and thaw-cli/thaw-llvm (engine-tests, test-integration). None of the crates built
+    # here depends on LLVM, so the LLVM cache restore and install steps are left out.
     runs-on: ubuntu-24.04
-    # The thaw-js mode steps moved to the thaw-js-modes and thaw-js-costack jobs, which run in parallel with this
-    # one; this job keeps the workspace tests and the Hono/Prisma/PostgreSQL acceptance tests. A hang fails with
-    # its logs instead of running for the 6-hour default.
     timeout-minutes: 60
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: app
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d app"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
       CARGO_BUILD_JOBS: "4"
@@ -589,7 +580,288 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
+          df -h /
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update reported an error (a broken mirror?), trying the install with the cached package lists" >&2;
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://mirrors.kernel.org/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Run tests
+        run: cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry --exclude thaw-js
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore
+
+
+  test-thaw-js:
+    # thaw-js tests with the environment unset (the default compile mode and backend), sharded by test name like
+    # engine-tests. Shard 0 also runs the thaw-js binaries' unit tests, the integration tests and the doc-tests.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
+          df -h /
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update reported an error (a broken mirror?), trying the install with the cached package lists" >&2;
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://mirrors.kernel.org/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: thaw-js lib tests (shard ${{ matrix.shard }} of 2)
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "2"
+          CARGO_TEST_ARGS: -p thaw-js --lib
+        run: tools/ci/run-shard.sh
+      - name: thaw-js binaries, integration tests and doc-tests
+        if: matrix.shard == 0
+        run: |
+          cargo test -p thaw-js --bins --test '*'
+          cargo test -p thaw-js --doc
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore
+
+
+  test-registry:
+    # thaw-registry tests, serial (--test-threads=1) as before, sharded by test name over three runners. Shard 0 also
+    # runs the node:zlib zstd natives tests (cargo feature `zstd`, C libzstd), which only compile with the feature on.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
+          df -h /
+      - name: Start vmstat logger
+        run: |
+          mkdir -p "$RUNNER_TEMP/diagnostics"
+          nohup vmstat -t 10 > "$RUNNER_TEMP/diagnostics/vmstat.log" 2>&1 < /dev/null &
+      - name: Install system dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update reported an error (a broken mirror?), trying the install with the cached package lists" >&2;
+               sudo timeout 600 apt-get -o Acquire::Retries=3 install -y libuv1-dev; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed" >&2
+            if [ "$attempt" = 1 ]; then
+              # fallback: the default Ubuntu archive is unreachable, use a mirror for noble
+              sudo rm -f /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
+              printf 'Types: deb\nURIs: http://mirrors.kernel.org/ubuntu/\nSuites: noble\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/ubuntu-fallback.sources >/dev/null
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: thaw-registry tests (shard ${{ matrix.shard }} of 3)
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "3"
+          CARGO_TEST_ARGS: -p thaw-registry
+        run: tools/ci/run-shard.sh --test-threads=1
+      - name: thaw-registry zstd feature tests
+        if: matrix.shard == 0
+        run: cargo test -p thaw-registry --features zstd -- zlib_zstd --test-threads=1
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          diagnostics="$RUNNER_TEMP/diagnostics"
+          mkdir -p "$diagnostics"
+          pkill -x vmstat || true
+          {
+            echo "== free -h"; free -h
+            echo "== df -h /"; df -h /
+            echo "== uptime"; uptime
+            echo "== dmesg (last 100 lines)"; (sudo dmesg -T 2>&1 || true) | tail -n 100
+            echo "== ps (top 25 by RSS)"; ps aux --sort=-rss | head -n 25
+          } > "$diagnostics/summary.txt" 2>&1 || true
+          cat "$diagnostics/summary.txt"
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: ignore
+
+
+  test-integration:
+    # The Hono/Prisma/PostgreSQL acceptance tests that used to be the tail of `test`, in two parallel parts.
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [hono, postgres]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Free disk space
+        run: |
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -654,26 +926,25 @@ jobs:
           echo "$prefix/bin" >> "$GITHUB_PATH"
           echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
-      - name: Run tests
-        run: |
-          cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
-          cargo test -p thaw-registry -- --test-threads=1
-          # node:zlib zstd natives (cargo feature `zstd`, C libzstd): the feature-gated tests run only with it on
-          cargo test -p thaw-registry --features zstd -- zlib_zstd --test-threads=1
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
       - name: Test Hono, Prisma, and PostgreSQL
+        if: matrix.part == 'hono'
+        env:
+          THAW_POSTGRES_URL: postgresql://postgres:password@127.0.0.1:5432/app
+        run: cargo test -p thaw-cli builds_and_serves_hono_react_prisma_postgres_when_enabled -- --nocapture
+      - name: Test real PostgreSQL clients
+        if: matrix.part == 'postgres'
         env:
           THAW_POSTGRES_URL: postgresql://postgres:password@127.0.0.1:5432/app
         run: |
-          cargo test -p thaw-cli builds_and_serves_hono_react_prisma_postgres_when_enabled -- --nocapture
           cargo test -p thaw-cli registry_add_queries_postgres_with_real_pg_when_enabled -- --nocapture
           THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli registry_add_runs_drizzle_execute_against_live_postgres_when_enabled -- --nocapture
       - name: Upload acceptance metrics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: acceptance-metrics
+          name: acceptance-metrics-${{ matrix.part }}
           path: target/acceptance/*.json
           if-no-files-found: ignore
       - name: Collect diagnostics
@@ -698,6 +969,7 @@ jobs:
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
 
+
   thaw-js-modes:
     # Split out of `test` so these thaw-js mode runs proceed in parallel with it. Both steps are gating; the
     # non-gating full-suite runs are in thaw-js-modes-full.
@@ -716,7 +988,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -817,7 +1090,12 @@ jobs:
           if-no-files-found: ignore
 
   thaw-js-modes-full:
-    # Split out of thaw-js-modes so the two non-gating whole-suite runs proceed in parallel with its gating steps.
+    # Split out of thaw-js-modes so the two non-gating whole-suite runs proceed in parallel with its gating steps, and
+    # with each other (one job per compile mode).
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: ["on", check]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -833,7 +1111,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -869,47 +1148,12 @@ jobs:
           key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
-      - name: Restore LLVM 22 cache
-        uses: actions/cache@v4
-        with:
-          path: ~/llvm-22
-          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
-      - name: Install LLVM 22
-        env:
-          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
-          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
-        run: |
-          prefix="$HOME/llvm-22"
-          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
-            # Extract into a scratch directory and move it into place, so an
-            # interrupted download or extraction never leaves a partial tree
-            # that the cache would then save.
-            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
-            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
-              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
-            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
-            mkdir "$work/extract"
-            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
-            rm -f "$work/llvm.tar.xz"
-            rm -rf "$prefix"
-            mv "$work/extract" "$prefix"
-            rm -rf "$work"
-          fi
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       # Non-gating (plan TJ150 section 7, PR7): the whole thaw-js suite with every eligible function compiled (to be gated
       # once it is green in both modes).
-      - name: thaw-js tests with compiled functions (non-gating)
+      - name: thaw-js tests, compile ${{ matrix.mode }} (non-gating)
         continue-on-error: true
         env:
-          THAW_JS_COMPILE: "on"
-          THAW_JS_COMPILE_AFTER: "1"
-        run: cargo test -p thaw-js
-      - name: thaw-js tests in compile check mode (non-gating)
-        continue-on-error: true
-        env:
-          THAW_JS_COMPILE: "check"
+          THAW_JS_COMPILE: ${{ matrix.mode }}
           THAW_JS_COMPILE_AFTER: "1"
         run: cargo test -p thaw-js
       - name: Collect diagnostics
@@ -934,9 +1178,19 @@ jobs:
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
 
+
   thaw-js-costack:
-    # The default coroutine backend (THAW_JS_CO unset: the costack backend where supported). Split out of `test`
-    # so it runs in parallel with it. Gating. The thread backend has its own job, thaw-js-thread.
+    # The default coroutine backend (THAW_JS_CO unset: the costack backend where supported). Gating. The thread
+    # backend has its own job, thaw-js-thread. One job per compile mode.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: "off"
+          - mode: "on"
+            after: "1"
+          - mode: check
+            after: "1"
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -952,7 +1206,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -988,53 +1243,18 @@ jobs:
           key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
-      - name: Restore LLVM 22 cache
-        uses: actions/cache@v4
-        with:
-          path: ~/llvm-22
-          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
-      - name: Install LLVM 22
+      - name: thaw-js lib tests on the default (costack) backend, compile ${{ matrix.mode }}
         env:
-          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
-          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+          THAW_JS_COMPILE: ${{ matrix.mode }}
+          THAW_JS_COMPILE_AFTER: ${{ matrix.after || '' }}
         run: |
-          prefix="$HOME/llvm-22"
-          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
-            # Extract into a scratch directory and move it into place, so an
-            # interrupted download or extraction never leaves a partial tree
-            # that the cache would then save.
-            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
-            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
-              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
-            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
-            mkdir "$work/extract"
-            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
-            rm -f "$work/llvm.tar.xz"
-            rm -rf "$prefix"
-            mv "$work/extract" "$prefix"
-            rm -rf "$work"
-          fi
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
-      # The thaw-js lib tests on the default coroutine backend (THAW_JS_CO unset), in each compile mode.
-      - name: thaw-js lib tests on the default (costack) backend, compile off
-        env:
-          THAW_JS_COMPILE: "off"
-        run: cargo test -p thaw-js --lib
-      - name: thaw-js lib tests on the default (costack) backend, compile on
-        env:
-          THAW_JS_COMPILE: "on"
-          THAW_JS_COMPILE_AFTER: "1"
-        run: cargo test -p thaw-js --lib
-      - name: thaw-js lib tests on the default (costack) backend, compile check
-        env:
-          THAW_JS_COMPILE: "check"
-          THAW_JS_COMPILE_AFTER: "1"
-        run: cargo test -p thaw-js --lib
+          # unset, not empty, in the off mode (the tests tell the two apart)
+          [ -n "$THAW_JS_COMPILE_AFTER" ] || unset THAW_JS_COMPILE_AFTER
+          cargo test -p thaw-js --lib
       # The live-limit test shares one process-global counter, so it runs alone; the deep-recursion test needs the
       # stack backend.
       - name: costack live-limit and deep-recursion tests, alone
+        if: matrix.mode == 'off'
         run: cargo test -p thaw-js --lib -- --ignored costack_live_limit js_deep_recursion_on_a_costack --test-threads=1
       - name: Collect diagnostics
         if: always()
@@ -1058,9 +1278,20 @@ jobs:
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
 
+
   thaw-js-thread:
     # The thread coroutine backend (THAW_JS_CO=thread), the escape hatch and the pre-flip default. Gating: the thread
-    # backend's coverage was gating while it was the default, and it stays so.
+    # backend's coverage was gating while it was the default, and it stays so. One job per compile mode (they ran as
+    # three serial steps of one 36 minute job).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: "off"
+          - mode: "on"
+            after: "1"
+          - mode: check
+            after: "1"
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -1076,7 +1307,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -1112,53 +1344,15 @@ jobs:
           key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
-      - name: Restore LLVM 22 cache
-        uses: actions/cache@v4
-        with:
-          path: ~/llvm-22
-          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
-      - name: Install LLVM 22
+      - name: thaw-js lib tests on the thread backend, compile ${{ matrix.mode }}
         env:
-          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
-          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+          THAW_JS_CO: thread
+          THAW_JS_COMPILE: ${{ matrix.mode }}
+          THAW_JS_COMPILE_AFTER: ${{ matrix.after || '' }}
         run: |
-          prefix="$HOME/llvm-22"
-          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
-            # Extract into a scratch directory and move it into place, so an
-            # interrupted download or extraction never leaves a partial tree
-            # that the cache would then save.
-            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
-            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
-              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
-            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
-            mkdir "$work/extract"
-            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
-            rm -f "$work/llvm.tar.xz"
-            rm -rf "$prefix"
-            mv "$work/extract" "$prefix"
-            rm -rf "$work"
-          fi
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
-      # The thaw-js lib tests on the thread coroutine backend, in each compile mode (the three modes of thaw-js-costack).
-      - name: thaw-js lib tests on the thread backend, compile off
-        env:
-          THAW_JS_CO: thread
-          THAW_JS_COMPILE: "off"
-        run: cargo test -p thaw-js --lib
-      - name: thaw-js lib tests on the thread backend, compile on
-        env:
-          THAW_JS_CO: thread
-          THAW_JS_COMPILE: "on"
-          THAW_JS_COMPILE_AFTER: "1"
-        run: cargo test -p thaw-js --lib
-      - name: thaw-js lib tests on the thread backend, compile check
-        env:
-          THAW_JS_CO: thread
-          THAW_JS_COMPILE: "check"
-          THAW_JS_COMPILE_AFTER: "1"
-        run: cargo test -p thaw-js --lib
+          # unset, not empty, in the off mode (the tests tell the two apart)
+          [ -n "$THAW_JS_COMPILE_AFTER" ] || unset THAW_JS_COMPILE_AFTER
+          cargo test -p thaw-js --lib
       - name: Collect diagnostics
         if: always()
         run: |
@@ -1181,14 +1375,19 @@ jobs:
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
 
+
   thaw-js-gc-stress:
     # The automatic cycle collector under stress: THAW_JS_GC_STRESS=200 collects at every 200th safe point and implies
     # the trigger on, so a collector bug that frees a live object fails here early. Runs on the default coroutine
-    # backend (costack). Non-gating for the first week of PRs.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # backend (costack). Non-gating for the first week of PRs. Sharded by test name over two runners.
     # Remove continue-on-error once this job has been green across a week of PRs.
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
       CARGO_BUILD_JOBS: "4"
@@ -1202,7 +1401,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -1238,42 +1438,15 @@ jobs:
           key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-js/**', 'crates/thaw-node-builtins/**', 'crates/thaw-parser/**', 'crates/thaw-intl/**', 'crates/thaw-napi/**') }}
           restore-keys: |
             thaw-runtime-${{ runner.os }}-
-      - name: Restore LLVM 22 cache
-        uses: actions/cache@v4
-        with:
-          path: ~/llvm-22
-          key: llvm-22.1.8-Linux-X64-df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
-      - name: Install LLVM 22
-        env:
-          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
-          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
-        run: |
-          prefix="$HOME/llvm-22"
-          if [[ ! -x "$prefix/bin/llvm-config" ]]; then
-            # Extract into a scratch directory and move it into place, so an
-            # interrupted download or extraction never leaves a partial tree
-            # that the cache would then save.
-            work=$(mktemp -d "$HOME/llvm-install.XXXXXX")
-            curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
-              -o "$work/llvm.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET"
-            echo "$LLVM_SHA256  $work/llvm.tar.xz" | sha256sum -c -
-            mkdir "$work/extract"
-            tar -xJf "$work/llvm.tar.xz" -C "$work/extract" --strip-components=1
-            rm -f "$work/llvm.tar.xz"
-            rm -rf "$prefix"
-            mv "$work/extract" "$prefix"
-            rm -rf "$work"
-          fi
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          echo "LLVM_SYS_221_PREFIX=$prefix" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
-      # The thaw-js lib tests with the GC stress interval, compile on. The same command as the other thaw-js jobs.
-      - name: thaw-js lib tests with GC stress
+      - name: thaw-js lib tests with GC stress (shard ${{ matrix.shard }} of 2)
         env:
           THAW_JS_GC_STRESS: "200"
           THAW_JS_COMPILE: "on"
           THAW_JS_COMPILE_AFTER: "1"
-        run: cargo test -p thaw-js --lib
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "2"
+          CARGO_TEST_ARGS: -p thaw-js --lib
+        run: tools/ci/run-shard.sh
       - name: Collect diagnostics
         if: always()
         run: |
@@ -1295,6 +1468,7 @@ jobs:
           name: diagnostics-${{ github.job }}-${{ strategy.job-index }}
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
+
 
   thaw-js-costack-arm:
     # The default coroutine backend (costack) on arm64, the only CI runner for the aarch64 context-switch assembly.
@@ -1319,10 +1493,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: thaw-js lib tests on the default (costack) backend (non-gating)
-        run: cargo test -p thaw-js --lib
+        run: |
+          # unset, not empty, in the off mode (the tests tell the two apart)
+          [ -n "$THAW_JS_COMPILE_AFTER" ] || unset THAW_JS_COMPILE_AFTER
+          cargo test -p thaw-js --lib
 
   engine-tests:
     strategy:
@@ -1345,7 +1523,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -1482,7 +1661,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -1660,7 +1840,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Start vmstat logger
         run: |
@@ -1770,7 +1951,8 @@ jobs:
           node-version: "22"
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          # in the background: the removal took ~1.7 min and nothing needs the space until the build
+          (sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift >/dev/null 2>&1 &)
           df -h /
       - name: Install system dependencies
         run: |
