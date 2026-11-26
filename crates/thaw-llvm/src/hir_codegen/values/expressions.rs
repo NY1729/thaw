@@ -435,6 +435,15 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
+            HirExpr::Conditional(test, _, alternate, ty)
+                if !self.live_add_branch
+                    && matches!(test.as_ref(), HirExpr::Call(callee, _)
+                        if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_live_add_guard")) =>
+            {
+                // No live JS handle can exist, so the engine `+` branch is dead: compile only the native one.
+                let _ = ty;
+                self.compile_expr(alternate)
+            }
             HirExpr::Conditional(test, consequent, alternate, ty) => {
                 self.compile_conditional_value(test, consequent, alternate, ty)
             }

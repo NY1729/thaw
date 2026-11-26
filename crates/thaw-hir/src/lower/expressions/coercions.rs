@@ -4071,6 +4071,9 @@ impl<'a> FnLowerer<'a> {
         let left_guard = self.json_operand_is_object_like(left, &lhs_ty)?;
         let right_guard = self.json_operand_is_object_like(right, &rhs_ty)?;
         let guard = self.lower_logical_expr(left_guard, right_guard, false)?;
+        // Marks the live-engine branch so codegen can drop it (and its thaw-js dependency) when the
+        // program holds no live handles.
+        let guard = HirExpr::Call(Box::new(HirExpr::Var("__thaw_live_add_guard".into())), vec![guard]);
         let result_ty = if guaranteed_string {
             HirType::Str
         } else {

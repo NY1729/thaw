@@ -1183,14 +1183,25 @@ fn build_with_native_mode_routed(
     }
 
     let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
-    compiler.set_codegen_opt(codegen_opt_level()?);
-    compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
-    compiler.set_uses_async_hooks(user_source.contains("async_hooks"));
-    if let Some(lib) = lib_mode {
-        compiler.set_library_mode(lib.exports.clone());
-    }
-    compiler.compile_program(&program)?;
+    // First without the thaw-js branch of dynamic `+` (it alone would disable turn resets); redo with it
+    // only if the program uses thaw-js anyway, since live handles can then reach that `+`.
+    let commonjs_entry = module_graph::entry_is_commonjs(input, &user_source)?;
+    let mut live_add_branch = false;
+    let compiler = loop {
+        let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
+        compiler.set_codegen_opt(codegen_opt_level()?);
+        compiler.set_commonjs_entry(commonjs_entry);
+        compiler.set_uses_async_hooks(user_source.contains("async_hooks"));
+        compiler.set_live_add_branch(live_add_branch);
+        if let Some(lib) = lib_mode {
+            compiler.set_library_mode(lib.exports.clone());
+        }
+        compiler.compile_program(&program)?;
+        if live_add_branch || !compiler.uses_thaw_js() {
+            break compiler;
+        }
+        live_add_branch = true;
+    };
     phase_mark("llvm-ir");
     if compiler.native_timers_conflict() {
         return Err(NATIVE_TIMERS_NEED_ENGINE.to_string());
