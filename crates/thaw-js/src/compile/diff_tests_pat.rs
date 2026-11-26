@@ -104,3 +104,36 @@ fn pattern_names_functions() {
     );
     assert_eq!(out[0], "abc");
 }
+
+#[test]
+fn default_parameters() {
+    let out = same(
+        r#"
+        function f(a, b = a + 1, c = b * 2) { return [a, b, c].join(',') }
+        console.log(f(1), f(1, 5), f(1, undefined, 7), f(1, null), f(1, 0));
+        function g(x = (() => 3)()) { return x }
+        console.log(g(), g(1));
+        function side(n) { console.log('side ' + n); return n }
+        function h(a = side(1), b = side(2)) { return a + b }
+        console.log(h(), h(9), h(9, 8));
+        const arrow = (a, b = () => a) => b();
+        console.log(arrow(4));
+        function cap(a = 1) { return () => a }
+        console.log(cap()(), cap(5)());
+        function thr(a = (() => { throw new RangeError('d') })()) { return a }
+        for (const t of [() => thr(), () => thr(1)]) { try { console.log(t()) } catch (e) { console.log(e.name) } }
+        function later(a = b, b = 2) { return a }
+        try { console.log(later()) } catch (e) { console.log(e.name) }
+        function self(a = self) { return typeof a }
+        console.log(self());
+        function nm(a = function () {}, b = () => 1) { return a.name + b.name }
+        console.log(nm());
+        function usethis(a = this) { return a === undefined }
+        console.log(usethis());
+        function len(a, b = 1, c) {}
+        console.log(len.length);
+        "#,
+        3,
+    );
+    assert!(out[0].starts_with("1,2,4 1,5,10 1,2,7 "), "{}", out[0]);
+}

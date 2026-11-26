@@ -835,7 +835,8 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         }
         match p {
             a::Pat::Ident(_) => {}
-            a::Pat::Assign(_) => w.block(FallbackReason::DefaultParam),
+            a::Pat::Assign(_) if !pattern_param_ok(def, i) => w.block(FallbackReason::DefaultParam),
+            a::Pat::Assign(_) => {}
             a::Pat::Rest(_) => w.block(FallbackReason::RestParam),
             _ if !pattern_param_ok(def, i) => w.block(FallbackReason::Destructuring),
             _ => {}
