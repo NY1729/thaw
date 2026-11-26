@@ -171,6 +171,36 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `buffer_encoding_argument`, plus Node's `ERR_UNKNOWN_ENCODING` for a string literal that
+    /// names no encoding (`Buffer.from(text, "bogus")`, `buf.toString("bogus")`). The runtime
+    /// decoders fall back to utf8 silently. `Buffer.from` accepts `""` as utf8.
+    // ponytail: literals only; a runtime string that is not an encoding still decodes as utf8.
+    fn checked_buffer_encoding_argument(&mut self, encoding: HirExpr, to_text: bool) -> Result<HirExpr, String> {
+        const KNOWN: [&str; 12] = [
+            "utf8", "utf-8", "hex", "base64", "base64url", "ascii", "latin1", "binary", "ucs2", "ucs-2",
+            "utf16le", "utf-16le",
+        ];
+        // A literal argument may come back wrapped (`TypedClosure(Str, Lit)`), so read it first.
+        let literal = match &encoding {
+            HirExpr::Lit(HirLit::Str(text)) => Some(text.clone()),
+            _ => None,
+        };
+        let encoding = self.buffer_encoding_argument(encoding, to_text)?;
+        let Some(text) = literal.as_ref() else {
+            return Ok(encoding);
+        };
+        if KNOWN.contains(&text.to_ascii_lowercase().as_str()) || (text.is_empty() && !to_text) {
+            return Ok(encoding);
+        }
+        let fail = Self::node_error_throw(
+            "TypeError",
+            "ERR_UNKNOWN_ENCODING",
+            &format!("Unknown encoding: {text}"),
+            None,
+        );
+        Ok(self.block_as_expr(HirExpr::Block(vec![fail]), HirType::Str))
+    }
+
     /// `Buffer.alloc`-style size validation (`ERR_OUT_OF_RANGE` unless `0 <= size <= 2^53 - 1`).
     fn checked_buffer_size(&mut self, size: HirExpr) -> Result<HirExpr, String> {
         if matches!(&size, HirExpr::Lit(HirLit::F64(n)) if (0.0..=9007199254740991.0).contains(n)) {

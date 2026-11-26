@@ -470,14 +470,24 @@ impl<'a> FnLowerer<'a> {
                             );
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_bytes_to_string".to_string())),
-                                vec![range, self.buffer_encoding_argument(arguments[0].clone(), true)?],
+                                vec![range, self.checked_buffer_encoding_argument(arguments[0].clone(), true)?],
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         let encoding = match call.args.first() {
                             Some(argument) => {
-                                let encoding = self.lower_expr(&argument.expr)?;
-                                self.buffer_encoding_argument(encoding, true)?
+                                // `toString("bogus" as any)`: the literal is checked whatever its cast type.
+                                let mut literal = argument.expr.as_ref();
+                                while let Expr::TsAs(inner) = literal {
+                                    literal = inner.expr.as_ref();
+                                }
+                                let encoding = match literal {
+                                    Expr::Lit(swc_ecma_ast::Lit::Str(text)) => {
+                                        HirExpr::Lit(HirLit::Str(text.value.to_string_lossy().into_owned()))
+                                    }
+                                    _ => self.lower_expr(&argument.expr)?,
+                                };
+                                self.checked_buffer_encoding_argument(encoding, true)?
                             }
                             None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
                         };

@@ -263,3 +263,36 @@ async function main(): Promise<void> {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// `[...anyString]` spreads code points and bad encodings throw Node's codes. Expected output from node 22.
+#[test]
+fn any_string_spread_and_unknown_encodings() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-any_spread_void_await-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"import * as fs from "node:fs";
+const s: any = JSON.parse('"héllo"');
+console.log([...s].join("|"), [...s].length);
+fs.writeFileSync(dir + "/f.txt", "x");
+function code(f: () => any): string { try { f(); return "ok"; } catch (e: any) { return e.code + " " + e.message; } }
+console.log(code(() => Buffer.from("x", "bogus" as any)));
+console.log(code(() => Buffer.from("x", "HEX" as any)));
+console.log(code(() => fs.readFileSync(dir + "/f.txt", "bogus" as any)));
+console.log(code(() => fs.writeFileSync(dir + "/f.txt", "y", "bogus" as any)));
+"#
+    .replace("dir +", &format!("{:?} +", dir.display().to_string()));
+    std::fs::write(&entry, source).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "h|é|l|l|o 5\n\
+         ERR_UNKNOWN_ENCODING Unknown encoding: bogus\n\
+         ok\n\
+         ERR_INVALID_ARG_VALUE The argument 'encoding' is invalid encoding. Received 'bogus'\n\
+         ERR_INVALID_ARG_VALUE The argument 'encoding' is invalid encoding. Received 'bogus'\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
