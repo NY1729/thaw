@@ -650,7 +650,8 @@ impl Visit for Walk {
 
     fn visit_assign_expr(&mut self, n: &a::AssignExpr) {
         match &n.left {
-            a::AssignTarget::Pat(_) => self.block(FallbackReason::Destructuring),
+            // iterators and getters run user code
+            a::AssignTarget::Pat(_) => self.impure = true,
             a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(b))
                 if self.fn_depth == 0 && !self.is_resolved(&b.id.sym) =>
             {
@@ -847,7 +848,9 @@ impl Visit for Walk {
 pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     let mut w = Walk::new();
     w.args_ok = def.uses_arguments && !def.arrow;
-    if def.class.is_some() {
+    // a base-class constructor runs like a function (the caller allocates `this` and runs the fields); a derived
+    // one binds `this` at `super()`
+    if def.class.as_ref().is_some_and(|c| c.derived) {
         w.block(FallbackReason::ClassConstructor);
     }
     if def.is_gen {

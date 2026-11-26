@@ -20,6 +20,8 @@ mod diff_tests_args;
 #[cfg(test)]
 mod diff_tests_calls;
 #[cfg(test)]
+mod diff_tests_class;
+#[cfg(test)]
 mod diff_tests_ctl;
 #[cfg(test)]
 mod diff_tests_direct;
@@ -979,8 +981,10 @@ impl Interp {
             CState::Cold(_) => {}
         }
         // a constructor call runs compiled unless the body reads `new.target` (the analyzer blocks that anyway);
-        // `class` bodies stay on the AST
-        if (new_target.is_some() && def.uses_new_target) || def.class.is_some() {
+        // a derived constructor binds `this` at `super()`: it stays on the AST
+        if (new_target.is_some() && def.uses_new_target)
+            || def.class.as_ref().is_some_and(|c| c.derived)
+        {
             return None;
         }
         let CState::Compiled(c) = &*st else {

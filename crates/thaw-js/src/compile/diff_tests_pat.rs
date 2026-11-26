@@ -196,3 +196,30 @@ fn spread_in_calls_arrays_and_objects() {
     );
     assert_eq!(out[0], "16 0ab10 21");
 }
+
+#[test]
+fn destructuring_assignment() {
+    let out = same(
+        r#"
+        function swap(a, b) { [a, b] = [b, a]; return a + ',' + b }
+        function obj(o) { let x, y; ({ x, y = 5, ...rest } = o); return [x, y, JSON.stringify(rest)].join('|') }
+        function nested(o) { let a, b; [a, { b }] = o; return a + b }
+        function val() { let a; const r = ([a] = [7, 8]); return a + ':' + r.length }
+        function glob() { [gx, gy] = [1, 2]; return gx + gy }
+        function cnst() { const c = 1; try { [c] = [2] } catch (e) { return e.name } }
+        function bad(v) { let a; try { [a] = v } catch (e) { return e.name + ': ' + e.message } return a }
+        function badobj(v) { let a; try { ({ a } = v) } catch (e) { return e.name + ': ' + e.message } return a }
+        function member(o) { [o.x, o.y] = [1, 2]; return o.x + o.y }
+        function loopswap(n) { let a = 0, b = 1; for (let i = 0; i < n; i++) [a, b] = [b, a + b]; return a }
+        function order() { const log = []; let a, b; [a = log.push('da'), b = log.push('db')] = [undefined, 1]; return log.join() + a + b }
+        function itclose() { let a; const it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false } }, return() { console.log('closed'); return {} } } } }; [a] = it; return a }
+        console.log(swap(1, 2), obj({ x: 1, z: 3 }), nested([1, { b: 2 }]), val(), glob(), cnst(), bad(5), bad(null), badobj(null), member({}), loopswap(10), order(), itclose());
+        "#,
+        9,
+    );
+    assert!(
+        out.iter()
+            .any(|l| l.starts_with("2,1 1|5|{\"z\":3} 3 7:2 3 TypeError")),
+        "{out:?}"
+    );
+}
