@@ -766,7 +766,7 @@ impl<'a> FnLowerer<'a> {
         Ok(Some(self.wrap_call_argument_bindings(result, &[(receiver_name, HirType::Json, receiver)])?))
     }
 
-    /// `get`/`set`/`add`/`has`/`delete` on an `any` receiver: a branded Json `Map`/`Set` wrapper
+    /// `get`/`set`/`add`/`has`/`delete` (and RegExp `test`/`exec`) on an `any` receiver: a branded Json `Map`/`Set` wrapper
     /// takes the native wrapper lowering, but a host-owned collection (a real JS `Map`/`Set` from
     /// an `any` literal field or an npm package) must be called live or the mutation is lost.
     fn lower_json_collection_method(
@@ -778,7 +778,7 @@ impl<'a> FnLowerer<'a> {
         let name = property.sym.as_ref();
         let arity = match name {
             "clear" | "keys" | "values" | "entries" => 0,
-            "get" | "add" | "has" | "delete" => 1,
+            "get" | "add" | "has" | "delete" | "test" | "exec" => 1,
             "set" => 2,
             _ => return Ok(None),
         };
@@ -813,7 +813,7 @@ impl<'a> FnLowerer<'a> {
             None => native,
         };
         let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?;
-        if matches!(name, "keys" | "values" | "entries") {
+        if matches!(name, "keys" | "values" | "entries" | "exec") {
             let native = self.coerce_to_declared(&HirType::Json, native)?;
             let has_handle = Self::strict_has_handle(Self::strict_json_handle(HirExpr::Var(receiver_name.clone())));
             let result = HirExpr::Conditional(Box::new(has_handle), Box::new(live), Box::new(native), HirType::Json);
