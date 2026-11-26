@@ -1,13 +1,13 @@
 {
  "areas": {
   "annexB/built-ins": {
-   "pass": 140,
-   "fail": 85,
+   "pass": 168,
+   "fail": 57,
    "skip": 16
   },
   "annexB/language": {
-   "pass": 136,
-   "fail": 683,
+   "pass": 810,
+   "fail": 9,
    "skip": 26
   },
   "built-ins/AbstractModuleSource": {
@@ -16,43 +16,43 @@
    "skip": 8
   },
   "built-ins/AggregateError": {
-   "pass": 15,
-   "fail": 9,
+   "pass": 17,
+   "fail": 7,
    "skip": 1
   },
   "built-ins/Array": {
-   "pass": 2269,
-   "fail": 716,
+   "pass": 2322,
+   "fail": 663,
    "skip": 98
   },
   "built-ins/ArrayBuffer": {
-   "pass": 90,
-   "fail": 49,
+   "pass": 94,
+   "fail": 45,
    "skip": 82
   },
   "built-ins/ArrayIteratorPrototype": {
-   "pass": 23,
-   "fail": 4,
+   "pass": 25,
+   "fail": 2,
    "skip": 0
   },
   "built-ins/AsyncDisposableStack": {
-   "pass": 80,
-   "fail": 23,
+   "pass": 81,
+   "fail": 22,
    "skip": 1
   },
   "built-ins/AsyncFromSyncIteratorPrototype": {
-   "pass": 23,
-   "fail": 15,
+   "pass": 26,
+   "fail": 12,
    "skip": 0
   },
   "built-ins/AsyncFunction": {
-   "pass": 14,
-   "fail": 3,
+   "pass": 15,
+   "fail": 2,
    "skip": 1
   },
   "built-ins/AsyncGeneratorFunction": {
-   "pass": 18,
-   "fail": 3,
+   "pass": 19,
+   "fail": 2,
    "skip": 2
   },
   "built-ins/AsyncGeneratorPrototype": {
@@ -81,23 +81,23 @@
    "skip": 1
   },
   "built-ins/DataView": {
-   "pass": 333,
-   "fail": 157,
+   "pass": 379,
+   "fail": 111,
    "skip": 70
   },
   "built-ins/Date": {
-   "pass": 509,
-   "fail": 90,
+   "pass": 540,
+   "fail": 59,
    "skip": 11
   },
   "built-ins/DisposableStack": {
-   "pass": 71,
-   "fail": 21,
+   "pass": 72,
+   "fail": 20,
    "skip": 1
   },
   "built-ins/Error": {
-   "pass": 35,
-   "fail": 53,
+   "pass": 37,
+   "fail": 51,
    "skip": 5
   },
   "built-ins/FinalizationRegistry": {
@@ -106,13 +106,13 @@
    "skip": 47
   },
   "built-ins/Function": {
-   "pass": 397,
-   "fail": 98,
+   "pass": 425,
+   "fail": 70,
    "skip": 14
   },
   "built-ins/GeneratorFunction": {
-   "pass": 18,
-   "fail": 3,
+   "pass": 19,
+   "fail": 2,
    "skip": 2
   },
   "built-ins/GeneratorPrototype": {
@@ -126,8 +126,8 @@
    "skip": 0
   },
   "built-ins/Iterator": {
-   "pass": 413,
-   "fail": 270,
+   "pass": 444,
+   "fail": 239,
    "skip": 1
   },
   "built-ins/JSON": {
@@ -136,8 +136,8 @@
    "skip": 2
   },
   "built-ins/Map": {
-   "pass": 151,
-   "fail": 51,
+   "pass": 163,
+   "fail": 39,
    "skip": 2
   },
   "built-ins/MapIteratorPrototype": {
@@ -146,8 +146,8 @@
    "skip": 0
   },
   "built-ins/Math": {
-   "pass": 242,
-   "fail": 85,
+   "pass": 264,
+   "fail": 63,
    "skip": 0
   },
   "built-ins/NaN": {
@@ -156,23 +156,23 @@
    "skip": 0
   },
   "built-ins/NativeErrors": {
-   "pass": 69,
-   "fail": 19,
+   "pass": 81,
+   "fail": 7,
    "skip": 6
   },
   "built-ins/Number": {
-   "pass": 250,
-   "fail": 89,
+   "pass": 252,
+   "fail": 87,
    "skip": 1
   },
   "built-ins/Object": {
-   "pass": 3131,
-   "fail": 271,
+   "pass": 3154,
+   "fail": 248,
    "skip": 9
   },
   "built-ins/Promise": {
-   "pass": 411,
-   "fail": 320,
+   "pass": 554,
+   "fail": 177,
    "skip": 1
   },
   "built-ins/Proxy": {
@@ -186,8 +186,8 @@
    "skip": 0
   },
   "built-ins/RegExp": {
-   "pass": 1643,
-   "fail": 224,
+   "pass": 1654,
+   "fail": 213,
    "skip": 12
   },
   "built-ins/RegExpStringIteratorPrototype": {
@@ -196,8 +196,8 @@
    "skip": 0
   },
   "built-ins/Set": {
-   "pass": 291,
-   "fail": 90,
+   "pass": 313,
+   "fail": 68,
    "skip": 2
   },
   "built-ins/SetIteratorPrototype": {
@@ -216,8 +216,8 @@
    "skip": 104
   },
   "built-ins/String": {
-   "pass": 1039,
-   "fail": 181,
+   "pass": 1064,
+   "fail": 156,
    "skip": 3
   },
   "built-ins/StringIteratorPrototype": {
@@ -231,8 +231,8 @@
    "skip": 1
   },
   "built-ins/Symbol": {
-   "pass": 60,
-   "fail": 19,
+   "pass": 62,
+   "fail": 17,
    "skip": 19
   },
   "built-ins/Temporal": {
@@ -246,8 +246,8 @@
    "skip": 1
   },
   "built-ins/TypedArray": {
-   "pass": 813,
-   "fail": 419,
+   "pass": 877,
+   "fail": 355,
    "skip": 221
   },
   "built-ins/TypedArrayConstructors": {
@@ -261,8 +261,8 @@
    "skip": 0
   },
   "built-ins/WeakMap": {
-   "pass": 86,
-   "fail": 54,
+   "pass": 103,
+   "fail": 37,
    "skip": 1
   },
   "built-ins/WeakRef": {
@@ -271,8 +271,8 @@
    "skip": 29
   },
   "built-ins/WeakSet": {
-   "pass": 62,
-   "fail": 22,
+   "pass": 74,
+   "fail": 10,
    "skip": 1
   },
   "built-ins/decodeURI": {
@@ -366,8 +366,8 @@
    "skip": 0
   },
   "language/eval-code": {
-   "pass": 160,
-   "fail": 182,
+   "pass": 326,
+   "fail": 16,
    "skip": 5
   },
   "language/export": {
@@ -376,13 +376,13 @@
    "skip": 3
   },
   "language/expressions": {
-   "pass": 9514,
-   "fail": 1237,
+   "pass": 9749,
+   "fail": 1002,
    "skip": 405
   },
   "language/function-code": {
-   "pass": 201,
-   "fail": 16,
+   "pass": 213,
+   "fail": 4,
    "skip": 0
   },
   "language/future-reserved-words": {
@@ -391,8 +391,8 @@
    "skip": 0
   },
   "language/global-code": {
-   "pass": 26,
-   "fail": 16,
+   "pass": 41,
+   "fail": 1,
    "skip": 0
   },
   "language/identifier-resolution": {
@@ -456,13 +456,13 @@
    "skip": 0
   },
   "language/statements": {
-   "pass": 8579,
-   "fail": 774,
+   "pass": 8742,
+   "fail": 611,
    "skip": 46
   },
   "language/types": {
-   "pass": 106,
-   "fail": 5,
+   "pass": 107,
+   "fail": 4,
    "skip": 2
   },
   "language/white-space": {
@@ -471,11 +471,11 @@
    "skip": 0
   }
  },
- "commit": "6fb5ef315144e91f3c0b3cef6ad7cb868d3eaee5",
+ "commit": "86748ddc8759fcbf0e43a28558af5192703b7d06",
  "test262": "2a1ade303f72d3de80565c921d685222405c32ce",
  "totals": {
-  "pass": 34707,
-  "fail": 6921,
+  "pass": 36575,
+  "fail": 5053,
   "skip": 7175
  }
 }
