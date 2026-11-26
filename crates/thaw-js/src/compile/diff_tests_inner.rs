@@ -301,16 +301,16 @@ fn refused_captured_block_let_stays_on_ast() {
 fn refused_captured_catch_param_stays_on_ast() {
     refused(
         "function f() { try { throw 1 } catch (e) { return function () { return e } } } console.log('' + f()());",
-        FallbackReason::Try,
+        FallbackReason::InnerFunction,
     );
 }
 
 #[test]
-fn refused_inner_method_stays_on_ast() {
-    refused(
-        "function f() { var o = { m() { return 1 } }; return o.m() } console.log('' + f());",
-        FallbackReason::ObjectMethod,
-    );
+fn inner_method_compiles() {
+    let src = "function f() { var o = { m() { return 1 } }; return o.m() } console.log('' + f()); console.log('' + f());";
+    same(src, 1);
+    let it = interp(&[src], CompileMode::On);
+    assert_eq!(it.cstats.rejected(FallbackReason::ObjectMethod), 0);
 }
 
 #[test]
@@ -338,9 +338,9 @@ fn refused_inner_class_stays_on_ast() {
 }
 
 #[test]
-fn refused_inner_declaration_stays_on_ast() {
-    refused(
-        "function f() { function g() { return 1 } return g() } console.log('' + f());",
-        FallbackReason::InnerFunction,
-    );
+fn inner_declaration_compiles() {
+    let src = "function f() { function g() { return 1 } return g() } console.log('' + f()); console.log('' + f());";
+    same(src, 1);
+    let it = interp(&[src], CompileMode::On);
+    assert_eq!(it.cstats.rejected(FallbackReason::InnerFunction), 0);
 }

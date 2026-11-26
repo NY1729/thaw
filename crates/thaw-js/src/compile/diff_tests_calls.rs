@@ -304,7 +304,7 @@ fn calls_unsupported_callee_shapes_stay_ast_with_their_reasons() {
     "#;
     assert!(it.run_sloppy(src).is_ok());
     assert_eq!(it.out, lines(&["2", "4", "2", "1"]));
-    assert_eq!(it.cstats.rejected(FallbackReason::Spread), 1);
+    assert_eq!(it.cstats.rejected(FallbackReason::Spread), 0);
     assert_eq!(it.cstats.rejected(FallbackReason::OptionalChain), 1);
     assert_eq!(it.cstats.rejected(FallbackReason::DirectEval), 1);
     assert_eq!(it.cstats.rejected(FallbackReason::FunctionCtor), 1);

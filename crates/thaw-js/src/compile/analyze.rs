@@ -59,6 +59,18 @@ impl NameClass {
     }
 }
 
+impl NamePlan {
+    /// Whether a captured name of this kind compiles: function-level names, and the `let`/`const` at the top of
+    /// the body, which the interpreter declares in the call's own scope too. Anything deeper needs a scope per
+    /// block.
+    pub(crate) fn scoped_ok(&self) -> bool {
+        matches!(
+            self.kind,
+            DeclKind::Param | DeclKind::Var | DeclKind::SelfName | DeclKind::FnDecl
+        ) || (self.level == 1 && matches!(self.kind, DeclKind::Let | DeclKind::Const))
+    }
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // read by the tests and by C2+ only
 pub(crate) struct NamePlan {
@@ -291,6 +303,8 @@ impl Walk {
             match s {
                 a::Stmt::Decl(a::Decl::Fn(f)) => {
                     self.bound(&f.ident.sym);
+                    // a declaration at the top of a body is hoisted into the frame (compiled as a prologue)
+                    self.ok_fn = true;
                     f.function.visit_with(self);
                 }
                 _ => s.visit_with(self),
@@ -673,7 +687,11 @@ impl Visit for Walk {
             }
             a::Prop::Assign(_) => self.block(FallbackReason::Unsupported),
             a::Prop::Method(_) | a::Prop::Getter(_) | a::Prop::Setter(_) => {
-                self.block(FallbackReason::ObjectMethod)
+                // the method's function is created (not called) here: `ok_fn` lets `visit_function` take it
+                self.ok_fn = true;
+                p.visit_children_with(self);
+                self.ok_fn = false;
+                return;
             }
             a::Prop::Shorthand(_) => {}
         }
@@ -750,7 +768,6 @@ impl Visit for Walk {
     }
 
     fn visit_try_stmt(&mut self, n: &a::TryStmt) {
-        self.block(FallbackReason::Try);
         n.visit_children_with(self);
     }
 
@@ -761,6 +778,13 @@ impl Visit for Walk {
             let mut names = Vec::new();
             pat_names(p, &mut names);
             for name in names {
+                // `var e` in the body assigns the catch binding in the interpreter's scopes
+                if self.frames[0]
+                    .iter()
+                    .any(|&i| self.decls[i].name == name && self.decls[i].kind == DeclKind::Var)
+                {
+                    self.block(FallbackReason::Try);
+                }
                 self.declare(top, &name, DeclKind::Catch, 0, false);
             }
             self.pat_refs(p);
@@ -797,16 +821,13 @@ impl Visit for Walk {
     }
 
     fn visit_for_in_stmt(&mut self, n: &a::ForInStmt) {
-        self.block(FallbackReason::ForIn);
         self.for_loop(&n.left, &n.right, &n.body);
     }
 
     fn visit_for_of_stmt(&mut self, n: &a::ForOfStmt) {
-        self.block(if n.is_await {
-            FallbackReason::ForAwait
-        } else {
-            FallbackReason::ForOf
-        });
+        if n.is_await {
+            self.block(FallbackReason::ForAwait);
+        }
         self.for_loop(&n.left, &n.right, &n.body);
     }
 
@@ -950,12 +971,11 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     {
         blockers |= FallbackReason::ScopedBlock.bit();
     }
-    // A captured name is compiled only as a parameter or a `var` (function level). Any other captured name
-    // (lexical, block-level, catch, self, class) keeps the function on the AST.
-    if names.iter().any(|n| {
-        n.class == NameClass::Scoped
-            && !matches!(n.kind, DeclKind::Param | DeclKind::Var | DeclKind::SelfName)
-    }) {
+    // Any captured name `scoped_ok` refuses (block-level, catch, class) keeps the function on the AST.
+    if names
+        .iter()
+        .any(|n| n.class == NameClass::Scoped && !n.scoped_ok())
+    {
         blockers |= FallbackReason::InnerFunction.bit();
         if reason.is_none_or(|cur| FallbackReason::InnerFunction.priority() > cur.priority()) {
             reason = Some(FallbackReason::InnerFunction);

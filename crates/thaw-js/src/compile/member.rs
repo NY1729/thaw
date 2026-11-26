@@ -235,6 +235,15 @@ fn prop_name(g: &mut Gen, k: &a::PropName) -> CG<PropKey> {
 enum Field {
     Prop(PropKey, Ex, bool),
     Spread(Ex),
+    /// A method (`Method`) or accessor (`Get`, `Set`): the key, then a closure over the call's scope.
+    Func(PropKey, Rc<a::Function>, FuncKind),
+}
+
+#[derive(Clone, Copy)]
+enum FuncKind {
+    Method,
+    Get,
+    Set,
 }
 
 /// `{ k: v, s, [c]: v, ...o }`: key then value, each in source order, then `put` (no methods or accessors).
@@ -259,19 +268,62 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
                 expr::compile(g, &a::Expr::Ident(i.clone()))?,
                 false,
             ),
+            a::Prop::Method(m) => Field::Func(
+                prop_name(g, &m.key)?,
+                Rc::from(m.function.clone()),
+                FuncKind::Method,
+            ),
+            a::Prop::Getter(gt) => Field::Func(
+                prop_name(g, &gt.key)?,
+                Rc::from(gt.function.clone()),
+                FuncKind::Get,
+            ),
+            a::Prop::Setter(st) => Field::Func(
+                prop_name(g, &st.key)?,
+                Rc::from(st.function.clone()),
+                FuncKind::Set,
+            ),
             _ => return reject(),
         };
         fields.push(field);
     }
     let n_fields = fields
         .iter()
-        .filter(|f| matches!(f, Field::Prop(..)))
+        .filter(|f| matches!(f, Field::Prop(..) | Field::Func(..)))
         .count();
     Ok(mk_ex(move |it, f| {
         let obj = it.plain_with_capacity(n_fields);
         for field in &fields {
             let (k, v, name_it) = match field {
                 Field::Prop(k, v, name_it) => (k, v, name_it),
+                Field::Func(k, func, kind) => {
+                    let k = prop_key_value(it, f, k)?;
+                    let name = it.fn_name_of_key(&k);
+                    it.cstats.closures_created += 1;
+                    match kind {
+                        FuncKind::Method => {
+                            let m = bx(it.method_value(Some(name), func, &f.scope))?;
+                            put(&obj, &k, m);
+                        }
+                        FuncKind::Get => {
+                            let m = bx(it.method_value(
+                                Some(format!("get {name}").into()),
+                                func,
+                                &f.scope,
+                            ))?;
+                            crate::define_accessor(&obj, &k, Some(m), None, true);
+                        }
+                        FuncKind::Set => {
+                            let m = bx(it.method_value(
+                                Some(format!("set {name}").into()),
+                                func,
+                                &f.scope,
+                            ))?;
+                            crate::define_accessor(&obj, &k, None, Some(m), true);
+                        }
+                    }
+                    continue;
+                }
                 Field::Spread(e) => {
                     let src = e(it, f)?;
                     let keys = it
@@ -285,17 +337,7 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
                     continue;
                 }
             };
-            let k = match k {
-                PropKey::Name(n) => n.clone(),
-                PropKey::Computed(e) => {
-                    let kv = e(it, f)?;
-                    it.key_of(&kv)
-                }
-                PropKey::Num(e) => {
-                    let n = e(it, f)?;
-                    it.key_of(&Value::Number(n))
-                }
-            };
+            let k = prop_key_value(it, f, k)?;
             let v = v(it, f)?;
             if *name_it {
                 crate::name_anonymous_fn(&v, &it.fn_name_of_key(&k));
@@ -304,4 +346,19 @@ pub(crate) fn object(g: &mut Gen, o: &a::ObjectLit) -> CG<Ex> {
         }
         Ok(Value::Object(obj))
     }))
+}
+
+/// The property name of a literal field: a name, or a computed key evaluated now.
+fn prop_key_value(it: &mut Interp, f: &mut Frame, k: &PropKey) -> CR<Rc<str>> {
+    Ok(match k {
+        PropKey::Name(n) => n.clone(),
+        PropKey::Computed(e) => {
+            let kv = e(it, f)?;
+            it.key_of(&kv)
+        }
+        PropKey::Num(e) => {
+            let n = e(it, f)?;
+            it.key_of(&Value::Number(n))
+        }
+    })
 }

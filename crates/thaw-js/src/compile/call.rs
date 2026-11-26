@@ -123,7 +123,7 @@ pub(crate) fn new_expr(g: &mut Gen, n: &a::NewExpr) -> CG<Ex> {
     Ok(mk_ex(move |it, f| {
         let fv = callee(it, f)?;
         let argv = eval_args(it, f, &args)?;
-        let r = if fv.is_callable() {
+        let r = if fv.is_constructor() {
             bx(it.construct(&fv, &argv))
         } else {
             bx(it.throw_error("TypeError", &format!("{text} is not a constructor")))

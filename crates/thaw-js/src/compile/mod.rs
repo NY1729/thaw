@@ -28,9 +28,13 @@ mod diff_tests_elem;
 #[cfg(test)]
 mod diff_tests_elemw;
 #[cfg(test)]
+mod diff_tests_fndecl;
+#[cfg(test)]
 mod diff_tests_inner;
 #[cfg(test)]
 mod diff_tests_inre;
+#[cfg(test)]
+mod diff_tests_loops;
 #[cfg(test)]
 mod diff_tests_mem;
 #[cfg(test)]

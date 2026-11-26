@@ -67,6 +67,11 @@ impl Gen {
         }
     }
 
+    /// Whether code is being generated at the top of the function body (no block scope open).
+    pub(crate) fn at_fn_top(&self) -> bool {
+        self.scopes.len() == 1
+    }
+
     /// Whether `name` is a scoped name (see `scoped`).
     pub(crate) fn is_scoped(&self, name: &str) -> bool {
         self.scoped.contains(name)
@@ -137,7 +142,7 @@ pub(crate) fn compile(
         || plan
             .names
             .iter()
-            .any(|n| n.class == NameClass::Scoped && !matches!(n.kind, DeclKind::Param | DeclKind::Var | DeclKind::SelfName))
+            .any(|n| n.class == NameClass::Scoped && !n.scoped_ok())
     {
         return reject();
     }
@@ -203,7 +208,21 @@ pub(crate) fn compile(
         }
     }
     let (body, expr_body) = match &def.body {
-        Body::Block(stmts) => (stmt::body(&mut g, stmts)?, None),
+        Body::Block(stmts) => {
+            // function declarations of the body are bound first (`hoist_functions`), then the statements run
+            for s in stmts {
+                if let a::Stmt::Decl(a::Decl::Fn(f)) = s {
+                    if g.is_scoped(&f.ident.sym) {
+                        scoped_vars.push(intern(&f.ident.sym));
+                    } else {
+                        g.declare_fn(&f.ident.sym, true);
+                    }
+                }
+            }
+            let mut list = stmt::fn_decls(&mut g, stmts)?;
+            list.extend(stmt::body(&mut g, stmts)?);
+            (list, None)
+        }
         Body::Expr(e) => (Vec::new(), Some(expr::compile(&mut g, e)?)),
     };
     debug_assert_eq!(

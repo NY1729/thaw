@@ -24,11 +24,22 @@ pub(crate) enum Mode {
     Param,
 }
 
-fn target(g: &mut Gen, name: &str, mode: Mode) -> CG<Bind> {
+pub(crate) fn target(g: &mut Gen, name: &str, mode: Mode) -> CG<Bind> {
     match mode {
         Mode::Let | Mode::Const => {
             if g.is_scoped(name) {
-                return reject();
+                // a captured `let`/`const` at the top of the body: declared in the call's scope, as the
+                // interpreter does when the declaration runs
+                if !g.at_fn_top() {
+                    return reject();
+                }
+                let name: Rc<str> = name.into();
+                let mutable = mode == Mode::Let;
+                return Ok(Box::new(move |it, f, v| {
+                    let n = it.intern(&name);
+                    f.scope.declare_rc(n, v, mutable);
+                    Ok(())
+                }));
             }
             let k = g.declare_block(name, mode == Mode::Let);
             Ok(Box::new(move |_, f, v| {

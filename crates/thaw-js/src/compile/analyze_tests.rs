@@ -178,7 +178,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
     // closures: captured names are Scoped, others Slot
     (
         "function f() { var g = () => x; let x = 1; return g }",
-        Some(R::InnerFunction),
+        None,
         "g:slot x:scoped",
     ),
     // inner functions compile
@@ -242,65 +242,53 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
     ("function f() { return new.target }", Some(R::NewTarget), ""),
     (
         "function f() { function g() { return arguments } return g }",
-        Some(R::InnerFunction),
+        None,
         "g:slot",
     ),
     // parameter forms
-    (
-        "function f(a = 1) { return a }",
-        Some(R::DefaultParam),
-        "a:slot",
-    ),
-    (
-        "function f(...r) { return r }",
-        Some(R::RestParam),
-        "r:slot",
-    ),
-    (
-        "function f({ a }) { return a }",
-        Some(R::Destructuring),
-        "a:slot",
-    ),
+    ("function f(a = 1) { return a }", None, "a:slot"),
+    ("function f(...r) { return r }", None, "r:slot"),
+    ("function f({ a }) { return a }", None, "a:slot"),
     (
         "function f(a, [b, c]) { return a + b + c }",
-        Some(R::Destructuring),
+        None,
         "a:slot b:slot c:slot",
     ),
     (
         "function f(a = 1, b = a) { return b }",
-        Some(R::DefaultParam),
+        None,
         "a:slot b:slot",
     ),
     // destructuring declarations
     (
         "function f(o) { var { x } = o; return x }",
-        Some(R::Destructuring),
+        None,
         "o:slot x:slot",
     ),
     (
         "function f(o) { let [p, q] = o; return p }",
-        Some(R::Destructuring),
+        None,
         "o:slot p:slot q:slot",
     ),
     // statements and expressions that wait for later PRs
     (
         "function f(o) { for (const k in o) { } }",
-        Some(R::ForIn),
+        None,
         "k:slot o:slot",
     ),
     (
         "function f(o) { for (const x of o) { } }",
-        Some(R::ForOf),
+        None,
         "o:slot x:slot",
     ),
     (
         "function f(o) { for (var k in o) { } return k }",
-        Some(R::ForIn),
+        None,
         "k:slot o:slot",
     ),
     (
         "function f(o) { try { return o } catch (e) { return e } }",
-        Some(R::Try),
+        None,
         "e:slot o:slot",
     ),
     // throw compiles
@@ -316,7 +304,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::Labels),
         "",
     ),
-    ("function f(a) { return [...a] }", Some(R::Spread), "a:slot"),
+    ("function f(a) { return [...a] }", None, "a:slot"),
     (
         "function f(a) { return a?.b }",
         Some(R::OptionalChain),
@@ -329,11 +317,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
     ),
     // in/instanceof and regex literals compile
     ("function f() { return /ab/g }", None, ""),
-    (
-        "function f() { return { m() { return 1 } } }",
-        Some(R::ObjectMethod),
-        "",
-    ),
+    ("function f() { return { m() { return 1 } } }", None, ""),
     (
         "function f(o) { return delete o.x }",
         Some(R::Delete),

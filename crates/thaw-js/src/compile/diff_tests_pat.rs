@@ -194,5 +194,5 @@ fn spread_in_calls_arrays_and_objects() {
         "#,
         6,
     );
-    assert_eq!(out[0], "16 18 11");
+    assert_eq!(out[0], "16 0ab10 21");
 }

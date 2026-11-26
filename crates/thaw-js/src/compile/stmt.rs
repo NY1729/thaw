@@ -11,7 +11,7 @@ use super::gen::{self, reject, Gen, CG};
 use super::num::{self, Bl};
 use super::pat;
 use super::{bx, Ex, Flow, Frame, St, CR};
-use crate::{Ctl, Interp};
+use crate::{Ctl, Interp, Value};
 
 fn mk_st<F>(f: F) -> St
 where
@@ -59,6 +59,8 @@ pub(crate) fn compile(g: &mut Gen, s: &a::Stmt) -> CG<St> {
             }))
         }
         a::Stmt::Empty(_) => Ok(mk_st(|_, _| Ok(Flow::Next))),
+        // hoisted: bound by the prologue (`fn_decls`); the analyzer refuses every other position
+        a::Stmt::Decl(a::Decl::Fn(_)) => Ok(mk_st(|_, _| Ok(Flow::Next))),
         a::Stmt::Block(b) => block(g, &b.stmts),
         a::Stmt::Return(r) => {
             let x = match &r.arg {
@@ -86,6 +88,9 @@ pub(crate) fn compile(g: &mut Gen, s: &a::Stmt) -> CG<St> {
         a::Stmt::Break(b) => jump(g, b.label.is_some(), Flow::Break(0)),
         a::Stmt::Continue(c) => jump(g, c.label.is_some(), Flow::Continue(0)),
         a::Stmt::Switch(sw) => switch_stmt(g, sw),
+        a::Stmt::Try(t) => try_stmt(g, t),
+        a::Stmt::ForOf(fs) if !fs.is_await => for_each(g, &fs.left, &fs.right, &fs.body, true),
+        a::Stmt::ForIn(fs) => for_each(g, &fs.left, &fs.right, &fs.body, false),
         _ => reject(),
     }
 }
@@ -338,9 +343,208 @@ fn var_decl(g: &mut Gen, v: &a::VarDecl) -> CG<St> {
                 None => gen::undefined(),
             };
             // declared after the initialiser: `let x = x` reads the outer binding
+            if g.is_scoped(name) {
+                let mode = if mutable {
+                    pat::Mode::Let
+                } else {
+                    pat::Mode::Const
+                };
+                let bind = pat::target(g, name, mode)?;
+                steps.push(mk_st(move |it, f| {
+                    let v = init(it, f)?;
+                    bind(it, f, v)?;
+                    Ok(Flow::Next)
+                }));
+                continue;
+            }
             let k = g.declare_block(name, mutable);
             steps.push(store(k, init));
         }
     }
     Ok(seq(steps))
+}
+
+/// `try`/`catch`/`finally`, as the interpreter's `Stmt::Try` arm: the block, then the handler for a thrown value
+/// (a `node:vm` timeout is not catchable), then the finalizer, whose own abrupt completion replaces the result.
+fn try_stmt(g: &mut Gen, t: &a::TryStmt) -> CG<St> {
+    let blk = block(g, &t.block.stmts)?;
+    let handler = match &t.handler {
+        Some(h) => Some(catch_clause(g, h)?),
+        None => None,
+    };
+    let fin = match &t.finalizer {
+        Some(b) => Some(block(g, &b.stmts)?),
+        None => None,
+    };
+    Ok(mk_st(move |it, f| {
+        let mut result = blk(it, f);
+        if let (Err(e), Some(h), false) = (&result, &handler, it.dl_hit) {
+            if matches!(**e, Ctl::Throw(_)) {
+                let Err(e) = std::mem::replace(&mut result, Ok(Flow::Next)) else {
+                    unreachable!()
+                };
+                let Ctl::Throw(v) = *e else { unreachable!() };
+                result = h(it, f, v);
+            }
+        }
+        if let Some(fin) = &fin {
+            match fin(it, f)? {
+                Flow::Next => {}
+                other => return Ok(other),
+            }
+        }
+        result
+    }))
+}
+
+type Handler = Box<dyn Fn(&mut Interp, &mut Frame, Value) -> CR<Flow>>;
+
+/// `catch (p) { body }`: the parameter and the body's names share one block scope.
+fn catch_clause(g: &mut Gen, h: &a::CatchClause) -> CG<Handler> {
+    g.push();
+    let r = (|| {
+        let bind = match &h.param {
+            Some(p) => Some(pat::compile(g, p, pat::Mode::Let)?),
+            None => None,
+        };
+        let body = seq(body(g, &h.body.stmts)?);
+        Ok(Box::new(move |it: &mut Interp, f: &mut Frame, v: Value| {
+            if let Some(b) = &bind {
+                b(it, f, v)?;
+            }
+            body(it, f)
+        }) as Handler)
+    })();
+    g.pop();
+    r
+}
+
+/// `for (head of right) body` / `for (head in right) body`. The head's `let`/`const` live in a scope of their
+/// own that starts after `right`; the interpreter's per-iteration scope is unobservable (captures are refused).
+fn for_each(g: &mut Gen, head: &a::ForHead, right: &a::Expr, body: &a::Stmt, of: bool) -> CG<St> {
+    let right = expr::compile(g, right)?;
+    g.push();
+    let r = (|| {
+        let bind: pat::Bind = match head {
+            a::ForHead::VarDecl(v) => match v.decls.as_slice() {
+                [d] if d.init.is_none() => {
+                    let mode = match v.kind {
+                        a::VarDeclKind::Var => pat::Mode::Var,
+                        a::VarDeclKind::Const => pat::Mode::Const,
+                        _ => pat::Mode::Let,
+                    };
+                    pat::compile(g, &d.name, mode)?
+                }
+                _ => return reject(),
+            },
+            // `for (x of ...)`: an assignment to an existing name
+            a::ForHead::Pat(p) => match &**p {
+                a::Pat::Ident(id) => {
+                    let place = expr::Place::of(g, &id.id);
+                    Box::new(move |it, f, v| place.write(it, f, v))
+                }
+                _ => return reject(),
+            },
+            _ => return reject(),
+        };
+        let body = loop_body(g, body)?;
+        Ok(if of {
+            for_of_loop(right, bind, body)
+        } else {
+            for_in_loop(right, bind, body)
+        })
+    })();
+    g.pop();
+    r
+}
+
+fn for_in_loop(right: Ex, bind: pat::Bind, body: St) -> St {
+    mk_st(move |it, f| {
+        let target = right(it, f)?;
+        let keys = it.for_in_keys(&target);
+        for key in keys {
+            bx(it.check_deadline())?;
+            bind(it, f, Value::Str(key.into()))?;
+            if let Some(out) = after_body(body(it, f)?) {
+                return Ok(out);
+            }
+        }
+        Ok(Flow::Next)
+    })
+}
+
+fn for_of_loop(right: Ex, bind: pat::Bind, body: St) -> St {
+    mk_st(move |it, f| {
+        let iterable = right(it, f)?;
+        // arrays, strings and the built-in collections: a snapshot of the values, nothing to close
+        if let Some(items) = it.iter_items(&iterable) {
+            for item in items {
+                bx(it.check_deadline())?;
+                bind(it, f, item)?;
+                if let Some(out) = after_body(body(it, f)?) {
+                    return Ok(out);
+                }
+            }
+            return Ok(Flow::Next);
+        }
+        // a user-defined iterable or a generator: pulled one value at a time, closed on early exit
+        let Some((iterator, next)) = bx(it.get_iterator(&iterable))? else {
+            return bx(it.throw_error("TypeError", "value is not iterable"));
+        };
+        loop {
+            bx(it.check_deadline())?;
+            let result = bx(it.call(&next, &iterator, &[]))?;
+            if !matches!(result, Value::Object(_)) {
+                return bx(it.throw_error("TypeError", "Iterator result is not an object"));
+            }
+            if bx(it.get(&result, "done"))?.truthy() {
+                return Ok(Flow::Next);
+            }
+            let item = bx(it.get(&result, "value"))?;
+            let outcome = match bind(it, f, item) {
+                Ok(()) => body(it, f).map(after_body),
+                Err(e) => Err(e),
+            };
+            match outcome {
+                Ok(None) => {}
+                Ok(Some(out)) => {
+                    it.close_iterator(&iterator);
+                    return Ok(out);
+                }
+                Err(e) => {
+                    it.close_iterator(&iterator);
+                    return Err(e);
+                }
+            }
+        }
+    })
+}
+
+/// The function declarations at the top of a function body, as `hoist_functions` binds them before any statement
+/// runs: a closure over the call's scope, stored in the name's slot (or its scoped binding).
+pub(crate) fn fn_decls(g: &mut Gen, stmts: &[a::Stmt]) -> CG<Vec<St>> {
+    let mut out = Vec::new();
+    for s in stmts {
+        let a::Stmt::Decl(a::Decl::Fn(f)) = s else {
+            continue;
+        };
+        let name: Rc<str> = Rc::from(f.ident.sym.as_ref());
+        let func = Rc::new(f.function.clone());
+        let slot = match g.var_local(&name) {
+            Some(l) => Some(l.slot),
+            None if g.is_scoped(&name) => None,
+            None => return reject(),
+        };
+        out.push(mk_st(move |it, fr| {
+            it.cstats.closures_created += 1;
+            let interned = it.intern(&name);
+            let v = bx(it.function_value(Some(interned), &func, &fr.scope))?;
+            match slot {
+                Some(k) => fr.slots[k as usize] = v,
+                None => bx(it.assign_var(&fr.scope, &name, v, false))?,
+            }
+            Ok(Flow::Next)
+        }));
+    }
+    Ok(out)
 }

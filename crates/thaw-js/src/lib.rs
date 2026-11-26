@@ -5122,6 +5122,23 @@ impl Interp {
         Ok(())
     }
 
+    /// The names a `for-in` visits: own enumerable keys, then inherited enumerable ones (shadowed names once).
+    pub(crate) fn for_in_keys(&mut self, target: &Value) -> Vec<Rc<str>> {
+        let mut keys = self.own_keys(target);
+        if let Value::Object(o) = target {
+            let mut cur = o.proto.borrow().clone();
+            while let Some(c) = cur {
+                for p in c.raw_props.borrow().iter().filter(|p| p.enumerable) {
+                    if !keys.contains(&p.key) {
+                        keys.push(p.key.clone());
+                    }
+                }
+                cur = c.proto.borrow().clone();
+            }
+        }
+        keys
+    }
+
     /// `let`/`const` pattern: the names are declared, and the `const` ones are then frozen.
     fn bind_lexical_pattern(
         &mut self,
@@ -5336,19 +5353,7 @@ impl Interp {
             }
             a::Stmt::ForIn(f) => {
                 let target = self.eval(&f.right, scope)?;
-                // own enumerable keys, then inherited enumerable ones (shadowed names once)
-                let mut keys = self.own_keys(&target);
-                if let Value::Object(o) = &target {
-                    let mut cur = o.proto.borrow().clone();
-                    while let Some(c) = cur {
-                        for p in c.raw_props.borrow().iter().filter(|p| p.enumerable) {
-                            if !keys.contains(&p.key) {
-                                keys.push(p.key.clone());
-                            }
-                        }
-                        cur = c.proto.borrow().clone();
-                    }
-                }
+                let keys = self.for_in_keys(&target);
                 for key in keys {
                     self.check_deadline()?;
                     let iter = Scope::new(Some(scope.clone()));
