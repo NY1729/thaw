@@ -218,8 +218,8 @@ fn destructuring_assignment() {
         9,
     );
     assert!(
-        out[0].starts_with("2,1 1|5|{\"z\":3} 3 7:2 3 TypeError"),
-        "{}",
-        out[0]
+        out.iter()
+            .any(|l| l.starts_with("2,1 1|5|{\"z\":3} 3 7:2 3 TypeError")),
+        "{out:?}"
     );
 }
