@@ -8338,7 +8338,10 @@ fn is_thaw_internal_wrapper(value: &Value) -> bool {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[unsafe(naked)]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value, cut: *const c_char) -> f64 {
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(
+    value: *mut Value,
+    cut: *const c_char,
+) -> f64 {
     // Hands the compiled caller's frame pointer and return address to the implementation.
     core::arch::naked_asm!(
         "mov rdx, rbp",
@@ -8352,7 +8355,10 @@ pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value, cut: *
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 #[unsafe(naked)]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value, cut: *const c_char) -> f64 {
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(
+    value: *mut Value,
+    cut: *const c_char,
+) -> f64 {
     core::arch::naked_asm!(
         "mov x2, x29",
         "mov x3, x30",
@@ -8367,7 +8373,10 @@ pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value, cut: *
     any(target_arch = "x86_64", target_arch = "aarch64")
 )))]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value, cut: *const c_char) -> f64 {
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(
+    value: *mut Value,
+    cut: *const c_char,
+) -> f64 {
     unsafe { thaw_json_capture_stack_trace_at(value, cut, 0, 0) }
 }
 
