@@ -1,9 +1,10 @@
 name: test262
 
-# Non-gating test262 conformance ratchet for thaw-js-node (tools/test262). Runs on demand, or on a pull request
+# Gating (on labelled PRs) test262 conformance ratchet for thaw-js-node (tools/test262). Runs on demand, or on a pull request
 # that carries the `thaw-js-measure` label. Each shard runs a slice of test262 (tools/test262/shards.json), then
 # compares against the committed baseline (tools/test262/baseline.json + failing.txt.gz): a test that passes in the
-# baseline and fails now is a regression. continue-on-error: read the job summary; nothing here is a required check.
+# baseline and fails now is a regression and fails the shard; the `ratchet` job aggregates them (make it a required
+# check). The workflow only runs on PRs carrying `thaw-js-measure` (or on dispatch).
 
 on:
   pull_request:
@@ -52,7 +53,6 @@ jobs:
   shard:
     name: test262 ${{ matrix.shard }}
     needs: build
-    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
@@ -81,12 +81,20 @@ jobs:
           export THAW_JS_NODE="$RUNNER_TEMP/bin/thaw-js-node"
           rc=0
           python3 -I tools/test262/compare.py "$RUNNER_TEMP/results.jsonl" > "$RUNNER_TEMP/ratchet.md" || rc=$?
-          { echo "### shard ${{ matrix.shard }}: ratchet exit $rc (non-gating)"; cat "$RUNNER_TEMP/ratchet.md"; } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$rc" != 0 ]; then echo "::warning title=test262 ratchet::shard ${{ matrix.shard }} has regressions vs the baseline (non-gating, see the job summary)"; fi
-          exit 0
+          { echo "### shard ${{ matrix.shard }}: ratchet exit $rc"; cat "$RUNNER_TEMP/ratchet.md"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" != 0 ]; then echo "::error title=test262 ratchet::shard ${{ matrix.shard }} has regressions vs the baseline (see the job summary)"; fi
+          exit "$rc"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test262-results-${{ matrix.shard }}
           path: ${{ runner.temp }}/results.jsonl
           if-no-files-found: ignore
+
+  ratchet:
+    name: test262 ratchet
+    needs: shard
+    if: always() && (github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure'))
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.shard.result }}" = success
