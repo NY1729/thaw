@@ -64,7 +64,7 @@ fn write_object_cached(
             .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
             .map(|base| base.join("thaw/objects")),
     };
-    let key = dir.as_ref().and_then(|_| {
+    let key = dir.as_ref().map(|_| {
         let mut hasher = Sha256::new();
         hasher.update(compiler.print_to_string());
         for name in ["THAW_CODEGEN_MIDEND", "THAW_CODEGEN_OPT", "THAW_KEEP_SYMBOLS"] {
@@ -80,7 +80,7 @@ fn write_object_cached(
         ));
         hasher.update(inkwell::targets::TargetMachine::get_host_cpu_name().to_bytes());
         hasher.update(inkwell::targets::TargetMachine::get_host_cpu_features().to_bytes());
-        Some(format!("{:x}.o", hasher.finalize()))
+        format!("{:x}.o", hasher.finalize())
     });
     if let (Some(dir), Some(key)) = (&dir, &key) {
         if std::fs::copy(dir.join(key), obj_path).is_ok() {
