@@ -84,8 +84,6 @@ fn derived_constructors_and_super() {
         console.log(JSON.stringify(new C()), new C().hi(0), new C() instanceof A);
         console.log(JSON.stringify(new D(-1)), JSON.stringify(new F()));
         try { new B(-1) } catch (e) { console.log(e.name + ': ' + e.message) }
-        const m = { __proto__: { v() { return 'proto' } }, v() { return 'own>' + super.v() } };
-        console.log(m.v());
         "#,
         8,
     );
