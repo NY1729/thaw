@@ -169,6 +169,7 @@ struct Walk {
     /// Names each nested function being walked binds for its whole body (see `shadow_names`): a reference to one
     /// is its own, not a capture of this function's name.
     shadow: Vec<BTreeSet<String>>,
+    uses_super: bool,
 }
 
 impl Walk {
@@ -191,6 +192,7 @@ impl Walk {
             args_ok: false,
             args_used: false,
             shadow: Vec::new(),
+            uses_super: false,
         }
     }
 
@@ -586,7 +588,9 @@ impl Visit for Walk {
     }
 
     fn visit_super(&mut self, _: &a::Super) {
-        self.block(FallbackReason::Super);
+        // resolved through the call's scope (`%home`, `%class`, the `this` binding): it needs one
+        self.uses_super = true;
+        self.impure = true;
     }
 
     fn visit_import(&mut self, _: &a::Import) {
@@ -865,11 +869,6 @@ impl Visit for Walk {
 pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     let mut w = Walk::new();
     w.args_ok = def.uses_arguments && !def.arrow;
-    // a base-class constructor runs like a function (the caller allocates `this` and runs the fields); a derived
-    // one binds `this` at `super()`
-    if def.class.as_ref().is_some_and(|c| c.derived) {
-        w.block(FallbackReason::ClassConstructor);
-    }
     if def.is_gen {
         w.block(FallbackReason::Generator);
     }
@@ -939,6 +938,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         impure,
         inner_fns,
         args_used,
+        uses_super,
         ..
     } = w;
     let class_of = |name: &str| {
@@ -1011,7 +1011,8 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         && (names.iter().any(|n| n.class == NameClass::Scoped)
             || def.strict
             || (def.uses_this && !def.arrow))
-        || args_used;
+        || args_used
+        || (uses_super && !def.arrow);
     FnPlan {
         names,
         free: free.into_iter().collect(),

@@ -18,6 +18,8 @@ use crate::{Interp, Kind, Value, R};
 /// The callee of a call: a plain expression (`this` undefined), or a property of an object (`this` the object).
 enum Target {
     Plain(Ex),
+    /// `super.m(...)`: the method read through `super`, called with the current `this`.
+    Super(Ex),
     Method(Ex, PropKey),
 }
 
@@ -78,12 +80,14 @@ fn spread_into(it: &mut Interp, v: Value, out: &mut Vec<Value>) -> CR<()> {
 /// `f(args)` and `o.m(args)` / `o[k](args)`. `(o.m)(args)` is a plain call here too (`this` undefined), as in
 /// `Interp::eval`, whose `Member` shape test looks at the callee node itself, not through parentheses.
 pub(crate) fn call(g: &mut Gen, c: &a::CallExpr) -> CG<Ex> {
-    let a::Callee::Expr(callee) = &c.callee else {
-        return reject();
+    let callee = match &c.callee {
+        a::Callee::Expr(callee) => callee,
+        a::Callee::Super(_) => return super_call(g, c),
+        _ => return reject(),
     };
     let text: Rc<str> = Rc::from(crate::expr_text(callee));
     let target = match &**callee {
-        a::Expr::SuperProp(_) => return reject(),
+        a::Expr::SuperProp(_) => Target::Super(expr::compile(g, callee)?),
         a::Expr::Member(m) => {
             let obj = expr::compile(g, &m.obj)?;
             let key = member::prop_key(g, &m.prop)?;
@@ -95,6 +99,7 @@ pub(crate) fn call(g: &mut Gen, c: &a::CallExpr) -> CG<Ex> {
     Ok(mk_ex(move |it, f| {
         let (fv, this) = match &target {
             Target::Plain(e) => (e(it, f)?, Value::Undefined),
+            Target::Super(e) => (e(it, f)?, it.this_of(&f.scope)),
             Target::Method(obj, key) => {
                 let o = obj(it, f)?;
                 let k = member::callee_key(it, f, key)?;
@@ -107,6 +112,17 @@ pub(crate) fn call(g: &mut Gen, c: &a::CallExpr) -> CG<Ex> {
         } else {
             bx(it.throw_error("TypeError", &format!("{text} is not a function")))
         };
+        give_arg_buf(it, argv);
+        r
+    }))
+}
+
+/// `super(args)` in a derived constructor: the interpreter's `super_call` against the call's scope.
+fn super_call(g: &mut Gen, c: &a::CallExpr) -> CG<Ex> {
+    let args = args_of(g, &c.args)?;
+    Ok(mk_ex(move |it, f| {
+        let argv = eval_args(it, f, &args)?;
+        let r = bx(it.super_call(&argv, &f.scope));
         give_arg_buf(it, argv);
         r
     }))

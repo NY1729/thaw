@@ -981,10 +981,7 @@ impl Interp {
             CState::Cold(_) => {}
         }
         // a constructor call runs compiled unless the body reads `new.target` (the analyzer blocks that anyway);
-        // a derived constructor binds `this` at `super()`: it stays on the AST
-        if (new_target.is_some() && def.uses_new_target)
-            || def.class.as_ref().is_some_and(|c| c.derived)
-        {
+        if new_target.is_some() && def.uses_new_target {
             return None;
         }
         let CState::Compiled(c) = &*st else {
