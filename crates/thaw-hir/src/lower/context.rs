@@ -78,6 +78,9 @@ struct FnLowerer<'a> {
     /// Set while a thaw-js function argument is coerced: only arrays stay live views there, so a
     /// Map/Set/Date/RegExp/class argument keeps its previous by-value wire.
     alias_arrays_only: bool,
+    /// Set while a throw publishes its value: an Error-family record keeps its live pointer-keyed
+    /// projection there instead of becoming the tagged Error text an `any` slot gets.
+    keep_error_record_live: bool,
     /// Set only while a live owner argument (`thaw_js_live_owner_argument`) projects a class:
     /// its live view exposes the decorator token as `constructor`.
     live_owner_constructor_token: bool,

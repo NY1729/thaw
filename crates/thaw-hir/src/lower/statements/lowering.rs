@@ -282,8 +282,11 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(name.clone(), value_type.clone());
         let original = HirExpr::Var(name.clone());
-        let setters = self.rejection_provenance_statements(original.clone(), &value_type)?;
-        let display = self.rejection_display_without_user_coercion(original.clone(), &value_type)?;
+        let outer = std::mem::replace(&mut self.keep_error_record_live, true);
+        let setters = self.rejection_provenance_statements(original.clone(), &value_type);
+        let display = self.rejection_display_without_user_coercion(original.clone(), &value_type);
+        self.keep_error_record_live = outer;
+        let (setters, display) = (setters?, display?);
         let mut statements = vec![
             HirStmt::Let(name, value_type.clone(), value),
         ];

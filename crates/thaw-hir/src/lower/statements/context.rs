@@ -97,6 +97,7 @@ impl<'a> FnLowerer<'a> {
             index_read_bindings: HashSet::new(),
             alias_native_arrays: false,
             alias_arrays_only: false,
+            keep_error_record_live: false,
             live_owner_constructor_token: false,
             projecting_class_methods: Vec::new(),
             dynamic_callback_parameter: None,

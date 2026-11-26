@@ -4845,6 +4845,17 @@ impl<'a> FnLowerer<'a> {
                         )?;
                         let original_is_jsvalue = self.infer_expr_type(&value)? == HirType::JsValue;
                         let actual = self.infer_expr_type(&value)?;
+                        // An Error-family record handed to an `any` slot becomes its native tagged Error
+                        // before the call: compiling that conversion inside the argument list would run
+                        // under the dynamic-argument marshaling mode and project the record instead.
+                        if *declared == HirType::Json && object_type_is_error_family(&actual) {
+                            let json = self.coerce_to_declared(&HirType::Json, value)?;
+                            let slot = format!("__thaw_error_arg_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(slot.clone(), HirType::Json);
+                            argument_bindings.push((slot.clone(), HirType::Json, json));
+                            return Ok(HirExpr::Var(slot));
+                        }
                         let jit_structural_class_object = direct_jit_typed_call
                             && class_name_from_type(&actual).is_some()
                             && matches!(declared, HirType::Object(_))
