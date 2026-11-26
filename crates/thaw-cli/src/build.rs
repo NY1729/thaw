@@ -1926,10 +1926,11 @@ fn lld_is_preferred_only_for_dynamic_builds_when_installed() {
 /// package with a JavaScript bundle, which constructs would keep the thaw-js evaluator from running it.
 /// Package names loaded through `loadThawJs("<name>", ...)` in the generated shim.
 fn thaw_js_routed_packages(shim_source: &str) -> Vec<String> {
-    let mut names = shim_source
-        .match_indices("loadThawJs(\"")
-        .filter_map(|(index, marker)| {
-            let rest = &shim_source[index + marker.len()..];
+    let mut names = ["loadThawJs(\"", "declareThawJs(\""]
+        .into_iter()
+        .flat_map(|needle| shim_source.match_indices(needle).map(move |(i, m)| (i, m.len())))
+        .filter_map(|(index, len)| {
+            let rest = &shim_source[index + len..];
             rest.find('"').map(|end| rest[..end].to_string())
         })
         .collect::<Vec<_>>();
