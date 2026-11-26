@@ -22,6 +22,8 @@ pub(crate) enum Mode {
     Const,
     Var,
     Param,
+    /// `[a, b] = ...` / `({ a } = ...)`: assignments to existing names.
+    Assign,
 }
 
 pub(crate) fn target(g: &mut Gen, name: &str, mode: Mode) -> CG<Bind> {
@@ -65,7 +67,14 @@ pub(crate) fn target(g: &mut Gen, name: &str, mode: Mode) -> CG<Bind> {
             }
             None => reject(),
         },
+        Mode::Assign => reject(),
     }
+}
+
+/// An assignment to a name that already exists: a slot, or a free name through the scope.
+fn assign_target(g: &Gen, id: &a::Ident) -> CG<Bind> {
+    let place = expr::Place::of(g, id);
+    Ok(Box::new(move |it, f, v| place.write(it, f, v)))
 }
 
 /// `default` applied when the value is `undefined`, then `inner`.
@@ -87,6 +96,12 @@ enum Key {
 
 pub(crate) fn compile(g: &mut Gen, p: &a::Pat, mode: Mode) -> CG<Bind> {
     match p {
+        a::Pat::Ident(b) if mode == Mode::Assign => assign_target(g, &b.id),
+        // the interpreter stores through the expression: only a plain name is compiled
+        a::Pat::Expr(e) if mode == Mode::Assign => match &**e {
+            a::Expr::Ident(id) => assign_target(g, id),
+            _ => reject(),
+        },
         a::Pat::Ident(b) => target(g, &b.id.sym, mode),
         a::Pat::Assign(d) => {
             let default = expr::compile(g, &d.right)?;
@@ -169,7 +184,12 @@ fn object(g: &mut Gen, op: &a::ObjectPat, mode: Mode) -> CG<Bind> {
                     Some(d) => Some(expr::named(d, &k, expr::compile(g, d)?)),
                     None => None,
                 };
-                Prop::Get(Key::Name(k.clone()), default, target(g, &k, mode)?)
+                let bind = if mode == Mode::Assign {
+                    assign_target(g, &ap.key.id)?
+                } else {
+                    target(g, &k, mode)?
+                };
+                Prop::Get(Key::Name(k.clone()), default, bind)
             }
             a::ObjectPatProp::Rest(r) => {
                 has_rest = true;

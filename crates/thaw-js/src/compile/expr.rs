@@ -299,6 +299,20 @@ pub(crate) fn combine(it: &mut Interp, op: a::BinaryOp, l: &Value, r: &Value) ->
 fn assign(g: &mut Gen, asg: &a::AssignExpr) -> CG<Ex> {
     use a::AssignOp as A;
     let id = match &asg.left {
+        a::AssignTarget::Pat(p) if matches!(asg.op, a::AssignOp::Assign) => {
+            let pat = match p {
+                a::AssignTargetPat::Array(ap) => a::Pat::Array(ap.clone()),
+                a::AssignTargetPat::Object(op) => a::Pat::Object(op.clone()),
+                _ => return reject(),
+            };
+            let rhs = compile(g, &asg.right)?;
+            let bind = super::pat::compile(g, &pat, super::pat::Mode::Assign)?;
+            return Ok(mk_ex(move |it, f| {
+                let v = rhs(it, f)?;
+                bind(it, f, v.clone())?;
+                Ok(v)
+            }));
+        }
         a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(id)) => &id.id,
         a::AssignTarget::Simple(a::SimpleAssignTarget::Member(m)) => {
             return member::assign(g, m, asg)

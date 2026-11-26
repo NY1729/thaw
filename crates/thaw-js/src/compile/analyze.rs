@@ -650,7 +650,8 @@ impl Visit for Walk {
 
     fn visit_assign_expr(&mut self, n: &a::AssignExpr) {
         match &n.left {
-            a::AssignTarget::Pat(_) => self.block(FallbackReason::Destructuring),
+            // iterators and getters run user code
+            a::AssignTarget::Pat(_) => self.impure = true,
             a::AssignTarget::Simple(a::SimpleAssignTarget::Ident(b))
                 if self.fn_depth == 0 && !self.is_resolved(&b.id.sym) =>
             {
