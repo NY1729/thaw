@@ -102,6 +102,8 @@ pub(crate) fn compile(g: &mut Gen, e: &a::Expr) -> CG<Ex> {
         a::Expr::Update(u) => update(g, &u.arg, matches!(u.op, a::UpdateOp::PlusPlus), u.prefix),
         a::Expr::Assign(asg) => assign(g, asg),
         a::Expr::Member(m) => member::read(g, m),
+        a::Expr::SuperProp(sp) => member::super_prop(g, sp),
+        a::Expr::OptChain(oc) => super::optchain::compile(g, oc),
         a::Expr::Call(c) => call::call(g, c),
         a::Expr::New(n) => call::new_expr(g, n),
         a::Expr::Array(arr) => member::array(g, arr),

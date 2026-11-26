@@ -7831,7 +7831,7 @@ unsafe extern "C" {
     fn thaw_error_delete_prop(error: *const c_char, key: *const c_char) -> bool;
     fn thaw_error_entries_json(error: *const c_char) -> *const c_char;
     fn thaw_error_is_instance(message: *const c_char, class_name: *const c_char) -> bool;
-    fn thaw_error_stack_frames(frame: usize, ra: usize) -> *const c_char;
+    fn thaw_error_stack_frames(frame: usize, ra: usize, cut: *const c_char) -> *const c_char;
     fn thaw_error_frames(error: *const c_char) -> *const c_char;
     fn thaw_error_cause(message: *const c_char) -> *const c_char;
     fn thaw_error_code(message: *const c_char) -> *const c_char;
@@ -8338,11 +8338,14 @@ fn is_thaw_internal_wrapper(value: &Value) -> bool {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[unsafe(naked)]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(
+    value: *mut Value,
+    cut: *const c_char,
+) -> f64 {
     // Hands the compiled caller's frame pointer and return address to the implementation.
     core::arch::naked_asm!(
-        "mov rsi, rbp",
-        "mov rdx, [rsp]",
+        "mov rdx, rbp",
+        "mov rcx, [rsp]",
         "jmp {inner}",
         inner = sym thaw_json_capture_stack_trace_at,
     )
@@ -8352,10 +8355,13 @@ pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 #[unsafe(naked)]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(
+    value: *mut Value,
+    cut: *const c_char,
+) -> f64 {
     core::arch::naked_asm!(
-        "mov x1, x29",
-        "mov x2, x30",
+        "mov x2, x29",
+        "mov x3, x30",
         "b {inner}",
         inner = sym thaw_json_capture_stack_trace_at,
     )
@@ -8367,12 +8373,16 @@ pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64
     any(target_arch = "x86_64", target_arch = "aarch64")
 )))]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_json_capture_stack_trace(value: *mut Value) -> f64 {
-    unsafe { thaw_json_capture_stack_trace_at(value, 0, 0) }
+pub unsafe extern "C" fn thaw_json_capture_stack_trace(
+    value: *mut Value,
+    cut: *const c_char,
+) -> f64 {
+    unsafe { thaw_json_capture_stack_trace_at(value, cut, 0, 0) }
 }
 
 unsafe extern "C" fn thaw_json_capture_stack_trace_at(
     value: *mut Value,
+    cut: *const c_char,
     frame: usize,
     ra: usize,
 ) -> f64 {
@@ -8392,7 +8402,7 @@ unsafe extern "C" fn thaw_json_capture_stack_trace_at(
         (_, true) => name,
         _ => format!("{name}: {message}"),
     };
-    let frames = unsafe { thaw_error_stack_frames(frame, ra) };
+    let frames = unsafe { thaw_error_stack_frames(frame, ra, cut) };
     let frames = if frames.is_null() {
         String::new()
     } else {

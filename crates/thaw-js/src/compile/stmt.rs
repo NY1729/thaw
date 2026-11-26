@@ -476,9 +476,9 @@ fn for_in_loop(right: Ex, bind: pat::Bind, body: St) -> St {
 fn for_of_loop(right: Ex, bind: pat::Bind, body: St) -> St {
     mk_st(move |it, f| {
         let iterable = right(it, f)?;
-        // arrays, strings and the built-in collections: a snapshot of the values, nothing to close
-        if let Some(items) = it.iter_items(&iterable) {
-            for item in items {
+        // arrays, strings and the built-in collections (live for Array/Set/Map), nothing to close
+        if let Some(mut items) = it.iter_items_live(&iterable) {
+            while let Some(item) = items.next(it) {
                 bx(it.check_deadline())?;
                 bind(it, f, item)?;
                 if let Some(out) = after_body(body(it, f)?) {

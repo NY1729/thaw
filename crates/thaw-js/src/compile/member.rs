@@ -362,3 +362,16 @@ fn prop_key_value(it: &mut Interp, f: &mut Frame, k: &PropKey) -> CR<Rc<str>> {
         }
     })
 }
+
+/// `super.x` / `super[k]`: the home object's prototype, then the key, then the read with the current `this`.
+pub(crate) fn super_prop(g: &mut Gen, sp: &a::SuperPropExpr) -> CG<Ex> {
+    let key = match &sp.prop {
+        a::SuperProp::Ident(i) => PropKey::Name(Rc::from(i.sym.as_ref())),
+        a::SuperProp::Computed(c) => PropKey::Computed(expr::compile(g, &c.expr)?),
+    };
+    Ok(mk_ex(move |it, f| {
+        let base = bx(it.super_base(&f.scope))?;
+        let k = prop_key_value(it, f, &key)?;
+        bx(it.super_read(&base, &k, &f.scope))
+    }))
+}

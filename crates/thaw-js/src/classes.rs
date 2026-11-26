@@ -339,7 +339,7 @@ impl Interp {
                 *t.kind.borrow_mut() = std::mem::replace(&mut *n.kind.borrow_mut(), Kind::Plain);
                 *t.proto.borrow_mut() = proto;
                 *t.raw_props.borrow_mut() = std::mem::take(&mut *n.raw_props.borrow_mut());
-                *t.index.borrow_mut() = n.index.borrow_mut().take();
+                *t.raw_props.index.borrow_mut() = n.raw_props.index.borrow_mut().take();
                 t.ext.set(n.ext.get());
                 t.frozen.set(n.frozen.get());
                 t.len_ro.set(n.len_ro.get());
@@ -432,6 +432,19 @@ impl Interp {
                 Ok(h.proto.borrow().clone().map_or(Value::Null, Value::Object))
             }
             _ => self.throw_error("SyntaxError", "'super' keyword unexpected here"),
+        }
+    }
+
+    /// `super[key]` once the base and the key are known: accessors on the base run with the current `this`.
+    pub(crate) fn super_read(&mut self, base: &Value, key: &str, scope: &Rc<Scope>) -> R<Value> {
+        let this = self.this_of(scope);
+        match base {
+            Value::Object(o) => match find_in_chain(o, key) {
+                Some(Slot::Data(v)) => Ok(v),
+                Some(Slot::Accessor { get: Some(g), .. }) => self.call(&g, &this, &[]),
+                _ => Ok(Value::Undefined),
+            },
+            _ => Ok(Value::Undefined),
         }
     }
 

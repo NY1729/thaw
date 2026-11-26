@@ -29,6 +29,86 @@ fn build_on_thaw_js(input: &Path, output: &Path, registry_dir: &Path) -> Result<
 }
 
 thread_local! {
+    static PHASE_MARK: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// `THAW_TIMINGS=1`: print the wall-clock ms since the previous mark (the first mark starts the clock).
+fn phase_mark(name: &str) {
+    if std::env::var_os("THAW_TIMINGS").is_none() {
+        return;
+    }
+    let now = std::time::Instant::now();
+    if let Some(prev) = PHASE_MARK.with(|m| m.replace(Some(now))) {
+        eprintln!(
+            "thaw-timing {name}: {} ms",
+            now.duration_since(prev).as_millis()
+        );
+    }
+}
+
+/// Content-addressed object cache: LLVM's `default<O2>` + codegen is the dominant build cost and is a pure
+/// function of the module text, the pipeline selection and the compiler binary, so an identical module
+/// (a rebuild with nothing relevant changed) reuses the stored object. `THAW_BUILD_CACHE=0` disables it,
+/// `THAW_BUILD_CACHE=<dir>` relocates it (default `$XDG_CACHE_HOME|~/.cache` + `/thaw/objects`).
+fn write_object_cached(
+    compiler: &HirCompiler,
+    obj_path: &Path,
+    lib_mode: bool,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let dir = match std::env::var_os("THAW_BUILD_CACHE") {
+        Some(value) if value == "0" => None,
+        Some(value) => Some(PathBuf::from(value)),
+        None => std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
+            .map(|base| base.join("thaw/objects")),
+    };
+    let key = dir.as_ref().and_then(|_| {
+        // The thaw binary identity stands in for the HIR/LLVM compiler version.
+        let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
+        let mtime = exe
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        let mut hasher = Sha256::new();
+        hasher.update(compiler.print_to_string());
+        for name in ["THAW_CODEGEN_MIDEND", "THAW_CODEGEN_OPT", "THAW_KEEP_SYMBOLS"] {
+            hasher.update(std::env::var(name).unwrap_or_default());
+            hasher.update([0u8]);
+        }
+        hasher.update(format!(
+            "{:?}|{}|{}|{lib_mode}",
+            codegen_opt_level().ok(),
+            exe.len(),
+            mtime.as_nanos()
+        ));
+        hasher.update(inkwell::targets::TargetMachine::get_host_cpu_name().to_bytes());
+        hasher.update(inkwell::targets::TargetMachine::get_host_cpu_features().to_bytes());
+        Some(format!("{:x}.o", hasher.finalize()))
+    });
+    if let (Some(dir), Some(key)) = (&dir, &key) {
+        if std::fs::copy(dir.join(key), obj_path).is_ok() {
+            phase_mark("object-cache-hit");
+            return Ok(());
+        }
+    }
+    compiler.write_object_file(obj_path)?;
+    if let (Some(dir), Some(key)) = (&dir, &key) {
+        // Best effort: a failed store only costs the next build its reuse. Rename keeps readers whole.
+        let tmp = dir.join(format!("{key}.{}.tmp", std::process::id()));
+        if std::fs::create_dir_all(dir).is_ok()
+            && std::fs::copy(obj_path, &tmp).is_ok()
+            && std::fs::rename(&tmp, dir.join(key)).is_err()
+        {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    Ok(())
+}
+
+thread_local! {
     /// Backend optimisation level forced for builds on this thread (`thaw build --fast-compile`,
     /// node-compat cases). `None` defers to `THAW_CODEGEN_OPT`.
     static CODEGEN_OPT_OVERRIDE: std::cell::Cell<Option<inkwell::OptimizationLevel>> =
@@ -686,6 +766,7 @@ fn build_with_native_mode_routed(
             }
         }
     }
+    phase_mark("start");
     let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
     let scratch = BuildScratch::new(output)?;
@@ -1066,7 +1147,9 @@ fn build_with_native_mode_routed(
         input.extension().and_then(|extension| extension.to_str()),
         Some("js" | "mjs" | "cjs")
     ));
+    phase_mark("registry+parse+bundle");
     let mut program = thaw_hir::lower_module(&module)?;
+    phase_mark("hir-lower");
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         let param_count = program
             .extern_functions
@@ -1108,6 +1191,7 @@ fn build_with_native_mode_routed(
         compiler.set_library_mode(lib.exports.clone());
     }
     compiler.compile_program(&program)?;
+    phase_mark("llvm-ir");
     if compiler.native_timers_conflict() {
         return Err(NATIVE_TIMERS_NEED_ENGINE.to_string());
     }
@@ -1164,7 +1248,8 @@ fn build_with_native_mode_routed(
     }
 
     let obj_path = scratch.path.join("input.o");
-    compiler.write_object_file(&obj_path)?;
+    write_object_cached(&compiler, &obj_path, lib_mode.is_some())?;
+    phase_mark("llvm-passes+codegen");
     if let Some(lib) = lib_mode {
         return link_library(&obj_path, output, lib);
     }
@@ -1335,6 +1420,7 @@ fn build_with_native_mode_routed(
     if std::env::var_os("THAW_KEEP_SYMBOLS").is_none() {
         linker.arg("-Wl,--strip-all");
     }
+    phase_mark("runtime-archives");
     let link_output = linker
         .arg("-o")
         .arg(scratch.path.join("program"))
@@ -1351,6 +1437,7 @@ fn build_with_native_mode_routed(
         return Err(format!("linking failed:\n{stderr}{hint}"));
     }
 
+    phase_mark("link");
     let linked = scratch.path.join("program");
     let linked_bytes = std::fs::read(&linked).map_err(|error| {
         format!(

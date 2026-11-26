@@ -1665,10 +1665,11 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::F64);
                     }
                     "__thaw_json_capture_stack_trace" => {
-                        let [target] = args.as_slice() else {
-                            return Err(format!("{name} expects one operand"));
+                        let [target, cut] = args.as_slice() else {
+                            return Err(format!("{name} expects two operands"));
                         };
                         self.expect_type(&HirType::Json, target, "stack trace target")?;
+                        self.expect_type(&HirType::Str, cut, "stack trace cut")?;
                         return Ok(HirType::F64);
                     }
                     "__thaw_error_frame" => {

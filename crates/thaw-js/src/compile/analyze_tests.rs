@@ -305,11 +305,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         "",
     ),
     ("function f(a) { return [...a] }", None, "a:slot"),
-    (
-        "function f(a) { return a?.b }",
-        Some(R::OptionalChain),
-        "a:slot",
-    ),
+    ("function f(a) { return a?.b }", None, "a:slot"),
     (
         "function f(a) { return a`x` }",
         Some(R::TaggedTemplate),
@@ -376,11 +372,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::FunctionCtor),
         "| free: Function",
     ),
-    (
-        "var f = ({ m() { return super.toString() } }).m",
-        Some(R::Super),
-        "",
-    ),
+    ("var f = ({ m() { return super.toString() } }).m", None, ""),
     (
         "var f = (class { #x = 1; m() { return this.#x } }).prototype.m",
         Some(R::PrivateName),

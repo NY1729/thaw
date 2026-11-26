@@ -166,6 +166,10 @@ struct Walk {
     /// `arguments` references may be compiled: a non-arrow function the interpreter gives an `arguments` binding.
     args_ok: bool,
     args_used: bool,
+    /// Names each nested function being walked binds for its whole body (see `shadow_names`): a reference to one
+    /// is its own, not a capture of this function's name.
+    shadow: Vec<BTreeSet<String>>,
+    uses_super: bool,
 }
 
 impl Walk {
@@ -187,6 +191,8 @@ impl Walk {
             self_name: None,
             args_ok: false,
             args_used: false,
+            shadow: Vec::new(),
+            uses_super: false,
         }
     }
 
@@ -245,7 +251,7 @@ impl Walk {
 
     /// A name bound inside a nested function (for the capture set).
     fn bound(&mut self, name: &str) {
-        if self.fn_depth > 0 {
+        if self.fn_depth > 0 && !self.shadow.iter().any(|s| s.contains(name)) {
             self.captured.insert(name.to_string());
         }
     }
@@ -464,7 +470,9 @@ impl Visit for Walk {
             }
         }
         if self.fn_depth > 0 {
-            self.captured.insert(name.to_string());
+            if !self.shadow.iter().any(|s| s.contains(name)) {
+                self.captured.insert(name.to_string());
+            }
             return;
         }
         match self.resolve(name) {
@@ -514,12 +522,17 @@ impl Visit for Walk {
         self.impure = true;
         self.fn_depth += 1;
         self.nonarrow_depth += 1;
+        self.shadow.push(shadow_names(
+            &f.params.iter().map(|p| &p.pat).collect::<Vec<_>>(),
+            f.body.as_ref().map(|b| b.stmts.as_slice()),
+        ));
         for p in &f.params {
             p.visit_with(self);
         }
         if let Some(b) = &f.body {
             self.body_stmts(&b.stmts);
         }
+        self.shadow.pop();
         self.fn_depth -= 1;
         self.nonarrow_depth -= 1;
     }
@@ -533,6 +546,12 @@ impl Visit for Walk {
         }
         self.impure = true;
         self.fn_depth += 1;
+        let body = match &*n.body {
+            a::ArrowFunctionBody::FunctionBody(b) => Some(b.stmts.as_slice()),
+            a::ArrowFunctionBody::Expr(_) => None,
+        };
+        self.shadow
+            .push(shadow_names(&n.params.iter().collect::<Vec<_>>(), body));
         for p in &n.params {
             p.visit_with(self);
         }
@@ -540,6 +559,7 @@ impl Visit for Walk {
             a::ArrowFunctionBody::FunctionBody(b) => self.body_stmts(&b.stmts),
             a::ArrowFunctionBody::Expr(e) => e.visit_with(self),
         }
+        self.shadow.pop();
         self.fn_depth -= 1;
     }
 
@@ -569,7 +589,9 @@ impl Visit for Walk {
     }
 
     fn visit_super(&mut self, _: &a::Super) {
-        self.block(FallbackReason::Super);
+        // resolved through the call's scope (`%home`, `%class`, the `this` binding): it needs one
+        self.uses_super = true;
+        self.impure = true;
     }
 
     fn visit_import(&mut self, _: &a::Import) {
@@ -725,7 +747,8 @@ impl Visit for Walk {
     }
 
     fn visit_opt_chain_expr(&mut self, n: &a::OptChainExpr) {
-        self.block(FallbackReason::OptionalChain);
+        // property reads and calls run getters and user code
+        self.impure = true;
         n.visit_children_with(self);
     }
 
@@ -848,11 +871,6 @@ impl Visit for Walk {
 pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     let mut w = Walk::new();
     w.args_ok = def.uses_arguments && !def.arrow;
-    // a base-class constructor runs like a function (the caller allocates `this` and runs the fields); a derived
-    // one binds `this` at `super()`
-    if def.class.as_ref().is_some_and(|c| c.derived) {
-        w.block(FallbackReason::ClassConstructor);
-    }
     if def.is_gen {
         w.block(FallbackReason::Generator);
     }
@@ -922,6 +940,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         impure,
         inner_fns,
         args_used,
+        uses_super,
         ..
     } = w;
     let class_of = |name: &str| {
@@ -994,7 +1013,8 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
         && (names.iter().any(|n| n.class == NameClass::Scoped)
             || def.strict
             || (def.uses_this && !def.arrow))
-        || args_used;
+        || args_used
+        || (uses_super && !def.arrow);
     FnPlan {
         names,
         free: free.into_iter().collect(),
@@ -1100,4 +1120,49 @@ fn pattern_param_ok(def: &FuncDef, i: usize) -> bool {
         later.extend(vars.0);
     }
     !later.iter().any(|n| used.0.contains(n))
+}
+
+/// `var` names of a body, not crossing function boundaries (function declarations are not included).
+struct VarOnly(Vec<String>);
+
+impl Visit for VarOnly {
+    fn visit_function(&mut self, _: &a::Function) {}
+    fn visit_arrow_expr(&mut self, _: &a::ArrowExpr) {}
+    fn visit_class(&mut self, _: &a::Class) {}
+    fn visit_var_decl(&mut self, n: &a::VarDecl) {
+        if matches!(n.kind, a::VarDeclKind::Var) {
+            for d in &n.decls {
+                pat_names(&d.name, &mut self.0);
+            }
+        }
+        n.visit_children_with(self);
+    }
+}
+
+/// Names a nested function binds in a scope that covers its whole body: its parameters, and (when the parameters
+/// are plain names, so there is no separate scope for default expressions) its `var`s, top-level function
+/// declarations and top-level `let`/`const`/`class`. A block-level name is left out: it covers only its block.
+fn shadow_names(params: &[&a::Pat], body: Option<&[a::Stmt]>) -> BTreeSet<String> {
+    let mut names = Vec::new();
+    for p in params {
+        pat_names(p, &mut names);
+    }
+    if let (true, Some(stmts)) = (params.iter().all(|p| matches!(p, a::Pat::Ident(_))), body) {
+        let mut vars = VarOnly(Vec::new());
+        for s in stmts {
+            s.visit_with(&mut vars);
+            match s {
+                a::Stmt::Decl(a::Decl::Fn(f)) => names.push(f.ident.sym.to_string()),
+                a::Stmt::Decl(a::Decl::Class(c)) => names.push(c.ident.sym.to_string()),
+                a::Stmt::Decl(a::Decl::Var(v)) if !matches!(v.kind, a::VarDeclKind::Var) => {
+                    for d in &v.decls {
+                        pat_names(&d.name, &mut names);
+                    }
+                }
+                _ => {}
+            }
+        }
+        names.extend(vars.0);
+    }
+    names.into_iter().collect()
 }

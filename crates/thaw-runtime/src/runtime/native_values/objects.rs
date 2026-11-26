@@ -29,16 +29,103 @@ thread_local! {
     // the compiled object stores only that field's Boolean value. Keep the
     // marker beside the allocation so an extracted method can validate the
     // actual receiver after function values flow through aliases/containers.
-    static OBJECT_CLASS_IDENTITIES: RefCell<HashMap<usize, ObjectClassMetadata>> = RefCell::new(HashMap::new());
+    static OBJECT_CLASS_IDENTITIES: RefCell<PtrMap<ObjectClassMetadata>> = RefCell::new(PtrMap::default());
 }
 
 #[derive(Default)]
 struct ObjectClassMetadata {
-    ancestry: Option<String>,
-    hidden_markers: std::collections::HashSet<String>,
+    ancestry: Option<std::rc::Rc<str>>,
+    hidden_markers: MarkerSet,
     // None keeps the static field-order fallback for ordinary fixed objects.
     // A copied object's physical slots can precede their actual creation.
-    own_key_order: Option<Vec<String>>,
+    #[allow(clippy::box_collection)]
+    own_key_order: Option<Box<Vec<String>>>,
+}
+
+/// Hidden compiler marker names of one object. Every instance of a class holds the same one-marker
+/// set, so the set is a shared refcounted slice (copy-on-write) rather than a per-object allocation.
+#[derive(Clone, Default)]
+struct MarkerSet(Option<std::rc::Rc<Vec<std::rc::Rc<str>>>>);
+
+impl MarkerSet {
+    fn contains(&self, marker: &str) -> bool {
+        self.0.as_ref().is_some_and(|known| known.iter().any(|known| &**known == marker))
+    }
+    fn insert(&mut self, marker: std::rc::Rc<str>) {
+        if self.contains(&marker) {
+            return;
+        }
+        match &mut self.0 {
+            Some(known) => std::rc::Rc::make_mut(known).push(marker),
+            None => self.0 = Some(single_marker_set(marker)),
+        }
+    }
+    fn remove(&mut self, marker: &str) -> bool {
+        if !self.contains(marker) {
+            return false;
+        }
+        if let Some(known) = &mut self.0 {
+            std::rc::Rc::make_mut(known).retain(|known| &**known != marker);
+        }
+        true
+    }
+    fn extend(&mut self, markers: MarkerSet) {
+        for marker in markers.0.iter().flat_map(|known| known.iter()) {
+            self.insert(marker.clone());
+        }
+    }
+}
+
+type MarkerSetCache = HashMap<std::rc::Rc<str>, std::rc::Rc<Vec<std::rc::Rc<str>>>>;
+
+thread_local! {
+    static SINGLE_MARKER_SETS: RefCell<MarkerSetCache> =
+        RefCell::new(HashMap::new());
+}
+
+/// The shared `{marker}` set of a class (one allocation per distinct marker).
+fn single_marker_set(marker: std::rc::Rc<str>) -> std::rc::Rc<Vec<std::rc::Rc<str>>> {
+    SINGLE_MARKER_SETS.with(|sets| {
+        sets.borrow_mut().entry(marker.clone()).or_insert_with(|| std::rc::Rc::new(vec![marker])).clone()
+    })
+}
+
+/// Pointer-keyed hasher: object addresses are already well spread, SipHash is the cost.
+#[derive(Default)]
+struct PtrHasher(u64);
+
+impl std::hash::Hasher for PtrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    fn write_usize(&mut self, value: usize) {
+        self.0 = (value as u64 >> 3).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type PtrMap<V> = HashMap<usize, V, std::hash::BuildHasherDefault<PtrHasher>>;
+
+thread_local! {
+    static INTERNED: RefCell<std::collections::HashSet<std::rc::Rc<str>>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// One shared allocation per distinct marker/ancestry text.
+fn intern(text: &str) -> std::rc::Rc<str> {
+    INTERNED.with(|set| {
+        let mut set = set.borrow_mut();
+        if let Some(known) = set.get(text) {
+            return known.clone();
+        }
+        let known: std::rc::Rc<str> = text.into();
+        set.insert(known.clone());
+        known
+    })
 }
 
 const NON_EXTENSIBLE: u8 = 1;
@@ -60,10 +147,18 @@ fn object_can_set_property_flags(object: *const u8, property: &str, requested: u
         || (current & PROPERTY_WRITABLE == 0 && requested & PROPERTY_WRITABLE != 0))
 }
 
+/// True while no descriptor flag or integrity state was ever recorded, i.e. every field has the
+/// default flags. Plain field writes ask this on every store, so it must stay two `is_empty` probes.
+fn object_flag_tables_empty() -> bool {
+    OBJECT_PROPERTY_FLAGS.with(|stored| stored.borrow().is_empty())
+        && OBJECT_STATES.with(|states| states.borrow().is_empty())
+}
+
 /// Effective descriptor flags for one physically present native data field.
 /// A zero result is a valid fully restricted property; callers establish
 /// existence from the allocation's trusted field layout before querying.
 fn object_property_flags(object: *const u8, property: &str) -> u8 {
+    if object_flag_tables_empty() { return PROPERTY_DEFAULT; }
     let mut flags = OBJECT_PROPERTY_FLAGS.with(|stored| stored.borrow()
         .get(&(object as usize)).and_then(|fields| fields.get(property)).copied()
         .unwrap_or(PROPERTY_DEFAULT));
@@ -79,6 +174,7 @@ fn object_property_flags(object: *const u8, property: &str) -> u8 {
 /// `property` points to a live native string; `object` is an opaque identity.
 pub unsafe extern "C" fn thaw_object_property_flags(object: *const u8, property: *const c_char) -> u8 {
     if object.is_null() || property.is_null() { return 0; }
+    if object_flag_tables_empty() { return PROPERTY_DEFAULT; }
     let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else { return 0; };
     object_property_flags(object, property)
 }
@@ -147,8 +243,8 @@ pub unsafe extern "C" fn thaw_object_set_class_identity(
     OBJECT_CLASS_IDENTITIES.with(|stored| {
         let mut stored = stored.borrow_mut();
         let metadata = stored.entry(object as usize).or_default();
-        metadata.ancestry = Some(identities.to_owned());
-        metadata.hidden_markers.insert(marker.to_owned());
+        metadata.ancestry = Some(intern(identities));
+        metadata.hidden_markers.insert(intern(marker));
         if let Some(order) = metadata.own_key_order.as_mut() {
             order.retain(|name| name != marker);
         }
@@ -240,7 +336,7 @@ pub unsafe extern "C" fn thaw_object_hide_marker(
     OBJECT_CLASS_IDENTITIES.with(|stored| {
         let mut stored = stored.borrow_mut();
         let metadata = stored.entry(object as usize).or_default();
-        metadata.hidden_markers.insert(marker.to_owned());
+        metadata.hidden_markers.insert(intern(marker));
         if let Some(order) = metadata.own_key_order.as_mut() {
             order.retain(|name| name != marker);
         }
@@ -288,7 +384,7 @@ pub extern "C" fn thaw_object_order_begin(object: *const u8) -> bool {
     }
     thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_CLASS_IDENTITIES.with(|stored| {
-        stored.borrow_mut().entry(object as usize).or_default().own_key_order = Some(Vec::new());
+        stored.borrow_mut().entry(object as usize).or_default().own_key_order = Some(Box::default());
     });
     true
 }
@@ -470,6 +566,10 @@ pub unsafe extern "C" fn thaw_object_accessor(
     setter: bool,
 ) -> *mut u8 {
     if object.is_null() || property.is_null() {
+        return std::ptr::null_mut();
+    }
+    // Every native field read/write asks; most programs never register an accessor.
+    if OBJECT_ACCESSORS.with(|accessors| accessors.borrow().is_empty()) {
         return std::ptr::null_mut();
     }
     let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else {
