@@ -393,8 +393,18 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    /// The unused payload of an absent optional/nullish value. An object payload is never read while
+    /// the tag says absent, so it is a null pointer rather than a freshly allocated zeroed object
+    /// (48 B of arena per `null` stored into a `C | null` slot).
+    fn compile_none_payload(&mut self, payload: &HirType) -> Result<BasicValueEnum<'ctx>, String> {
+        match payload {
+            HirType::Object(_) => Ok(self.basic_type(payload)?.const_zero()),
+            _ => self.compile_zero_value(payload),
+        }
+    }
+
     fn compile_optional_none(&mut self, payload: &HirType) -> Result<BasicValueEnum<'ctx>, String> {
-        let value = self.compile_zero_value(payload)?;
+        let value = self.compile_none_payload(payload)?;
         self.build_optional_value(value, payload, false)
     }
 
@@ -465,11 +475,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(allocation.into())
             }
             HirType::Optional(payload) | HirType::Nullable(payload) => {
-                let value = self.compile_zero_value(payload)?;
+                let value = self.compile_none_payload(payload)?;
                 self.build_optional_value(value, payload, false)
             }
             HirType::Nullish(payload) => {
-                let value = self.compile_zero_value(payload)?;
+                let value = self.compile_none_payload(payload)?;
                 self.build_nullish_value(value, payload, 2)
             }
             other => Ok(self.basic_type(other)?.const_zero()),
@@ -511,7 +521,7 @@ impl<'ctx> HirCompiler<'ctx> {
         payload: &HirType,
         tag: u64,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let value = self.compile_zero_value(payload)?;
+        let value = self.compile_none_payload(payload)?;
         self.build_nullish_value(value, payload, tag)
     }
 
