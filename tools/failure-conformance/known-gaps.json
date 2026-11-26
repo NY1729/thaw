@@ -2,55 +2,7 @@
  "note": "expected non-MATCH cases; may only shrink. Regenerate: run.sh --write-baseline after a fix.",
  "gaps": [
   {
-   "id": "uncaught.error",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.typeerror",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.rangeerror",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.subclass",
-   "kind": "DIFF"
-  },
-  {
    "id": "uncaught.subclass-code",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.string",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.number",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.bool",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.bigint",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.object",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.array",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.null",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.undefined",
    "kind": "DIFF"
   },
   {
@@ -62,18 +14,6 @@
    "kind": "DIFF"
   },
   {
-   "id": "uncaught.cause",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.cause-string",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.cause-chain",
-   "kind": "DIFF"
-  },
-  {
    "id": "uncaught.aggregate",
    "kind": "DIFF"
   },
@@ -82,43 +22,11 @@
    "kind": "DIFF"
   },
   {
-   "id": "uncaught.empty-message",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.multiline-message",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.extra-props",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.name-changed",
-   "kind": "DIFF"
-  },
-  {
    "id": "uncaught.stdout-before",
    "kind": "DIFF"
   },
   {
-   "id": "uncaught.in-function",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.rethrow-finally",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.throw-in-catch",
-   "kind": "DIFF"
-  },
-  {
    "id": "uncaught.error-nostack",
-   "kind": "DIFF"
-  },
-  {
-   "id": "uncaught.error-customstack",
    "kind": "DIFF"
   },
   {
@@ -130,67 +38,7 @@
    "kind": "DIFF"
   },
   {
-   "id": "uncaught.date",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.queuemicrotask",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.then",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.async-fn",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.async-await",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.reject-error",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.reject-subclass",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.reject-string",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.reject-number",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.reject-undefined",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.reject-null",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.reject-object",
-   "kind": "DIFF"
-  },
-  {
    "id": "async.reject-symbol",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.promise-all",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.late-catch",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.event-handler-throw",
    "kind": "DIFF"
   },
   {
@@ -207,10 +55,6 @@
   },
   {
    "id": "async.emitter-error-object",
-   "kind": "DIFF"
-  },
-  {
-   "id": "async.eventtarget-listener",
    "kind": "DIFF"
   },
   {
@@ -350,18 +194,6 @@
    "kind": "RUN-FAIL"
   },
   {
-   "id": "inspect.error-cause",
-   "kind": "DIFF"
-  },
-  {
-   "id": "inspect.error-cause-string",
-   "kind": "DIFF"
-  },
-  {
-   "id": "inspect.error-cause-chain",
-   "kind": "DIFF"
-  },
-  {
    "id": "inspect.error-percent-s",
    "kind": "DIFF"
   },
@@ -394,10 +226,6 @@
    "kind": "DIFF"
   },
   {
-   "id": "inspect.inspect-error-depth0",
-   "kind": "DIFF"
-  },
-  {
    "id": "inspect.inspect-error-colors",
    "kind": "DIFF"
   },
@@ -407,10 +235,6 @@
   },
   {
    "id": "inspect.inspect-error-cause-depth",
-   "kind": "DIFF"
-  },
-  {
-   "id": "inspect.format-error",
    "kind": "DIFF"
   },
   {

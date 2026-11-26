@@ -64,7 +64,10 @@ fn metadata_suffix(message: &str) -> &str {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[unsafe(naked)]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn thaw_error_frame(
+    name: *const c_char,
+    message: *const c_char,
+) -> *const c_char {
     core::arch::naked_asm!(
         "mov rdx, rbp",
         "mov rcx, [rsp]",
@@ -79,7 +82,10 @@ pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 #[unsafe(naked)]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn thaw_error_frame(
+    name: *const c_char,
+    message: *const c_char,
+) -> *const c_char {
     core::arch::naked_asm!(
         "mov x2, x29",
         "mov x3, x30",
@@ -91,9 +97,15 @@ pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c
 /// See the x86-64 variant; without a known frame layout no stack is captured.
 /// # Safety
 /// Both pointers must reference live native strings.
-#[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 #[no_mangle]
-pub unsafe extern "C" fn thaw_error_frame(name: *const c_char, message: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn thaw_error_frame(
+    name: *const c_char,
+    message: *const c_char,
+) -> *const c_char {
     unsafe { thaw_error_frame_at(name, message, 0, 0) }
 }
 
@@ -103,7 +115,9 @@ unsafe extern "C" fn thaw_error_frame_at(
     frame: usize,
     ra: usize,
 ) -> *const c_char {
-    if name.is_null() || message.is_null() { return std::ptr::null(); }
+    if name.is_null() || message.is_null() {
+        return std::ptr::null();
+    }
     let name = unsafe { wtf8_bytes(name) };
     let message = unsafe { wtf8_bytes(message) };
     let error = thaw_arena::error_wire::encode_tagged(name, message, None)
@@ -150,13 +164,20 @@ pub unsafe extern "C" fn thaw_error_frame_own(value: *const c_char) -> *const c_
 /// See the x86-64 variant; without a known frame layout no stack is captured.
 /// # Safety
 /// `value` must reference a live native string.
-#[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_frame_own(value: *const c_char) -> *const c_char {
     unsafe { thaw_error_frame_own_at(value, 0, 0) }
 }
 
-unsafe extern "C" fn thaw_error_frame_own_at(value: *const c_char, frame: usize, ra: usize) -> *const c_char {
+unsafe extern "C" fn thaw_error_frame_own_at(
+    value: *const c_char,
+    frame: usize,
+    ra: usize,
+) -> *const c_char {
     if value.is_null() || thaw_arena::contains_allocation(value as usize) {
         return value;
     }
@@ -172,7 +193,6 @@ unsafe extern "C" fn thaw_error_frame_own_at(value: *const c_char, frame: usize,
         value
     }
 }
-
 
 /// Drops a `SuppressedError`'s trailing `.error`/`.suppressed` sub-tags
 /// (and anything after them) so `.message`/`.cause`/`.code`/`.name` read
@@ -201,26 +221,31 @@ fn split_error_tag_bytes(message: &[u8]) -> (&[u8], &[u8]) {
         // Untagged rejections may still have trailing identity/property tags.
         let body = split_once_error_marker(message, ERROR_PROPS_MARKER as u8)
             .map_or(message, |value| value.0);
-        let body = split_once_error_marker(body, ERROR_TAG_MARKER as u8)
-            .map_or(body, |value| value.0);
+        let body =
+            split_once_error_marker(body, ERROR_TAG_MARKER as u8).map_or(body, |value| value.0);
         return (b"Error", body);
     };
-    let (name, body) = split_once_error_marker(rest, ERROR_TAG_MARKER as u8)
-        .unwrap_or((b"Error", message));
-    let body = split_once_error_marker(body, ERROR_PROPS_MARKER as u8)
-        .map_or(body, |value| value.0);
+    let (name, body) =
+        split_once_error_marker(rest, ERROR_TAG_MARKER as u8).unwrap_or((b"Error", message));
+    let body =
+        split_once_error_marker(body, ERROR_PROPS_MARKER as u8).map_or(body, |value| value.0);
     let body = split_once_error_marker(body, ERROR_NAME_OVERRIDE_MARKER as u8)
         .map_or(body, |value| value.0);
-    let body = split_once_error_marker(body, ERROR_CAUSE_MARKER as u8)
-        .map_or(body, |value| value.0);
-    (name, split_once_error_marker(body, ERROR_CODE_MARKER as u8)
-        .map_or(body, |value| value.0))
+    let body =
+        split_once_error_marker(body, ERROR_CAUSE_MARKER as u8).map_or(body, |value| value.0);
+    (
+        name,
+        split_once_error_marker(body, ERROR_CODE_MARKER as u8).map_or(body, |value| value.0),
+    )
 }
 
 fn split_error_tag(message: &str) -> (&str, &str) {
     let (name, body) = split_error_tag_bytes(message.as_bytes());
     // ASCII markers cannot split a UTF-8 code point in a valid `str`.
-    (std::str::from_utf8(name).unwrap(), std::str::from_utf8(body).unwrap())
+    (
+        std::str::from_utf8(name).unwrap(),
+        std::str::from_utf8(body).unwrap(),
+    )
 }
 
 // Native class errors carry a versioned ancestry chain. Legacy tagged
@@ -239,9 +264,17 @@ fn error_ancestry(chain: &str) -> std::str::Split<'_, char> {
 fn split_error_name_override(message: &str) -> Option<&str> {
     let message = strip_suppressed_segments(metadata_suffix(message));
     let (_, after) = message.split_once(ERROR_NAME_OVERRIDE_MARKER)?;
-    let after = after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0);
-    let after = after.split_once(ERROR_CAUSE_MARKER).map_or(after, |value| value.0);
-    Some(after.split_once(ERROR_CODE_MARKER).map_or(after, |value| value.0))
+    let after = after
+        .split_once(ERROR_PROPS_MARKER)
+        .map_or(after, |value| value.0);
+    let after = after
+        .split_once(ERROR_CAUSE_MARKER)
+        .map_or(after, |value| value.0);
+    Some(
+        after
+            .split_once(ERROR_CODE_MARKER)
+            .map_or(after, |value| value.0),
+    )
 }
 
 /// The reported `.name` -- the runtime override when present, otherwise
@@ -258,20 +291,31 @@ fn resolved_error_name(message: &str) -> String {
 fn split_error_cause(message: &str) -> Option<&str> {
     let message = strip_suppressed_segments(metadata_suffix(message));
     let after = message.split_once(ERROR_CAUSE_MARKER)?.1;
-    let after = after.split_once(ERROR_CODE_MARKER).map_or(after, |value| value.0);
-    Some(after.split_once(ERROR_PROPS_MARKER).map_or(after, |value| value.0))
+    let after = after
+        .split_once(ERROR_CODE_MARKER)
+        .map_or(after, |value| value.0);
+    Some(
+        after
+            .split_once(ERROR_PROPS_MARKER)
+            .map_or(after, |value| value.0),
+    )
 }
 
 fn split_error_code(message: &str) -> Option<&str> {
     let message = strip_suppressed_segments(metadata_suffix(message));
-    message
-        .split_once(ERROR_CODE_MARKER)
-        .map(|value| value.1.split_once(ERROR_PROPS_MARKER).map_or(value.1, |props| props.0))
+    message.split_once(ERROR_CODE_MARKER).map(|value| {
+        value
+            .1
+            .split_once(ERROR_PROPS_MARKER)
+            .map_or(value.1, |props| props.0)
+    })
 }
 
 /// A `SuppressedError`'s `.error` sub-error tag, or `None`.
 fn split_suppressed_error(message: &str) -> Option<&str> {
-    let after = metadata_suffix(message).split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    let after = metadata_suffix(message)
+        .split_once(ERROR_SUPPRESSED_ERROR_MARKER)?
+        .1;
     if let Some((error, _)) = split_length_prefixed(after) {
         return Some(error);
     }
@@ -287,7 +331,9 @@ fn split_suppressed_error(message: &str) -> Option<&str> {
 
 /// A `SuppressedError`'s `.suppressed` sub-error tag, or `None`.
 fn split_suppressed(message: &str) -> Option<&str> {
-    let after_error = metadata_suffix(message).split_once(ERROR_SUPPRESSED_ERROR_MARKER)?.1;
+    let after_error = metadata_suffix(message)
+        .split_once(ERROR_SUPPRESSED_ERROR_MARKER)?
+        .1;
     if let Some((_, suppressed)) = split_length_prefixed(after_error) {
         return Some(suppressed);
     }
@@ -321,9 +367,11 @@ pub unsafe extern "C" fn thaw_error_suppress(
     let error = unsafe { CStr::from_ptr(error) }.to_string_lossy();
     let suppressed = unsafe { CStr::from_ptr(suppressed) }.to_string_lossy();
     let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    let Some(mut tagged) = thaw_arena::error_wire::encode_tagged(
-        b"SuppressedError", message.as_bytes(), None,
-    ) else { return std::ptr::null(); };
+    let Some(mut tagged) =
+        thaw_arena::error_wire::encode_tagged(b"SuppressedError", message.as_bytes(), None)
+    else {
+        return std::ptr::null();
+    };
     tagged.push(ERROR_SUPPRESSED_ERROR_MARKER as u8);
     tagged.extend_from_slice(format!("{}:{error}{suppressed}", error.len()).as_bytes());
     arena_wtf8(&tagged).map_or(std::ptr::null(), |value| value.cast())
@@ -341,9 +389,13 @@ fn error_property(message: &str, name: &str) -> Option<String> {
     let bag = metadata_suffix(message).split_once(ERROR_PROPS_MARKER)?.1;
     let value: serde_json::Value = serde_json::from_str(bag).ok()?;
     let object = value.as_object()?;
-    let value = object
-        .get(name)
-        .or_else(|| if name == "cause" { object.get(HIDDEN_CAUSE_KEY) } else { None })?;
+    let value = object.get(name).or_else(|| {
+        if name == "cause" {
+            object.get(HIDDEN_CAUSE_KEY)
+        } else {
+            None
+        }
+    })?;
     Some(match value {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Null => return None,
@@ -355,9 +407,13 @@ fn error_property_json(message: &str, name: &str) -> Option<String> {
     let bag = metadata_suffix(message).split_once(ERROR_PROPS_MARKER)?.1;
     let value: serde_json::Value = serde_json::from_str(bag).ok()?;
     let object = value.as_object()?;
-    let value = object
-        .get(name)
-        .or_else(|| if name == "cause" { object.get(HIDDEN_CAUSE_KEY) } else { None })?;
+    let value = object.get(name).or_else(|| {
+        if name == "cause" {
+            object.get(HIDDEN_CAUSE_KEY)
+        } else {
+            None
+        }
+    })?;
     serde_json::to_string(value).ok()
 }
 
@@ -376,10 +432,9 @@ pub unsafe extern "C" fn thaw_error_property(
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
-    if let Some(json) = with_extras(message, |extras| {
-        extras.lookup(&name)
-    }) {
-        return arena_c_string(&json_text_as_plain(&json)).map_or(std::ptr::null(), |value| value.cast());
+    if let Some(json) = with_extras(message, |extras| extras.lookup(&name)) {
+        return arena_c_string(&json_text_as_plain(&json))
+            .map_or(std::ptr::null(), |value| value.cast());
     }
     match error_property(&text, &name) {
         Some(value) => arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast()),
@@ -402,9 +457,7 @@ pub unsafe extern "C" fn thaw_error_property_json(
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
-    if let Some(json) = with_extras(message, |extras| {
-        extras.lookup(&name)
-    }) {
+    if let Some(json) = with_extras(message, |extras| extras.lookup(&name)) {
         return arena_c_string(&json).map_or(std::ptr::null(), |value| value.cast());
     }
     match error_property_json(&text, &name) {
@@ -460,7 +513,10 @@ pub unsafe extern "C" fn thaw_error_message(message: *const c_char) -> *const c_
     if let Some(text) = with_extras(message, |extras| extras.message.clone()) {
         return arena_wtf8(text.as_bytes()).map_or(std::ptr::null(), |value| value.cast());
     }
-    if with_extras(message, |extras| Some(extras.deleted.iter().any(|key| key == "message"))) == Some(true) {
+    if with_extras(message, |extras| {
+        Some(extras.deleted.iter().any(|key| key == "message"))
+    }) == Some(true)
+    {
         return arena_wtf8(b"").map_or(std::ptr::null(), |value| value.cast());
     }
     let bytes = unsafe { wtf8_bytes(message) };
@@ -475,10 +531,9 @@ pub unsafe extern "C" fn thaw_error_cause(message: *const c_char) -> *const c_ch
     if message.is_null() {
         return std::ptr::null();
     }
-    if let Some(json) = with_extras(message, |extras| {
-        extras.lookup("cause")
-    }) {
-        return arena_c_string(&json_text_as_plain(&json)).map_or(std::ptr::null(), |value| value.cast());
+    if let Some(json) = with_extras(message, |extras| extras.lookup("cause")) {
+        return arena_c_string(&json_text_as_plain(&json))
+            .map_or(std::ptr::null(), |value| value.cast());
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     if let Some(value) = error_property(&text, "cause") {
@@ -496,9 +551,14 @@ pub unsafe extern "C" fn thaw_error_code(message: *const c_char) -> *const c_cha
         return std::ptr::null();
     }
     if let Some(json) = with_extras(message, |extras| {
-        extras.props.iter().find(|prop| prop.0 == "code").map(|prop| prop.1.clone())
+        extras
+            .props
+            .iter()
+            .find(|prop| prop.0 == "code")
+            .map(|prop| prop.1.clone())
     }) {
-        return arena_c_string(&json_text_as_plain(&json)).map_or(std::ptr::null(), |value| value.cast());
+        return arena_c_string(&json_text_as_plain(&json))
+            .map_or(std::ptr::null(), |value| value.cast());
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     // A JS error crossing the boundary carries its own `code` (`ENOENT`,
@@ -601,11 +661,17 @@ unsafe fn error_stack(message: *const c_char, frames: bool) -> *const c_char {
     // V8 serializes `stack` on first access: later name/message writes no longer change it. Only the
     // header is cached, so the frame line stays out of `console.log(error)` like before.
     if is_framed_error_text(message) {
-        let header = rendered.split("\n    at ").next().unwrap_or_default().to_string();
+        let header = rendered
+            .split("\n    at ")
+            .next()
+            .unwrap_or_default()
+            .to_string();
         thaw_arena::register_metadata_reset_hook(prune_error_extras);
         let key = extras_key(message);
         ERROR_EXTRAS.with(|table| {
-            extras_entry(&mut table.borrow_mut(), key).stack.get_or_insert(header);
+            extras_entry(&mut table.borrow_mut(), key)
+                .stack
+                .get_or_insert(header);
         });
     }
     arena_c_string(&rendered).map_or(std::ptr::null(), |value| value.cast())
@@ -697,7 +763,13 @@ impl ErrorExtras {
             .iter()
             .find(|prop| prop.0 == key)
             .map(|prop| prop.1.clone())
-            .or_else(|| if key == "cause" { self.cause.clone() } else { None })
+            .or_else(|| {
+                if key == "cause" {
+                    self.cause.clone()
+                } else {
+                    None
+                }
+            })
     }
 }
 
@@ -734,7 +806,10 @@ fn extras_key(pointer: *const c_char) -> usize {
 
 /// Runs `read` on the extras of `pointer`; the empty-table early-out keeps error-free programs
 /// at one TLS read.
-fn with_extras<R>(pointer: *const c_char, read: impl FnOnce(&ErrorExtras) -> Option<R>) -> Option<R> {
+fn with_extras<R>(
+    pointer: *const c_char,
+    read: impl FnOnce(&ErrorExtras) -> Option<R>,
+) -> Option<R> {
     if ERROR_EXTRAS.with(|table| table.borrow().is_empty()) {
         return None;
     }
@@ -742,7 +817,9 @@ fn with_extras<R>(pointer: *const c_char, read: impl FnOnce(&ErrorExtras) -> Opt
     ERROR_EXTRAS.with(|table| {
         let table = table.borrow();
         let extras = table.get(&key)?;
-        (extras.text == key_bytes(key)).then_some(extras).and_then(read)
+        (extras.text == key_bytes(key))
+            .then_some(extras)
+            .and_then(read)
     })
 }
 
@@ -755,7 +832,10 @@ fn extras_entry(table: &mut HashMap<usize, ErrorExtras>, key: usize) -> &mut Err
     let text = key_bytes(key);
     let extras = table.entry(key).or_default();
     if extras.text != text {
-        *extras = ErrorExtras { text: text.to_vec(), ..ErrorExtras::default() };
+        *extras = ErrorExtras {
+            text: text.to_vec(),
+            ..ErrorExtras::default()
+        };
     }
     extras
 }
@@ -785,7 +865,13 @@ fn effective_name_message(pointer: *const c_char, text: &str) -> (String, String
     let message = with_extras(pointer, |extras| extras.message.clone())
         .or_else(|| {
             // A deleted own `message` falls back to `Error.prototype.message` (empty).
-            with_extras(pointer, |extras| extras.deleted.iter().any(|key| key == "message").then(String::new))
+            with_extras(pointer, |extras| {
+                extras
+                    .deleted
+                    .iter()
+                    .any(|key| key == "message")
+                    .then(String::new)
+            })
         })
         .unwrap_or_else(|| split_error_tag(text).1.to_string());
     (name, message)
@@ -801,16 +887,18 @@ fn is_framed_error_text(pointer: *const c_char) -> bool {
 
 /// Keys of the JS-origin `\u{5}` property bag, in bag order.
 fn bag_keys(text: &str) -> Vec<String> {
-    let Some(bag) = metadata_suffix(text).split_once(ERROR_PROPS_MARKER).map(|v| v.1) else {
+    let Some(bag) = metadata_suffix(text)
+        .split_once(ERROR_PROPS_MARKER)
+        .map(|v| v.1)
+    else {
         return Vec::new();
     };
     match serde_json::from_str::<serde_json::Value>(bag) {
-        Ok(serde_json::Value::Object(map)) => {
-            map.keys()
-                .filter(|key| *key != HIDDEN_CAUSE_KEY && !key.starts_with('\0'))
-                .cloned()
-                .collect()
-        }
+        Ok(serde_json::Value::Object(map)) => map
+            .keys()
+            .filter(|key| *key != HIDDEN_CAUSE_KEY && !key.starts_with('\0'))
+            .cloned()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -823,14 +911,19 @@ fn arena_json(value: impl Into<serde_json::Value>) -> *const c_char {
 }
 
 fn arena_key_object(keys: Vec<String>) -> *const c_char {
-    arena_json(keys.into_iter().map(|key| (key, serde_json::Value::Null)).collect::<serde_json::Map<_, _>>())
+    arena_json(
+        keys.into_iter()
+            .map(|key| (key, serde_json::Value::Null))
+            .collect::<serde_json::Map<_, _>>(),
+    )
 }
 
 /// Own enumerable keys, in order: assigned props, then the JS-origin bag.
 fn error_enumerable_keys(pointer: *const c_char, text: &str) -> Vec<String> {
-    let mut keys: Vec<String> =
-        with_extras(pointer, |extras| Some(extras.props.iter().map(|p| p.0.clone()).collect()))
-            .unwrap_or_default();
+    let mut keys: Vec<String> = with_extras(pointer, |extras| {
+        Some(extras.props.iter().map(|p| p.0.clone()).collect())
+    })
+    .unwrap_or_default();
     for key in bag_keys(text) {
         if !keys.contains(&key) {
             keys.push(key);
@@ -853,8 +946,12 @@ pub unsafe extern "C" fn thaw_error_set_prop(
     if key.is_null() || json.is_null() || !is_framed_error_text(error) {
         return false;
     }
-    let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
-    let json = unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned();
+    let key = unsafe { CStr::from_ptr(key) }
+        .to_string_lossy()
+        .into_owned();
+    let json = unsafe { CStr::from_ptr(json) }
+        .to_string_lossy()
+        .into_owned();
     thaw_arena::register_metadata_reset_hook(prune_error_extras);
     let table_key = extras_key(error);
     ERROR_EXTRAS.with(|table| {
@@ -900,20 +997,25 @@ pub unsafe extern "C" fn thaw_error_set_prop(
 /// # Safety
 /// All pointers must be null or valid NUL-terminated strings.
 #[no_mangle]
-pub unsafe extern "C" fn thaw_error_get_prop_json(error: *const c_char, key: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn thaw_error_get_prop_json(
+    error: *const c_char,
+    key: *const c_char,
+) -> *const c_char {
     if key.is_null() || error.is_null() {
         return std::ptr::null();
     }
-    let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
-    if let Some(json) = with_extras(error, |extras| {
-        extras.lookup(&key)
-    }) {
+    let key = unsafe { CStr::from_ptr(key) }
+        .to_string_lossy()
+        .into_owned();
+    if let Some(json) = with_extras(error, |extras| extras.lookup(&key)) {
         return arena_c_string(&json).map_or(std::ptr::null(), |value| value.cast());
     }
     if !is_framed_error_text(error) {
         return std::ptr::null();
     }
-    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(error) }
+        .to_string_lossy()
+        .into_owned();
     let deleted = with_extras(error, |extras| Some(extras.deleted.contains(&key))).unwrap_or(false);
     if deleted {
         return std::ptr::null();
@@ -922,8 +1024,9 @@ pub unsafe extern "C" fn thaw_error_get_prop_json(error: *const c_char, key: *co
         "message" => arena_json(effective_name_message(error, &text).1),
         "name" => arena_json(effective_name_message(error, &text).0),
         "stack" => arena_json(unsafe { stack_text(error, true) }),
-        "cause" if error_property_json(&text, &key).is_none() => split_error_cause(&text)
-            .map_or(std::ptr::null(), |cause| arena_json(cause.to_string())),
+        "cause" if error_property_json(&text, &key).is_none() => {
+            split_error_cause(&text).map_or(std::ptr::null(), |cause| arena_json(cause.to_string()))
+        }
         _ => error_property_json(&text, &key)
             .and_then(|json| arena_c_string(&json))
             .map_or(std::ptr::null(), |value| value.cast()),
@@ -937,7 +1040,9 @@ pub unsafe extern "C" fn thaw_error_has_prop(error: *const c_char, key: *const c
     if key.is_null() || error.is_null() {
         return false;
     }
-    let name = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+    let name = unsafe { CStr::from_ptr(key) }
+        .to_string_lossy()
+        .into_owned();
     if with_extras(error, |extras| Some(extras.lookup(&name).is_some())) == Some(true) {
         return true;
     }
@@ -947,7 +1052,9 @@ pub unsafe extern "C" fn thaw_error_has_prop(error: *const c_char, key: *const c
     if with_extras(error, |extras| Some(extras.deleted.contains(&name))) == Some(true) {
         return false;
     }
-    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(error) }
+        .to_string_lossy()
+        .into_owned();
     matches!(name.as_str(), "message" | "stack")
         || bag_keys(&text).contains(&name)
         || (name == "cause" && split_error_cause(&text).is_some())
@@ -962,7 +1069,9 @@ pub unsafe extern "C" fn thaw_error_delete_prop(error: *const c_char, key: *cons
     if key.is_null() || !is_framed_error_text(error) {
         return true;
     }
-    let key = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+    let key = unsafe { CStr::from_ptr(key) }
+        .to_string_lossy()
+        .into_owned();
     let table_key = extras_key(error);
     thaw_arena::register_metadata_reset_hook(prune_error_extras);
     ERROR_EXTRAS.with(|table| {
@@ -979,7 +1088,9 @@ pub unsafe extern "C" fn thaw_error_delete_prop(error: *const c_char, key: *cons
             "cause" => extras.cause = None,
             _ => {}
         }
-        if matches!(key.as_str(), "message" | "stack" | "cause" | "code") && !extras.deleted.contains(&key) {
+        if matches!(key.as_str(), "message" | "stack" | "cause" | "code")
+            && !extras.deleted.contains(&key)
+        {
             extras.deleted.push(key);
         }
     });
@@ -994,13 +1105,20 @@ pub unsafe extern "C" fn thaw_error_delete_prop(error: *const c_char, key: *cons
 /// # Safety
 /// `error` must be null or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn thaw_error_own_keys(error: *const c_char, include_hidden: u8) -> *const c_char {
+pub unsafe extern "C" fn thaw_error_own_keys(
+    error: *const c_char,
+    include_hidden: u8,
+) -> *const c_char {
     if error.is_null() {
         return std::ptr::null();
     }
-    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(error) }
+        .to_string_lossy()
+        .into_owned();
     if !is_framed_error_text(error) {
-        let mut keys: Vec<String> = (0..text.encode_utf16().count()).map(|i| i.to_string()).collect();
+        let mut keys: Vec<String> = (0..text.encode_utf16().count())
+            .map(|i| i.to_string())
+            .collect();
         if include_hidden != 0 {
             keys.push("length".to_string());
         }
@@ -1034,17 +1152,25 @@ pub unsafe extern "C" fn thaw_error_own_keys(error: *const c_char, include_hidde
 /// # Safety
 /// Both pointers must be null or valid NUL-terminated strings.
 #[no_mangle]
-pub unsafe extern "C" fn thaw_error_assign_json(error: *const c_char, json_object: *const c_char) -> bool {
+pub unsafe extern "C" fn thaw_error_assign_json(
+    error: *const c_char,
+    json_object: *const c_char,
+) -> bool {
     if json_object.is_null() || !is_framed_error_text(error) {
         return false;
     }
-    let text = unsafe { CStr::from_ptr(json_object) }.to_string_lossy().into_owned();
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let text = unsafe { CStr::from_ptr(json_object) }
+        .to_string_lossy()
+        .into_owned();
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&text)
+    else {
         return true;
     };
     for (key, value) in map {
-        let (Ok(key), Ok(value)) = (std::ffi::CString::new(key), std::ffi::CString::new(value.to_string()))
-        else {
+        let (Ok(key), Ok(value)) = (
+            std::ffi::CString::new(key),
+            std::ffi::CString::new(value.to_string()),
+        ) else {
             continue;
         };
         unsafe { thaw_error_set_prop(error, key.as_ptr(), value.as_ptr()) };
@@ -1053,7 +1179,10 @@ pub unsafe extern "C" fn thaw_error_assign_json(error: *const c_char, json_objec
 }
 
 /// Own enumerable props of a framed Error as a JSON object: assigned props, then the JS-origin bag.
-fn error_props_object(error: *const c_char, text: &str) -> serde_json::Map<String, serde_json::Value> {
+fn error_props_object(
+    error: *const c_char,
+    text: &str,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut object = serde_json::Map::new();
     let props = with_extras(error, |extras| Some(extras.props.clone())).unwrap_or_default();
     for (key, json) in props {
@@ -1061,7 +1190,10 @@ fn error_props_object(error: *const c_char, text: &str) -> serde_json::Map<Strin
             object.insert(key, value);
         }
     }
-    if let Some(bag) = metadata_suffix(text).split_once(ERROR_PROPS_MARKER).map(|v| v.1) {
+    if let Some(bag) = metadata_suffix(text)
+        .split_once(ERROR_PROPS_MARKER)
+        .map(|v| v.1)
+    {
         if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(bag) {
             for (key, value) in map.into_iter().filter(|(key, _)| !key.starts_with('\0')) {
                 if key == HIDDEN_CAUSE_KEY {
@@ -1083,7 +1215,9 @@ pub unsafe extern "C" fn thaw_error_json_stringify(error: *const c_char) -> *con
     if error.is_null() {
         return std::ptr::null();
     }
-    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(error) }
+        .to_string_lossy()
+        .into_owned();
     if !is_framed_error_text(error) {
         return arena_json(text);
     }
@@ -1100,12 +1234,19 @@ pub unsafe extern "C" fn thaw_error_entries_json(error: *const c_char) -> *const
     if error.is_null() {
         return std::ptr::null();
     }
-    let text = unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(error) }
+        .to_string_lossy()
+        .into_owned();
     if !is_framed_error_text(error) {
         return arena_json(
             text.encode_utf16()
                 .enumerate()
-                .map(|(i, unit)| (i.to_string(), serde_json::Value::String(String::from_utf16_lossy(&[unit]))))
+                .map(|(i, unit)| {
+                    (
+                        i.to_string(),
+                        serde_json::Value::String(String::from_utf16_lossy(&[unit])),
+                    )
+                })
                 .collect::<serde_json::Map<_, _>>(),
         );
     }
@@ -1147,7 +1288,10 @@ unsafe fn error_text_with_props(error: *const c_char, with_id: bool) -> *const c
         let mut pairs = extras.props.clone();
         for (key, value) in [("message", &extras.message), ("stack", &extras.stack)] {
             if let Some(value) = value {
-                pairs.push((key.to_string(), serde_json::Value::String(value.clone()).to_string()));
+                pairs.push((
+                    key.to_string(),
+                    serde_json::Value::String(value.clone()).to_string(),
+                ));
             }
         }
         if let Some(cause) = &extras.cause {
@@ -1156,6 +1300,19 @@ unsafe fn error_text_with_props(error: *const c_char, with_id: bool) -> *const c
         Some(pairs)
     })
     .unwrap_or_default();
+    // A cause that has a cause of its own cannot ride in the frame (the inner marker would cut it
+    // short), so the bag carries it whole.
+    if !overlay.iter().any(|(key, _)| key == HIDDEN_CAUSE_KEY) {
+        let text = unsafe { CStr::from_ptr(error) }.to_string_lossy();
+        if let Some(cause) =
+            split_error_cause(&text).filter(|cause| cause.contains(ERROR_CAUSE_MARKER))
+        {
+            overlay.push((
+                HIDDEN_CAUSE_KEY.to_string(),
+                serde_json::Value::String(cause.to_string()).to_string(),
+            ));
+        }
+    }
     if with_id {
         overlay.push((ERROR_ID_KEY.to_string(), extras_key(error).to_string()));
         // The Json/JS copy carries the full `stack` (frames recorded at construction), not just the
@@ -1170,7 +1327,8 @@ unsafe fn error_text_with_props(error: *const c_char, with_id: bool) -> *const c
         return error;
     }
     let bytes = unsafe { CStr::from_ptr(error) }.to_bytes();
-    let suffix_start = thaw_arena::error_wire::parse_tagged(bytes).map_or(0, |frame| bytes.len() - frame.suffix.len());
+    let suffix_start = thaw_arena::error_wire::parse_tagged(bytes)
+        .map_or(0, |frame| bytes.len() - frame.suffix.len());
     let bag_start = bytes[suffix_start..]
         .iter()
         .position(|byte| *byte == ERROR_PROPS_MARKER as u8)
@@ -1209,12 +1367,17 @@ thread_local! {
 /// # Safety
 /// `json` must be null or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn thaw_error_register_owner_props(owner: *const u8, json: *const c_char) -> bool {
+pub unsafe extern "C" fn thaw_error_register_owner_props(
+    owner: *const u8,
+    json: *const c_char,
+) -> bool {
     if owner.is_null() || json.is_null() {
         return false;
     }
     thaw_arena::register_metadata_reset_hook(prune_error_extras);
-    let text = unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(json) }
+        .to_string_lossy()
+        .into_owned();
     OWNER_PROPS.with(|table| table.borrow_mut().insert(owner as usize, text));
     true
 }
@@ -1223,7 +1386,8 @@ pub unsafe extern "C" fn thaw_error_register_owner_props(owner: *const u8, json:
 /// With `hidden` set, `stack` and `message` lead the object (for `getOwnPropertyNames`).
 #[no_mangle]
 pub extern "C" fn thaw_error_owner_props(owner: *const u8, hidden: u8) -> *const c_char {
-    let Some(text) = OWNER_PROPS.with(|table| table.borrow().get(&(owner as usize)).cloned()) else {
+    let Some(text) = OWNER_PROPS.with(|table| table.borrow().get(&(owner as usize)).cloned())
+    else {
         return arena_c_string("").map_or(std::ptr::null(), |value| value.cast());
     };
     if hidden == 0 {
@@ -1257,7 +1421,9 @@ pub unsafe extern "C" fn thaw_object_stack_set(owner: *const u8, text: *const c_
         return false;
     }
     thaw_arena::register_metadata_reset_hook(prune_object_stacks);
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .into_owned();
     OBJECT_STACKS.with(|table| table.borrow_mut().insert(owner as usize, text));
     true
 }
@@ -1291,7 +1457,10 @@ pub extern "C" fn thaw_object_stack_has(owner: *const u8) -> bool {
 /// # Safety
 /// `fallback` must be a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn thaw_object_stack_get(owner: *const u8, fallback: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn thaw_object_stack_get(
+    owner: *const u8,
+    fallback: *const c_char,
+) -> *const c_char {
     match OBJECT_STACKS.with(|table| table.borrow().get(&(owner as usize)).cloned()) {
         Some(text) => arena_c_string(&text).map_or(fallback, |value| value.cast()),
         None => fallback,
@@ -1313,7 +1482,9 @@ pub unsafe extern "C" fn thaw_native_subclass_mark(base: *const u8, name: *const
         return;
     }
     thaw_arena::register_metadata_reset_hook(prune_native_subclass_names);
-    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    let name = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
     NATIVE_SUBCLASS_NAMES.with(|table| table.borrow_mut().insert(base as usize, name));
 }
 
@@ -1321,7 +1492,8 @@ pub unsafe extern "C" fn thaw_native_subclass_mark(base: *const u8, name: *const
 #[no_mangle]
 pub extern "C" fn thaw_native_subclass_name(base: *const u8) -> *const c_char {
     let name = NATIVE_SUBCLASS_NAMES.with(|table| table.borrow().get(&(base as usize)).cloned());
-    name.and_then(|name| arena_c_string(&name)).map_or(std::ptr::null(), |value| value.cast())
+    name.and_then(|name| arena_c_string(&name))
+        .map_or(std::ptr::null(), |value| value.cast())
 }
 
 fn prune_native_subclass_names(tracing: bool) {
@@ -1357,12 +1529,18 @@ fn prune_object_stacks(tracing: bool) {
 /// # Safety
 /// `error` must be a valid NUL-terminated string.
 unsafe fn stack_text(error: *const c_char, frames: bool) -> String {
-    let (cached, assigned) =
-        with_extras(error, |extras| Some((extras.stack.clone(), extras.stack_user))).unwrap_or_default();
+    let (cached, assigned) = with_extras(error, |extras| {
+        Some((extras.stack.clone(), extras.stack_user))
+    })
+    .unwrap_or_default();
     if assigned {
         return cached.unwrap_or_default();
     }
-    let frames = if frames { stack_frames(error) } else { String::new() };
+    let frames = if frames {
+        stack_frames(error)
+    } else {
+        String::new()
+    };
     format!("{}{}", unsafe { stack_header(error, cached) }, frames)
 }
 
@@ -1420,7 +1598,11 @@ fn stack_frames(error: *const c_char) -> String {
 /// `error` must be null or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_frames(error: *const c_char) -> *const c_char {
-    let lines = if is_framed_error_text(error) { stack_frames(error) } else { String::new() };
+    let lines = if is_framed_error_text(error) {
+        stack_frames(error)
+    } else {
+        String::new()
+    };
     arena_c_string(&lines).map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -1431,19 +1613,38 @@ pub unsafe extern "C" fn thaw_error_frames(error: *const c_char) -> *const c_cha
 /// # Safety
 /// `cut` must be null or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn thaw_error_stack_frames(frame: usize, ra: usize, cut: *const c_char) -> *const c_char {
+pub unsafe extern "C" fn thaw_error_stack_frames(
+    frame: usize,
+    ra: usize,
+    cut: *const c_char,
+) -> *const c_char {
     let limit = thaw_error_stack_trace_limit();
     let lines = if limit < 1.0 {
         String::new()
     } else {
         // `Error.captureStackTrace(o, fn)` drops the frames above and including the innermost `fn`.
-        let cut = if cut.is_null() { "".into() } else { unsafe { CStr::from_ptr(cut) }.to_string_lossy() };
-        let mut pcs = caller_pcs(frame, ra, if cut.is_empty() { (limit as usize).min(200) } else { 200 });
+        let cut = if cut.is_null() {
+            "".into()
+        } else {
+            unsafe { CStr::from_ptr(cut) }.to_string_lossy()
+        };
+        let mut pcs = caller_pcs(
+            frame,
+            ra,
+            if cut.is_empty() {
+                (limit as usize).min(200)
+            } else {
+                200
+            },
+        );
         if !cut.is_empty() {
             if let Some(table) = FN_TABLE.get() {
                 let named = |pc: usize| {
                     let index = table.entries.partition_point(|entry| entry.address <= pc);
-                    pc >= table.lo && pc < table.hi && index > 0 && table.entries[index - 1].name == *cut
+                    pc >= table.lo
+                        && pc < table.hi
+                        && index > 0
+                        && table.entries[index - 1].name == *cut
                 };
                 if let Some(at) = pcs.iter().position(|&pc| named(pc)) {
                     pcs.drain(..=at);
@@ -1451,7 +1652,11 @@ pub unsafe extern "C" fn thaw_error_stack_frames(frame: usize, ra: usize, cut: *
             }
         }
         let lines = render_frames(&pcs, limit as usize);
-        if lines.is_empty() { "\n    at <anonymous>".to_string() } else { lines }
+        if lines.is_empty() {
+            "\n    at <anonymous>".to_string()
+        } else {
+            lines
+        }
     };
     arena_c_string(&lines).map_or(std::ptr::null(), |value| value.cast())
 }
@@ -1499,7 +1704,11 @@ pub unsafe extern "C" fn thaw_register_fn_table(
     hi: *const u8,
     file: *const c_char,
 ) {
-    let text = |pointer: *const c_char| unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned();
+    let text = |pointer: *const c_char| {
+        unsafe { CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned()
+    };
     let mut entries: Vec<FnInfo> = (0..count)
         .map(|index| {
             let entry = unsafe { &*entries.add(index) };
@@ -1513,7 +1722,12 @@ pub unsafe extern "C" fn thaw_register_fn_table(
         })
         .collect();
     entries.sort_by_key(|entry| entry.address);
-    let _ = FN_TABLE.set(FnTable { entries, lo: lo as usize, hi: hi as usize, file: text(file) });
+    let _ = FN_TABLE.set(FnTable {
+        entries,
+        lo: lo as usize,
+        hi: hi as usize,
+        file: text(file),
+    });
 }
 
 /// `[low, high)` of the calling thread's stack, cached per thread; `(0, 0)` where unknown.
@@ -1540,7 +1754,11 @@ fn query_stack_bounds() -> (usize, usize) {
         let (mut base, mut size) = (std::ptr::null_mut(), 0usize);
         let ok = libc::pthread_attr_getstack(&attr, &mut base, &mut size) == 0;
         libc::pthread_attr_destroy(&mut attr);
-        if ok { (base as usize, base as usize + size) } else { (0, 0) }
+        if ok {
+            (base as usize, base as usize + size)
+        } else {
+            (0, 0)
+        }
     }
 }
 
@@ -1564,7 +1782,12 @@ fn caller_pcs(frame: usize, ra: usize, limit: usize) -> Vec<usize> {
     let mut seen = usize::from(compiled(pcs[0]));
     let (low, high) = stack_bounds();
     let mut frame = frame;
-    while seen < limit && pcs.len() < 256 && frame.is_multiple_of(8) && frame >= low && frame + 16 <= high {
+    while seen < limit
+        && pcs.len() < 256
+        && frame.is_multiple_of(8)
+        && frame >= low
+        && frame + 16 <= high
+    {
         let (next, ra) = unsafe { (*(frame as *const usize), *((frame + 8) as *const usize)) };
         let pc = ra.wrapping_sub(1);
         seen += usize::from(compiled(pc));
@@ -1622,7 +1845,11 @@ fn render_frames(pcs: &[usize], limit: usize) -> String {
         } else if info.name.is_empty() {
             write!(out, "\n    at {file}:{}:{}", info.line, info.col)
         } else {
-            write!(out, "\n    at {} ({file}:{}:{})", info.name, info.line, info.col)
+            write!(
+                out,
+                "\n    at {} ({file}:{}:{})",
+                info.name, info.line, info.col
+            )
         };
     }
     out
@@ -1636,14 +1863,22 @@ mod error_native_tests {
     fn stack_frame_line_follows_the_trace_limit_and_assigned_stacks() {
         // The limit and the side table are thread-local.
         std::thread::spawn(|| unsafe {
-            let text = |pointer: *const c_char| CStr::from_ptr(pointer).to_string_lossy().into_owned();
+            let text =
+                |pointer: *const c_char| CStr::from_ptr(pointer).to_string_lossy().into_owned();
             let error = thaw_error_frame(c"TypeError".as_ptr(), c"m".as_ptr());
             assert_eq!(text(thaw_error_stack(error)), "TypeError: m");
-            assert_eq!(text(thaw_error_stack_with_frames(error)), "TypeError: m\n    at <anonymous>");
+            assert_eq!(
+                text(thaw_error_stack_with_frames(error)),
+                "TypeError: m\n    at <anonymous>"
+            );
             thaw_error_set_stack_trace_limit(0.0);
             assert_eq!(text(thaw_error_stack_with_frames(error)), "TypeError: m");
             thaw_error_set_stack_trace_limit(10.0);
-            assert!(thaw_error_set_prop(error, c"stack".as_ptr(), c"\"custom\"".as_ptr()));
+            assert!(thaw_error_set_prop(
+                error,
+                c"stack".as_ptr(),
+                c"\"custom\"".as_ptr()
+            ));
             assert_eq!(text(thaw_error_stack_with_frames(error)), "custom");
             assert_eq!(text(thaw_error_stack(error)), "custom");
         })
@@ -1738,8 +1973,12 @@ mod error_native_tests {
         // `\u{1}Error\u{1}message\u{5}<props>` so a later property
         // reconstruction can read it; `.message`/`String()` still show
         // only the labeled text.
-        let labeled = "`pkg::boom`'s promise rejected: boom\u{1}Error\u{1}boom\u{5}{\"status\":418}";
-        assert_eq!(call_message(labeled), "`pkg::boom`'s promise rejected: boom");
+        let labeled =
+            "`pkg::boom`'s promise rejected: boom\u{1}Error\u{1}boom\u{5}{\"status\":418}";
+        assert_eq!(
+            call_message(labeled),
+            "`pkg::boom`'s promise rejected: boom"
+        );
         assert_eq!(call_name(labeled), "Error");
     }
 
@@ -1750,7 +1989,8 @@ mod error_native_tests {
         // an `http-errors` error). A number renders as itself, a boolean
         // as `true`/`false`, a string unquoted; an absent property is
         // `None`.
-        let tagged = "\u{1}ImATeapotError\u{1}teapot\u{5}{\"status\":418,\"expose\":true,\"label\":\"x\"}";
+        let tagged =
+            "\u{1}ImATeapotError\u{1}teapot\u{5}{\"status\":418,\"expose\":true,\"label\":\"x\"}";
         assert_eq!(call_property(tagged, "status").as_deref(), Some("418"));
         assert_eq!(call_property(tagged, "expose").as_deref(), Some("true"));
         assert_eq!(call_property(tagged, "label").as_deref(), Some("x"));
@@ -1890,9 +2130,8 @@ mod error_native_tests {
         let error = CString::new(error).unwrap();
         let suppressed = CString::new(suppressed).unwrap();
         let message = CString::new(message).unwrap();
-        let result = unsafe {
-            thaw_error_suppress(error.as_ptr(), suppressed.as_ptr(), message.as_ptr())
-        };
+        let result =
+            unsafe { thaw_error_suppress(error.as_ptr(), suppressed.as_ptr(), message.as_ptr()) };
         assert!(!result.is_null());
         unsafe { CStr::from_ptr(result) }
             .to_string_lossy()
@@ -1901,7 +2140,8 @@ mod error_native_tests {
 
     #[test]
     fn a_suppressed_error_keeps_its_sub_errors_separate_from_its_message() {
-        let tagged = "\u{1}SuppressedError\u{1}both\u{6}\u{1}Error\u{1}first\u{7}\u{1}TypeError\u{1}second";
+        let tagged =
+            "\u{1}SuppressedError\u{1}both\u{6}\u{1}Error\u{1}first\u{7}\u{1}TypeError\u{1}second";
         assert_eq!(call_name(tagged), "SuppressedError");
         assert_eq!(call_message(tagged), "both");
         assert_eq!(call_suppressed_error(tagged), "\u{1}Error\u{1}first");
@@ -1913,11 +2153,7 @@ mod error_native_tests {
 
     #[test]
     fn nested_suppressed_errors_round_trip_without_delimiter_collisions() {
-        let inner = call_suppress(
-            "\u{1}Error\u{1}first",
-            "\u{1}TypeError\u{1}second",
-            "inner",
-        );
+        let inner = call_suppress("\u{1}Error\u{1}first", "\u{1}TypeError\u{1}second", "inner");
         let outer = call_suppress(&inner, "\u{1}RangeError\u{1}third", "outer");
         assert_eq!(call_message(&outer), "outer");
         assert_eq!(call_suppressed_error(&outer), inner);
@@ -1938,17 +2174,32 @@ mod error_native_tests {
             assert!(!result.is_null());
             assert_eq!(unsafe { wtf8_bytes(result) }, body);
         }
-        assert_eq!(call_message("\u{1}TypeError\u{1}plain\u{3}ERR_TEST"), "plain");
+        assert_eq!(
+            call_message("\u{1}TypeError\u{1}plain\u{3}ERR_TEST"),
+            "plain"
+        );
         assert_eq!(call_message("plain"), "plain");
     }
 
     #[test]
     fn legacy_error_property_json_preserves_types_and_null() {
         let source = "legacy\u{5}{\"status\":418,\"expose\":true,\"payload\":{\"id\":9},\"explicitNull\":null}";
-        assert_eq!(error_property_json(source, "status").as_deref(), Some("418"));
-        assert_eq!(error_property_json(source, "expose").as_deref(), Some("true"));
-        assert_eq!(error_property_json(source, "payload").as_deref(), Some("{\"id\":9}"));
-        assert_eq!(error_property_json(source, "explicitNull").as_deref(), Some("null"));
+        assert_eq!(
+            error_property_json(source, "status").as_deref(),
+            Some("418")
+        );
+        assert_eq!(
+            error_property_json(source, "expose").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            error_property_json(source, "payload").as_deref(),
+            Some("{\"id\":9}")
+        );
+        assert_eq!(
+            error_property_json(source, "explicitNull").as_deref(),
+            Some("null")
+        );
         assert_eq!(error_property_json(source, "missing"), None);
     }
 
@@ -1977,7 +2228,10 @@ mod error_native_tests {
         assert_eq!(call_message(tagged), "outer");
         let tagged = CString::new(tagged).unwrap();
         let cause = unsafe { thaw_error_cause(tagged.as_ptr()) };
-        assert_eq!(unsafe { CStr::from_ptr(cause) }.to_string_lossy(), "\u{1}TypeError\u{1}root");
+        assert_eq!(
+            unsafe { CStr::from_ptr(cause) }.to_string_lossy(),
+            "\u{1}TypeError\u{1}root"
+        );
     }
 }
 
@@ -1987,7 +2241,10 @@ mod error_native_tests {
 #[no_mangle]
 pub extern "C" fn thaw_stack_guard_limit() -> u64 {
     const MARGIN: u64 = 1 << 20;
-    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     let size = if unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut limit) } == 0
         && limit.rlim_cur != libc::RLIM_INFINITY
     {
@@ -2025,12 +2282,18 @@ mod error_extras_tests {
 
     fn get(error: *const c_char, key: &str) -> Option<String> {
         let value = unsafe { thaw_error_get_prop_json(error, c(key).as_ptr()) };
-        (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned())
+        (!value.is_null()).then(|| {
+            unsafe { CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned()
+        })
     }
 
     fn text(value: *const c_char) -> String {
         assert!(!value.is_null());
-        unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(value) }
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Each test runs on its own thread: the table is thread-local.
@@ -2047,7 +2310,10 @@ mod error_extras_tests {
             assert_eq!(get(error, "code").as_deref(), Some("\"E_X\""));
             assert_eq!(get(error, "meta").as_deref(), Some("{\"a\":[1,2]}"));
             assert_eq!(get(error, "absent"), None);
-            assert_eq!(text(unsafe { thaw_error_own_keys(error, 0) }), r#"{"code":null,"meta":null}"#);
+            assert_eq!(
+                text(unsafe { thaw_error_own_keys(error, 0) }),
+                r#"{"code":null,"meta":null}"#
+            );
             assert_eq!(
                 text(unsafe { thaw_error_own_keys(error, 1) }),
                 r#"{"stack":null,"message":null,"code":null,"meta":null}"#
@@ -2055,8 +2321,14 @@ mod error_extras_tests {
             assert!(unsafe { thaw_error_has_prop(error, c("code").as_ptr()) });
             assert!(unsafe { thaw_error_delete_prop(error, c("code").as_ptr()) });
             assert!(!unsafe { thaw_error_has_prop(error, c("code").as_ptr()) });
-            assert_eq!(text(unsafe { thaw_error_own_keys(error, 0) }), r#"{"meta":null}"#);
-            assert_eq!(text(unsafe { thaw_error_json_stringify(error) }), r#"{"meta":{"a":[1,2]}}"#);
+            assert_eq!(
+                text(unsafe { thaw_error_own_keys(error, 0) }),
+                r#"{"meta":null}"#
+            );
+            assert_eq!(
+                text(unsafe { thaw_error_json_stringify(error) }),
+                r#"{"meta":{"a":[1,2]}}"#
+            );
         });
     }
 
@@ -2078,14 +2350,20 @@ mod error_extras_tests {
             let error = frame("TypeError", "old");
             assert!(set(error, "message", "\"new\""));
             assert_eq!(text(unsafe { thaw_error_message(error) }), "new");
-            assert_eq!(text(unsafe { thaw_error_to_string(error) }), "TypeError: new");
+            assert_eq!(
+                text(unsafe { thaw_error_to_string(error) }),
+                "TypeError: new"
+            );
             assert_eq!(text(unsafe { thaw_error_name(error) }), "TypeError");
             // `message` stays a hidden property; `name` becomes an enumerable own one.
             assert_eq!(text(unsafe { thaw_error_own_keys(error, 0) }), "{}");
             assert!(set(error, "name", "\"Custom\""));
             assert_eq!(text(unsafe { thaw_error_name(error) }), "Custom");
             assert_eq!(text(unsafe { thaw_error_to_string(error) }), "Custom: new");
-            assert_eq!(text(unsafe { thaw_error_own_keys(error, 0) }), r#"{"name":null}"#);
+            assert_eq!(
+                text(unsafe { thaw_error_own_keys(error, 0) }),
+                r#"{"name":null}"#
+            );
             assert!(unsafe { thaw_error_delete_prop(error, c("message").as_ptr()) });
             assert_eq!(text(unsafe { thaw_error_message(error) }), "");
         });
@@ -2153,10 +2431,16 @@ mod error_extras_tests {
             let owner = 0x1000usize as *const u8;
             let fallback = c("Error: fallback");
             assert!(!thaw_object_stack_has(owner));
-            assert_eq!(text(unsafe { thaw_object_stack_get(owner, fallback.as_ptr()) }), "Error: fallback");
+            assert_eq!(
+                text(unsafe { thaw_object_stack_get(owner, fallback.as_ptr()) }),
+                "Error: fallback"
+            );
             assert!(unsafe { thaw_object_stack_set(owner, c("Named: kept").as_ptr()) });
             assert!(thaw_object_stack_has(owner));
-            assert_eq!(text(unsafe { thaw_object_stack_get(owner, fallback.as_ptr()) }), "Named: kept");
+            assert_eq!(
+                text(unsafe { thaw_object_stack_get(owner, fallback.as_ptr()) }),
+                "Named: kept"
+            );
             assert!(!unsafe { thaw_object_stack_set(std::ptr::null(), c("x").as_ptr()) });
         });
     }
@@ -2165,10 +2449,18 @@ mod error_extras_tests {
     fn plain_strings_are_not_errors() {
         isolated(|| {
             let plain = c("plain");
-            assert!(!unsafe { thaw_error_set_prop(plain.as_ptr(), c("k").as_ptr(), c("1").as_ptr()) });
+            assert!(!unsafe {
+                thaw_error_set_prop(plain.as_ptr(), c("k").as_ptr(), c("1").as_ptr())
+            });
             assert_eq!(get(plain.as_ptr(), "k"), None);
-            assert_eq!(text(unsafe { thaw_error_own_keys(plain.as_ptr(), 0) }), r#"{"0":null,"1":null,"2":null,"3":null,"4":null}"#);
-            assert_eq!(text(unsafe { thaw_error_json_stringify(plain.as_ptr()) }), "\"plain\"");
+            assert_eq!(
+                text(unsafe { thaw_error_own_keys(plain.as_ptr(), 0) }),
+                r#"{"0":null,"1":null,"2":null,"3":null,"4":null}"#
+            );
+            assert_eq!(
+                text(unsafe { thaw_error_json_stringify(plain.as_ptr()) }),
+                "\"plain\""
+            );
             assert!(unsafe { thaw_error_delete_prop(plain.as_ptr(), c("k").as_ptr()) });
             assert!(ERROR_EXTRAS.with(|table| table.borrow().is_empty()));
         });
@@ -2179,7 +2471,10 @@ mod error_extras_tests {
         isolated(|| {
             let error = frame("Error", "a");
             assert!(unsafe { thaw_error_assign_json(error, c(r#"{"b":1,"a":"x"}"#).as_ptr()) });
-            assert_eq!(text(unsafe { thaw_error_own_keys(error, 0) }), r#"{"b":null,"a":null}"#);
+            assert_eq!(
+                text(unsafe { thaw_error_own_keys(error, 0) }),
+                r#"{"b":null,"a":null}"#
+            );
             assert!(!unsafe { thaw_error_assign_json(c("plain").as_ptr(), c("{}").as_ptr()) });
         });
     }
@@ -2195,7 +2490,10 @@ mod error_extras_tests {
             buffer[7] = b'b';
             assert_eq!(get(error, "k"), None);
             assert!(set(error, "other", "2"));
-            assert_eq!(text(unsafe { thaw_error_own_keys(error, 0) }), r#"{"other":null}"#);
+            assert_eq!(
+                text(unsafe { thaw_error_own_keys(error, 0) }),
+                r#"{"other":null}"#
+            );
         });
     }
 
@@ -2227,7 +2525,10 @@ mod error_extras_tests {
             assert!(set(error, "n", "1"));
             let baked = text(unsafe { thaw_error_with_props(error) });
             assert_eq!(baked.matches(ERROR_PROPS_MARKER).count(), 1);
-            assert_eq!(text(unsafe { thaw_error_with_props(c("plain").as_ptr()) }), "plain");
+            assert_eq!(
+                text(unsafe { thaw_error_with_props(c("plain").as_ptr()) }),
+                "plain"
+            );
         });
     }
 
@@ -2237,8 +2538,14 @@ mod error_extras_tests {
             let error = frame("Error", "e");
             assert!(set(error, "a", "1"));
             assert!(set(error, "b", "\"two\""));
-            assert_eq!(text(unsafe { thaw_error_entries_json(error) }), r#"{"a":1,"b":"two"}"#);
-            assert_eq!(text(unsafe { thaw_error_entries_json(c("ab").as_ptr()) }), r#"{"0":"a","1":"b"}"#);
+            assert_eq!(
+                text(unsafe { thaw_error_entries_json(error) }),
+                r#"{"a":1,"b":"two"}"#
+            );
+            assert_eq!(
+                text(unsafe { thaw_error_entries_json(c("ab").as_ptr()) }),
+                r#"{"0":"a","1":"b"}"#
+            );
             assert!(unsafe { thaw_error_entries_json(std::ptr::null()) }.is_null());
         });
     }
@@ -2248,7 +2555,12 @@ mod error_extras_tests {
         isolated(|| {
             let owner = 0x1000_usize as *const u8;
             assert_eq!(text(unsafe { thaw_error_owner_props(owner, 0) }), "");
-            assert!(unsafe { thaw_error_register_owner_props(owner, c(r#"{"status":404,"name":"HttpError"}"#).as_ptr()) });
+            assert!(unsafe {
+                thaw_error_register_owner_props(
+                    owner,
+                    c(r#"{"status":404,"name":"HttpError"}"#).as_ptr(),
+                )
+            });
             assert_eq!(
                 text(unsafe { thaw_error_owner_props(owner, 0) }),
                 r#"{"status":404,"name":"HttpError"}"#
@@ -2267,8 +2579,14 @@ mod error_extras_tests {
             let second = frame("Error", "x");
             assert_ne!(unsafe { thaw_string_strict_equal(first, second) }, 0);
             assert_eq!(unsafe { thaw_string_strict_equal(first, first) }, 0);
-            assert_eq!(unsafe { thaw_string_strict_equal(c("x").as_ptr(), c("x").as_ptr()) }, 0);
-            assert_ne!(unsafe { thaw_string_strict_equal(c("x").as_ptr(), c("y").as_ptr()) }, 0);
+            assert_eq!(
+                unsafe { thaw_string_strict_equal(c("x").as_ptr(), c("x").as_ptr()) },
+                0
+            );
+            assert_ne!(
+                unsafe { thaw_string_strict_equal(c("x").as_ptr(), c("y").as_ptr()) },
+                0
+            );
         });
     }
 }

@@ -569,7 +569,7 @@ fn frame_split_empty_promise_any_rejects() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_any_empty_rejection"),
-        "AggregateError: All promises were rejected\nAggregateError: All promises were rejected\n"
+        "AggregateError: All promises were rejected {\n  [errors]: []\n}\nAggregateError: All promises were rejected {\n  [errors]: []\n}\n"
     );
 }
 
@@ -646,7 +646,7 @@ fn frame_split_promise_any_all_rejected_enters_nearest_catch() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_any_all_rejected"),
-        "AggregateError: All promises were rejected\n"
+        "AggregateError: All promises were rejected {\n  [errors]: [ 'first', 'second' ]\n}\n"
     );
 }
 

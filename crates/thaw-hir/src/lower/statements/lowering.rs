@@ -568,7 +568,9 @@ impl<'a> FnLowerer<'a> {
                     Box::new(value.clone()), ty.clone(), name.to_string());
                 let concat = |left, right| HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![left, right]);
-                Ok(concat(concat(field("name"), HirExpr::Lit(HirLit::Str(": ".into()))), field("message")))
+                // Framed like a thrown Error (`\u{1}Name\u{1}message`) so reporters print it as one.
+                let framed = concat(HirExpr::Lit(HirLit::Str("\u{1}".into())), field("name"));
+                Ok(concat(concat(framed, HirExpr::Lit(HirLit::Str("\u{1}".into()))), field("message")))
             }
             // Plain (non-Error) aggregates print like console.log, from the
             // materialized Json copy made at throw time.

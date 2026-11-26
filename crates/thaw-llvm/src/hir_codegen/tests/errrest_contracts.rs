@@ -350,12 +350,12 @@ fn errrest_uncaught_throw_reports_inspected_value() {
         ("function main(): void { throw null; }", "null\n", "null"),
         (
             "function main(): void { throw new TypeError(\"tt\", { cause: new Error(\"root\") }); }",
-            "[TypeError: tt] { [cause]: [Error: root] }\n",
+            "TypeError: tt {\n  [cause]: Error: root\n}\n",
             "cause",
         ),
         (
             "function main(): void { const e: any = new Error(\"withprops\"); e.code = \"E_X\"; throw e; }",
-            "[Error: withprops] { code: 'E_X' }\n",
+            "Error: withprops {\n  code: 'E_X'\n}\n",
             "props",
         ),
     ];
