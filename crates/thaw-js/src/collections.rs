@@ -30,13 +30,49 @@ fn hkey(v: &Value) -> HKey {
 /// Collections smaller than this are searched linearly.
 const HASH_MIN: usize = 16;
 
-/// `Map` storage: insertion-ordered entries plus a lazily built hash index.
+/// A deleted slot of `MapData::entries` / `SetData::items` (`delete` is O(1); `compact` drops the dead slots).
+fn dead(v: &Value) -> bool {
+    matches!(v, Value::Hole)
+}
+
+/// `Hole` never is a user key (`hkey` already reads it as `undefined`), so it can mark a deleted slot.
+fn live_key(k: Value) -> Value {
+    if dead(&k) {
+        Value::Undefined
+    } else {
+        k
+    }
+}
+
+/// Live cursors move to where their entry lands once the `dead` slots before it are dropped.
+fn remap_cursors(
+    cursors: &mut Vec<Weak<Cell<usize>>>,
+    is_dead: impl Fn(usize) -> bool,
+    len: usize,
+) {
+    cursors.retain(|w| match w.upgrade() {
+        Some(c) => {
+            let at = c.get().min(len);
+            let gone = (0..at).filter(|&i| is_dead(i)).count();
+            c.set(c.get() - gone);
+            true
+        }
+        None => false,
+    });
+}
+
+/// `Map` storage: insertion-ordered entries (deleted ones stay as `Hole` keys until `compact`) plus a lazily
+/// built hash index.
 #[derive(Default)]
 pub(crate) struct MapData {
     pub(crate) entries: Vec<(Value, Value)>,
     index: Option<FxMap<HKey, usize>>,
     /// Positions of live iterators, kept in step with `delete`/`clear`.
-    cursors: Vec<Weak<Cell<usize>>>,
+    #[allow(clippy::box_collection)]
+    // one word instead of three keeps `Kind` at 80 bytes (size_tests)
+    cursors: Box<Vec<Weak<Cell<usize>>>>,
+    /// Deleted slots in `entries`.
+    dead: usize,
 }
 
 impl MapData {
@@ -54,10 +90,23 @@ impl MapData {
             entries
                 .iter()
                 .enumerate()
+                .filter(|(_, (k, _))| !dead(k))
                 .map(|(i, (k, _))| (hkey(k), i))
                 .collect()
         });
         index.get(&hkey(key)).copied()
+    }
+    /// Number of live entries.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len() - self.dead
+    }
+    /// The live `(key, value)` pairs in insertion order.
+    pub(crate) fn pairs(&self) -> Vec<(Value, Value)> {
+        self.entries
+            .iter()
+            .filter(|(k, _)| !dead(k))
+            .cloned()
+            .collect()
     }
     pub(crate) fn get(&mut self, key: &Value) -> Option<Value> {
         self.find(key).map(|i| self.entries[i].1.clone())
@@ -66,6 +115,7 @@ impl MapData {
         self.find(key).is_some()
     }
     pub(crate) fn set(&mut self, key: Value, value: Value) {
+        let key = live_key(key);
         match self.find(&key) {
             Some(i) => self.entries[i].1 = value,
             None => {
@@ -80,13 +130,27 @@ impl MapData {
         let Some(i) = self.find(key) else {
             return false;
         };
-        self.entries.remove(i);
-        self.index = None;
-        shift_cursors(&mut self.cursors, i);
+        if let Some(index) = &mut self.index {
+            index.remove(&hkey(key));
+        }
+        self.entries[i] = (Value::Hole, Value::Undefined);
+        self.dead += 1;
+        if self.dead >= HASH_MIN && 2 * self.dead > self.entries.len() {
+            self.compact();
+        }
         true
+    }
+    /// Drops the deleted slots; the index is rebuilt on the next lookup.
+    fn compact(&mut self) {
+        let entries = &self.entries;
+        remap_cursors(&mut self.cursors, |i| dead(&entries[i].0), entries.len());
+        self.entries.retain(|(k, _)| !dead(k));
+        self.dead = 0;
+        self.index = None;
     }
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.dead = 0;
         self.index = None;
         reset_cursors(&mut self.cursors);
     }
@@ -98,7 +162,11 @@ pub(crate) struct SetData {
     pub(crate) items: Vec<Value>,
     index: Option<FxMap<HKey, usize>>,
     /// Positions of live iterators, kept in step with `delete`/`clear`.
-    cursors: Vec<Weak<Cell<usize>>>,
+    #[allow(clippy::box_collection)]
+    // one word instead of three keeps `Kind` at 80 bytes (size_tests)
+    cursors: Box<Vec<Weak<Cell<usize>>>>,
+    /// Deleted slots in `items`.
+    dead: usize,
 }
 
 impl SetData {
@@ -113,15 +181,25 @@ impl SetData {
             items
                 .iter()
                 .enumerate()
+                .filter(|(_, k)| !dead(k))
                 .map(|(i, k)| (hkey(k), i))
                 .collect()
         });
         index.get(&hkey(key)).copied()
     }
+    /// Number of live items.
+    pub(crate) fn len(&self) -> usize {
+        self.items.len() - self.dead
+    }
+    /// The live items in insertion order.
+    pub(crate) fn values(&self) -> Vec<Value> {
+        self.items.iter().filter(|k| !dead(k)).cloned().collect()
+    }
     pub(crate) fn has(&mut self, key: &Value) -> bool {
         self.find(key).is_some()
     }
     pub(crate) fn add(&mut self, key: Value) {
+        let key = live_key(key);
         if self.find(&key).is_some() {
             return;
         }
@@ -134,13 +212,27 @@ impl SetData {
         let Some(i) = self.find(key) else {
             return false;
         };
-        self.items.remove(i);
-        self.index = None;
-        shift_cursors(&mut self.cursors, i);
+        if let Some(index) = &mut self.index {
+            index.remove(&hkey(key));
+        }
+        self.items[i] = Value::Hole;
+        self.dead += 1;
+        if self.dead >= HASH_MIN && 2 * self.dead > self.items.len() {
+            self.compact();
+        }
         true
+    }
+    /// Drops the deleted slots; the index is rebuilt on the next lookup.
+    fn compact(&mut self) {
+        let items = &self.items;
+        remap_cursors(&mut self.cursors, |i| dead(&items[i]), items.len());
+        self.items.retain(|k| !dead(k));
+        self.dead = 0;
+        self.index = None;
     }
     pub(crate) fn clear(&mut self) {
         self.items.clear();
+        self.dead = 0;
         self.index = None;
         reset_cursors(&mut self.cursors);
     }
@@ -162,19 +254,6 @@ pub(crate) struct CollIterData {
 fn register_cursor(cursors: &mut Vec<Weak<Cell<usize>>>, cursor: &Rc<Cell<usize>>) {
     cursors.retain(|w| w.strong_count() > 0);
     cursors.push(Rc::downgrade(cursor));
-}
-
-/// An entry at `removed` went away: cursors past it step back, so no unvisited entry is skipped.
-fn shift_cursors(cursors: &mut Vec<Weak<Cell<usize>>>, removed: usize) {
-    cursors.retain(|w| match w.upgrade() {
-        Some(c) => {
-            if removed < c.get() {
-                c.set(c.get() - 1);
-            }
-            true
-        }
-        None => false,
-    });
 }
 
 /// `clear()`: live iterators continue from the start of whatever is added later.
@@ -199,11 +278,20 @@ fn live_cursor(src: &Obj) -> Rc<Cell<usize>> {
     cursor
 }
 
-/// The `(key, value)` at `i` of a Map or Set (for a Set both are the item).
-fn entry_at(src: &Obj, i: usize) -> Option<(Value, Value)> {
+/// The first live `(key, value)` at or after slot `i` of a Map or Set (for a Set both are the item), and the
+/// slot after it (where a cursor continues).
+fn entry_at(src: &Obj, i: usize) -> Option<(usize, Value, Value)> {
     match &*src.kind.borrow() {
-        Kind::Map(m) => m.entries.get(i).cloned(),
-        Kind::Set(s) => s.items.get(i).map(|v| (v.clone(), v.clone())),
+        Kind::Map(m) => {
+            let at = i + m.entries.get(i..)?.iter().position(|(k, _)| !dead(k))?;
+            let (k, v) = m.entries[at].clone();
+            Some((at + 1, k, v))
+        }
+        Kind::Set(s) => {
+            let at = i + s.items.get(i..)?.iter().position(|k| !dead(k))?;
+            let v = s.items[at].clone();
+            Some((at + 1, v.clone(), v))
+        }
         _ => None,
     }
 }
@@ -235,8 +323,8 @@ fn coll_iter_next(it: &mut Interp, this: &Value, is_map: bool) -> R<Value> {
         entry_at(&src, cursor.get())
     };
     match entry {
-        Some((k, v)) => {
-            cursor.set(cursor.get() + 1);
+        Some((next, k, v)) => {
+            cursor.set(next);
             let value = match mode {
                 0 => k,
                 1 => v,
@@ -325,12 +413,12 @@ impl Interp {
                     Kind::Array(items) => {
                         return Some(items.iter().map(|v| unhole(Some(v))).collect())
                     }
-                    Kind::Set(set) => return Some(set.items.clone()),
+                    Kind::Set(set) => return Some(set.values()),
                     // a detached or out-of-bounds view: the protocol path throws V8's TypeError. A resizable buffer's
                     // view may change length while it is iterated, so it also takes the lazy protocol path.
                     Kind::Typed(t) if t.gone() || t.rz => return None,
                     Kind::Typed(t) => return Some(t.to_values()),
-                    Kind::Map(map) => map.entries.clone(),
+                    Kind::Map(map) => map.pairs(),
                     _ => return None,
                 };
                 Some(
@@ -711,11 +799,8 @@ impl Interp {
             with_map!(this, it, |e| e.clear());
             Ok(Value::Undefined)
         });
-        let size = self.native(|it, this, _| {
-            Ok(Value::Number(
-                with_map!(this, it, |e| e.entries.len()) as f64
-            ))
-        });
+        let size =
+            self.native(|it, this, _| Ok(Value::Number(with_map!(this, it, |e| e.len()) as f64)));
         define_accessor(&mp, "size", Some(size), None, false);
         self.set_native(&mp, "forEach", |it, this, args| {
             let Value::Object(src) = this else {
@@ -726,8 +811,8 @@ impl Interp {
             };
             with_map!(this, it, |_e| ());
             let cursor = live_cursor(src);
-            while let Some((k, v)) = entry_at(src, cursor.get()) {
-                cursor.set(cursor.get() + 1);
+            while let Some((next, k, v)) = entry_at(src, cursor.get()) {
+                cursor.set(next);
                 it.call(&arg(args, 0), &arg(args, 1), &[v, k, this.clone()])?;
             }
             Ok(Value::Undefined)
@@ -797,8 +882,8 @@ impl Interp {
             with_set!(this, it, |e| e.clear());
             Ok(Value::Undefined)
         });
-        let size = self
-            .native(|it, this, _| Ok(Value::Number(with_set!(this, it, |e| e.items.len()) as f64)));
+        let size =
+            self.native(|it, this, _| Ok(Value::Number(with_set!(this, it, |e| e.len()) as f64)));
         define_accessor(&sp, "size", Some(size), None, false);
         self.set_native(&sp, "forEach", |it, this, args| {
             let Value::Object(src) = this else {
@@ -809,8 +894,8 @@ impl Interp {
             };
             with_set!(this, it, |_e| ());
             let cursor = live_cursor(src);
-            while let Some((v, _)) = entry_at(src, cursor.get()) {
-                cursor.set(cursor.get() + 1);
+            while let Some((next, v, _)) = entry_at(src, cursor.get()) {
+                cursor.set(next);
                 it.call(&arg(args, 0), &arg(args, 1), &[v.clone(), v, this.clone()])?;
             }
             Ok(Value::Undefined)
