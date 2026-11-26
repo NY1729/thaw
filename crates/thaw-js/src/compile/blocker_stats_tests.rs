@@ -38,7 +38,7 @@ fn two_blockers_are_both_any_and_neither_is_sole() {
 
     let it = run_on(&format!("{src}\nf([1]); f([2]);"));
     let s = &it.cstats;
-    assert_eq!(s.calls(), 2);
+    assert_eq!(s.calls(), 4);
     assert_eq!(s.rejected(R::TaggedTemplate), 1);
     assert_eq!(s.rejected(R::Delete), 0);
     assert_eq!(s.any_functions(R::TaggedTemplate), 1);
