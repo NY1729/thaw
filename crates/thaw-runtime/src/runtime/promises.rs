@@ -68,7 +68,7 @@ fn count_poll(resumed: bool) {
 
 fn promise_stats(sink: &mut thaw_arena::StatsSink) {
     let count = |n: Option<usize>| n.unwrap_or(0) as u64;
-    sink.add("promises", "active", count(ACTIVE_PROMISES.try_with(|a| a.borrow().len()).ok()));
+    sink.add("promises", "active", count(ACTIVE_PROMISES.try_with(|a| a.borrow().iter().count()).ok()));
     sink.add("promises", "slot_owners", count(PROMISE_ARENA_SLOT_OWNERS.try_with(|o| o.borrow().len()).ok()));
     sink.add("promises", "reason_owners", count(NATIVE_PROMISE_REASON_OWNERS.try_with(|o| o.borrow().len()).ok()));
     sink.add("promises", "ready", count(READY_CONTINUATIONS.try_with(|r| r.borrow().len()).ok()));
