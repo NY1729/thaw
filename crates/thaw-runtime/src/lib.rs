@@ -888,6 +888,9 @@ fn next_timer_delay() -> Option<Duration> {
 pub extern "C" fn thaw_runtime_enable_turn_reset() {
     let off = std::env::var("THAW_ARENA_NATIVE_RESET").is_ok_and(|v| v == "0");
     TURN_RESET.with(|flag| flag.set(!off));
+    if !off {
+        thaw_arena::arm_reclaim();
+    }
 }
 
 /// Reclaims arena memory at the outermost loop turn: only the entry point's driver loops reach

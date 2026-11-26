@@ -680,6 +680,41 @@ fn native_loop_reclaims_arena_between_turns() {
 }
 
 #[test]
+fn json_roundtrip_in_async_loop_is_bounded() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-arena-json-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "interface It { id: number; name: string }\nconst items: It[] = [];\nfor (let i = 0; i < 200; i++) items.push({ id: i, name: \"n\" + i });\nconst txt = JSON.stringify(items);\nfunction work(): number { const back = JSON.parse(txt) as It[]; return back.length; }\nasync function tick(i: number): Promise<number> { return i + 1; }\nasync function main(): Promise<void> { let n = 0; for (let r = 0; r < 3000; r++) { n += work(); n += await tick(r); } console.log(n); }\n",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    for stress in ["0", "1"] {
+        let result = Command::new(&output)
+            .env("THAW_ARENA_STATS", "1")
+            .env("THAW_ARENA_STRESS", stress)
+            .env("THAW_ARENA_POISON", "1")
+            .output()
+            .unwrap();
+        assert_eq!(result.stdout, b"5101500\n");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let at = stderr.find("malloc_in_use=").expect(&stderr);
+        let malloc: u64 = stderr[at + 14..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // 3000 unreclaimed parses held ~600 MB of Json trees before stage 2.
+        assert!(malloc < 64 << 20, "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn run_flushes_process_output_and_reports_non_tty_pipes() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-run-stdio-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();

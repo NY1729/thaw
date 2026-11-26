@@ -46,6 +46,7 @@ use std::ffi::{c_void, CString};
 use std::os::raw::c_char;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use thaw_arena::NativeStr as CStr;
 
 mod native_links;
@@ -2620,8 +2621,71 @@ pub fn arena_owned_json_root_token(value: *const Value) -> Option<usize> {
     ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().get(&(value as usize)).map(|entry| entry.0))
 }
 
+thread_local! {
+    static JSON_BOXES_CREATED: Cell<u64> = const { Cell::new(0) };
+    static JSON_BOXES_DESTROYED: Cell<u64> = const { Cell::new(0) };
+    static JSON_STATS_REGISTERED: Cell<bool> = const { Cell::new(false) };
+    // THAW_ARENA_STATS only: live box address -> creating call site (`leak`'s caller).
+}
+// A static (not thread-local) so the exit-time stats provider still sees it after TLS teardown.
+static JSON_BOX_SITES: Mutex<Option<HashMap<usize, &'static std::panic::Location<'static>>>> =
+    Mutex::new(None);
+
+fn json_box_stats(sink: &mut thaw_arena::StatsSink) {
+    let get = |c: &'static std::thread::LocalKey<Cell<u64>>| c.try_with(Cell::get).unwrap_or(0);
+    let len = |n: Option<usize>| n.unwrap_or(0) as u64;
+    let mut by_site: HashMap<String, u64> = HashMap::new();
+    if let Some(sites) = JSON_BOX_SITES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        for site in sites.values() {
+            *by_site
+                .entry(format!("{}:{}", site.file(), site.line()))
+                .or_default() += 1;
+        }
+    }
+    let mut by_site: Vec<_> = by_site.into_iter().collect();
+    by_site.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (site, n) in by_site.into_iter().take(8) {
+        sink.add("json_outstanding", &site, n);
+    }
+    sink.add("json", "created", get(&JSON_BOXES_CREATED));
+    sink.add("json", "destroyed", get(&JSON_BOXES_DESTROYED));
+    sink.add(
+        "json",
+        "arena_owned",
+        len(ARENA_OWNED_JSON_ROOTS.try_with(|r| r.borrow().len()).ok()),
+    );
+    sink.add(
+        "json",
+        "root_pins",
+        len(JSON_ROOT_PINS.try_with(|r| r.borrow().len()).ok()),
+    );
+}
+
+/// Produces a Json Box handed to generated code. Counted for THAW_ARENA_STATS attribution.
+#[track_caller]
 fn leak(value: Value) -> *mut Value {
-    Box::into_raw(Box::new(value))
+    JSON_BOXES_CREATED.with(|c| c.set(c.get() + 1));
+    if thaw_arena::stats_enabled() && !JSON_STATS_REGISTERED.with(|r| r.replace(true)) {
+        thaw_arena::register_stats_provider(json_box_stats);
+    }
+    let raw = Box::into_raw(Box::new(value));
+    if thaw_arena::stats_enabled() {
+        let site = std::panic::Location::caller();
+        let mut sites = JSON_BOX_SITES.lock().unwrap_or_else(|e| e.into_inner());
+        sites
+            .get_or_insert_with(HashMap::new)
+            .insert(raw as usize, site);
+    }
+    // Stage 2: every Box handed to generated code is owned by an arena token once resets run,
+    // so a Box the compiler could not prove fresh is still freed with its last reference.
+    if thaw_arena::reclaim_armed() {
+        return thaw_json_track_arena_owned_root(raw);
+    }
+    raw
 }
 
 /// Records `prototype` as `object`'s prototype (`Object.create(proto)`,
@@ -3593,6 +3657,10 @@ fn valid_json_number(bytes: &[u8]) -> bool {
 #[no_mangle]
 pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
     let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
+    if thaw_arena::reclaim_armed() {
+        // ponytail: ~8x text size approximates the Rc tree; replace with a real size walk if it matters
+        thaw_arena::note_external_bytes(bytes.len().saturating_mul(8));
+    }
     let value = JsonParser::new(bytes).parse();
     PARSE_ERROR.with(|error| error.set(value.is_none()));
     let value = value.unwrap_or(Value::Null);
@@ -3815,6 +3883,16 @@ pub unsafe extern "C" fn thaw_json_destroy(value: *mut Value) {
         untrack_typed_decode_child(value);
         untrack_arena_owned_json_root(value);
         release_isolated_json_cycles(unsafe { &*value });
+        JSON_BOXES_DESTROYED.with(|c| c.set(c.get() + 1));
+        if thaw_arena::stats_enabled() {
+            if let Some(sites) = JSON_BOX_SITES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+            {
+                sites.remove(&(value as usize));
+            }
+        }
         drop(unsafe { Box::from_raw(value) });
         HOST_ERROR.with(|slot| *slot.borrow_mut() = original_host_error);
     }

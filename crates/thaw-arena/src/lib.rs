@@ -204,6 +204,28 @@ pub fn is_tracing() -> bool {
     TRACING.with(Cell::get)
 }
 
+thread_local! {
+    static RECLAIM_ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Called by the native event loop once it resets the arena between turns. From then on
+/// producers of Rust-owned values (Json boxes) tie them to an arena token so the reset hook
+/// frees them; before that nothing would ever run the hook, and the token would be pure cost.
+pub fn arm_reclaim() {
+    RECLAIM_ARMED.with(|armed| armed.set(true));
+}
+
+/// Counts Rust-heap bytes owned by arena-reclaimed values (Json trees) toward the next
+/// automatic reset, which otherwise only sees arena bytes.
+pub fn note_external_bytes(bytes: usize) {
+    BYTES_SINCE_RESET.with(|since| since.set(since.get().saturating_add(bytes)));
+}
+
+/// True when tracing is on and a reset is going to run (see `arm_reclaim`).
+pub fn reclaim_armed() -> bool {
+    is_tracing() && RECLAIM_ARMED.with(Cell::get)
+}
+
 /// Tracks references held in runtime side tables rather than native fields.
 pub fn replace_reference(owner: usize, previous: usize, next: usize) {
     if !is_tracing() {
