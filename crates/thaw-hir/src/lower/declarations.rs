@@ -1205,6 +1205,13 @@ fn lower_function_statements(
             lowerer
                 .scope
                 .insert("__thaw_generator_initialized".into(), HirType::Bool);
+            // Locals hoisted out of nested loops left the scope with their blocks; the
+            // producer closure must still capture them.
+            for local in &locals {
+                if let HirStmt::Let(name, ty, _) = local {
+                    lowerer.scope.insert(name.clone(), ty.clone());
+                }
+            }
             body.extend(locals);
             body.push(HirStmt::Let(
                 "__thaw_generator_initialized".into(),
