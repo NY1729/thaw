@@ -180,8 +180,13 @@ impl<'a> FnLowerer<'a> {
             "utf8", "utf-8", "hex", "base64", "base64url", "ascii", "latin1", "binary", "ucs2", "ucs-2",
             "utf16le", "utf-16le",
         ];
+        // A literal argument may come back wrapped (`TypedClosure(Str, Lit)`), so read it first.
+        let literal = match &encoding {
+            HirExpr::Lit(HirLit::Str(text)) => Some(text.clone()),
+            _ => None,
+        };
         let encoding = self.buffer_encoding_argument(encoding, to_text)?;
-        let HirExpr::Lit(HirLit::Str(text)) = &encoding else {
+        let Some(text) = literal.as_ref() else {
             return Ok(encoding);
         };
         if KNOWN.contains(&text.to_ascii_lowercase().as_str()) || (text.is_empty() && !to_text) {
