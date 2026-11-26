@@ -277,6 +277,12 @@ fs.writeFileSync(dir + "/f.txt", "x");
 function code(f: () => any): string { try { f(); return "ok"; } catch (e: any) { return e.code + " " + e.message; } }
 console.log(code(() => Buffer.from("x", "bogus" as any)));
 console.log(code(() => Buffer.from("x", "HEX" as any)));
+const dyn: string = JSON.parse('"nope"');
+const okEnc: string = JSON.parse('"HEX"');
+console.log(code(() => Buffer.from("x", dyn)));
+console.log(code(() => Buffer.from("x", okEnc)));
+console.log(code(() => Buffer.from("ab").toString(dyn)));
+console.log(code(() => Buffer.from("ab").toString(okEnc)));
 console.log(code(() => fs.readFileSync(dir + "/f.txt", "bogus" as any)));
 console.log(code(() => fs.writeFileSync(dir + "/f.txt", "y", "bogus" as any)));
 "#
@@ -290,6 +296,10 @@ console.log(code(() => fs.writeFileSync(dir + "/f.txt", "y", "bogus" as any)));
         String::from_utf8_lossy(&result.stdout),
         "h|é|l|l|o 5\n\
          ERR_UNKNOWN_ENCODING Unknown encoding: bogus\n\
+         ok\n\
+         ERR_UNKNOWN_ENCODING Unknown encoding: nope\n\
+         ok\n\
+         ERR_UNKNOWN_ENCODING Unknown encoding: nope\n\
          ok\n\
          ERR_INVALID_ARG_VALUE The argument 'encoding' is invalid encoding. Received 'bogus'\n\
          ERR_INVALID_ARG_VALUE The argument 'encoding' is invalid encoding. Received 'bogus'\n"

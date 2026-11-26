@@ -174,7 +174,7 @@ impl<'a> FnLowerer<'a> {
     /// `buffer_encoding_argument`, plus Node's `ERR_UNKNOWN_ENCODING` for a string literal that
     /// names no encoding (`Buffer.from(text, "bogus")`, `buf.toString("bogus")`). The runtime
     /// decoders fall back to utf8 silently. `Buffer.from` accepts `""` as utf8.
-    // ponytail: literals only; a runtime string that is not an encoding still decodes as utf8.
+    /// A non-literal encoding is checked at run time the same way.
     fn checked_buffer_encoding_argument(&mut self, encoding: HirExpr, to_text: bool) -> Result<HirExpr, String> {
         const KNOWN: [&str; 12] = [
             "utf8", "utf-8", "hex", "base64", "base64url", "ascii", "latin1", "binary", "ucs2", "ucs-2",
@@ -187,7 +187,10 @@ impl<'a> FnLowerer<'a> {
         };
         let encoding = self.buffer_encoding_argument(encoding, to_text)?;
         let Some(text) = literal.as_ref() else {
-            return Ok(encoding);
+            if matches!(encoding, HirExpr::Lit(_)) {
+                return Ok(encoding);
+            }
+            return self.runtime_checked_encoding(encoding, to_text, &KNOWN);
         };
         if KNOWN.contains(&text.to_ascii_lowercase().as_str()) || (text.is_empty() && !to_text) {
             return Ok(encoding);
@@ -199,6 +202,44 @@ impl<'a> FnLowerer<'a> {
             None,
         );
         Ok(self.block_as_expr(HirExpr::Block(vec![fail]), HirType::Str))
+    }
+
+    fn runtime_checked_encoding(&mut self, encoding: HirExpr, to_text: bool, known: &[&str]) -> Result<HirExpr, String> {
+        let name = format!("__thaw_buffer_enc_{}", self.next_binding);
+        let low = format!("__thaw_buffer_enc_low_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Str);
+        self.scope.insert(low.clone(), HirType::Str);
+        let is = |var: &str, text: &str| {
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Var(var.to_string())),
+                Box::new(HirExpr::Lit(HirLit::Str(text.into()))),
+            )
+        };
+        let mut ok = HirExpr::Lit(HirLit::Bool(false));
+        let empty_ok = !to_text;
+        let candidates = known.iter().map(|k| (low.as_str(), *k)).chain(empty_ok.then_some((name.as_str(), "")));
+        for (var, text) in candidates {
+            ok = HirExpr::Conditional(
+                Box::new(is(var, text)),
+                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                Box::new(ok),
+                HirType::Bool,
+            );
+        }
+        let fail = Self::node_error_throw("TypeError", "ERR_UNKNOWN_ENCODING", "Unknown encoding: ", Some(HirExpr::Var(name.clone())));
+        let lowered = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_string_to_lower_case".into())),
+            vec![HirExpr::Var(name.clone())],
+        );
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(name.clone(), HirType::Str, encoding),
+            HirStmt::Let(low, HirType::Str, lowered),
+            HirStmt::If(ok, Vec::new(), vec![fail]),
+            HirStmt::Return(Some(HirExpr::Var(name))),
+        ]);
+        Ok(self.block_as_expr(body, HirType::Str))
     }
 
     /// `Buffer.alloc`-style size validation (`ERR_OUT_OF_RANGE` unless `0 <= size <= 2^53 - 1`).
