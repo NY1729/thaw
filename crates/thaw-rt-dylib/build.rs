@@ -37,10 +37,19 @@ fn main() {
     } else {
         hasher.update(b"variant=core;engine=none\n");
     }
+    let intl = std::env::var_os("CARGO_FEATURE_INTL").is_some();
+    if intl {
+        println!("cargo:rerun-if-changed=exports-intl.txt");
+        hasher.update(b"intl=1\n");
+        hasher.update(std::fs::read(manifest_dir.join("exports-intl.txt")).unwrap());
+    }
     hasher.update(b"jsvalue_layout=-\n");
     let mut dirs = vec!["thaw-arena", "thaw-jit", "thaw-runtime", "thaw-std"];
     if js {
         dirs.extend(["thaw-js", "thaw-parser", "thaw-node-builtins"]);
+    }
+    if intl {
+        dirs.extend(["thaw-intl", "thaw-icu-data"]);
     }
     for dir in dirs {
         let path = manifest_dir.join("..").join(dir);
