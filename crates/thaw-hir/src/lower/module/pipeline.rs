@@ -2739,6 +2739,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     if *param == HirType::Dynamic {
                         *param = actual;
                         changed = true;
+                        // A return type inferred while this parameter was still `Dynamic` (a
+                        // dynamic-call `JsValue`) is stale once it has a concrete type.
+                        if ret_inferred.contains(&callee) {
+                            let signature = signatures.get_mut(&callee).unwrap();
+                            if signature.ret == HirType::JsValue {
+                                signature.ret = HirType::Dynamic;
+                            }
+                        }
                     } else if *param == HirType::Json
                         && actual == HirType::JsValue
                         && preserves_json_boundary
