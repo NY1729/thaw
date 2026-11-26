@@ -2324,7 +2324,8 @@ fn generate_registry_shims_pass(
             js_source: bundle.js_source,
         })
         .collect::<Vec<_>>();
-    let mut eager_scripts = thaw_bridge::generate_module_init(&eager_bundles);
+    let lazy_packages = std::env::var("THAW_LAZY_PACKAGES").as_deref() == Ok("1");
+    let mut eager_scripts = thaw_bridge::generate_module_init_with(&eager_bundles, lazy_packages);
     let eager_executables = platform_executables
         .iter()
         .filter(|(name, _)| static_packages.contains(name))

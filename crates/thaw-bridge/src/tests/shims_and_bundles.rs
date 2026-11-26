@@ -237,6 +237,10 @@ fn generates_load_script_call_per_bundle() {
             js_source: "function isOdd(n) { return n % 2 === 1; }",
         },
     ];
+    let lazy = generate_module_init_with(&bundles, true);
+    assert!(lazy.contains("declareThawJs(\"left-pad\"") && !lazy.contains("loadThawJs("), "{lazy}");
+    let realm = [ModuleBundle { package_name: "path/posix", js_source: "/* __thaw_bundle_realm */" }];
+    assert!(generate_module_init_with(&realm, true).contains("loadThawJs(\"path/posix\""));
     let init = generate_module_init(&bundles);
     assert!(init.starts_with("function __thaw_module_init(): void {\n"));
     assert!(init.contains("loadThawJs(\"left-pad\", \"function pad(s) { return s; }\")"), "{init}");

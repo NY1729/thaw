@@ -116,6 +116,7 @@ fn thaw_js_routed_packages_are_read_from_the_generated_shim() {
     let shim = "function __thaw_module_init(): void {\n    // a\n    if (!loadThawJs(\"semver\", \"x\")) throw 1;\n    if (!loadThawJs(\"ms\", \"y\")) throw 1;\n    if (!loadThawJs(\"ms\", \"y\")) throw 1;\n    loadScript(\"z\");\n}";
     assert_eq!(thaw_js_routed_packages(shim), ["ms", "semver"]);
     assert!(thaw_js_routed_packages("loadScript(\"z\");").is_empty());
+    assert_eq!(thaw_js_routed_packages("if (!declareThawJs(\"lazy\", \"x\")) throw 1;"), ["lazy"]);
 }
 
 /// `tjs-kit`: functions whose bodies the specialization JIT cannot take (they use `Map`), so the
