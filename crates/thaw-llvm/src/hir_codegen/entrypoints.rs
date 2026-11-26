@@ -88,6 +88,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
         });
+        // From here the entry point's frame holds no arena pointers (globals are registered roots), so
+        // the native loop drivers may reclaim between turns. Programs driven by thaw-js, napi or a native
+        // http server keep arena pointers in tables the audit has not covered: they never reclaim.
+        if !self.uses_thaw_js && !self.uses_napi && self.module.get_function("createServer").is_none() {
+            self.builder.build_call(
+                self.module.get_function("thaw_runtime_enable_turn_reset").unwrap(), &[],
+                "enable_native_turn_reset",
+            ).unwrap();
+        }
         if user_main.is_some() && !main_returns_promise {
             // A synchronous throw out of main is fatal unless a process listener
             // handles it: go straight to the terminal checkpoint, which reports it

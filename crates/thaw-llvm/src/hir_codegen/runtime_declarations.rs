@@ -4248,6 +4248,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_runtime_enable_turn_reset",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_runtime_run_until_idle",
             i64_type.fn_type(&[], false),
             Some(Linkage::External),
