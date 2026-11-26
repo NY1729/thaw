@@ -111,6 +111,10 @@ thread_local! {
     /// `reset_if_grown` reclaims again.
     static BYTES_SINCE_RESET: Cell<usize> = const { Cell::new(0) };
     static NEXT_AUTO_RESET: Cell<usize> = const { Cell::new(AUTO_RESET_FLOOR) };
+    /// Extra mark roots for one reset: the words of the stack scanned by `thaw_arena_poll`.
+    static STACK_ROOTS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// Highest address of this thread's stack once `thaw_arena_enable_safepoints` ran; 0 = off.
+    static SAFEPOINT_STACK_BASE: Cell<usize> = const { Cell::new(0) };
     /// Spare-capacity allocations (arrays grown by `push`): address -> total
     /// bytes. Addresses are reused after a reset, so every reset clears it.
     static CAPACITIES: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
@@ -737,6 +741,11 @@ pub extern "C" fn thaw_arena_reset_if_grown() {
     if !forced && BYTES_SINCE_RESET.with(Cell::get) < NEXT_AUTO_RESET.with(Cell::get) {
         return;
     }
+    thaw_arena_reset_if_grown_forced();
+}
+
+/// The reset of `thaw_arena_reset_if_grown` once its threshold check has passed.
+fn thaw_arena_reset_if_grown_forced() {
     thaw_arena_reset();
     let surviving: usize = ALLOCATIONS.with(|allocations| {
         allocations
@@ -746,6 +755,81 @@ pub extern "C" fn thaw_arena_reset_if_grown() {
             .sum()
     });
     NEXT_AUTO_RESET.with(|next| next.set(AUTO_RESET_FLOOR.max(surviving.saturating_mul(2))));
+}
+
+/// Called once by the generated entry point (on the thread that runs the program) when the
+/// compiler emitted `thaw_arena_poll` calls. Records the stack extent and arms Json-box
+/// reclamation; stays off (polls are no-ops) if the stack extent cannot be determined.
+#[no_mangle]
+pub extern "C" fn thaw_arena_enable_safepoints() {
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return;
+        }
+        let (mut low, mut size) = (std::ptr::null_mut(), 0usize);
+        let ok = libc::pthread_attr_getstack(&attr, &mut low, &mut size) == 0;
+        libc::pthread_attr_destroy(&mut attr);
+        if ok && !low.is_null() {
+            SAFEPOINT_STACK_BASE.with(|base| base.set(low as usize + size));
+            arm_reclaim();
+        }
+    }
+}
+
+/// Loop back-edge poll of a generated function that no runtime frame can sit below (the
+/// compiler removes the call elsewhere). When enough has been allocated it scans this thread's
+/// stack, including spilled callee-saved registers, as extra roots and runs a normal reset.
+#[no_mangle]
+pub extern "C" fn thaw_arena_poll() {
+    if SAFEPOINT_STACK_BASE.with(Cell::get) == 0 || !is_tracing() {
+        return;
+    }
+    if !stats::stress_due() && BYTES_SINCE_RESET.with(Cell::get) < NEXT_AUTO_RESET.with(Cell::get) {
+        return;
+    }
+    safepoint_reset();
+}
+
+#[inline(never)]
+fn safepoint_reset() {
+    let base = SAFEPOINT_STACK_BASE.with(Cell::get);
+    let mut regs = [0usize; 12];
+    // Callee-saved registers can hold the only copy of a caller's pointer.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::asm!(
+            "mov [{0}], rbx", "mov [{0} + 8], rbp", "mov [{0} + 16], r12", "mov [{0} + 24], r13",
+            "mov [{0} + 32], r14", "mov [{0} + 40], r15",
+            in(reg) regs.as_mut_ptr(), options(nostack)
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!(
+            "stp x19, x20, [{0}]", "stp x21, x22, [{0}, #16]", "stp x23, x24, [{0}, #32]",
+            "stp x25, x26, [{0}, #48]", "stp x27, x28, [{0}, #64]", "stp x29, x30, [{0}, #80]",
+            in(reg) regs.as_mut_ptr(), options(nostack)
+        );
+    }
+    let regs = std::hint::black_box(regs);
+    let sp = &regs as *const _ as usize;
+    if sp >= base {
+        return;
+    }
+    let mut words: Vec<usize> = regs.to_vec();
+    let mut at = sp & !(std::mem::size_of::<usize>() - 1);
+    while at + std::mem::size_of::<usize>() <= base {
+        words.push(unsafe { (at as *const usize).read() });
+        at += std::mem::size_of::<usize>();
+    }
+    STACK_ROOTS.with(|roots| *roots.borrow_mut() = words);
+    thaw_arena_reset_if_grown_forced();
+    STACK_ROOTS.with(|roots| roots.borrow_mut().clear());
 }
 
 /// Reclaims generations with no values reachable from registered global roots.
@@ -797,6 +881,30 @@ pub extern "C" fn thaw_arena_reset() {
         let current_generation = RETAINED.with(|retained| retained.borrow().len());
         let nearest =
             |pointer: usize| nearest_allocation(&allocations, &fresh, current_generation, pointer);
+        // `arena_hi` is inclusive: a one-past-the-end pointer still resolves to its allocation.
+        let arena_lo = allocations
+            .keys()
+            .next()
+            .copied()
+            .into_iter()
+            .chain(fresh.first().map(|record| record.base))
+            .min()
+            .unwrap_or(usize::MAX);
+        let arena_hi = allocations
+            .iter()
+            .next_back()
+            .map(|(&base, record)| base + record.size)
+            .into_iter()
+            .chain(fresh.iter().map(|record| record.base + record.size).max())
+            .max()
+            .unwrap_or(0);
+        let (refs_lo, refs_hi) = REFERENCES.with(|references| {
+            let references = references.borrow();
+            match (references.keys().next(), references.keys().next_back()) {
+                (Some(&lo), Some(&hi)) => (lo, hi),
+                _ => (usize::MAX, 0),
+            }
+        });
         let mut pending = roots
             .iter()
             .map(|&slot| unsafe { (slot as *const usize).read_unaligned() })
@@ -806,6 +914,11 @@ pub extern "C" fn thaw_arena_reset() {
         // address as an owner node as well as visiting its current contents.
         pending.extend(roots.iter().copied());
         PINNED.with(|pinned| pending.extend(pinned.borrow().keys().copied()));
+        // A conservative stack scan also accepts a one-past-the-end pointer (a loop induction
+        // variable), which belongs to the allocation just before it.
+        STACK_ROOTS.with(|words| {
+            pending.extend(words.borrow().iter().flat_map(|&w| [w, w.wrapping_sub(1)]))
+        });
         let mut live = HashSet::new();
         let mut owners = HashSet::new();
         while let Some(pointer) = pending.pop() {
@@ -840,7 +953,12 @@ pub extern "C" fn thaw_arena_reset() {
             for offset in (0..size.saturating_sub(std::mem::size_of::<usize>() - 1))
                 .step_by(std::mem::size_of::<usize>())
             {
-                pending.push(unsafe { ((start + offset) as *const usize).read_unaligned() });
+                // Most words are numbers; only one inside an address range worth a lookup
+                // (the arena, or a side-table owner such as a Json Box) is queued.
+                let word = unsafe { ((start + offset) as *const usize).read_unaligned() };
+                if (word >= arena_lo && word <= arena_hi) || (word >= refs_lo && word <= refs_hi) {
+                    pending.push(word);
+                }
             }
         }
         let generations = live
@@ -1321,6 +1439,36 @@ mod tests {
             assert!(was_reclaimed(garbage));
             assert!(!was_reclaimed(kept.0));
             drop(kept);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn poll_keeps_what_only_the_stack_points_to() {
+        std::thread::spawn(|| {
+            thaw_arena_enable_tracing();
+            thaw_arena_enable_safepoints();
+            // The heap box hides the base address; the stack holds only an interior pointer.
+            let base = Box::new(thaw_arena_alloc(64, 8) as usize);
+            let interior = std::hint::black_box(*base + 8);
+            let end = std::hint::black_box(thaw_arena_alloc(64, 8) as usize + 64);
+            let end_base = Box::new(end - 64);
+            for _ in 0..(AUTO_RESET_FLOOR / 4096 + 1) {
+                thaw_arena_alloc(4096, 8);
+            }
+            thaw_arena_poll();
+            // Stale stack words may keep a few of the 4 KiB blocks; the bulk goes.
+            assert!(stats::RECLAIMED_BYTES.with(Cell::get) > (AUTO_RESET_FLOOR / 2) as u64);
+            assert!(
+                !was_reclaimed(*base),
+                "an interior stack pointer keeps its allocation"
+            );
+            assert!(
+                !was_reclaimed(*end_base),
+                "a one-past-the-end stack pointer does too"
+            );
+            std::hint::black_box((interior, end));
         })
         .join()
         .unwrap();

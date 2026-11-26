@@ -711,6 +711,44 @@ fn dynamic_add_alone_keeps_turn_resets() {
 }
 
 #[test]
+fn sync_loops_reclaim_arena_at_safepoints() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-arena-safepoint-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    // `work` is only called directly, so its loops poll; the `map` callback's loop sits below a
+    // runtime frame and must not. `keep` lives across every reset.
+    std::fs::write(
+        &input,
+        "interface It { id: number; name: string }\nconst keep: It[] = [];\nfor (let i = 0; i < 50; i++) keep.push({ id: i, name: \"n\" + i });\nlet total = 0;\nfunction work(r: number): number {\n  const m = new Map<number, string>();\n  for (let i = 0; i < 2000; i++) m.set(i, \"v\" + i);\n  const back = JSON.parse(JSON.stringify(keep)) as It[];\n  const mapped = back.map((x) => { let s = \"\"; for (let k = 0; k < 3; k++) s += x.name; return s.length; });\n  let t = mapped.length + m.size;\n  for (let i = 0; i < 2000; i++) t += (m.get(i) as string).length;\n  return t + r;\n}\nfor (let r = 0; r < 300; r++) total += work(r);\nconsole.log(total + keep.length);\n",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    for stress in ["0", "997"] {
+        let result = Command::new(&output)
+            .env("THAW_ARENA_STATS", "1")
+            .env("THAW_ARENA_STRESS", stress)
+            .env("THAW_ARENA_POISON", "1")
+            .output()
+            .unwrap();
+        assert_eq!(result.stdout, b"3326900\n");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let at = stderr.find("peak=").expect(&stderr);
+        let peak: u64 = stderr[at + 5..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // 372 MB are allocated in total.
+        assert!(peak < 32 << 20, "{stderr}");
+        assert!(!stderr.contains("resets=0 "), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn json_roundtrip_in_async_loop_is_bounded() {
     let directory =
         std::env::temp_dir().join(format!("thaw-cli-arena-json-{}", std::process::id()));
@@ -787,7 +825,10 @@ fn compiled_app_exec_path_supports_node_eval() {
     assert_eq!(value["argv"], serde_json::json!([output, "tail"]));
     assert_eq!(
         value["execArgv"],
-        serde_json::json!(["-e", "process.stdout.write(JSON.stringify({ argv: process.argv, execArgv: process.execArgv }))"])
+        serde_json::json!([
+            "-e",
+            "process.stdout.write(JSON.stringify({ argv: process.argv, execArgv: process.execArgv }))"
+        ])
     );
     let _ = std::fs::remove_dir_all(directory);
 }

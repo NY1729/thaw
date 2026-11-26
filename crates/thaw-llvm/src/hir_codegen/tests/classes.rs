@@ -4018,6 +4018,36 @@ fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
 }
 
 #[test]
+fn arena_polls_stay_only_where_no_runtime_frame_can_sit_below() {
+    let source = r#"
+        function fill(n: number): number { const a: number[] = []; for (let i = 0; i < n; i++) a.push(i); return a.length; }
+        function spin(n: number): number { let s = 0; for (let i = 0; i < n; i++) s += i % 7; return s; }
+        function main(): void {
+            console.log(fill(3) + spin(4));
+            const cb = (n: number): number => { const a: number[] = []; for (let i = 0; i < n; i++) a.push(i); return a.length; };
+            console.log([1, 2].map(cb).length);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "arena_polls");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let polls = |name: &str| {
+        ir.split("\ndefine ")
+            .find(|chunk| chunk.lines().next().is_some_and(|line| line.contains(name)))
+            .unwrap_or_else(|| panic!("{name} in {ir}"))
+            .matches("call void @thaw_arena_poll()")
+            .count()
+    };
+    assert_eq!(polls("fill("), 1, "{ir}");
+    assert_eq!(polls("spin("), 0, "no call in the loop: nothing to reclaim");
+    assert_eq!(ir.matches("call void @thaw_arena_poll()").count(), 1, "a callback can sit below a runtime frame:\n{ir}");
+    assert!(ir.contains("call void @thaw_arena_enable_safepoints()"));
+}
+
+#[test]
 fn optional_void_callable_adapter_preserves_calls_and_void_returns() {
     let source = r#"
         function emit(value: number = 7): void { console.log(value); }

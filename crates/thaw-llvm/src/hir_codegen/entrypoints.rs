@@ -25,7 +25,12 @@ impl<'ctx> HirCompiler<'ctx> {
         // Projection wrappers and owned Json receivers can outlive a call
         // through a global or captured arena cell. Start tracing before
         // module initialization creates either kind of value.
-        if self.projects_native_objects || self.tracks_owned_json_roots
+        // A loop poll needs tracing (to know the roots), a main-thread stack scan and no runtime
+        // frame below it; thaw-js, napi and native servers keep arena pointers in tables the audit
+        // has not covered.
+        let polls = self.prune_arena_polls(!self.uses_napi
+            && self.module.get_function("createServer").is_none());
+        if polls || self.projects_native_objects || self.tracks_owned_json_roots
             || self.tracks_physical_object_layouts {
             let pointer = self.context.ptr_type(AddressSpace::default());
             let enable = self.module.add_function("thaw_arena_enable_tracing",
@@ -41,6 +46,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_call(register, &[(*slot).into()],
                     "register_native_object_exception_root").unwrap();
             }
+        }
+        if polls {
+            let enable = self.module.add_function("thaw_arena_enable_safepoints",
+                self.context.void_type().fn_type(&[], false), Some(Linkage::External));
+            self.builder.build_call(enable, &[], "enable_arena_safepoints").unwrap();
         }
         // Module initialization can fail after loading an addon. Every exit
         // must have the process reporters installed before reaching cleanup.
