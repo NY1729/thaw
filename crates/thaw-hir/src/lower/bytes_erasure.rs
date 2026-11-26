@@ -188,9 +188,14 @@ fn erase_dynamic_ty(ty: &mut HirType) {
 /// A callable's own result keeps the `Bytes` marker: a callback that returns a byte buffer
 /// (`(n) => new Uint8Array(n)`) crosses to thaw-js as a Buffer/Uint8Array, and the callback adapter
 /// can only pick that encoding from this type. Its physical value is already the byte view.
+///
+/// An async callable's `Promise<Bytes>` keeps it too: erased to `Promise<number[]>`, the callback
+/// adapter read the byte view as `f64` slots (a buffer of garbage and an out-of-bounds read).
 fn erase_callable_ret(ty: &mut HirType) {
-    if *ty != HirType::Bytes {
-        erase_ty(ty);
+    match ty {
+        HirType::Bytes => {}
+        HirType::Promise(inner) if **inner == HirType::Bytes => {}
+        _ => erase_ty(ty),
     }
 }
 

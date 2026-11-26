@@ -83,6 +83,94 @@ impl<'a> FnLowerer<'a> {
         HirStmt::Throw(message)
     }
 
+    /// The `size` of `Buffer.alloc`-style calls. Node never coerces it: anything but a number is
+    /// `ERR_INVALID_ARG_TYPE`. A statically known non-number throws; a dynamic value is
+    /// checked with `typeof` at run time.
+    fn buffer_size_argument(&mut self, size: HirExpr) -> Result<HirExpr, String> {
+        const MESSAGE: &str = "The \"size\" argument must be of type number. Received ";
+        let ty = self.infer_expr_type(&size)?;
+        let (received, detail) = match &ty {
+            HirType::F64 | HirType::I64 => return self.coerce_primitive_to_number(size),
+            HirType::Json | HirType::JsValue => {
+                let name = format!("__thaw_buffer_size_arg_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), HirType::Json);
+                let json = self.coerce_to_declared(&HirType::Json, size)?;
+                let var = HirExpr::Var(name.clone());
+                let is_number = HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                        vec![var.clone()],
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::Str("number".into()))),
+                );
+                let fail = Self::node_error_throw("TypeError", "ERR_INVALID_ARG_TYPE", MESSAGE, None);
+                let invalid = self.block_as_expr(HirExpr::Block(vec![fail]), HirType::F64);
+                let checked = HirExpr::Conditional(
+                    Box::new(is_number),
+                    Box::new(HirExpr::JsonAsNumber(Box::new(var))),
+                    Box::new(invalid),
+                    HirType::F64,
+                );
+                return self.wrap_call_argument_bindings(checked, &[(name, HirType::Json, json)]);
+            }
+            HirType::Str | HirType::StrLiteral(_) => ("type string (", Some(self.coerce_primitive_to_string(size.clone())?)),
+            HirType::Bool => ("type boolean (", Some(self.coerce_primitive_to_string(size.clone())?)),
+            HirType::Null => ("null", None),
+            HirType::Undefined => ("undefined", None),
+            _ => ("an instance of Object", None),
+        };
+        let wrapped = detail.map(|d| {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                vec![d, HirExpr::Lit(HirLit::Str(")".into()))],
+            )
+        });
+        let stmt = Self::node_error_throw("TypeError", "ERR_INVALID_ARG_TYPE", &format!("{MESSAGE}{received}"), wrapped);
+        Ok(HirExpr::EvalThen(
+            Box::new(size),
+            Box::new(self.block_as_expr(HirExpr::Block(vec![stmt]), HirType::F64)),
+        ))
+    }
+
+    /// An encoding argument as the C string the runtime decodes. Passing a non-string value
+    /// through unchanged made the runtime read an arbitrary pointer as text (a crash for a
+    /// `null`/`URL`/`Uint8Array` encoding). `undefined` is `utf8`; `to_text` (the
+    /// `toString(enc)` rule) otherwise stringifies the value, so the runtime rejects it as an
+    /// unknown encoding, while `Buffer.from(text, enc)` ignores a non-string encoding.
+    fn buffer_encoding_argument(&mut self, encoding: HirExpr, to_text: bool) -> Result<HirExpr, String> {
+        let utf8 = || HirExpr::Lit(HirLit::Str("utf8".into()));
+        match self.infer_expr_type(&encoding)? {
+            HirType::Str | HirType::StrLiteral(_) => self.coerce_primitive_to_string(encoding),
+            HirType::Undefined => Ok(HirExpr::EvalThen(Box::new(encoding), Box::new(utf8()))),
+            HirType::Json | HirType::JsValue => {
+                let name = format!("__thaw_buffer_encoding_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), HirType::Json);
+                let json = self.coerce_to_declared(&HirType::Json, encoding)?;
+                let var = HirExpr::Var(name.clone());
+                let typeof_is = |kind: &str| {
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                            vec![HirExpr::Var(name.clone())],
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::Str(kind.into()))),
+                    )
+                };
+                let other = if to_text { self.coerce_primitive_to_string(var.clone())? } else { utf8() };
+                let text = self.coerce_primitive_to_string(var)?;
+                let inner = HirExpr::Conditional(Box::new(typeof_is("undefined")), Box::new(utf8()), Box::new(other), HirType::Str);
+                let result = HirExpr::Conditional(Box::new(typeof_is("string")), Box::new(text), Box::new(inner), HirType::Str);
+                self.wrap_call_argument_bindings(result, &[(name, HirType::Json, json)])
+            }
+            _ if to_text => self.coerce_primitive_to_string(encoding),
+            _ => Ok(HirExpr::EvalThen(Box::new(encoding), Box::new(utf8()))),
+        }
+    }
+
     /// `Buffer.alloc`-style size validation (`ERR_OUT_OF_RANGE` unless `0 <= size <= 2^53 - 1`).
     fn checked_buffer_size(&mut self, size: HirExpr) -> Result<HirExpr, String> {
         if matches!(&size, HirExpr::Lit(HirLit::F64(n)) if (0.0..=9007199254740991.0).contains(n)) {

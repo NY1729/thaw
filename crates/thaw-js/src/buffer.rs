@@ -317,7 +317,8 @@ const BUFFER_PRELUDE: &str = r#"
     throw e;
   });
   def(Buffer, 'alloc', function (n, fill, enc) {
-    if (typeof n !== 'number') { var e = new TypeError('The "size" argument must be of type number. Received ' + (n === undefined ? 'undefined' : 'type ' + typeof n)); e.code = 'ERR_INVALID_ARG_TYPE'; throw e; }
+    if (typeof n !== 'number') { var e = new TypeError('The "size" argument must be of type number. Received ' + (n === undefined || n === null ? String(n) : typeof n === 'object' ? 'an instance of ' + (n.constructor && n.constructor.name || 'Object') : typeof n === 'function' ? 'function ' + n.name : 'type ' + typeof n + ' (' + String(n) + ')')); e.code = 'ERR_INVALID_ARG_TYPE'; throw e; }
+    if (!(n >= 0 && n <= 9007199254740991)) { var re = new RangeError('The value of "size" is out of range. It must be >= 0 && <= 9007199254740991. Received ' + String(n)); re.code = 'ERR_OUT_OF_RANGE'; throw re; }
     var b = wrap(new U8(n));
     if (fill !== undefined && fill !== 0) b.fill(fill, 0, n, enc);
     return b;
