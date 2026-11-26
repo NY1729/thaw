@@ -57,6 +57,8 @@ pub enum Ctor {
     Plain,
     /// A named constructor other than `Object` (`Foo {}`).
     Named(String),
+    /// An Error's stack text printed as the entries' base (multi-line layout even without frames).
+    Stack(String),
     /// `Object.create(null)` (`[Object: null prototype] {}`).
     NullProto,
 }
@@ -378,6 +380,8 @@ struct Ctx<'a> {
     seen: Vec<usize>,
     circular: Vec<(usize, usize)>,
     indentation_lvl: usize,
+    /// The next `reduce_to_single_string` lays out multi-line (an Error base that stands for a stack).
+    force_multiline: bool,
     current_depth: usize,
 }
 
@@ -393,6 +397,7 @@ pub fn inspect(node: &Node, opts: &InspectOptions) -> String {
         seen: Vec::new(),
         circular: Vec::new(),
         indentation_lvl: 0,
+        force_multiline: false,
         current_depth: 0,
     };
     ctx.format_value(node, 0)
@@ -492,6 +497,7 @@ impl Ctx<'_> {
 
     fn format_raw(&mut self, node: &Node, mut recurse_times: usize) -> String {
         let mut base = String::new();
+        let mut force_multiline = false;
         let braces: [String; 2];
         let extras;
         enum Kind<'n> {
@@ -592,6 +598,12 @@ impl Ctx<'_> {
                 let prefix = match ctor {
                     Ctor::Plain => String::new(),
                     // An Error's multi-line stack is the entries' `base`, which forces the multi-line layout.
+                    Ctor::Stack(name) => {
+                        force_multiline = true;
+                        base =
+                            name.replace('\n', &format!("\n{}", " ".repeat(self.indentation_lvl)));
+                        String::new()
+                    }
                     Ctor::Named(name) if name.contains('\n') => {
                         base =
                             name.replace('\n', &format!("\n{}", " ".repeat(self.indentation_lvl)));
@@ -613,7 +625,7 @@ impl Ctx<'_> {
                 keys = entries;
                 ctx_style = match ctor {
                     Ctor::Plain => "Object".into(),
-                    Ctor::Named(name) => name.clone(),
+                    Ctor::Named(name) | Ctor::Stack(name) => name.clone(),
                     Ctor::NullProto => "[Object: null prototype]".into(),
                 };
             }
@@ -669,6 +681,7 @@ impl Ctx<'_> {
             }
         }
         self.seen.pop();
+        self.force_multiline = force_multiline;
         let items = match &kind {
             Kind::Array(items) => Some(*items),
             _ => None,
@@ -819,10 +832,14 @@ impl Ctx<'_> {
         value: Option<&[Option<Node>]>,
     ) -> String {
         let entries = output.len();
+        let force_multiline = std::mem::take(&mut self.force_multiline);
         if extras == Extras::ArrayExtras && entries > 6 {
             output = self.group_array_elements(output, value);
         }
-        if self.current_depth - recurse_times < self.opts.compact && entries == output.len() {
+        if !force_multiline
+            && self.current_depth - recurse_times < self.opts.compact
+            && entries == output.len()
+        {
             let start = output.len() + self.indentation_lvl + len16(&braces[0]) + len16(base) + 10;
             if self.is_below_break_length(&output, start, base) {
                 let joined = output.join(", ");

@@ -61,7 +61,7 @@ include!("runtime/native_values/bytes.rs");
 include!("runtime/abi.rs");
 
 unsafe extern "C" {
-    fn thaw_error_inspect(value: *const c_char) -> *const c_char;
+    fn thaw_error_console_inspect(value: *const c_char) -> *const c_char;
 }
 
 /// One line on stderr; unlike `eprintln!` a closed pipe (EPIPE) is ignored instead of panicking, which aborts
@@ -100,7 +100,7 @@ pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
     if !error.is_null() {
         // thaw-std's inspector: the plain `Name: message` line, or Node's nested form when the
         // error carries own properties or a `cause`.
-        let rendered = unsafe { thaw_error_inspect(error) };
+        let rendered = unsafe { thaw_error_console_inspect(error) };
         let text = if rendered.is_null() {
             unsafe { CStr::from_ptr(error) }.to_string_lossy()
         } else {
@@ -118,12 +118,12 @@ pub unsafe extern "C" fn thaw_runtime_report_uncaught(error: *const c_char) {
 /// `error` must be null or point to a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_runtime_report_unhandled_rejection(error: *const c_char) {
-    unsafe { thaw_runtime_report_uncaught(error) };
     if error.is_null() {
         return;
     }
     let text = unsafe { CStr::from_ptr(error) }.to_string_lossy();
     if text.starts_with('\u{1}') || text == "Unhandled opaque Promise rejection" {
+        unsafe { thaw_runtime_report_uncaught(error) };
         return;
     }
     // V8's no-side-effects string of the reason: objects become `#<Object>`.

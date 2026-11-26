@@ -6048,7 +6048,11 @@ fn aggregate_error_inspect_node(
     }
     Some(Node::Object {
         id,
-        ctor: Ctor::Named(header),
+        ctor: if STACK_LIKE.get() {
+            Ctor::Stack(header[1..header.len() - 1].to_string())
+        } else {
+            Ctor::Named(header)
+        },
         entries,
     })
 }
@@ -6328,6 +6332,12 @@ fn subclass_props(
         .collect()
 }
 
+thread_local! {
+    /// Uncaught-error reports: a frameless Error prints like Node's, which always has a stack
+    /// (`Name: message` unbracketed, multi-line layout once it has entries).
+    static STACK_LIKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Node's rendering of an error with no stack frames: `[Name: message]` (`[Name]` when empty).
 fn error_header(name: &str, message: &str) -> String {
     if message.is_empty() {
@@ -6406,6 +6416,7 @@ fn tagged_error_node(
         });
     let message = text(&mut fields, b"message")
         .unwrap_or_else(|| String::from_utf8_lossy(frame.display).into_owned());
+    let mut stack_like = false;
     let base = match text(&mut fields, b"stack") {
         Some(stack) if stack.contains("\n    at ") => stack,
         Some(stack) => format!("[{stack}]"),
@@ -6415,7 +6426,16 @@ fn tagged_error_node(
                 .unwrap_or_default();
             // The lone placeholder frame of an Error that captured none stays stackless.
             if frames.is_empty() || frames == "\n    at <anonymous>" {
-                error_header(&name, &message)
+                if STACK_LIKE.get() {
+                    stack_like = true;
+                    if message.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{name}: {message}")
+                    }
+                } else {
+                    error_header(&name, &message)
+                }
             } else {
                 let header = error_header(&name, &message);
                 format!("{}{frames}", &header[1..header.len() - 1])
@@ -6468,7 +6488,11 @@ fn tagged_error_node(
     } else {
         Node::Object {
             id: 0,
-            ctor: Ctor::Named(base),
+            ctor: if stack_like {
+                Ctor::Stack(base)
+            } else {
+                Ctor::Named(base)
+            },
             entries,
         }
     })
@@ -6491,7 +6515,11 @@ pub unsafe extern "C" fn thaw_error_inspect(value: *const c_char) -> *const c_ch
 /// `value` must be null or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_error_console_inspect(value: *const c_char) -> *const c_char {
-    unsafe { error_inspect(value, true) }
+    // Node's Errors always carry a stack, so a frameless one lays out like one.
+    let outer = STACK_LIKE.replace(true);
+    let text = unsafe { error_inspect(value, true) };
+    STACK_LIKE.set(outer);
+    text
 }
 
 unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
@@ -6520,7 +6548,9 @@ unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
                         .parse()
                         .is_some_and(|bag| {
                             bag.as_object().is_some_and(|object| {
-                                object.keys().any(|key| key != b"errors" && key != b"name")
+                                object.keys().any(|key| {
+                                    STACK_LIKE.get() || (key != b"errors" && key != b"name")
+                                })
                             })
                         })
                 })
