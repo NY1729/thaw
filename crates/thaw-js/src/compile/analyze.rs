@@ -681,13 +681,15 @@ impl Visit for Walk {
     }
 
     fn visit_spread_element(&mut self, n: &a::SpreadElement) {
-        self.block(FallbackReason::Spread);
+        // getters and proxies run user code
+        self.impure = true;
         n.visit_children_with(self);
     }
 
     fn visit_expr_or_spread(&mut self, n: &a::ExprOrSpread) {
         if n.spread.is_some() {
-            self.block(FallbackReason::Spread);
+            // the iterator protocol runs user code
+            self.impure = true;
         }
         n.visit_children_with(self);
     }

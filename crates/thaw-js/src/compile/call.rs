@@ -21,21 +21,21 @@ enum Target {
     Method(Ex, PropKey),
 }
 
-/// The argument expressions, in order. Spread arguments are blocked by the analyzer; this is the second check.
-fn args_of(g: &mut Gen, args: &[a::ExprOrSpread]) -> CG<Vec<Ex>> {
+/// An argument expression and whether it is spread (`...x`).
+type Arg = (Ex, bool);
+
+/// The argument expressions, in order.
+fn args_of(g: &mut Gen, args: &[a::ExprOrSpread]) -> CG<Vec<Arg>> {
     let mut out = Vec::with_capacity(args.len());
     for arg in args {
-        if arg.spread.is_some() {
-            return reject();
-        }
-        out.push(expr::compile(g, &arg.expr)?);
+        out.push((expr::compile(g, &arg.expr)?, arg.spread.is_some()));
     }
     Ok(out)
 }
 
 /// The argument values, left to right, in a buffer from `Interp::arg_pool`. A throw part way returns the buffer
 /// (emptied) to the pool before it propagates. The caller gives the buffer back after the call.
-fn eval_args(it: &mut Interp, f: &mut Frame, args: &[Ex]) -> CR<Vec<Value>> {
+fn eval_args(it: &mut Interp, f: &mut Frame, args: &[Arg]) -> CR<Vec<Value>> {
     if args.is_empty() {
         return Ok(Vec::new());
     }
@@ -44,16 +44,35 @@ fn eval_args(it: &mut Interp, f: &mut Frame, args: &[Ex]) -> CR<Vec<Value>> {
     if out.capacity() > 0 {
         it.cstats.note_arg_pool_hit();
     }
-    for x in args {
-        match x(it, f) {
-            Ok(v) => out.push(v),
-            Err(e) => {
-                give_arg_buf(it, out);
-                return Err(e);
+    for (x, spread) in args {
+        let r = match x(it, f) {
+            Ok(v) if *spread => spread_into(it, v, &mut out),
+            Ok(v) => {
+                out.push(v);
+                Ok(())
             }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = r {
+            give_arg_buf(it, out);
+            return Err(e);
         }
     }
     Ok(out)
+}
+
+/// The values of a spread argument, as `Interp::eval_args` collects them.
+fn spread_into(it: &mut Interp, v: Value, out: &mut Vec<Value>) -> CR<()> {
+    match bx(it.iter_protocol(&v))? {
+        Some(items) => {
+            out.extend(items);
+            Ok(())
+        }
+        None => bx(it.throw_error(
+            "TypeError",
+            "Spread syntax requires ...iterable[Symbol.iterator] to be a function",
+        )),
+    }
 }
 
 /// `f(args)` and `o.m(args)` / `o[k](args)`. `(o.m)(args)` is a plain call here too (`this` undefined), as in

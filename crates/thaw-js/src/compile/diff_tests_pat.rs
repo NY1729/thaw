@@ -160,3 +160,39 @@ fn rest_parameters() {
     );
     assert_eq!(out[0], "undefined:0: 1:0: 1:1:2 1:3:2-3-4");
 }
+
+#[test]
+fn spread_in_calls_arrays_and_objects() {
+    let out = same(
+        r#"
+        function sum() { let s = 0; for (let i = 0; i < arguments.length; i++) s += arguments[i]; return s }
+        function f(a, b) { return sum(...a, 10, ...b) }
+        console.log(f([1, 2], [3]), f('ab'.split(''), []), f([], [5, 6]));
+        function g(a) { return [0, ...a, , ...'xy'].length }
+        console.log(g([1, 2, 3]), g(new Set([1])), g(''));
+        function h(o) { return JSON.stringify({ z: 0, ...o, y: 1, ...{ x: 2 } }) }
+        console.log(h({ a: 1, y: 9 }), h(null), h(undefined), h('ab'), h(5));
+        function m(o, args) { return o.f(...args) }
+        console.log(m({ f(a, b) { return this.k + a + b }, k: 100 }, [1, 2]));
+        function nw(args) { return new Date(...args).getTime() }
+        console.log(nw([0]), nw([1970, 0, 2]));
+        function* gen() { yield 1; yield 2 }
+        function it(x) { return Math.max(...x) }
+        console.log(it(gen()), it(new Set([4, 9, 2])), it([]));
+        function bad(x) { return sum(...x) }
+        for (const v of [5, null, undefined, {}]) { try { console.log(bad(v)) } catch (e) { console.log(e.name + ': ' + e.message) } }
+        function badarr(x) { return [...x] }
+        for (const v of [5, null, {}]) { try { console.log(badarr(v)) } catch (e) { console.log(e.name + ': ' + e.message) } }
+        function order() { const log = []; const t = (n) => (log.push(n), [n]); const r = [...t(1), ...t(2)]; sum(...t(3), ...t(4)); return log.join() + r.join() }
+        console.log(order());
+        const thrower = { [Symbol.iterator]() { throw new RangeError('it') } };
+        function th() { return sum(...thrower) }
+        try { th() } catch (e) { console.log(e.name) }
+        function getter(o) { return { ...o } }
+        let calls = 0;
+        console.log(JSON.stringify(getter({ get a() { calls++; return 1 }, b: 2 })), calls);
+        "#,
+        6,
+    );
+    assert_eq!(out[0], "16 18 11");
+}
