@@ -376,11 +376,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         Some(R::FunctionCtor),
         "| free: Function",
     ),
-    (
-        "var f = ({ m() { return super.toString() } }).m",
-        None,
-        "",
-    ),
+    ("var f = ({ m() { return super.toString() } }).m", None, ""),
     (
         "var f = (class { #x = 1; m() { return this.#x } }).prototype.m",
         Some(R::PrivateName),

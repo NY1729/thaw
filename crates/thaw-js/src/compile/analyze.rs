@@ -747,7 +747,8 @@ impl Visit for Walk {
     }
 
     fn visit_opt_chain_expr(&mut self, n: &a::OptChainExpr) {
-        self.block(FallbackReason::OptionalChain);
+        // property reads and calls run getters and user code
+        self.impure = true;
         n.visit_children_with(self);
     }
 

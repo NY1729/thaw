@@ -24,10 +24,10 @@ enum Target {
 }
 
 /// An argument expression and whether it is spread (`...x`).
-type Arg = (Ex, bool);
+pub(crate) type Arg = (Ex, bool);
 
 /// The argument expressions, in order.
-fn args_of(g: &mut Gen, args: &[a::ExprOrSpread]) -> CG<Vec<Arg>> {
+pub(crate) fn args_of(g: &mut Gen, args: &[a::ExprOrSpread]) -> CG<Vec<Arg>> {
     let mut out = Vec::with_capacity(args.len());
     for arg in args {
         out.push((expr::compile(g, &arg.expr)?, arg.spread.is_some()));
@@ -37,7 +37,7 @@ fn args_of(g: &mut Gen, args: &[a::ExprOrSpread]) -> CG<Vec<Arg>> {
 
 /// The argument values, left to right, in a buffer from `Interp::arg_pool`. A throw part way returns the buffer
 /// (emptied) to the pool before it propagates. The caller gives the buffer back after the call.
-fn eval_args(it: &mut Interp, f: &mut Frame, args: &[Arg]) -> CR<Vec<Value>> {
+pub(crate) fn eval_args(it: &mut Interp, f: &mut Frame, args: &[Arg]) -> CR<Vec<Value>> {
     if args.is_empty() {
         return Ok(Vec::new());
     }
