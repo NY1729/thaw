@@ -14,6 +14,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bumpalo::Bump;
+mod stats;
+pub use stats::{
+    register_stats_provider, stats_enabled, stats_summary, thaw_arena_print_stats, StatsSink,
+};
 mod strings;
 pub use strings::*;
 pub mod error_wire;
@@ -80,7 +84,7 @@ struct PendingAllocation {
 const PENDING_SCAN_LIMIT: usize = 32;
 
 thread_local! {
-    static ARENA: RefCell<Bump> = RefCell::new(Bump::new());
+    static ARENA: RefCell<Bump> = RefCell::new({ stats::init(); Bump::new() });
     static RETAINED: RefCell<Vec<Bump>> = const { RefCell::new(Vec::new()) };
     /// Allocations that survived a reset (or were looked up since), keyed by base address.
     static ALLOCATIONS: RefCell<BTreeMap<usize, AllocRecord>> = const { RefCell::new(BTreeMap::new()) };
@@ -651,6 +655,8 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
         return std::ptr::null_mut();
     };
     BYTES_SINCE_RESET.with(|bytes| bytes.set(bytes.get().saturating_add(size)));
+    stats::ALLOCS.with(|c| c.set(c.get() + 1));
+    stats::BYTES_TOTAL.with(|c| c.set(c.get() + size as u64));
     if is_tracing() {
         unsafe { pointer.write_bytes(0, size) };
         // 0 marks "identity unavailable" once the serial counter is exhausted.
@@ -673,6 +679,26 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
     pointer
 }
 
+pub(crate) fn bytes_since_reset() -> usize {
+    BYTES_SINCE_RESET.try_with(Cell::get).unwrap_or(0)
+}
+
+/// Bump chunks currently held (current arena plus retained generations).
+pub(crate) fn chunk_count() -> usize {
+    let count = |bump: &mut Bump| unsafe { bump.iter_allocated_chunks_raw().count() };
+    let current = ARENA
+        .try_with(|a| a.try_borrow_mut().map(|mut a| count(&mut a)).unwrap_or(0))
+        .unwrap_or(0);
+    let retained = RETAINED
+        .try_with(|r| {
+            r.try_borrow_mut()
+                .map(|mut r| r.iter_mut().map(count).sum())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    current + retained
+}
+
 /// Reclaims at a quiescent point of a long-lived program (an event loop turn
 /// with no native frame holding arena pointers), the counterpart of the
 /// per-invocation reset in Lambda programs. It only acts when tracing is on --
@@ -681,7 +707,12 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
 /// bytes so a large live graph is not re-marked on every turn.
 #[no_mangle]
 pub extern "C" fn thaw_arena_reset_if_grown() {
-    if !is_tracing() || BYTES_SINCE_RESET.with(Cell::get) < NEXT_AUTO_RESET.with(Cell::get) {
+    if !is_tracing() {
+        return;
+    }
+    // THAW_ARENA_STRESS=N: test-only forced reset every Nth call.
+    let forced = stats::stress_due();
+    if !forced && BYTES_SINCE_RESET.with(Cell::get) < NEXT_AUTO_RESET.with(Cell::get) {
         return;
     }
     thaw_arena_reset();
@@ -705,12 +736,22 @@ pub extern "C" fn thaw_arena_reset() {
     let Some(_reset_guard) = ResetGuard::acquire() else {
         return;
     };
-    BYTES_SINCE_RESET.with(|bytes| bytes.set(0));
+    let since = BYTES_SINCE_RESET.with(|bytes| bytes.replace(0)) as u64;
+    stats::RESETS.with(|c| c.set(c.get() + 1));
+    stats::PEAK_BYTES.with(|c| c.set(c.get().max(stats::LIVE_AFTER_RESET.with(Cell::get) + since)));
     CAPACITIES.with(|c| c.borrow_mut().clear());
     let roots = ROOTS.with(|roots| roots.borrow().clone());
     if !is_tracing() {
         strings::reset_lengths(false);
-        ARENA.with(|arena| arena.borrow_mut().reset());
+        stats::RECLAIMED_BYTES.with(|c| c.set(c.get() + since));
+        stats::LIVE_AFTER_RESET.with(|c| c.set(0));
+        ARENA.with(|arena| {
+            let mut arena = arena.borrow_mut();
+            if stats::poison_enabled() {
+                poison_chunks(&mut arena);
+            }
+            arena.reset()
+        });
         ALLOCATION_REFERENCES.with(|references| references.borrow_mut().clear());
         run_metadata_reset_hooks(false);
         run_reset_hooks(false);
@@ -721,6 +762,7 @@ pub extern "C" fn thaw_arena_reset() {
         // Allocations since the last settle are sorted once and consulted in place; only the
         // live ones are ever inserted into the ordered map.
         let mut fresh = PENDING_ALLOCATIONS.with(|fresh| std::mem::take(&mut *fresh.borrow_mut()));
+        stats::PEAK_PENDING.with(|c| c.set(c.get().max(fresh.len() as u64)));
         fresh.sort_by_key(|record| record.base);
         // A repeated base (a zero-size allocation) keeps the newest record, as a map insert did.
         fresh.dedup_by(|later, earlier| {
@@ -835,10 +877,18 @@ pub extern "C" fn thaw_arena_reset() {
                 if live.contains(&base) {
                     survivors.push((base, record));
                 } else {
+                    if stats::poison_enabled() {
+                        // Dead memory: any later read through a stale pointer shows 0xDD.
+                        unsafe { (base as *mut u8).write_bytes(0xDD, record.size) };
+                    }
                     ranges.push((base, base + record.size));
                 }
             }
         });
+        let live_bytes: u64 = survivors.iter().map(|(_, r)| r.size as u64).sum();
+        stats::LIVE_AFTER_RESET.with(|c| c.set(live_bytes));
+        stats::RECLAIMED_BYTES
+            .with(|c| c.set(c.get() + ranges_bytes(&RECLAIMED.with(|r| r.borrow().clone()))));
         *allocations = survivors.into_iter().collect();
         RETAINED.with(|retained| {
             let mut retained = retained.borrow_mut();
@@ -872,6 +922,17 @@ pub extern "C" fn thaw_arena_reset() {
     run_reset_hooks(true);
 }
 
+fn ranges_bytes(ranges: &[(usize, usize)]) -> u64 {
+    ranges.iter().map(|(start, end)| (end - start) as u64).sum()
+}
+
+/// `THAW_ARENA_POISON`: fills every used chunk with 0xDD before a bulk reset.
+fn poison_chunks(arena: &mut Bump) {
+    for chunk in unsafe { arena.iter_allocated_chunks_raw() } {
+        unsafe { chunk.0.write_bytes(0xDD, chunk.1) };
+    }
+}
+
 /// Called by a thread that is about to exit while values it allocated may still be referenced
 /// (a coroutine thread handing its results back to the host). Leaks this thread's arena and
 /// retained generations instead of freeing them on thread exit.
@@ -886,6 +947,42 @@ pub extern "C" fn thaw_arena_detach_thread() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_count_allocations_and_resets() {
+        thaw_arena_alloc(64, 8);
+        thaw_arena_alloc(16, 8);
+        let summary = stats_summary();
+        assert!(
+            summary.contains("thaw-arena arena: allocs=2 bytes=80 "),
+            "{summary}"
+        );
+        assert!(summary.contains("since_reset=80"), "{summary}");
+        thaw_arena_reset();
+        let summary = stats_summary();
+        assert!(summary.contains("resets=1 reclaimed=80 "), "{summary}");
+        assert!(summary.contains("since_reset=0"), "{summary}");
+        assert!(
+            summary.contains("thaw-arena heap: arena_bytes=0"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn stats_provider_lines_are_rendered() {
+        fn provider(sink: &mut StatsSink) {
+            sink.add("custom", "a", 1);
+            sink.add("custom", "b", 2);
+        }
+        register_stats_provider(provider);
+        register_stats_provider(provider);
+        assert_eq!(
+            stats_summary()
+                .matches("thaw-arena custom: a=1 b=2\n")
+                .count(),
+            1
+        );
+    }
 
     thread_local! {
         static RESET_TEST_EVENTS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
