@@ -565,6 +565,9 @@ impl<'a> FnLowerer<'a> {
         if let Some(has_own) = self.lower_prototype_has_own_symbol_call(call)? {
             return Ok(has_own);
         }
+        if let Some(rejects) = self.try_lower_assert_rejects_promise(call)? {
+            return Ok(rejects);
+        }
         if let Some(timer) = self.try_lower_native_timer(call)? {
             return Ok(timer);
         }
@@ -6214,4 +6217,49 @@ enum HrtimeKind {
     Bigint,
     Pair,
     Since(String),
+}
+
+impl<'a> FnLowerer<'a> {
+    /// `assert.rejects(promise, ...)` / `doesNotReject`: Node takes a promise or a function returning one,
+    /// but the ambient declaration only has the function form (a native Promise cannot cross into the
+    /// engine as a value), so a promise argument becomes `() => promise`.
+    fn try_lower_assert_rejects_promise(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else { return Ok(None) };
+        let Expr::Ident(name) = callee.as_ref() else { return Ok(None) };
+        let Some(hex) = name.sym.strip_prefix("__thaw_typed_tjs_").or_else(|| name.sym.strip_prefix("__thaw_typed_wrapper_tjs_")) else {
+            return Ok(None);
+        };
+        let encode = |text: &str| text.bytes().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let named = ["rejects", "doesNotReject"].iter().any(|function| {
+            ["node:assert", "node:assert/strict"].iter().any(|module| {
+                hex.strip_prefix(encode(&format!("{module}::{function}")).as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("__"))
+            })
+        });
+        let Some(first) = call.args.first() else { return Ok(None) };
+        if !named
+            || call.type_args.is_some()
+            || call.args.iter().any(|argument| argument.spread.is_some())
+            || matches!(first.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
+        {
+            return Ok(None);
+        }
+        let lowered = self.lower_expr(&first.expr)?;
+        if !matches!(self.infer_expr_type(&lowered)?, HirType::Promise(_)) {
+            return Ok(None);
+        }
+        let wrapper = swc_ecma_ast::ArrowExpr {
+            span: call.span,
+            ctxt: swc_common::SyntaxContext::empty(),
+            params: Vec::new(),
+            body: Box::new(swc_ecma_ast::ArrowFunctionBody::Expr(first.expr.clone())),
+            is_async: false,
+            is_generator: false,
+            type_params: None,
+            return_type: None,
+        };
+        let mut rewritten = call.clone();
+        *rewritten.args[0].expr = Expr::Arrow(wrapper);
+        self.lower_call_unread(&rewritten).map(Some)
+    }
 }

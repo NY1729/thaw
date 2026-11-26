@@ -5528,7 +5528,7 @@ impl<'a> FnLowerer<'a> {
                             }
                             _ => (entries, ty),
                         };
-                        if ty == HirType::JsValue {
+                        if matches!(ty, HirType::JsValue | HirType::Json) {
                 let call_arguments =
                     self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![entries]))?;
                             let object = HirExpr::Call(

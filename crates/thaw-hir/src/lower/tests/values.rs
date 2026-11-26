@@ -4373,3 +4373,18 @@ fn object_literal_with_getter_keeps_the_closure_path() {
     );
     assert!(!binding_chain_is_inlined(&value), "{value:?}");
 }
+
+#[test]
+fn from_entries_accepts_a_json_entry_source_and_a_bool_union_member_reads_undefined() {
+    lower(
+        "function main(entries: any, m: string[] | boolean): void {\n\
+         \x20 console.log(Object.fromEntries(entries));\n\
+         }",
+    );
+    lower(
+        "function main(flag: boolean): void {\n\
+         \x20 const m = flag && { groups: 1 };\n\
+         \x20 if (m) { console.log(m.groups); }\n\
+         }",
+    );
+}

@@ -44,6 +44,9 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn try_lower_native_timer(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        if let Some(promise) = self.try_lower_native_timers_promise(call)? {
+            return Ok(Some(promise));
+        }
         if !native_timers() || call.type_args.is_some() {
             return Ok(None);
         }
@@ -88,7 +91,8 @@ impl<'a> FnLowerer<'a> {
             .native_timer_set_kind(&Expr::Call(call.clone()))
             .ok_or("native timer call is not eligible")?;
         let callback = match call.args[0].expr.as_ref() {
-            Expr::Arrow(arrow) => self.lower_contextual_arrow(arrow, &[], None)?,
+            // The timer discards the callback's value, so an expression body (`() => ac.abort()`) is `void`.
+            Expr::Arrow(arrow) => self.lower_contextual_arrow(arrow, &[], Some(&HirType::Void))?,
             other => self.lower_expr(other)?,
         };
         let returns_timer_value = |ret: &HirType| matches!(ret, HirType::Void | HirType::F64 | HirType::Bool | HirType::Undefined);
@@ -118,5 +122,73 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var("__thaw_timer_set".into())),
             vec![HirExpr::Lit(HirLit::F64(f64::from(kind))), delay, callback],
         ))
+    }
+}
+
+// `node:timers/promises` `setTimeout`/`setImmediate` on the native timer queue. The engine's own promise
+// timers run its loop to completion inside the call, so two pending sleeps would settle in call order and
+// an `AbortSignal` fired by a native timer could never interrupt one. The call is an immediately-invoked
+// arrow, so each argument is evaluated once; an omitted argument is `undefined`.
+const NATIVE_SLEEP: &str = r#"((delay: number, value: any, options: any): Promise<any> => new Promise<any>((resolve, reject) => {
+  const signal: any = options ? options.signal : undefined;
+  const fail = (): void => { const error: any = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; reject(error); };
+  if (signal && signal.aborted) { fail(); return; }
+  const timer = SCHEDULE;
+  if (signal) { signal.addEventListener('abort', () => { CLEAR(timer); fail(); }, { once: true }); }
+}))"#;
+
+impl<'a> FnLowerer<'a> {
+    fn try_lower_native_timers_promise(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else { return Ok(None) };
+        let Expr::Ident(name) = callee.as_ref() else { return Ok(None) };
+        let Some(hex) = name.sym.strip_prefix("__thaw_typed_tjs_").or_else(|| name.sym.strip_prefix("__thaw_typed_wrapper_tjs_")) else {
+            return Ok(None);
+        };
+        let encode = |text: &str| text.bytes().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let named = |target: &str| {
+            let target = encode(target);
+            hex.strip_prefix(target.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with("__"))
+        };
+        let (min, max, schedule, clear) = if named("node:timers/promises::setTimeout") {
+            (1, 3, "setTimeout(() => resolve(value), delay)", "clearTimeout")
+        } else if named("node:timers/promises::setImmediate") {
+            (0, 2, "setImmediate(() => resolve(value))", "clearImmediate")
+        } else {
+            return Ok(None);
+        };
+        if call.type_args.is_some()
+            || call.args.len() < min
+            || call.args.len() > max
+            || call.args.iter().any(|argument| argument.spread.is_some())
+        {
+            return Ok(None);
+        }
+        let source = NATIVE_SLEEP.replace("SCHEDULE", schedule).replace("CLEAR", clear);
+        let module = thaw_parser::parse_typescript(&format!("{source};"))?;
+        let Some(swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(statement))) = module.body.first() else {
+            return Err("internal: native sleep did not parse".into());
+        };
+        let Expr::Paren(paren) = statement.expr.as_ref() else {
+            return Err("internal: native sleep shape".into());
+        };
+        // `setImmediate(value, options)` has no delay: the arrow's first parameter takes `undefined`.
+        let mut args = call.args.clone();
+        if max == 2 {
+            args.insert(0, swc_ecma_ast::ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(swc_ecma_ast::Lit::Num(swc_ecma_ast::Number { span: call.span, value: 0.0, raw: None }))) });
+        }
+        while args.len() < 3 {
+            args.push(swc_ecma_ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("undefined".into(), call.span))),
+            });
+        }
+        let invoked = CallExpr {
+            span: call.span,
+            ctxt: swc_common::SyntaxContext::empty(),
+            callee: Callee::Expr(Box::new(Expr::Paren(paren.clone()))),
+            args,
+            type_args: None,
+        };
+        self.lower_call_unread(&invoked).map(Some)
     }
 }
