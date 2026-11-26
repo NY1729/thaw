@@ -92,7 +92,6 @@ function main(): void { console.log(names(ev(3))); }
 }
 
 #[test]
-#[ignore = "known gap vs Node: class getter/static/constructor frames differ (new K, get g, K.s)"]
 fn stack_fidelity_class() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];

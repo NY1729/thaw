@@ -383,6 +383,13 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(class) = rest.strip_suffix("_initialize") {
             return Some(format!("new {}", plain(class)));
         }
+        for (marker, prefix) in [("_getter_", "get"), ("_setter_", "set")] {
+            if let Some((owner, property)) = rest.rsplit_once(marker) {
+                if owner.ends_with("_instance") || owner.ends_with("_static") {
+                    return Some(format!("{prefix} {property}"));
+                }
+            }
+        }
         let (class, member) = rest
             .rsplit_once("_method_")
             .or_else(|| rest.rsplit_once("_static_"))?;
