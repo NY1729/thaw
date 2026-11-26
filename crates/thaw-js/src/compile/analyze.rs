@@ -319,11 +319,15 @@ impl Walk {
         match p {
             a::Pat::Ident(b) => self.bound(&b.id.sym),
             a::Pat::Array(ap) => {
+                // the iterator protocol runs user code
+                self.impure = true;
                 for e in ap.elems.iter().flatten() {
                     self.pat_refs(e);
                 }
             }
             a::Pat::Object(op) => {
+                // property reads can run getters
+                self.impure = true;
                 for prop in &op.props {
                     match prop {
                         a::ObjectPatProp::KeyValue(kv) => {
@@ -353,6 +357,8 @@ impl Walk {
     /// `for (let x of e) body` / `for (x in e) body`: the head scope covers the right-hand side, so a
     /// head binding is in effect only from the body on.
     fn for_loop(&mut self, left: &a::ForHead, right: &a::Expr, body: &a::Stmt) {
+        // iterators, getters and proxies run user code
+        self.impure = true;
         self.frames.push(Vec::new());
         let top = self.frames.len() - 1;
         let body_lo = body.span().lo.0;

@@ -121,3 +121,19 @@ fn lazy_iteration_matches_off() {
         1,
     );
 }
+
+/// Check mode runs a pure kernel twice: a loop over a user iterator must not count as one.
+#[test]
+fn user_iterator_loops_are_not_pure_kernels() {
+    same(
+        r#"
+        const it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false } }, return() { console.log('closed'); return {} } } } };
+        function f() { for (const x of it) { return 'returned' } }
+        function g() { const [a] = it; return a }
+        function h(o) { for (const k in o) { return k } }
+        console.log(f(), g(), h({ a: 1 }));
+        console.log(f(), g(), h({ a: 1 }));
+        "#,
+        3,
+    );
+}
