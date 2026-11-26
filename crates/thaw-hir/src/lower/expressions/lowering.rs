@@ -2446,6 +2446,23 @@ impl<'a> FnLowerer<'a> {
                     }
                     // An `any` holding a native class instance projected as a live
                     // host: ask the engine against the class's real counterpart.
+                    if value_type == HirType::Json
+                        && extends_error_family
+                        && !is_error_family_name(class.sym.as_ref())
+                    {
+                        // A user Error subclass crossing `any` is its native tagged Error: ask the tag chain.
+                        let temp = format!("__thaw_instanceof_error_json_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(temp.clone(), HirType::Json);
+                        let native = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_error_instance".to_string())),
+                            vec![
+                                HirExpr::Var(temp.clone()),
+                                HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                            ],
+                        );
+                        return self.wrap_call_argument_bindings(native, &[(temp, HirType::Json, value)]);
+                    }
                     if value_type == HirType::Json {
                         let dynamic_constructor = self
                             .decorator_class_token(class.sym.as_ref())

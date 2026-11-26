@@ -2002,6 +2002,12 @@ impl<'a> FnLowerer<'a> {
                     )],
                 ));
             }
+            if object_type_is_error_family(&actual) {
+                // An Error-family record crossing into `any` becomes the native tagged Error
+                // (name/message/own props, ancestry), the same form a throw produces.
+                let tagged = self.coerce_primitive_to_string(value)?;
+                return self.coerce_to_declared(&HirType::Json, tagged);
+            }
             if let HirType::Object(fields) = &actual {
                 if !object_type_is_error_family(&actual)
                     && self.class_instance_supports_live_methods(&actual)

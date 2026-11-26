@@ -366,3 +366,25 @@ fn errrest_uncaught_throw_reports_inspected_value() {
         assert_eq!(code, Some(1), "{label}");
     }
 }
+
+#[test]
+fn errrest_error_subclass_record_through_any_keeps_identity_and_props() {
+    let source = r#"class CodeErr extends Error {
+  code: string;
+  constructor(m: string) { super(m); this.name = "CodeErr"; this.code = "E_CODE"; }
+}
+class Plain extends Error {}
+function main(): void {
+  const a: any = new CodeErr("hi");
+  console.log(a.name, a.message, a.code, a instanceof Error, a instanceof CodeErr, Object.keys(a).join(","));
+  const p: any = new Plain("p");
+  const q: any = a;
+  console.log(q.code, q instanceof CodeErr);
+  console.log(p.name, p instanceof Error, p instanceof Plain);
+}"#;
+    // Real node 22 output.
+    assert_eq!(
+        compile_and_run(source, "errrest_error_subclass_record_through_any"),
+        "CodeErr hi E_CODE true true code,name\nE_CODE true\nError true true\n"
+    );
+}
