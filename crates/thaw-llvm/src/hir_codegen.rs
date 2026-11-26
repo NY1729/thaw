@@ -2255,8 +2255,11 @@ impl<'ctx> HirCompiler<'ctx> {
     /// load and a compare per call), and the `noinline` that keeps frames visible for stack traces
     /// has nothing to protect, so both are lifted and the mid-end can inline it into hot loops.
     fn relax_leaf_function(&self, function: FunctionValue<'ctx>, overflow: IntValue<'ctx>) {
-        const NON_REENTRANT: [&str; 3] =
-            ["thaw_arena_alloc", "thaw_object_accessor", "thaw_object_property_flags"];
+        const NON_REENTRANT: [&str; 3] = [
+            "thaw_arena_alloc",
+            "thaw_object_accessor",
+            "thaw_object_property_flags",
+        ];
         for block in function.get_basic_blocks() {
             let mut next = block.get_first_instruction();
             while let Some(instruction) = next {
