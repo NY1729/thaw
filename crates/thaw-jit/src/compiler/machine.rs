@@ -438,12 +438,40 @@ fn global_namespace(symbol: &str) -> &str {
 /// Cache hit for an already-compiled symbol, skipping the parse. `required_args` is cached so the
 /// per-call argument check needs no program.
 fn cached(symbol: &str) -> Option<(*mut libc::c_void, *const JitGlobals, usize)> {
-    let cache = cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache
-        .get(symbol)
-        .map(|code| (code.memory, code.globals, code.required_args))
+    // Per-thread direct-mapped front cache indexed by the symbol's length and tail bytes (symbols
+    // end in the distinguishing `:namespace::name`), verified by content: a
+    // hit costs one memcmp instead of a mutex lock plus a SipHash of the whole symbol text.
+    // Compiled stubs are never evicted from the global cache, so a verified entry never dangles.
+    const SLOTS: usize = 64; // index() takes the top 6 bits of a 64-bit mix
+    type Slot = Option<(String, (*mut libc::c_void, *const JitGlobals, usize))>;
+    thread_local! {
+        static FRONT: RefCell<[Slot; SLOTS]> = const { RefCell::new([const { None }; SLOTS]) };
+    }
+    let bytes = symbol.as_bytes();
+    let tail = match bytes.last_chunk::<8>() {
+        Some(tail) => u64::from_le_bytes(*tail),
+        None => bytes.len() as u64, // shorter than any real symbol
+    };
+    let mixed = (tail ^ bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let index = (mixed >> 58) as usize; // top 6 bits: SLOTS = 64
+    if let Some(hit) = FRONT.with(|front| {
+        front.borrow()[index]
+            .as_ref()
+            .filter(|(key, _)| key == symbol)
+            .map(|(_, hit)| *hit)
+    }) {
+        return Some(hit);
+    }
+    let hit = {
+        let cache = cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache
+            .get(symbol)
+            .map(|code| (code.memory, code.globals, code.required_args))
+    }?;
+    FRONT.with(|front| front.borrow_mut()[index] = Some((symbol.to_owned(), hit)));
+    Some(hit)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
