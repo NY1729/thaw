@@ -10965,6 +10965,12 @@ pub extern "C" fn thaw_json_map_or_set_entries(value: *mut Value) -> *mut Value 
     if let Value::Host(lease) = value {
         return leak(Value::shared_array(host_enumerate_values(lease, 7)));
     }
+    // A string iterates by code point (`[...anyString]`).
+    if let Some(text) = value.as_str() {
+        return leak(Value::shared_array(
+            text.chars().map(|c| Value::String(c.to_string())).collect(),
+        ));
+    }
     let Some(fields) = value.as_object().filter(|_| is_branded_wrapper(value)) else {
         return leak(value.clone());
     };
