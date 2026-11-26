@@ -29,8 +29,8 @@ fn hot_type_sizes_are_pinned() {
 const VALUE: usize = 24;
 const SLOT: usize = 48;
 const PROP: usize = 72;
-const KIND: usize = 88;
-const OBJDATA: usize = 224;
+const KIND: usize = 80;
+const OBJDATA: usize = 216;
 const SCOPE: usize = 136;
 const BINDING: usize = 32;
 const FUNCDEF: usize = 232;

@@ -68,6 +68,8 @@ pub(crate) struct MapData {
     pub(crate) entries: Vec<(Value, Value)>,
     index: Option<FxMap<HKey, usize>>,
     /// Positions of live iterators, kept in step with `delete`/`clear`.
+    #[allow(clippy::box_collection)]
+    // one word instead of three keeps `Kind` at 80 bytes (size_tests)
     cursors: Box<Vec<Weak<Cell<usize>>>>,
     /// Deleted slots in `entries`.
     dead: usize,
@@ -160,6 +162,8 @@ pub(crate) struct SetData {
     pub(crate) items: Vec<Value>,
     index: Option<FxMap<HKey, usize>>,
     /// Positions of live iterators, kept in step with `delete`/`clear`.
+    #[allow(clippy::box_collection)]
+    // one word instead of three keeps `Kind` at 80 bytes (size_tests)
     cursors: Box<Vec<Weak<Cell<usize>>>>,
     /// Deleted slots in `items`.
     dead: usize,
