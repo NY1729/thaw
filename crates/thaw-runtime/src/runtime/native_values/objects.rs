@@ -76,8 +76,10 @@ impl MarkerSet {
     }
 }
 
+type MarkerSetCache = HashMap<std::rc::Rc<str>, std::rc::Rc<Vec<std::rc::Rc<str>>>>;
+
 thread_local! {
-    static SINGLE_MARKER_SETS: RefCell<HashMap<std::rc::Rc<str>, std::rc::Rc<Vec<std::rc::Rc<str>>>>> =
+    static SINGLE_MARKER_SETS: RefCell<MarkerSetCache> =
         RefCell::new(HashMap::new());
 }
 
