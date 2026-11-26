@@ -74,6 +74,8 @@ fn promise_stats(sink: &mut thaw_arena::StatsSink) {
     sink.add("promises", "ready", count(READY_CONTINUATIONS.try_with(|r| r.borrow().len()).ok()));
     sink.add("promises", "poll_one_calls", POLL_CALLS.try_with(Cell::get).unwrap_or(0));
     sink.add("promises", "poll_one_resumes", POLL_RESUMES.try_with(Cell::get).unwrap_or(0));
+    sink.add("promises", "turn_reset", u64::from(TURN_RESET.try_with(Cell::get).unwrap_or(false)));
+    sink.add("promises", "poll_depth", POLL_DEPTH.try_with(Cell::get).unwrap_or(0) as u64);
 }
 
 fn release_reclaimed_native_promise_internal_owners(tracing: bool) {

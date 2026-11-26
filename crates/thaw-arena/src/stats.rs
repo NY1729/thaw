@@ -132,6 +132,7 @@ pub fn stats_summary() -> String {
     sink.add("arena", "reclaimed", get(&RECLAIMED_BYTES));
     sink.add("arena", "chunks", crate::chunk_count() as u64);
     sink.add("arena", "peak_pending", get(&PEAK_PENDING));
+    sink.add("arena", "tracing", u64::from(crate::is_tracing()));
     sink.add("heap", "arena_bytes", live + since);
     if let Some(malloc) = malloc_in_use() {
         sink.add("heap", "malloc_in_use", malloc);
