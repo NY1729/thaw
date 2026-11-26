@@ -548,7 +548,6 @@ impl ObjData {
         if let Some(map) = self.raw_props.index.borrow_mut().as_mut() {
             map.remove(key);
         }
-        self.raw_props.dirty.set(true);
         true
     }
 }
@@ -561,11 +560,10 @@ fn tomb() -> Rc<str> {
     TOMB.with(|t| t.clone())
 }
 
-/// An object's own properties plus their key index. `delete` on a large object leaves a tombstone (`dirty`);
+/// An object's own properties plus their key index. `delete` on a large object leaves a tombstone (see `compact`);
 /// every `borrow*` compacts first, so readers never see one.
 pub(crate) struct PropVec {
     v: RefCell<Vec<Prop>>,
-    dirty: Cell<bool>,
     /// Key -> position in the vector, built lazily for objects with many properties (`None` = stale).
     index: RefCell<Option<FxMap<Rc<str>, usize>>>,
 }
@@ -574,19 +572,21 @@ impl PropVec {
     fn new() -> Self {
         PropVec {
             v: RefCell::new(Vec::new()),
-            dirty: Cell::new(false),
             index: RefCell::new(None),
         }
     }
 
+    /// Tombstones exist exactly when a live index holds fewer keys than the vector has slots (a delete only
+    /// tombstones while the index is built, and dropping the index always follows a compaction).
     fn compact(&self) {
-        if self.dirty.get() {
-            if let Ok(mut v) = self.v.try_borrow_mut() {
-                let t = tomb();
-                v.retain(|p| !Rc::ptr_eq(&p.key, &t));
-                self.dirty.set(false);
-                *self.index.borrow_mut() = None;
-            }
+        let stale = match (self.index.try_borrow(), self.v.try_borrow()) {
+            (Ok(i), Ok(v)) => i.as_ref().is_some_and(|m| m.len() != v.len()),
+            _ => false,
+        };
+        if stale {
+            let t = tomb();
+            self.v.borrow_mut().retain(|p| !Rc::ptr_eq(&p.key, &t));
+            *self.index.borrow_mut() = None;
         }
     }
 
