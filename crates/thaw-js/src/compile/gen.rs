@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use thaw_parser::ast as a;
 
-use super::analyze::{DeclKind, FnPlan, NameClass};
-use super::{expr, stmt, CompiledFn, Ex, FallbackReason, FrameInit};
+use super::analyze::{self, DeclKind, FnPlan, NameClass};
+use super::{expr, pat, stmt, CompiledFn, Ex, FallbackReason, FrameInit};
 use crate::{Body, FuncDef};
 
 /// Codegen result: `Err` names the reason the function stays on the AST interpreter.
@@ -163,9 +163,26 @@ pub(crate) fn compile(
         .map(|n| intern(&n.name));
     let mut param_slots = Vec::with_capacity(def.params.len());
     let mut scoped_params = Vec::new();
+    let mut scoped_vars = Vec::new();
+    let mut param_binds = Vec::new();
     for (i, p) in def.params.iter().enumerate() {
-        let a::Pat::Ident(b) = p else {
-            return reject();
+        let b = match p {
+            a::Pat::Ident(b) => b,
+            // a pattern parameter: its names are declared first, then the binder runs after the frame exists
+            p => {
+                let mut names = Vec::new();
+                analyze::pat_names(p, &mut names);
+                for n in &names {
+                    if g.is_scoped(n) {
+                        scoped_vars.push(intern(n));
+                    } else {
+                        g.declare_fn(n, true);
+                    }
+                }
+                param_binds.push((i, pat::compile(&mut g, p, pat::Mode::Param)?));
+                param_slots.push(None);
+                continue;
+            }
         };
         if g.is_scoped(&b.id.sym) {
             scoped_params.push((i, intern(&b.id.sym)));
@@ -174,7 +191,6 @@ pub(crate) fn compile(
             param_slots.push(Some(g.declare_fn(&b.id.sym, true)));
         }
     }
-    let mut scoped_vars = Vec::new();
     for name in &def.hoisted {
         if g.is_scoped(name) {
             scoped_vars.push(intern(name));
@@ -194,6 +210,7 @@ pub(crate) fn compile(
         nslots: g.next_slot,
         self_slot,
         param_slots,
+        param_binds,
         body,
         expr_body,
         frame: plan.needs_scope.then_some(FrameInit {

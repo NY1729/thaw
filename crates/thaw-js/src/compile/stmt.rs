@@ -9,6 +9,7 @@ use thaw_parser::ast as a;
 use super::expr;
 use super::gen::{self, reject, Gen, CG};
 use super::num::{self, Bl};
+use super::pat;
 use super::{bx, Ex, Flow, Frame, St, CR};
 use crate::{Ctl, Interp};
 
@@ -292,8 +293,24 @@ fn var_decl(g: &mut Gen, v: &a::VarDecl) -> CG<St> {
     let mutable = !matches!(v.kind, a::VarDeclKind::Const);
     let mut steps = Vec::with_capacity(v.decls.len());
     for d in &v.decls {
-        let a::Pat::Ident(b) = &d.name else {
-            return reject();
+        let b = match &d.name {
+            a::Pat::Ident(b) => b,
+            pat => {
+                let Some(e) = &d.init else { return reject() };
+                let init = expr::compile(g, e)?;
+                let mode = match (is_var, mutable) {
+                    (true, _) => pat::Mode::Var,
+                    (_, true) => pat::Mode::Let,
+                    _ => pat::Mode::Const,
+                };
+                let bind = pat::compile(g, pat, mode)?;
+                steps.push(mk_st(move |it, f| {
+                    let v = init(it, f)?;
+                    bind(it, f, v)?;
+                    Ok(Flow::Next)
+                }));
+                continue;
+            }
         };
         let name = &b.id.sym;
         if is_var {

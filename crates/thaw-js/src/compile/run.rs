@@ -116,7 +116,21 @@ impl CompiledFn {
             this,
             ret: Value::Undefined,
         };
-        let r = self.body(it, &mut frame);
+        let mut r = Ok(());
+        for (i, bind) in &self.param_binds {
+            let v = match args.get_mut(*i) {
+                Some(a) => std::mem::replace(a, Value::Undefined),
+                None => Value::Undefined,
+            };
+            if let Err(e) = bind(it, &mut frame, v) {
+                r = Err(*e);
+                break;
+            }
+        }
+        let r = match r {
+            Ok(()) => self.body(it, &mut frame),
+            Err(e) => Err(e),
+        };
         // every exit path (return, throw, fallthrough) comes here: the values are dropped now, as the AST frame's
         // are at return, and only the empty buffer is kept
         let mut slots = std::mem::take(&mut frame.slots);

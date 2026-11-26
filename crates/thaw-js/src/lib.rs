@@ -5116,7 +5116,29 @@ impl Interp {
                     self.assign_var(scope, &id.id.sym, value, scope.strict.get())?
                 }
                 pat if is_var => self.bind_pattern(pat, value, scope, false)?,
-                pat => self.bind_pattern(pat, value, scope, true)?,
+                pat => self.bind_lexical_pattern(pat, value, scope, mutable)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// `let`/`const` pattern: the names are declared, and the `const` ones are then frozen.
+    fn bind_lexical_pattern(
+        &mut self,
+        pat: &a::Pat,
+        value: Value,
+        scope: &Rc<Scope>,
+        mutable: bool,
+    ) -> R<()> {
+        self.bind_pattern(pat, value, scope, true)?;
+        if !mutable {
+            let mut names = Vec::new();
+            compile::pat_names(pat, &mut names);
+            let mut vars = scope.vars.borrow_mut();
+            for n in &names {
+                if let Some(b) = vars.get_mut(n) {
+                    b.mutable = false;
+                }
             }
         }
         Ok(())
@@ -5347,7 +5369,12 @@ impl Interp {
                 Some(p) if matches!(v.kind, a::VarDeclKind::Var) => {
                     self.bind_pattern(p, value, scope, false)
                 }
-                Some(p) => self.bind_pattern(p, value, scope, true),
+                Some(p) => self.bind_lexical_pattern(
+                    p,
+                    value,
+                    scope,
+                    !matches!(v.kind, a::VarDeclKind::Const),
+                ),
                 None => unsupported("for-head"),
             },
             a::ForHead::Pat(p) => self.bind_pattern(p, value, scope, false),

@@ -373,7 +373,7 @@ impl Walk {
 }
 
 /// Bound names of a pattern, in source order.
-fn pat_names(p: &a::Pat, out: &mut Vec<String>) {
+pub(crate) fn pat_names(p: &a::Pat, out: &mut Vec<String>) {
     match p {
         a::Pat::Ident(b) => out.push(b.id.sym.to_string()),
         a::Pat::Array(ap) => {
@@ -463,9 +463,6 @@ impl Visit for Walk {
     fn visit_var_declarator(&mut self, d: &a::VarDeclarator) {
         if let Some(init) = &d.init {
             init.visit_with(self);
-        }
-        if !matches!(d.name, a::Pat::Ident(_)) {
-            self.block(FallbackReason::Destructuring);
         }
         self.pat_refs(&d.name);
     }
@@ -830,7 +827,7 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
     if def.is_async {
         w.block(FallbackReason::Async);
     }
-    for p in &def.params {
+    for (i, p) in def.params.iter().enumerate() {
         let mut names = Vec::new();
         pat_names(p, &mut names);
         for name in names {
@@ -840,7 +837,8 @@ pub(crate) fn analyze(def: &FuncDef) -> FnPlan {
             a::Pat::Ident(_) => {}
             a::Pat::Assign(_) => w.block(FallbackReason::DefaultParam),
             a::Pat::Rest(_) => w.block(FallbackReason::RestParam),
-            _ => w.block(FallbackReason::Destructuring),
+            _ if !pattern_param_ok(def, i) => w.block(FallbackReason::Destructuring),
+            _ => {}
         }
     }
     // The self name is a slot only when the body mentions it (plan 1.3). It is declared after the parameters
@@ -1009,4 +1007,64 @@ impl Visit for LoopFinder {
     fn visit_do_while_stmt(&mut self, _: &a::DoWhileStmt) {
         self.0 = true;
     }
+}
+
+/// Identifiers in the expressions of a pattern (defaults, computed keys), not its bound names.
+fn pat_expr_idents(p: &a::Pat, out: &mut IdentNames) {
+    match p {
+        a::Pat::Array(ap) => {
+            for e in ap.elems.iter().flatten() {
+                pat_expr_idents(e, out);
+            }
+        }
+        a::Pat::Object(op) => {
+            for prop in &op.props {
+                match prop {
+                    a::ObjectPatProp::KeyValue(kv) => {
+                        if let a::PropName::Computed(c) = &kv.key {
+                            c.expr.visit_with(out);
+                        }
+                        pat_expr_idents(&kv.value, out);
+                    }
+                    a::ObjectPatProp::Assign(ap) => {
+                        if let Some(v) = &ap.value {
+                            v.visit_with(out);
+                        }
+                    }
+                    a::ObjectPatProp::Rest(r) => pat_expr_idents(&r.arg, out),
+                }
+            }
+        }
+        a::Pat::Assign(ap) => {
+            ap.right.visit_with(out);
+            pat_expr_idents(&ap.left, out);
+        }
+        a::Pat::Rest(r) => pat_expr_idents(&r.arg, out),
+        a::Pat::Expr(e) => e.visit_with(out),
+        a::Pat::Ident(_) | a::Pat::Invalid(_) => {}
+    }
+}
+
+/// Whether parameter `i` can be a compiled pattern or default: its expressions must not name anything that is
+/// bound later (a later parameter, a `var`, a function declaration), because compiled frames declare those
+/// first while the interpreter binds parameters in order against the outer scope. Pattern kinds `Pat::Expr`
+/// and invalid ones are never bound.
+fn pattern_param_ok(def: &FuncDef, i: usize) -> bool {
+    let mut used = IdentNames(Default::default());
+    pat_expr_idents(&def.params[i], &mut used);
+    if used.0.is_empty() {
+        return true;
+    }
+    let mut later = Vec::new();
+    for p in &def.params[i..] {
+        pat_names(p, &mut later);
+    }
+    if let Body::Block(stmts) = &def.body {
+        let mut vars = VarNames(Vec::new());
+        for s in stmts {
+            s.visit_with(&mut vars);
+        }
+        later.extend(vars.0);
+    }
+    !later.iter().any(|n| used.0.contains(n))
 }
