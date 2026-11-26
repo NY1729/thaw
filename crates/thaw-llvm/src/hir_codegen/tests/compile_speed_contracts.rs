@@ -46,3 +46,36 @@ fn synthetic_error_stores_live_in_one_shared_function() {
     assert!(setter_calls >= 1, "{ir}");
     assert_eq!(direct_frames, 1, "only the shared setter calls thaw_error_frame:\n{ir}");
 }
+
+#[test]
+fn call_free_leaf_functions_drop_the_stack_guard_and_may_inline() {
+    let context = Context::create();
+    let module = thaw_parser::parse_typescript(
+        r#"
+        function sq(x: number): number { return x * x + 1; }
+        function fib(n: number): number { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+        function main(): void { console.log(sq(3) + fib(5)); }
+    "#,
+    )
+    .unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let mut compiler = HirCompiler::new(&context, "leaf_guard");
+    compiler.compile_program(&program).unwrap();
+    let noinline = inkwell::attributes::Attribute::get_named_enum_kind_id("noinline");
+    let find = |suffix: &str| {
+        compiler
+            .module
+            .get_functions()
+            .find(|f| f.get_name().to_string_lossy().ends_with(suffix) && f.count_basic_blocks() > 0)
+            .unwrap_or_else(|| panic!("no function ending in {suffix}"))
+    };
+    use inkwell::values::AnyValue;
+    let (leaf, recursive) = (find("sq"), find("fib"));
+    let attr = |f: inkwell::values::FunctionValue| {
+        f.get_enum_attribute(inkwell::attributes::AttributeLoc::Function, noinline).is_some()
+    };
+    // Stack traces need the frame of a function that can run user code; a leaf has none to show.
+    assert!(!attr(leaf) && attr(recursive));
+    assert!(leaf.print_to_string().to_string().contains("br i1 false"), "{}", leaf.print_to_string());
+    assert!(!recursive.print_to_string().to_string().contains("br i1 false"));
+}
