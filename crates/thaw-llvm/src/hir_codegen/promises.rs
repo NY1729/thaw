@@ -2614,6 +2614,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
         }
+        // `await <Promise<void>>` outside an async frame (top level, a plain closure) has no
+        // suspension point to hoist into: drive the event loop until it settles, like the typed
+        // `AwaitPromise` does for a value-carrying promise.
+        if matches!(self.expr_hir_type(inner), Some(HirType::Promise(resolved)) if *resolved == HirType::Void) {
+            let promise = self.compile_promise_for_consumption(inner)?;
+            self.drive_promise_to_completion(promise)?;
+            return Ok(self.context.ptr_type(AddressSpace::default()).const_null().into());
+        }
         let value = self.compile_expr(inner)?;
         if !is_sleep {
             // User-defined async functions still use the V1 synchronous ABI.
