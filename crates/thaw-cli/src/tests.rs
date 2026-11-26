@@ -681,8 +681,7 @@ fn native_loop_reclaims_arena_between_turns() {
 
 #[test]
 fn dynamic_add_alone_keeps_turn_resets() {
-    let directory =
-        std::env::temp_dir().join(format!("thaw-cli-arena-add-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("thaw-cli-arena-add-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let input = directory.join("main.ts");
     let output = directory.join("app");
@@ -692,11 +691,21 @@ fn dynamic_add_alone_keeps_turn_resets() {
     )
     .unwrap();
     run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
-    let result = Command::new(&output).env("THAW_ARENA_STATS", "1").output().unwrap();
+    let result = Command::new(&output)
+        .env("THAW_ARENA_STATS", "1")
+        .output()
+        .unwrap();
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert_eq!(result.stdout, b"200090000\n");
-    let at = stderr.find("resets=").unwrap_or_else(|| panic!("resets in {stderr}"));
-    let resets: u64 = stderr[at + 7..].split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap();
+    let at = stderr
+        .find("resets=")
+        .unwrap_or_else(|| panic!("resets in {stderr}"));
+    let resets: u64 = stderr[at + 7..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!(resets > 0, "{stderr}");
     let _ = std::fs::remove_dir_all(directory);
 }
