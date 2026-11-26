@@ -317,12 +317,9 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
             }
         }
     }
-    if let Some(i) = o.position(key) {
-        if !o.raw_props.borrow()[i].configurable {
-            return Ok(false);
-        }
+    if !o.remove_prop_if(key, true) {
+        return Ok(false);
     }
-    o.remove_prop(key);
     if let Some(id) = crate::host::native_error_target(it, o, key) {
         crate::host::native_error_write(id, key, None);
     }

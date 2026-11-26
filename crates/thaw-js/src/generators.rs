@@ -450,8 +450,8 @@ impl Interp {
     pub(crate) fn yield_star(&mut self, iterable: Value) -> R<Value> {
         let agen = self.rt.cur_co.last().is_some_and(|c| c.agen);
         if !agen {
-            if let Some(items) = self.iter_items(&iterable) {
-                for item in items {
+            if let Some(mut items) = self.iter_items_live(&iterable) {
+                while let Some(item) = items.next(self) {
                     self.yield_value(item)?;
                 }
                 return Ok(Value::Undefined);

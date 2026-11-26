@@ -349,6 +349,35 @@ pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
         || matches!((a, b), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan())
 }
 
+/// The values a `for-of` / `yield*` visits: a snapshot, or a live Map/Set cursor.
+pub(crate) enum ItemsIter {
+    Snap(std::vec::IntoIter<Value>),
+    Live(Obj, Rc<Cell<usize>>, bool),
+    /// a dense array read by index at each step, so pushes/pops/shifts during the loop are seen
+    Arr(Obj, usize),
+}
+
+impl ItemsIter {
+    pub(crate) fn next(&mut self, it: &mut Interp) -> Option<Value> {
+        match self {
+            ItemsIter::Snap(i) => i.next(),
+            ItemsIter::Arr(a, i) => {
+                let v = match &*a.kind.borrow() {
+                    Kind::Array(items) => items.get(*i).map(|v| unhole(Some(v)))?,
+                    _ => return None,
+                };
+                *i += 1;
+                Some(v)
+            }
+            ItemsIter::Live(src, cur, is_map) => {
+                let (next, k, v) = entry_at(src, cur.get())?;
+                cur.set(next);
+                Some(if *is_map { it.array(vec![k, v]) } else { k })
+            }
+        }
+    }
+}
+
 impl Interp {
     /// A live `Map`/`Set` iterator over `this` (`mode`: 0 keys, 1 values, 2 entries), or a
     /// TypeError if `this` is not the right kind of collection.
@@ -430,6 +459,23 @@ impl Interp {
             }
             _ => None,
         }
+    }
+
+    /// `iter_items` for loops that run user code between steps: a Map/Set is walked live (a registered cursor), so
+    /// entries deleted or added during the loop are seen exactly as a Map/Set iterator would.
+    pub(crate) fn iter_items_live(&mut self, v: &Value) -> Option<ItemsIter> {
+        if let Value::Object(o) = v {
+            let is_map = match &*o.kind.borrow() {
+                Kind::Map(_) => true,
+                Kind::Set(_) => false,
+                Kind::Array(_) if !crate::array_snapshot_unsafe(o) => {
+                    return Some(ItemsIter::Arr(o.clone(), 0))
+                }
+                _ => return self.iter_items(v).map(|x| ItemsIter::Snap(x.into_iter())),
+            };
+            return Some(ItemsIter::Live(o.clone(), live_cursor(o), is_map));
+        }
+        self.iter_items(v).map(|x| ItemsIter::Snap(x.into_iter()))
     }
 
     /// `iter_items`, extended with the `Symbol.iterator` protocol for user-defined iterables
