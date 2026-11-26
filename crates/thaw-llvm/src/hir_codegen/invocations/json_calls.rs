@@ -400,11 +400,21 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string());
             }
             "__thaw_json_capture_stack_trace" => {
-                return self.compile_single_arg_call(
-                    "thaw_json_capture_stack_trace",
-                    args,
-                    "JSON capture stack trace",
-                )
+                let [target, cut] = args else {
+                    return Err("JSON capture stack trace expects a target and a cut name".into());
+                };
+                let (target, cut) = (self.compile_expr(target)?, self.compile_expr(cut)?);
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_capture_stack_trace").unwrap(),
+                        &[target.into(), cut.into()],
+                        "json_capture_stack_trace",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("JSON capture stack trace returned no value".into());
             }
             "__thaw_json_map_or_set_entries" => {
                 return self.compile_single_arg_call(

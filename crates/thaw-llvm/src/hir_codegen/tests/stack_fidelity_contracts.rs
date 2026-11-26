@@ -303,7 +303,6 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: Error.captureStackTrace ignores its constructorOpt argument"]
 fn stack_fidelity_capture() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
