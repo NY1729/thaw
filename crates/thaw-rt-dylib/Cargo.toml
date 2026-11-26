@@ -17,6 +17,7 @@ thaw-jit = { path = "../thaw-jit" }
 thaw-runtime = { path = "../thaw-runtime" }
 thaw-std = { path = "../thaw-std" }
 thaw-js = { path = "../thaw-js", optional = true }
+thaw-intl = { path = "../thaw-intl", optional = true }
 
 [build-dependencies]
 sha2 = "0.10"
@@ -25,3 +26,5 @@ sha2 = "0.10"
 default = []
 # One image with thaw-js too (`--shared-rt` for programs that use the JS engine): one arena, one TLS set.
 thaw-js = ["dep:thaw-js"]
+# The `intl` variant (`libthaw_rt_intl.so.1`): adds the thaw-intl natives and the baked CLDR data.
+intl = ["dep:thaw-intl", "thaw-js?/intl"]

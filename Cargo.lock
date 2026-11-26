@@ -3311,6 +3311,7 @@ version = "0.1.0"
 dependencies = [
  "sha2",
  "thaw-arena",
+ "thaw-intl",
  "thaw-jit",
  "thaw-js",
  "thaw-runtime",

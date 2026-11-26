@@ -93,7 +93,7 @@ fn shared_rt_default_off_manifest_is_unchanged() {
 fn shared_rt_c_abi_v1_links_and_runs_from_c() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-shared-rt-c-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let lib = build_rt_shared_library(false).unwrap();
+    let lib = build_rt_shared_library(false, RtVariant::Base).unwrap();
     std::fs::write(
         dir.join("abi.c"),
         "#include <stdint.h>\n\
@@ -202,7 +202,7 @@ fn lib_command_stdout(command: &mut Command) -> String {
 fn lib_built_clamp(dir: &Path, store_name: &str) -> (PathBuf, String, PathBuf) {
     let registry = lib_fixture_registry(dir, "clamp-fixture", LIB_CLAMP_DTS, LIB_CLAMP_BUNDLE);
     let store = dir.join(store_name);
-    let (key, built) = lib_build("clamp-fixture", &registry, &store, false).unwrap();
+    let (key, built) = lib_build("clamp-fixture", &registry, &store, false, RtVariant::Base).unwrap();
     assert!(built);
     let so = store.join("store").join(&key).join("libthaw_pkg_clamp_fixture.so");
     (store, key, so)
@@ -313,7 +313,7 @@ fn lib_build_twice_is_byte_identical() {
     assert_eq!(key_a, key_b);
     assert_eq!(std::fs::read(&so_a).unwrap(), std::fs::read(&so_b).unwrap());
     let registry = dir.join("modules");
-    let (key_again, built) = lib_build("clamp-fixture", &registry, &store_a, false).unwrap();
+    let (key_again, built) = lib_build("clamp-fixture", &registry, &store_a, false, RtVariant::Base).unwrap();
     assert_eq!((key_again, built), (key_a, false));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -327,7 +327,7 @@ fn lib_build_rejects_non_scalar_only_packages() {
         "export declare function greet(s: string): string;\n",
         "module.exports = { greet: function(s) { return 'hi ' + s; } };\n",
     );
-    let error = lib_build("greeter", &registry, &dir.join("store"), false).unwrap_err();
+    let error = lib_build("greeter", &registry, &dir.join("store"), false, RtVariant::Base).unwrap_err();
     assert!(error.contains("no exportable functions"), "{error}");
     assert!(!dir.join("store").join("store").exists());
     let _ = std::fs::remove_dir_all(dir);
@@ -388,5 +388,100 @@ fn shared_rt_links_a_jit_registry_program() {
     assert_eq!(build("shared", true), "3 1\n");
     let manifest = artifact_manifest_from_bytes(&std::fs::read(dir.join("shared")).unwrap()).unwrap();
     assert_eq!(manifest["shared_rt"], true, "fell back to the static runtime");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn readelf(path: &Path) -> String {
+    String::from_utf8_lossy(&Command::new("readelf").arg("-d").arg(path).output().unwrap().stdout).into_owned()
+}
+
+#[test]
+fn shared_rt_variant_selection_is_conservative() {
+    use RtVariant::{Base, Intl};
+    assert_eq!(shared_rt_variant(false, false, None).unwrap(), Some(Base));
+    assert_eq!(shared_rt_variant(true, false, None).unwrap(), Some(Intl));
+    assert_eq!(shared_rt_variant(false, false, Some(Intl)).unwrap(), Some(Intl));
+    assert_eq!(shared_rt_variant(true, false, Some(Intl)).unwrap(), Some(Intl));
+    assert!(shared_rt_variant(true, false, Some(Base)).is_err());
+    // tls/wasm/brotli/sqlite/zstd/icu4c have no shared image.
+    assert_eq!(shared_rt_variant(true, true, None).unwrap(), None);
+    assert_eq!(shared_rt_variant(false, true, Some(Intl)).unwrap(), None);
+    assert_eq!(RtVariant::parse("auto").unwrap(), None);
+    assert_eq!(RtVariant::parse("intl").unwrap(), Some(Intl));
+    assert!(RtVariant::parse("js").is_err());
+    assert_ne!(Base.soname(), Intl.soname());
+    assert_eq!(RtVariant::from_soname(Intl.soname()), Some(Intl));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn shared_rt_intl_program_links_the_intl_image() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-shared-rt-intl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = "function main(): void { console.log([\"b\", \"a\"].sort((x, y) => x.localeCompare(y)).join(\",\")); console.log((1234.5).toLocaleString(\"de-DE\")); }\n";
+    let inline = shared_rt_build(&dir, "inline", source, false).unwrap();
+    let shared = shared_rt_build(&dir, "shared", source, true).unwrap();
+    let inline_out = Command::new(&inline).output().unwrap();
+    let shared_out = Command::new(&shared).env_remove("LD_LIBRARY_PATH").output().unwrap();
+    assert!(shared_out.status.success(), "{}", String::from_utf8_lossy(&shared_out.stderr));
+    assert_eq!(inline_out.stdout, shared_out.stdout);
+    let elf = readelf(&shared);
+    assert!(elf.contains("libthaw_rt_intl.so.1"), "{elf}");
+    assert!(!elf.contains("libthaw_rt.so.1"), "{elf}");
+    let manifest = artifact_manifest_from_bytes(&std::fs::read(&shared).unwrap()).unwrap();
+    assert_eq!(manifest["shared_rt_variant"], "intl");
+    // The same image is also what a hello program does NOT link: base stays base.
+    let hello = shared_rt_build(&dir, "hello", "function main(): void { console.log(\"hi\"); }\n", true).unwrap();
+    let elf = readelf(&hello);
+    assert!(elf.contains("libthaw_rt.so.1") && !elf.contains("libthaw_rt_intl"), "{elf}");
+    assert!(artifact_manifest_from_bytes(&std::fs::read(&hello).unwrap()).unwrap().get("shared_rt_variant").is_none());
+    // Forcing base for an Intl program is an error; forcing intl for hello is honoured.
+    set_rt_variant_override(Some(RtVariant::Base));
+    let error = shared_rt_build(&dir, "forced-base", source, true).unwrap_err();
+    set_rt_variant_override(Some(RtVariant::Intl));
+    let forced = shared_rt_build(&dir, "forced-intl", "function main(): void { console.log(\"hi\"); }\n", true);
+    set_rt_variant_override(None);
+    assert!(error.contains("--rt-variant base"), "{error}");
+    assert!(readelf(&forced.unwrap()).contains("libthaw_rt_intl.so.1"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn shared_rt_variants_have_distinct_abi_hashes_and_sonames() {
+    let base = build_rt_shared_library(false, RtVariant::Base).unwrap();
+    let intl = build_rt_shared_library(false, RtVariant::Intl).unwrap();
+    assert_ne!(base.parent(), intl.parent(), "per-variant ABI hash directory");
+    assert!(base.ends_with("libthaw_rt.so.1") && intl.ends_with("libthaw_rt_intl.so.1"));
+    let size = |p: &Path| std::fs::metadata(p).unwrap().len();
+    eprintln!("SIZES base={} intl={}", size(&base), size(&intl));
+    assert!(size(&intl) > size(&base));
+    let soname = |p: &Path| String::from_utf8_lossy(&Command::new("readelf").arg("-d").arg(p).output().unwrap().stdout).into_owned();
+    assert!(soname(&intl).contains("[libthaw_rt_intl.so.1]"));
+    assert!(soname(&base).contains("[libthaw_rt.so.1]"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn lib_build_intl_variant_records_and_verifies_its_runtime_image() {
+    let dir = lib_test_dir("intlvariant");
+    let registry = lib_fixture_registry(&dir, "clamp-fixture", LIB_CLAMP_DTS, LIB_CLAMP_BUNDLE);
+    let store = dir.join("store");
+    let (base_key, _) = lib_build("clamp-fixture", &registry, &store, false, RtVariant::Base).unwrap();
+    let (intl_key, built) = lib_build("clamp-fixture", &registry, &store, false, RtVariant::Intl).unwrap();
+    assert!(built);
+    assert_ne!(base_key, intl_key);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(store.join("store").join(&intl_key).join("thaw.json")).unwrap()).unwrap();
+    assert_eq!(manifest["rt"]["variant"], "intl");
+    assert_eq!(manifest["rt"]["soname"], "libthaw_rt_intl.so.1");
+    let so = store.join("store").join(&intl_key).join("libthaw_pkg_clamp_fixture.so");
+    assert!(readelf(&so).contains("libthaw_rt_intl.so.1"));
+    lib_verify(&store, None).unwrap();
+    // Removing the intl image makes verify fail for that entry only.
+    let hash = manifest["rt"]["abi_hash"].as_str().unwrap();
+    std::fs::remove_file(store.join("rt").join(hash).join("libthaw_rt_intl.so.1")).unwrap();
+    assert!(lib_verify_one(&store.join("store").join(&intl_key)).is_err());
+    assert!(lib_verify_one(&store.join("store").join(&base_key)).is_ok());
     let _ = std::fs::remove_dir_all(dir);
 }

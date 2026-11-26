@@ -108,6 +108,24 @@ mod tests {
     }
 
     #[test]
+    fn intl_exports_file_is_sorted_and_disjoint_from_core_and_js() {
+        let intl: Vec<&str> = include_str!("../exports-intl.txt").lines().collect();
+        assert!(
+            intl.windows(2).all(|w| w[0] < w[1]),
+            "exports-intl.txt must be sorted and unique"
+        );
+        for other in [
+            include_str!("../exports.txt"),
+            include_str!("../exports-js.txt"),
+        ] {
+            let other: Vec<&str> = other.lines().collect();
+            assert!(intl
+                .iter()
+                .all(|n| n.starts_with("thaw_intl_") && !other.contains(n)));
+        }
+    }
+
+    #[test]
     fn abi_hash_is_16_hex_and_stable() {
         let a = unsafe { CStr::from_ptr(thaw_rt_abi_hash()) }
             .to_str()

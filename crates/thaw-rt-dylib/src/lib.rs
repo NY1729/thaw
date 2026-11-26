@@ -6,6 +6,8 @@ pub mod cabi;
 // Keep the runtime crates in the link even though this crate names none of
 // their items directly.
 pub use thaw_arena as _arena;
+#[cfg(feature = "intl")]
+pub use thaw_intl as _intl;
 pub use thaw_jit as _jit;
 #[cfg(feature = "thaw-js")]
 pub use thaw_js as _js;
