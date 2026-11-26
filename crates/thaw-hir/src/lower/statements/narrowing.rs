@@ -1090,7 +1090,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn infer_generator_types(
-        &self,
+        &mut self,
         body: &[HirStmt],
         yields: &str,
         returns: &str,
@@ -1101,9 +1101,11 @@ impl<'a> FnLowerer<'a> {
             returns: &str,
             yielded: &mut Vec<&'a HirExpr>,
             returned: &mut Vec<&'a HirExpr>,
+            locals: &mut Vec<(&'a Symbol, &'a HirType)>,
         ) {
             for statement in statements {
                 match statement {
+                    HirStmt::Let(name, ty, _) => locals.push((name, ty)),
                     HirStmt::Expr(HirExpr::Assign(channel, value)) if channel == yields => {
                         if matches!(value.as_ref(), HirExpr::ArrayConcat(..)) {
                             yielded.push(value);
@@ -1121,18 +1123,18 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                     HirStmt::If(_, then_body, else_body) => {
-                        collect(then_body, yields, returns, yielded, returned);
-                        collect(else_body, yields, returns, yielded, returned);
+                        collect(then_body, yields, returns, yielded, returned, locals);
+                        collect(else_body, yields, returns, yielded, returned, locals);
                     }
                     HirStmt::While(_, loop_body) => {
-                        collect(loop_body, yields, returns, yielded, returned)
+                        collect(loop_body, yields, returns, yielded, returned, locals)
                     }
                     HirStmt::Finally(body, _) => {
-                        collect(body, yields, returns, yielded, returned);
+                        collect(body, yields, returns, yielded, returned, locals);
                     }
                     HirStmt::Try(try_body, _, catch_body, _) => {
-                        collect(try_body, yields, returns, yielded, returned);
-                        collect(catch_body, yields, returns, yielded, returned);
+                        collect(try_body, yields, returns, yielded, returned, locals);
+                        collect(catch_body, yields, returns, yielded, returned, locals);
                     }
                     _ => {}
                 }
@@ -1141,13 +1143,21 @@ impl<'a> FnLowerer<'a> {
 
         let mut yielded = Vec::new();
         let mut returned = Vec::new();
-        collect(body, yields, returns, &mut yielded, &mut returned);
+        let mut locals = Vec::new();
+        collect(body, yields, returns, &mut yielded, &mut returned, &mut locals);
+        // Loop temporaries and block-scoped locals left `self.scope` when their
+        // statements were lowered; bring them back while typing the yields.
+        let saved_scope = self.scope.clone();
+        for (name, ty) in locals {
+            self.scope.entry(name.clone()).or_insert_with(|| ty.clone());
+        }
+        let this = &*self;
         let infer = |values: Vec<&HirExpr>| -> Result<HirType, String> {
             let mut types = Vec::new();
             for value in values {
                 let ty = match value {
                     HirExpr::ArrayConcat(_, element) => element.clone(),
-                    _ => self.infer_expr_type(value)?,
+                    _ => this.infer_expr_type(value)?,
                 };
                 if ty != HirType::Dynamic && !types.contains(&ty) {
                     types.push(ty);
@@ -1159,7 +1169,9 @@ impl<'a> FnLowerer<'a> {
                 _ => HirType::Union(types),
             })
         };
-        Ok((infer(yielded)?, infer(returned)?))
+        let result = infer(yielded).and_then(|y| Ok((y, infer(returned)?)));
+        self.scope = saved_scope;
+        result
     }
 
     /// Normalizes a `for`/`while`/`if` body, which SWC represents as a
