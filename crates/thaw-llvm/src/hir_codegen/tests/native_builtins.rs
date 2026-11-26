@@ -8575,7 +8575,7 @@ fn compiles_aggregate_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "AggregateError\n1,2,3\n17\ntrue\n[AggregateError: all failed] {\n  [errors]: [\n    Error: a\n        at main (input.ts:5:9)\n  ]\n}\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
+        "AggregateError {\n  [errors]: [ 1, 2, 3 ]\n}\n1,2,3\n17\ntrue\n[AggregateError: all failed] {\n  [errors]: [\n    Error: a\n        at main (input.ts:5:9)\n  ]\n}\ntrue\nAggregateError\nall failed\n{ message: 'not aggregate', name: 'AggregateError', errors: {} }\n"
     );
 }
 
