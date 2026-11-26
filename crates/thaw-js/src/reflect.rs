@@ -73,8 +73,9 @@ fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
         }
     }
     o.force_key(key);
-    let i = o.position(key)?;
-    let props = o.raw_props.borrow();
+    // no compaction: a run of `delete`s keeps its tombstones while their keys are probed
+    let i = o.position_raw(key)?;
+    let props = o.raw_props.v.borrow();
     Some((props[i].slot.clone(), props[i].writable && writable))
 }
 
