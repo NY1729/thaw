@@ -280,6 +280,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(object.into());
             }
             // `x` carries the "never assigned" marker NaN of a class field read through a structural view.
+            "__thaw_live_add_guard" => {
+                let [guard] = args else {
+                    return Err("live add guard expects one operand".into());
+                };
+                return self.compile_expr(guard);
+            }
             "__thaw_is_unset_number" => {
                 let [value] = args else {
                     return Err("unset number check expects one number".into());
