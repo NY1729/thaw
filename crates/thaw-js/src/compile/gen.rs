@@ -135,7 +135,7 @@ pub(crate) fn compile(
     plan: &FnPlan,
     intern: &mut dyn FnMut(&str) -> Rc<str>,
 ) -> CG<CompiledFn> {
-    if def.class.is_some()
+    if def.class.as_ref().is_some_and(|c| c.derived)
         || def.is_gen
         || def.is_async
         // the analyzer scopes only parameters and `var`s; any other scoped name here is a bug, not a fallback

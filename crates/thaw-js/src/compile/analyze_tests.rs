@@ -393,7 +393,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
     ),
     (
         "var f = class { constructor(a) { this.a = a } }",
-        Some(R::ClassConstructor),
+        None,
         "a:slot",
     ),
     (
