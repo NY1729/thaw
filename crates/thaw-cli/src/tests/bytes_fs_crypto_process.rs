@@ -303,3 +303,38 @@ console.log(code(() => fs.writeFileSync(dir + "/f.txt", "y", "bogus" as any)));
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// Top-level `await` of `Promise<void>` with timers, nested async functions, a caught rejection and
+// an uncaught one (exit code 1, nothing after it runs). Expected output from node 22.
+#[test]
+fn top_level_void_await_with_nested_awaits_and_rejections() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-tla_void-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+async function inner(n: number): Promise<void> { await sleep(2); console.log("inner", n); await sleep(1); }
+async function outer(): Promise<void> { await inner(1); await inner(2); console.log("outer done"); }
+console.log("start");
+await outer();
+console.log("after outer");
+const p = Promise.all([sleep(3), sleep(1)]);
+await p;
+console.log("all");
+await new Promise<void>(r => setTimeout(() => { console.log("t1"); setTimeout(() => { console.log("t2"); r(); }, 1); }, 1));
+console.log("end");
+try { await new Promise<void>((_, rej) => setTimeout(() => rej(new Error("boom")), 1)); } catch (e: any) { console.log("caught", e.message); }
+await new Promise<void>((_, rej) => setTimeout(() => rej(new Error("unhandled")), 1));
+console.log("unreachable");
+"#;
+    std::fs::write(&entry, source).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "start\ninner 1\ninner 2\nouter done\nafter outer\nall\nt1\nt2\nend\ncaught boom\n"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Error: unhandled"));
+    let _ = std::fs::remove_dir_all(dir);
+}
