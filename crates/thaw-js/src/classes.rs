@@ -435,6 +435,19 @@ impl Interp {
         }
     }
 
+    /// `super[key]` once the base and the key are known: accessors on the base run with the current `this`.
+    pub(crate) fn super_read(&mut self, base: &Value, key: &str, scope: &Rc<Scope>) -> R<Value> {
+        let this = self.this_of(scope);
+        match base {
+            Value::Object(o) => match find_in_chain(o, key) {
+                Some(Slot::Data(v)) => Ok(v),
+                Some(Slot::Accessor { get: Some(g), .. }) => self.call(&g, &this, &[]),
+                _ => Ok(Value::Undefined),
+            },
+            _ => Ok(Value::Undefined),
+        }
+    }
+
     /// Evaluate a chain containing `?.`; `None` means the chain short-circuited.
     pub(crate) fn eval_opt(&mut self, oc: &a::OptChainExpr, scope: &Rc<Scope>) -> R<Option<Value>> {
         match &*oc.base {

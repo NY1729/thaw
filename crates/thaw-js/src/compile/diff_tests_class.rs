@@ -60,3 +60,36 @@ fn base_class_constructors() {
         out[0]
     );
 }
+
+#[test]
+fn derived_constructors_and_super() {
+    let out = same(
+        r#"
+        class A { constructor(x) { this.x = x; if (x < 0) throw new RangeError('neg') } hi(p) { return 'A.hi' + p + this.x } get g() { return 'A.g' + this.x } static s() { return 'A.s' } }
+        class B extends A {
+          y = 2;
+          constructor(x, ...rest) { super(x * 2); this.rest = rest.length }
+          hi(p) { return 'B>' + super.hi(p) + super['hi'](p + 1) }
+          get g() { return 'B>' + super.g }
+          arrow() { return [1].map(() => super.hi(0))[0] }
+          static s() { return 'B>' + super.s() }
+          missing() { return super.nope }
+          spread(args) { return super.hi(...args) }
+        }
+        class C extends B { constructor() { super(5, 1, 2); this.c = true } }
+        class D extends A { constructor(x) { try { super(x) } catch (e) { this.err = e.name } } }
+        class F extends A { constructor() { super(1); return { replaced: 1 } } }
+        const b = new B(3, 'a');
+        console.log(JSON.stringify(b), b.hi('!'), b.g, b.arrow(), B.s(), b.missing(), b.spread(['?']));
+        console.log(JSON.stringify(new C()), new C().hi(0), new C() instanceof A);
+        console.log(JSON.stringify(new D(-1)), JSON.stringify(new F()));
+        try { new B(-1) } catch (e) { console.log(e.name + ': ' + e.message) }
+        "#,
+        8,
+    );
+    assert!(
+        out[0].starts_with("{\"x\":6,\"y\":2,\"rest\":1}"),
+        "{}",
+        out[0]
+    );
+}

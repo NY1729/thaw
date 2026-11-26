@@ -294,7 +294,7 @@ fn calls_unsupported_callee_shapes_stay_ast_with_their_reasons() {
     it.compile_after = 1;
     let src = r#"
         function spread(a) { return Math.max(...a) }
-        function opt(f) { return f?.() }
+        function opt(f) { return f`x` }
         function ev() { return eval("1 + 1") }
         function ctor() { return Function("return 1")() }
         console.log(String(spread([1, 2])));
@@ -305,7 +305,7 @@ fn calls_unsupported_callee_shapes_stay_ast_with_their_reasons() {
     assert!(it.run_sloppy(src).is_ok());
     assert_eq!(it.out, lines(&["2", "4", "2", "1"]));
     assert_eq!(it.cstats.rejected(FallbackReason::Spread), 0);
-    assert_eq!(it.cstats.rejected(FallbackReason::OptionalChain), 1);
+    assert_eq!(it.cstats.rejected(FallbackReason::TaggedTemplate), 1);
     assert_eq!(it.cstats.rejected(FallbackReason::DirectEval), 1);
     assert_eq!(it.cstats.rejected(FallbackReason::FunctionCtor), 1);
     assert_eq!(it.cstats.rejected(FallbackReason::NotYet), 0);

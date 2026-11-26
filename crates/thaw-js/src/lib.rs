@@ -5917,16 +5917,7 @@ impl Interp {
                         self.key_of(&v)
                     }
                 };
-                // accessors on the base run with the current `this`
-                let this = self.this_of(scope);
-                match &base {
-                    Value::Object(o) => match find_in_chain(o, &key) {
-                        Some(Slot::Data(v)) => Ok(v),
-                        Some(Slot::Accessor { get: Some(g), .. }) => self.call(&g, &this, &[]),
-                        _ => Ok(Value::Undefined),
-                    },
-                    _ => Ok(Value::Undefined),
-                }
+                self.super_read(&base, &key, scope)
             }
             a::Expr::TaggedTpl(t) => {
                 let (f, this) = match &*t.tag {
