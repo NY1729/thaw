@@ -622,11 +622,6 @@ pub(crate) fn str_len_with(s: &str, ascii: bool) -> usize {
     }
 }
 
-/// UTF-16 unit index -> byte offset (a unit inside a surrogate pair maps to the pair's start).
-pub(crate) fn unit_to_byte(s: &str, ui: usize) -> usize {
-    unit_to_byte_with(s, crate::jsstr::scan_ascii(s), ui)
-}
-
 /// [`unit_to_byte`] when the caller already knows `ascii == s.is_ascii()`.
 pub(crate) fn unit_to_byte_with(s: &str, ascii: bool, ui: usize) -> usize {
     if ascii {
@@ -661,8 +656,9 @@ pub(crate) fn byte_to_unit_with(s: &str, ascii: bool, bi: usize) -> usize {
 
 /// `s.indexOf(n, from)` in UTF-16 units. The search runs over units, so a start inside a surrogate
 /// pair is honoured (a byte offset there would snap to the pair's start).
-pub(crate) fn find_units(s: &str, n: &str, from: usize) -> Option<usize> {
-    if s.is_ascii() {
+/// [`find_units`] when the caller already knows `ascii == s.is_ascii()` (a `JsStr` memoises it).
+pub(crate) fn find_units_with(s: &str, ascii: bool, n: &str, from: usize) -> Option<usize> {
+    if ascii {
         let from = from.min(s.len());
         return s[from..].find(n).map(|i| i + from);
     }
@@ -678,8 +674,9 @@ pub(crate) fn find_units(s: &str, n: &str, from: usize) -> Option<usize> {
 }
 
 /// `s.lastIndexOf(n, from)` in UTF-16 units: the last start at or before `from`.
-pub(crate) fn rfind_units(s: &str, n: &str, from: usize) -> Option<usize> {
-    if s.is_ascii() {
+/// [`rfind_units`] when the caller already knows `ascii == s.is_ascii()`.
+pub(crate) fn rfind_units_with(s: &str, ascii: bool, n: &str, from: usize) -> Option<usize> {
+    if ascii {
         let end = from.saturating_add(n.len()).min(s.len());
         return s[..end].rfind(n);
     }
@@ -1540,6 +1537,16 @@ impl Interp {
             }
         }
         self.array_items(v)
+    }
+
+    /// `array_items(v).len()` without copying a real array's elements.
+    pub(crate) fn array_len(&self, v: &Value) -> usize {
+        if let Value::Object(o) = v {
+            if let Kind::Array(items) = &*o.kind.borrow() {
+                return items.len();
+            }
+        }
+        self.array_items(v).len()
     }
 
     pub(crate) fn array_items(&self, v: &Value) -> Vec<Value> {
@@ -2665,7 +2672,7 @@ impl Interp {
             if o.len_ro.get() {
                 return it.throw_error("TypeError", RO_LENGTH);
             }
-            let len = it.array_items(this).len();
+            let len = it.array_len(this);
             let start = match arg(args, 0) {
                 Value::Undefined => 0,
                 v => {
@@ -2920,7 +2927,7 @@ impl Interp {
                 v => it.tonum(&v)?.max(0.0) as usize,
             };
             Ok(Value::Number(
-                find_units(&s, &n, from).map_or(-1.0, |u| u as f64),
+                find_units_with(&s, s.is_ascii_cached(), &n, from).map_or(-1.0, |u| u as f64),
             ))
         });
         self.set_native(&sp, "lastIndexOf", |it, this, args| {
@@ -2934,7 +2941,7 @@ impl Interp {
                 },
             };
             Ok(Value::Number(
-                rfind_units(&s, &n, from).map_or(-1.0, |u| u as f64),
+                rfind_units_with(&s, s.is_ascii_cached(), &n, from).map_or(-1.0, |u| u as f64),
             ))
         });
         self.set_native(&sp, "includes", |it, this, args| {
@@ -2947,7 +2954,9 @@ impl Interp {
             }
             let n = it.tostr(&arg(args, 0))?;
             let from = position_arg(it, &arg(args, 1), 0, s.len16())?;
-            Ok(Value::Bool(find_units(&s, &n, from).is_some()))
+            Ok(Value::Bool(
+                find_units_with(&s, s.is_ascii_cached(), &n, from).is_some(),
+            ))
         });
         self.set_native(&sp, "startsWith", |it, this, args| {
             let s = this_str(it, this, "startsWith")?;
@@ -2958,7 +2967,7 @@ impl Interp {
                 );
             }
             let n = it.tostr(&arg(args, 0))?;
-            let from = unit_to_byte(&s, position_arg(it, &arg(args, 1), 0, s.len16())?);
+            let from = unit_to_byte_with(&s, s.is_ascii_cached(), position_arg(it, &arg(args, 1), 0, s.len16())?);
             Ok(Value::Bool(s[from..].starts_with(&*n)))
         });
         self.set_native(&sp, "endsWith", |it, this, args| {
@@ -2971,7 +2980,7 @@ impl Interp {
             }
             let n = it.tostr(&arg(args, 0))?;
             let end = position_arg(it, &arg(args, 1), s.len16(), s.len16())?;
-            let head = &s[..unit_to_byte(&s, end)];
+            let head = &s[..unit_to_byte_with(&s, s.is_ascii_cached(), end)];
             Ok(Value::Bool(head.ends_with(&*n)))
         });
         self.set_native(&sp, "toUpperCase", |it, this, _| {
