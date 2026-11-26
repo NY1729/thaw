@@ -2203,9 +2203,9 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// Function prologue: when the stack is within the guard margin of its end, throw a catchable
     /// `RangeError` instead of faulting. Costs one load, one compare and a cold branch per call.
-    fn emit_stack_overflow_guard(&mut self) -> Result<(), String> {
+    fn emit_stack_overflow_guard(&mut self) -> Result<Option<IntValue<'ctx>>, String> {
         if !self.stack_guard {
-            return Ok(());
+            return Ok(None);
         }
         let function = self.current_function();
         let i64_type = self.context.i64_type();
@@ -2250,7 +2250,53 @@ impl<'ctx> HirCompiler<'ctx> {
             .as_pointer_value();
         self.compile_throw_builtin_error_with("RangeError", message)?;
         self.builder.position_at_end(ok);
-        Ok(())
+        Ok(Some(overflow))
+    }
+
+    /// A function whose body calls nothing but allocation and property-flag helpers (which never run
+    /// user code) is a leaf: it cannot recurse, cannot construct an `Error` (so it never sits in a
+    /// captured `Error.stack`), and cannot suspend. Its stack guard is dead weight (a probe slot, a
+    /// load and a compare per call), and the `noinline` that keeps frames visible for stack traces
+    /// has nothing to protect, so both are lifted and the mid-end can inline it into hot loops.
+    fn relax_leaf_function(&self, function: FunctionValue<'ctx>, overflow: IntValue<'ctx>) {
+        const NON_REENTRANT: [&str; 3] = [
+            "thaw_arena_alloc",
+            "thaw_object_accessor",
+            "thaw_object_property_flags",
+        ];
+        for block in function.get_basic_blocks() {
+            // The guard's own cold path calls the shared error setter; it dies with the guard.
+            if block
+                .get_name()
+                .to_string_lossy()
+                .starts_with("stack_overflow")
+            {
+                continue;
+            }
+            let mut next = block.get_first_instruction();
+            while let Some(instruction) = next {
+                next = instruction.get_next_instruction();
+                if instruction.get_opcode() != inkwell::values::InstructionOpcode::Call {
+                    continue;
+                }
+                let Ok(call) = inkwell::values::CallSiteValue::try_from(instruction) else {
+                    return;
+                };
+                let Some(callee) = call.get_called_fn_value() else {
+                    return;
+                };
+                let name = callee.get_name().to_string_lossy().into_owned();
+                let intrinsic = name.starts_with("llvm.") && !name.starts_with("llvm.coro.");
+                if !(intrinsic || NON_REENTRANT.contains(&name.as_str())) {
+                    return;
+                }
+            }
+        }
+        overflow.replace_all_uses_with(self.context.bool_type().const_zero());
+        function.remove_enum_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            inkwell::attributes::Attribute::get_named_enum_kind_id("noinline"),
+        );
     }
 
     /// Checks the module exception slot immediately after a generated Thaw
@@ -2385,8 +2431,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
 
-        self.emit_stack_overflow_guard()?;
+        let stack_check = self.emit_stack_overflow_guard()?;
         let terminated = self.compile_block(&func.body)?;
+        if let Some(overflow) = stack_check {
+            self.relax_leaf_function(function, overflow);
+        }
 
         if !terminated {
             if func.ret == HirType::Void {
