@@ -249,6 +249,12 @@ impl ActivePromises {
 }
 
 thread_local! {
+    /// Set by the generated entry point once only its own frame is left on the stack: the loop
+    /// drivers may then reclaim arena memory between turns (see `native_turn_reset`).
+    static TURN_RESET: Cell<bool> = const { Cell::new(false) };
+    /// Nesting of `thaw_runtime_poll_one`: callbacks run inside it, so a loop they start is never
+    /// at a quiescent point.
+    static POLL_DEPTH: Cell<u32> = const { Cell::new(0) };
     static READY_CONTINUATIONS: RefCell<VecDeque<ReadyContinuation>> =
         const { RefCell::new(VecDeque::new()) };
     static TIMERS: RefCell<Vec<PromiseTimer>> = const { RefCell::new(Vec::new()) };
@@ -875,11 +881,46 @@ fn next_timer_delay() -> Option<Duration> {
     }
 }
 
+/// Called by the generated entry point after the user's `main` returned, when no generated frame
+/// other than the entry point's remains. Arms arena reclamation between native loop turns.
+/// `THAW_ARENA_NATIVE_RESET=0` keeps it off.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_enable_turn_reset() {
+    let off = std::env::var("THAW_ARENA_NATIVE_RESET").is_ok_and(|v| v == "0");
+    TURN_RESET.with(|flag| flag.set(!off));
+}
+
+/// Reclaims arena memory at the outermost loop turn: only the entry point's driver loops reach
+/// here with no poll (and so no callback) on the stack. Roots are the registered globals plus
+/// every `ArenaRoot` held by continuations, timers and promises; `thaw_arena_reset_if_grown`
+/// still waits for its allocation threshold (or `THAW_ARENA_STRESS`).
+fn native_turn_reset() {
+    if TURN_RESET.with(Cell::get) && POLL_DEPTH.with(Cell::get) == 0 {
+        thaw_arena::thaw_arena_reset_if_grown();
+    }
+}
+
+struct PollDepth;
+
+impl PollDepth {
+    fn enter() -> Self {
+        POLL_DEPTH.with(|d| d.set(d.get() + 1));
+        PollDepth
+    }
+}
+
+impl Drop for PollDepth {
+    fn drop(&mut self) {
+        POLL_DEPTH.with(|d| d.set(d.get() - 1));
+    }
+}
+
 /// Runs one ready continuation or dispatches ready I/O and returns 1. Returns
 /// 0 when neither source is ready. I/O and retired-engine integrations can alternate
 /// their own polling with this function without a multi-threaded executor.
 #[no_mangle]
 pub extern "C" fn thaw_runtime_poll_one() -> u8 {
+    let _depth = PollDepth::enter();
     count_poll(false);
     // Node emits `rejectionHandled` after the microtask queue drains, so the late
     // handler's own continuation runs first.
@@ -983,7 +1024,11 @@ include!("runtime/timers.rs");
 #[no_mangle]
 pub extern "C" fn thaw_runtime_run_until_idle() -> usize {
     let mut count = 0;
-    while thaw_runtime_poll_one() != 0 {
+    loop {
+        native_turn_reset();
+        if thaw_runtime_poll_one() == 0 {
+            break;
+        }
         count += 1;
     }
     count
@@ -1151,6 +1196,7 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
             reject_for_invocation_deadline(promise.cast_mut());
             continue;
         }
+        native_turn_reset();
         if thaw_runtime_poll_one() != 0 {
             continue;
         }

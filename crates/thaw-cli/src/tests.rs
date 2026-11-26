@@ -640,6 +640,46 @@ fn arena_stats_summary_is_printed_at_exit() {
 }
 
 #[test]
+fn native_loop_reclaims_arena_between_turns() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-arena-reset-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "async function step(i: number): Promise<number> { return i + 1; } async function main(): Promise<void> { let s = 0; for (let i = 0; i < 200000; i++) s += await step(i); console.log(s); }",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let field = |stderr: &str, key: &str| -> u64 {
+        let at = stderr
+            .find(&format!("{key}="))
+            .unwrap_or_else(|| panic!("{key} in {stderr}"));
+        stderr[at + key.len() + 1..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    for stress in ["0", "1"] {
+        let result = Command::new(&output)
+            .env("THAW_ARENA_STATS", "1")
+            .env("THAW_ARENA_STRESS", stress)
+            .env("THAW_ARENA_POISON", "1")
+            .output()
+            .unwrap();
+        assert_eq!(result.stdout, b"20000100000\n");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(field(&stderr, "resets") > 0, "{stderr}");
+        assert!(field(&stderr, "peak") < 64 << 20, "{stderr}");
+        assert!(field(&stderr, "active") < 1000, "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn run_flushes_process_output_and_reports_non_tty_pipes() {
     let directory = std::env::temp_dir().join(format!("thaw-cli-run-stdio-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
