@@ -880,6 +880,7 @@ fn next_timer_delay() -> Option<Duration> {
 /// their own polling with this function without a multi-threaded executor.
 #[no_mangle]
 pub extern "C" fn thaw_runtime_poll_one() -> u8 {
+    count_poll(false);
     // Node emits `rejectionHandled` after the microtask queue drains, so the late
     // handler's own continuation runs first.
     if READY_CONTINUATIONS.with(|ready| ready.borrow().is_empty()) {
@@ -919,6 +920,7 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
     let hook_key = continuation.subscription.hook_key;
     let settles = continuation.subscription.hook_settles;
     async_hook_emit(1, hook_key, 0);
+    count_poll(true);
     (continuation.subscription.resume)(continuation.subscription.frame, continuation.result);
     if settles {
         async_hook_emit(3, hook_key, 0);

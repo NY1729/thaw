@@ -46,6 +46,36 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+thread_local! {
+    static STATS_REGISTERED: Cell<bool> = const { Cell::new(false) };
+    /// Calls to `thaw_runtime_poll_one` and continuations it resumed (THAW_ARENA_STATS only).
+    static POLL_CALLS: Cell<u64> = const { Cell::new(0) };
+    static POLL_RESUMES: Cell<u64> = const { Cell::new(0) };
+}
+
+fn register_promise_stats() {
+    if thaw_arena::stats_enabled() && !STATS_REGISTERED.with(|r| r.replace(true)) {
+        thaw_arena::register_stats_provider(promise_stats);
+    }
+}
+
+fn count_poll(resumed: bool) {
+    POLL_CALLS.with(|c| c.set(c.get() + 1));
+    if resumed {
+        POLL_RESUMES.with(|c| c.set(c.get() + 1));
+    }
+}
+
+fn promise_stats(sink: &mut thaw_arena::StatsSink) {
+    let count = |n: Option<usize>| n.unwrap_or(0) as u64;
+    sink.add("promises", "active", count(ACTIVE_PROMISES.try_with(|a| a.borrow().iter().count()).ok()));
+    sink.add("promises", "slot_owners", count(PROMISE_ARENA_SLOT_OWNERS.try_with(|o| o.borrow().len()).ok()));
+    sink.add("promises", "reason_owners", count(NATIVE_PROMISE_REASON_OWNERS.try_with(|o| o.borrow().len()).ok()));
+    sink.add("promises", "ready", count(READY_CONTINUATIONS.try_with(|r| r.borrow().len()).ok()));
+    sink.add("promises", "poll_one_calls", POLL_CALLS.try_with(Cell::get).unwrap_or(0));
+    sink.add("promises", "poll_one_resumes", POLL_RESUMES.try_with(Cell::get).unwrap_or(0));
+}
+
 fn release_reclaimed_native_promise_internal_owners(tracing: bool) {
     let released = NATIVE_PROMISE_REASON_OWNERS.with(|owners| {
         let mut owners = owners.borrow_mut();
@@ -187,6 +217,7 @@ fn new_promise_with_trigger(trigger_key: u64) -> *mut ThawPromise {
         unsafe { (*promise).external_root = Some(thaw_arena::ArenaRoot::new(promise as usize)); }
     }
     ACTIVE_PROMISES.with(|active| active.borrow_mut().push(promise));
+    register_promise_stats();
     async_hook_emit(0, hook_key, trigger_key);
     promise
 }
