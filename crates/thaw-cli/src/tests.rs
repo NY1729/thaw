@@ -610,7 +610,8 @@ fn run_reads_ctrl_c_as_input_in_raw_mode() {
 
 #[test]
 fn arena_stats_summary_is_printed_at_exit() {
-    let directory = std::env::temp_dir().join(format!("thaw-cli-arena-stats-{}", std::process::id()));
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-arena-stats-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let input = directory.join("main.ts");
     let output = directory.join("app");
@@ -622,11 +623,17 @@ fn arena_stats_summary_is_printed_at_exit() {
     run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
     let quiet = Command::new(&output).output().unwrap();
     assert!(!String::from_utf8_lossy(&quiet.stderr).contains("thaw-arena"));
-    let result = Command::new(&output).env("THAW_ARENA_STATS", "1").output().unwrap();
+    let result = Command::new(&output)
+        .env("THAW_ARENA_STATS", "1")
+        .output()
+        .unwrap();
     assert_eq!(result.stdout, b"5050\n");
     let stderr = String::from_utf8_lossy(&result.stderr);
     for category in ["arena", "heap", "promises"] {
-        assert!(stderr.contains(&format!("thaw-arena {category}: ")), "{stderr}");
+        assert!(
+            stderr.contains(&format!("thaw-arena {category}: ")),
+            "{stderr}"
+        );
     }
     assert!(stderr.contains("poll_one_resumes="), "{stderr}");
     let _ = std::fs::remove_dir_all(directory);
