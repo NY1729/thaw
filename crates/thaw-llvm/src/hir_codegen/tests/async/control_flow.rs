@@ -284,6 +284,27 @@ fn frame_split_supports_for_await_of_and_rejection_catch() {
 }
 
 #[test]
+fn frame_split_rejects_when_native_try_throws_after_await() {
+    let source = r#"
+        async function rethrow(): Promise<void> {
+            await sleep(1);
+            try { throw new Error("t"); } catch (e) { throw new Error("n"); }
+        }
+        async function early(flag: boolean): Promise<number> {
+            await sleep(1);
+            try { if (flag) { return 1; } } catch (e) { return 2; }
+            return 3;
+        }
+        async function main(): Promise<void> {
+            try { await rethrow(); } catch (e) { console.log("caught"); }
+            console.log(await early(true));
+            console.log(await early(false));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_try_after_await"), "caught\n1\n3\n");
+}
+
+#[test]
 fn frame_split_supports_await_in_while_condition() {
     let source = r#"
         async function shouldContinue(value: number): Promise<boolean> {

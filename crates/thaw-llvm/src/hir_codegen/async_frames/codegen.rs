@@ -1233,10 +1233,8 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             self.builder.build_return(None).map_err(|e| e.to_string())?;
         }
+        // The caller keeps emitting into `after` (even when nothing branches to it), so it must stay open.
         self.builder.position_at_end(after);
-        if !reachable {
-            self.builder.build_unreachable().map_err(|e| e.to_string())?;
-        }
         Ok(())
     }
 
