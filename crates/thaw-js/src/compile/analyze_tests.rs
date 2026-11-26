@@ -305,11 +305,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
         "",
     ),
     ("function f(a) { return [...a] }", None, "a:slot"),
-    (
-        "function f(a) { return a?.b }",
-        Some(R::OptionalChain),
-        "a:slot",
-    ),
+    ("function f(a) { return a?.b }", None, "a:slot"),
     (
         "function f(a) { return a`x` }",
         Some(R::TaggedTemplate),

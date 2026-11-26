@@ -30,47 +30,47 @@ fn run_on(src: &str) -> Interp {
 
 #[test]
 fn two_blockers_are_both_any_and_neither_is_sole() {
-    // the optional chain comes first, so it is the first blocker; `delete` is the second.
-    let src = "function f(a) { return a?.b + (delete a.c) }";
+    // the tagged template comes first, so it is the first blocker; `delete` is the second.
+    let src = "function tag(s) { return 1 } function f(a) { return tag`x` + (delete a.c) }";
     let plan = analyze(&def_of(src));
-    assert_eq!(plan.verdict(), Err(R::OptionalChain));
-    assert_eq!(plan.all_reasons(), vec![R::OptionalChain, R::Delete]);
+    assert_eq!(plan.verdict(), Err(R::TaggedTemplate));
+    assert_eq!(plan.all_reasons(), vec![R::TaggedTemplate, R::Delete]);
 
     let it = run_on(&format!("{src}\nf([1]); f([2]);"));
     let s = &it.cstats;
     assert_eq!(s.calls(), 2);
-    assert_eq!(s.rejected(R::OptionalChain), 1);
+    assert_eq!(s.rejected(R::TaggedTemplate), 1);
     assert_eq!(s.rejected(R::Delete), 0);
-    assert_eq!(s.any_functions(R::OptionalChain), 1);
+    assert_eq!(s.any_functions(R::TaggedTemplate), 1);
     assert_eq!(s.any_functions(R::Delete), 1);
-    assert_eq!(s.sole_functions(R::OptionalChain), 0);
+    assert_eq!(s.sole_functions(R::TaggedTemplate), 0);
     assert_eq!(s.sole_functions(R::Delete), 0);
     // calls go to every blocker (any), to none as the sole one
-    assert_eq!(s.calls_rejected(R::OptionalChain), 2);
-    assert_eq!(s.calls_any(R::OptionalChain), 2);
+    assert_eq!(s.calls_rejected(R::TaggedTemplate), 2);
+    assert_eq!(s.calls_any(R::TaggedTemplate), 2);
     assert_eq!(s.calls_any(R::Delete), 2);
-    assert_eq!(s.calls_sole(R::OptionalChain), 0);
+    assert_eq!(s.calls_sole(R::TaggedTemplate), 0);
     assert_eq!(s.calls_sole(R::Delete), 0);
 }
 
 #[test]
 fn one_blocker_is_sole() {
-    // an optional chain is the single blocker
-    let src = "function f(a) { return a?.length } \
+    // a tagged template is the single blocker
+    let src = "function tag(s) { return 1 } function f(a) { return tag`x` } \
                f([1]); f([]); f([2]);";
     let it = run_on(src);
     let s = &it.cstats;
-    assert_eq!(s.rejected(R::OptionalChain), 1);
-    assert_eq!(s.any_functions(R::OptionalChain), 1);
-    assert_eq!(s.sole_functions(R::OptionalChain), 1);
+    assert_eq!(s.rejected(R::TaggedTemplate), 1);
+    assert_eq!(s.any_functions(R::TaggedTemplate), 1);
+    assert_eq!(s.sole_functions(R::TaggedTemplate), 1);
     assert_eq!(s.any_functions(R::DefaultParam), 0);
-    assert_eq!(s.calls_any(R::OptionalChain), 3);
-    assert_eq!(s.calls_sole(R::OptionalChain), 3);
+    assert_eq!(s.calls_any(R::TaggedTemplate), 3);
+    assert_eq!(s.calls_sole(R::TaggedTemplate), 3);
     let text = s.report();
     assert!(text.contains("thaw-js compile blockers"), "{text}");
     assert!(
         text.lines()
-            .any(|l| l.trim_start().starts_with("optional-chain")
+            .any(|l| l.trim_start().starts_with("tagged-template")
                 && l.contains("any=1")
                 && l.contains("sole=1")),
         "{text}"
