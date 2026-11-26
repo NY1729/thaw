@@ -335,6 +335,7 @@ struct Code {
     memory: *mut libc::c_void,
     mapped_size: usize,
     globals: *const JitGlobals,
+    required_args: usize,
 }
 
 unsafe impl Send for Code {}
@@ -404,6 +405,7 @@ mod executable_mapping_tests {
             memory,
             mapped_size,
             globals: ptr::null(),
+            required_args: 0,
         });
     }
 
@@ -431,6 +433,45 @@ fn global_namespace(symbol: &str) -> &str {
     }
     let label = symbol.rsplit_once(':').map_or(symbol, |(_, label)| label);
     label
+}
+
+/// Cache hit for an already-compiled symbol, skipping the parse. `required_args` is cached so the
+/// per-call argument check needs no program.
+fn cached(symbol: &str) -> Option<(*mut libc::c_void, *const JitGlobals, usize)> {
+    // Per-thread direct-mapped front cache indexed by the symbol's length and tail bytes (symbols
+    // end in the distinguishing `:namespace::name`), verified by content: a
+    // hit costs one memcmp instead of a mutex lock plus a SipHash of the whole symbol text.
+    // Compiled stubs are never evicted from the global cache, so a verified entry never dangles.
+    const SLOTS: usize = 64; // index() takes the top 6 bits of a 64-bit mix
+    type Slot = Option<(String, (*mut libc::c_void, *const JitGlobals, usize))>;
+    thread_local! {
+        static FRONT: RefCell<[Slot; SLOTS]> = const { RefCell::new([const { None }; SLOTS]) };
+    }
+    let bytes = symbol.as_bytes();
+    let tail = match bytes.last_chunk::<8>() {
+        Some(tail) => u64::from_le_bytes(*tail),
+        None => bytes.len() as u64, // shorter than any real symbol
+    };
+    let mixed = (tail ^ bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let index = (mixed >> 58) as usize; // top 6 bits: SLOTS = 64
+    if let Some(hit) = FRONT.with(|front| {
+        front.borrow()[index]
+            .as_ref()
+            .filter(|(key, _)| key == symbol)
+            .map(|(_, hit)| *hit)
+    }) {
+        return Some(hit);
+    }
+    let hit = {
+        let cache = cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache
+            .get(symbol)
+            .map(|code| (code.memory, code.globals, code.required_args))
+    }?;
+    FRONT.with(|front| front.borrow_mut()[index] = Some((symbol.to_owned(), hit)));
+    Some(hit)
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
@@ -468,6 +509,7 @@ fn compile(
             memory,
             mapped_size,
             globals: globals_ptr,
+            required_args: program.required_args(),
         },
     );
     Ok((memory, globals_ptr))
@@ -546,21 +588,27 @@ pub unsafe extern "C" fn thaw_jit_call_f64(
         };
     };
     crate::profile::record(symbol);
-    let Some(program) = NumericProgram::parse(symbol) else {
-        return ThawJitResult {
-            value: 0.0,
-            error: INVALID_SYMBOL.as_ptr().cast(),
-        };
+    let bad_call = || ThawJitResult {
+        value: 0.0,
+        error: INVALID_SYMBOL.as_ptr().cast(),
     };
-    if program.required_args() > arg_count || (arg_count != 0 && args.is_null()) {
-        return ThawJitResult {
-            value: 0.0,
-            error: INVALID_SYMBOL.as_ptr().cast(),
+    let args_ok = |required: usize| required <= arg_count && (arg_count == 0 || !args.is_null());
+    let (code, globals) = if let Some((code, globals, required)) = cached(symbol) {
+        if !args_ok(required) {
+            return bad_call();
+        }
+        (code, globals)
+    } else {
+        let Some(program) = NumericProgram::parse(symbol) else {
+            return bad_call();
         };
-    }
-    let (code, globals) = match compile(symbol, &program) {
-        Ok(compiled) => compiled,
-        Err(error) => return ThawJitResult { value: 0.0, error },
+        if !args_ok(program.required_args()) {
+            return bad_call();
+        }
+        match compile(symbol, &program) {
+            Ok(compiled) => compiled,
+            Err(error) => return ThawJitResult { value: 0.0, error },
+        }
     };
     let function = std::mem::transmute::<*mut libc::c_void, extern "C" fn(*const f64) -> f64>(code);
     let previous_allocator = ARENA_ALLOC.with(|allocator| allocator.replace(arena_alloc));

@@ -4,7 +4,7 @@
 use sha2::{Digest, Sha256};
 use thaw_llvm::hir_codegen::LibraryExport;
 
-const LIB_USAGE: &str = "usage: thaw lib build <package> [--registry <dir>] [--store <dir>] [--no-install]\n       thaw lib list [--store <dir>]\n       thaw lib verify [<key>] [--store <dir>]";
+const LIB_USAGE: &str = "usage: thaw lib build <package> [--registry <dir>] [--store <dir>] [--no-install] [--rt-variant base|intl]\n       thaw lib list [--store <dir>]\n       thaw lib verify [<key>] [--store <dir>]";
 
 /// What `build` needs to compile the generated entry as a library.
 struct LibBuildMode {
@@ -12,7 +12,9 @@ struct LibBuildMode {
     /// `.thaw.pkg` payload (the manifest without `sha256`).
     metadata: Vec<u8>,
     soname: String,
-    /// Directory holding `libthaw_rt.so.1` at link time.
+    /// Which runtime image (`libthaw_rt.so.1` / `libthaw_rt_intl.so.1`) the library links against.
+    variant: RtVariant,
+    /// Directory holding that image at link time.
     rt_dir: PathBuf,
     /// `DT_RUNPATH`, relative to the library (`$ORIGIN/../../rt/<abi hash>`).
     rpath: String,
@@ -50,11 +52,13 @@ fn lib_store_key(
     version: &str,
     fingerprint: &str,
     rt_abi_hash: &str,
+    variant: RtVariant,
     triple: &str,
 ) -> String {
     // The trailing empty line is the (M2: always empty) sorted dependency-key list.
     let text = format!(
-        "thaw-lib-v1\n{bundle_sha}\n{dts_sha}\n{version}\n{fingerprint}\n{rt_abi_hash}\nvariant=core;engine=none\n{triple}\nO2\n\n"
+        "thaw-lib-v1\n{bundle_sha}\n{dts_sha}\n{version}\n{fingerprint}\n{rt_abi_hash}\nvariant={};engine=none\n{triple}\nO2\n\n",
+        if variant == RtVariant::Intl { "intl" } else { "core" }
     );
     sha256_hex(text.as_bytes())[..32].to_string()
 }
@@ -92,12 +96,17 @@ fn run_lib(args: &[String]) -> Result<(), String> {
     let mut registry = PathBuf::from("thaw_modules");
     let mut store: Option<PathBuf> = None;
     let mut install = true;
+    let mut variant = RtVariant::Base;
     let mut iter = args[1..].iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--registry" => registry = iter.next().ok_or("--registry needs a directory")?.into(),
             "--store" => store = Some(iter.next().ok_or("--store needs a directory")?.into()),
             "--no-install" => install = false,
+            "--rt-variant" => {
+                let value = iter.next().ok_or("--rt-variant needs base or intl")?;
+                variant = RtVariant::parse(value)?.ok_or("--rt-variant for `thaw lib` must be base or intl")?;
+            }
             other if other.starts_with("--") => return Err(format!("unknown option `{other}`\n{LIB_USAGE}")),
             other => positional.push(other.to_string()),
         }
@@ -108,7 +117,7 @@ fn run_lib(args: &[String]) -> Result<(), String> {
     };
     match (command, positional.as_slice()) {
         ("build", [package]) => {
-            let (key, built) = lib_build(package, &registry, &store, install)?;
+            let (key, built) = lib_build(package, &registry, &store, install, variant)?;
             println!("{} {key}", if built { "built" } else { "up-to-date" });
             Ok(())
         }
@@ -202,6 +211,7 @@ fn lib_build(
     registry: &Path,
     store: &Path,
     install: bool,
+    variant: RtVariant,
 ) -> Result<(String, bool), String> {
     let ident = package_ident(package);
     let info = read_lib_package(registry, package)?;
@@ -213,7 +223,7 @@ fn lib_build(
     }
 
     // The runtime: built once (cached next to the compiler), copied into the store.
-    let rt_cached = build_rt_shared_library(false)?;
+    let rt_cached = build_rt_shared_library(false, variant)?;
     let rt_hash = rt_cached
         .parent()
         .and_then(Path::file_name)
@@ -221,17 +231,17 @@ fn lib_build(
         .ok_or("runtime library has no ABI hash directory")?
         .to_string();
     let rt_dir = store.join("rt").join(&rt_hash);
-    let rt_lib = rt_dir.join("libthaw_rt.so.1");
+    let rt_lib = rt_dir.join(variant.soname());
     if !rt_lib.is_file() {
         lib_private_dir(&rt_dir)?;
-        let tmp = rt_dir.join(format!("libthaw_rt.so.1.tmp-{}-{}", std::process::id(), unique_suffix()));
+        let tmp = rt_dir.join(format!("{}.tmp-{}-{}", variant.soname(), std::process::id(), unique_suffix()));
         std::fs::copy(&rt_cached, &tmp).map_err(|e| format!("failed to copy the runtime: {e}"))?;
         lib_set_mode(&tmp, 0o755)?;
         std::fs::rename(&tmp, &rt_lib).map_err(|e| format!("failed to install the runtime: {e}"))?;
     }
 
     let triple = inkwell::targets::TargetMachine::get_default_triple().to_string();
-    let key = lib_store_key(&info.bundle_sha, &sha256_hex(info.dts.as_bytes()), &info.version, runtime_fingerprint(), &rt_hash, &triple);
+    let key = lib_store_key(&info.bundle_sha, &sha256_hex(info.dts.as_bytes()), &info.version, runtime_fingerprint(), &rt_hash, variant, &triple);
     let final_dir = store.join("store").join(&key);
     let soname = format!("libthaw_pkg_{ident}.so");
     if final_dir.join("thaw.json").is_file() && lib_verify_one(&final_dir).is_ok() {
@@ -271,6 +281,11 @@ fn lib_build(
         header_exports.push((c_symbol.clone(), function.params.len()));
         exports.push(LibraryExport { hir_name: c_symbol.clone(), c_symbol });
     }
+    // The base entry keeps its original shape; only the intl one names its image.
+    let rt_manifest = match variant {
+        RtVariant::Base => serde_json::json!({ "variant": "core", "abi_hash": rt_hash }),
+        RtVariant::Intl => serde_json::json!({ "variant": "intl", "soname": variant.soname(), "abi_hash": rt_hash }),
+    };
     let manifest = sorted_json(serde_json::json!({
         "schema": 1,
         "name": package,
@@ -278,7 +293,7 @@ fn lib_build(
         "key": key,
         "tier": "L1",
         "engine": "none",
-        "rt": { "variant": "core", "abi_hash": rt_hash },
+        "rt": rt_manifest,
         "target": triple,
         "soname": soname,
         "deps": [],
@@ -289,6 +304,7 @@ fn lib_build(
         exports,
         metadata: serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?.into_bytes(),
         soname: soname.clone(),
+        variant,
         rt_dir,
         rpath: format!("$ORIGIN/../../rt/{rt_hash}"),
     };
@@ -370,7 +386,7 @@ fn lib_private_dir(path: &Path) -> Result<(), String> {
     lib_set_mode(path, 0o700)
 }
 
-/// Links `obj` into the shared library `output` against the store's `libthaw_rt.so.1`.
+/// Links `obj` into the shared library `output` against the store's runtime image.
 fn link_library(obj: &Path, output: &Path, mode: &LibBuildMode) -> Result<(), String> {
     let map = output.with_extension("map");
     let globals: Vec<&str> = mode.exports.iter().map(|e| e.c_symbol.as_str()).collect();
@@ -384,7 +400,7 @@ fn link_library(obj: &Path, output: &Path, mode: &LibBuildMode) -> Result<(), St
         .args(["-shared", "-fPIC"])
         .arg(obj)
         .arg(format!("-L{}", mode.rt_dir.display()))
-        .arg("-l:libthaw_rt.so.1")
+        .arg(format!("-l:{}", mode.variant.soname()))
         .arg(format!("-Wl,-rpath,{}", mode.rpath))
         .args(["-lm", "-ldl"])
         .arg(format!("-Wl,-soname,{}", mode.soname))
@@ -424,11 +440,12 @@ fn lib_list(store: &Path) -> Result<(), String> {
         let text = std::fs::read_to_string(dir.join("thaw.json")).map_err(|e| e.to_string())?;
         let manifest: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         println!(
-            "{} {}@{} {}",
+            "{} {}@{} {} rt={}",
             manifest["key"].as_str().unwrap_or("?"),
             manifest["name"].as_str().unwrap_or("?"),
             manifest["version"].as_str().unwrap_or("?"),
             manifest["soname"].as_str().unwrap_or("?"),
+            manifest["rt"]["soname"].as_str().unwrap_or(RtVariant::Base.soname()),
         );
     }
     Ok(())
@@ -444,6 +461,17 @@ fn lib_verify_one(dir: &Path) -> Result<(), String> {
     for path in [dir, library.as_path(), &dir.join("thaw.json")] {
         if !cache_file_is_private(path) {
             return Err(format!("`{}` is writable by others or owned by another user", path.display()));
+        }
+    }
+    // The runtime image the library was linked against must still be in the store.
+    let rt_soname = manifest["rt"]["soname"].as_str().unwrap_or(RtVariant::Base.soname());
+    if RtVariant::from_soname(rt_soname).is_none() {
+        return Err(format!("thaw.json names an unknown runtime image `{rt_soname}`"));
+    }
+    if let (Some(rt_hash), Some(store)) = (manifest["rt"]["abi_hash"].as_str(), dir.parent().and_then(Path::parent)) {
+        let rt_lib = store.join("rt").join(rt_hash).join(rt_soname);
+        if !rt_lib.is_file() {
+            return Err(format!("runtime image `{}` is missing", rt_lib.display()));
         }
     }
     let bytes = std::fs::read(&library).map_err(|e| format!("failed to read `{}`: {e}", library.display()))?;

@@ -399,9 +399,12 @@ fn stmt_contains_await(stmt: &HirStmt) -> bool {
 fn async_arrow_has_only_tail_await_returns(statements: &[HirStmt]) -> bool {
     fn visit(statements: &[HirStmt], saw_tail_await: &mut bool) -> bool {
         statements.iter().all(|statement| match statement {
-            HirStmt::Return(Some(HirExpr::AwaitPromise(_, _) | HirExpr::Await(_))) => {
+            // The awaited operand becomes the arrow's returned promise, evaluated outside an
+            // async frame: an `await` nested in it (`await (await open()).close()`) would
+            // suspend with no frame and hand the host a promise of the wrong shape.
+            HirStmt::Return(Some(HirExpr::AwaitPromise(inner, _) | HirExpr::Await(inner))) => {
                 *saw_tail_await = true;
-                true
+                !contains_await(inner)
             }
             HirStmt::Return(_) => false,
             HirStmt::If(condition, then_body, else_body) => {

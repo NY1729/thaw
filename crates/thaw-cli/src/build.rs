@@ -35,6 +35,67 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// The two shared runtime images: `base` carries no CLDR data; `intl` adds thaw-intl + the baked
+/// ICU data (the part that dwarfs the rest of the runtime). Each has its own soname and ABI hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RtVariant {
+    Base,
+    Intl,
+}
+
+impl RtVariant {
+    pub(crate) fn soname(self) -> &'static str {
+        match self {
+            RtVariant::Base => "libthaw_rt.so.1",
+            RtVariant::Intl => "libthaw_rt_intl.so.1",
+        }
+    }
+
+    pub(crate) fn from_soname(soname: &str) -> Option<Self> {
+        [RtVariant::Base, RtVariant::Intl].into_iter().find(|v| v.soname() == soname)
+    }
+
+    /// `auto` is `None`.
+    pub(crate) fn parse(text: &str) -> Result<Option<Self>, String> {
+        match text {
+            "auto" => Ok(None),
+            "base" => Ok(Some(RtVariant::Base)),
+            "intl" => Ok(Some(RtVariant::Intl)),
+            other => Err(format!("unknown --rt-variant `{other}` (expected auto, base or intl)")),
+        }
+    }
+}
+
+thread_local! {
+    static RT_VARIANT_OVERRIDE: std::cell::Cell<Option<RtVariant>> = const { std::cell::Cell::new(None) };
+}
+
+/// `--rt-variant` / `THAW_RT_VARIANT`: force the `--shared-rt` image (default: pick by use).
+fn set_rt_variant_override(variant: Option<RtVariant>) {
+    RT_VARIANT_OVERRIDE.with(|cell| cell.set(variant));
+}
+
+/// Conservative detector: a program needs the intl image when the source markers (`Intl`,
+/// `toLocale*`, ...) or the generated code (`thaw_intl_*` calls) say so. Other runtime features
+/// (tls, wasm, brotli, sqlite, zstd, icu4c) have no shared image and keep `--shared-rt` off.
+fn shared_rt_variant(
+    needs_intl: bool,
+    other_features: bool,
+    forced: Option<RtVariant>,
+) -> Result<Option<RtVariant>, String> {
+    if other_features {
+        return Ok(None);
+    }
+    match (forced, needs_intl) {
+        (Some(RtVariant::Base), true) => Err(
+            "--rt-variant base: the program uses Intl / locale APIs; use --rt-variant intl or auto".into(),
+        ),
+        (Some(variant), _) => Ok(Some(variant)),
+        (None, true) => Ok(Some(RtVariant::Intl)),
+        (None, false) => Ok(Some(RtVariant::Base)),
+    }
+}
+
 fn set_codegen_opt_override(level: Option<inkwell::OptimizationLevel>) {
     CODEGEN_OPT_OVERRIDE.with(|cell| cell.set(level));
 }
@@ -1063,9 +1124,17 @@ fn build_with_native_mode_routed(
     // `--shared-rt` links `libthaw_rt.so.1`: the core runtime, or with thaw-js too (one image,
     // one arena) when the program uses the JS engine. Default features only; napi and
     // runtime features fall back to the static archives, with a notice.
-    let shared_rt_active = shared_rt && !static_link && !uses_napi && runtime_features.is_empty();
+    let needs_intl = runtime_features.contains("intl") || compiler.uses_intl();
+    let other_features = runtime_features.iter().any(|f| *f != "intl");
+    let forced_variant = RT_VARIANT_OVERRIDE.with(std::cell::Cell::get);
+    let rt_variant = if shared_rt && !static_link && !uses_napi && lib_mode.is_none() {
+        shared_rt_variant(needs_intl, other_features, forced_variant)?
+    } else {
+        None
+    };
+    let shared_rt_active = rt_variant.is_some();
     let shared_rt_js = shared_rt_active && compiler.uses_thaw_js();
-    if shared_rt && !shared_rt_active {
+    if shared_rt && !shared_rt_active && lib_mode.is_none() {
         let reason = if uses_napi {
             "native addon in use"
         } else {
@@ -1073,11 +1142,16 @@ fn build_with_native_mode_routed(
         };
         eprintln!("thaw: --shared-rt: {reason}, falling back to the static runtime");
     }
-    if shared_rt_active {
+    if let Some(variant) = rt_variant {
         manifest["shared_rt"] = serde_json::json!(true);
+        // Base keeps the manifest exactly as before.
+        if variant == RtVariant::Intl {
+            manifest["shared_rt_variant"] = serde_json::json!("intl");
+        }
     }
     if let Some(lib) = lib_mode {
-        if uses_napi || compiler.uses_thaw_js() || !runtime_features.is_empty() {
+        let library_features = runtime_features.iter().any(|f| *f != "intl") || (needs_intl && lib.variant != RtVariant::Intl);
+        if uses_napi || compiler.uses_thaw_js() || library_features {
             return Err(format!(
                 "not-libraryizable: package needs a JS engine or a runtime feature (L2): napi={uses_napi} thaw_js={} features={runtime_features:?}",
                 compiler.uses_thaw_js()
@@ -1101,7 +1175,7 @@ fn build_with_native_mode_routed(
     // thaw-js backs `loadScript`/`callDynamic` (docs/design/bridge.md
     // section 7). It is built and
     // linked only when LLVM found a call into that host.
-    let shared_rt_lib = shared_rt_active.then(|| build_rt_shared_library(shared_rt_js)).transpose()?;
+    let shared_rt_lib = rt_variant.map(|variant| build_rt_shared_library(shared_rt_js, variant)).transpose()?;
     let static_rt_libs = match shared_rt_lib {
         Some(_) => None,
         None => Some((
@@ -1139,7 +1213,7 @@ fn build_with_native_mode_routed(
             }
         })
         .transpose()?;
-    let intl_lib = (compiler.uses_intl() && !thaw_js_intl)
+    let intl_lib = (compiler.uses_intl() && !thaw_js_intl && !shared_rt_active)
         .then(|| build_staticlib("thaw-intl"))
         .transpose()?;
     let napi_lib = uses_napi
@@ -2050,15 +2124,23 @@ fn cargo_build_staticlib(
 
 /// `--shared-rt`: the core runtime as `libthaw_rt.so.1` (crate `thaw-rt-dylib`), copied into
 /// `thaw-libs/cache/<fingerprint>/shared/<rt_abi_hash>/` so the program can `rpath` it.
-fn build_rt_shared_library(with_js: bool) -> Result<PathBuf, String> {
+fn build_rt_shared_library(with_js: bool, variant: RtVariant) -> Result<PathBuf, String> {
     // The crate is a staticlib: rustc's own cdylib version script would export every
     // `#[no_mangle]` symbol of the dependencies, so the shared object is linked here, with
     // `thaw_rt.map` as the only version script.
-    let archive = if with_js {
-        build_staticlib_with_features("thaw-rt-dylib", &["thaw-js"])?
-    } else {
+    let mut features = Vec::new();
+    if with_js {
+        features.push("thaw-js");
+    }
+    if variant == RtVariant::Intl {
+        features.push("intl");
+    }
+    let archive = if features.is_empty() {
         build_staticlib("thaw-rt-dylib")?
+    } else {
+        build_staticlib_with_features("thaw-rt-dylib", &features)?
     };
+    let soname = variant.soname();
     let bytes = std::fs::read(&archive)
         .map_err(|e| format!("failed to read `{}`: {e}", archive.display()))?;
     let abi_hash = rt_abi_hash_of_bytes(&bytes)?;
@@ -2067,7 +2149,7 @@ fn build_rt_shared_library(with_js: bool) -> Result<PathBuf, String> {
         .join(runtime_fingerprint())
         .join("shared")
         .join(&abi_hash);
-    let lib = dir.join("libthaw_rt.so.1");
+    let lib = dir.join(soname);
     if !lib.is_file() {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("failed to create `{}`: {e}", dir.display()))?;
@@ -2075,7 +2157,7 @@ fn build_rt_shared_library(with_js: bool) -> Result<PathBuf, String> {
         let map = dir.join(format!("thaw_rt.map.tmp-{}-{}", std::process::id(), unique_suffix()));
         std::fs::write(&map, include_str!("../../thaw-rt-dylib/thaw_rt.map"))
             .map_err(|e| format!("failed to write `{}`: {e}", map.display()))?;
-        let tmp = dir.join(format!("libthaw_rt.so.1.tmp-{}-{}", std::process::id(), unique_suffix()));
+        let tmp = dir.join(format!("{soname}.tmp-{}-{}", std::process::id(), unique_suffix()));
         let output = Command::new("cc")
             .args(["-shared", "-Wl,--whole-archive"])
             .arg(&archive)
@@ -2085,7 +2167,7 @@ fn build_rt_shared_library(with_js: bool) -> Result<PathBuf, String> {
                 "-Wl,-Bsymbolic",
                 "-Wl,--no-undefined-version",
                 "-Wl,--build-id=none",
-                "-Wl,-soname,libthaw_rt.so.1",
+                &format!("-Wl,-soname,{soname}"),
                 "-Wl,--gc-sections",
                 "-Wl,--strip-all",
                 "-lm",
@@ -2096,12 +2178,12 @@ fn build_rt_shared_library(with_js: bool) -> Result<PathBuf, String> {
             .arg("-o")
             .arg(&tmp)
             .output()
-            .map_err(|e| format!("failed to invoke `cc` for libthaw_rt.so.1: {e}"))?;
+            .map_err(|e| format!("failed to invoke `cc` for {soname}: {e}"))?;
         let _ = std::fs::remove_file(&map);
         if !output.status.success() {
             let _ = std::fs::remove_file(&tmp);
             return Err(format!(
-                "linking libthaw_rt.so.1 failed:\n{}",
+                "linking {soname} failed:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             ));
         }

@@ -694,7 +694,12 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
     }
     println!("napi: {}", manifest["napi"].as_bool().unwrap_or(false));
     if manifest["shared_rt"].as_bool() == Some(true) {
-        println!("shared-rt: libthaw_rt.so.1");
+        let soname = if manifest["shared_rt_variant"].as_str() == Some("intl") {
+            RtVariant::Intl.soname()
+        } else {
+            RtVariant::Base.soname()
+        };
+        println!("shared-rt: {soname}");
     }
     Ok(())
 }
@@ -850,6 +855,11 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
     let mut icu4c = false;
     let mut fast_compile = false;
     let mut shared_rt = std::env::var("THAW_SHARED_RT").as_deref() == Ok("1");
+    // `--rt-variant auto|base|intl` (or THAW_RT_VARIANT): which `--shared-rt` image to link.
+    let mut rt_variant = match std::env::var("THAW_RT_VARIANT") {
+        Ok(text) => RtVariant::parse(&text)?,
+        Err(_) => None,
+    };
     let mut registry_was_explicit = false;
 
     let mut i = 0;
@@ -903,6 +913,11 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
             // Backend without instruction-selection optimisation: faster to compile, slower code.
             "--fast-compile" => fast_compile = true,
             "--shared-rt" => shared_rt = true,
+            "--rt-variant" => {
+                let value = build_option_value(args, i)?.unwrap();
+                i += 1;
+                rt_variant = RtVariant::parse(value)?;
+            }
             other => {
                 if input.is_some() {
                     return Err(format!("unexpected extra argument `{other}`"));
@@ -961,6 +976,7 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
         assets = Some(build_vite_project(&directory)?);
     }
 
+    set_rt_variant_override(rt_variant);
     set_codegen_opt_override(fast_compile.then_some(inkwell::OptimizationLevel::None));
     let result = build_with_native_mode_shared(
         &input,

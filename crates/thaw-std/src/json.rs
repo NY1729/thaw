@@ -2031,7 +2031,10 @@ struct JsonRootLease {
 
 impl Drop for JsonRootLease {
     fn drop(&mut self) {
-        let destroy = JSON_ROOT_PINS.with(|pins| {
+        // A lease held by another thread-local (a thrown exception packet) can drop during
+        // thread teardown, after `JSON_ROOT_PINS` is gone; touching it then aborts the process
+        // at exit. The pins die with the thread, so there is nothing left to release.
+        let Ok(destroy) = JSON_ROOT_PINS.try_with(|pins| {
             let mut pins = pins.borrow_mut();
             let Some((count, requested)) = pins.get_mut(&self.value) else {
                 return false;
@@ -2044,7 +2047,9 @@ impl Drop for JsonRootLease {
             } else {
                 false
             }
-        });
+        }) else {
+            return;
+        };
         if destroy {
             unsafe { thaw_json_destroy(self.value as *mut Value) };
         }
@@ -10498,6 +10503,16 @@ fn error_value_from_text(value: *const c_char, bytes: &[u8]) -> Option<Value> {
     let mut fields = indexmap::IndexMap::new();
     fields.insert(b"name".to_vec(), name);
     fields.insert(b"message".to_vec(), message);
+    // The frames recorded at construction ride along, so `any`-typed reads of `stack` keep them.
+    let frames = unsafe { thaw_error_frames(value) };
+    let header = if frames.is_null() {
+        header
+    } else {
+        format!(
+            "{header}{}",
+            unsafe { CStr::from_ptr(frames) }.to_string_lossy()
+        )
+    };
     fields.insert(b"stack".to_vec(), Value::String(header));
     let merged = unsafe { thaw_error_with_props(value) };
     let merged = unsafe { CStr::from_ptr(merged) }.to_bytes();

@@ -34,20 +34,28 @@ fn compile_jit_callback(callback: f64) -> Option<(JitCallback, usize)> {
         return None;
     };
     let symbol = format!("expr:{callback}:array-callback");
-    let Some(program) = NumericProgram::parse(&symbol) else {
-        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
-        return None;
-    };
-    let required_args = program.required_args();
-    if required_args > 16 {
-        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
-        return None;
-    }
-    let code = match compile(&symbol, &program) {
-        Ok((code, _)) => code,
-        Err(error) => {
-            CALL_ERROR.with(|slot| slot.set(error));
+    let (code, required_args) = if let Some((code, _, required_args)) = cached(&symbol) {
+        if required_args > 16 {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
             return None;
+        }
+        (code, required_args)
+    } else {
+        let Some(program) = NumericProgram::parse(&symbol) else {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return None;
+        };
+        let required_args = program.required_args();
+        if required_args > 16 {
+            CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+            return None;
+        }
+        match compile(&symbol, &program) {
+            Ok((code, _)) => (code, required_args),
+            Err(error) => {
+                CALL_ERROR.with(|slot| slot.set(error));
+                return None;
+            }
         }
     };
     Some((

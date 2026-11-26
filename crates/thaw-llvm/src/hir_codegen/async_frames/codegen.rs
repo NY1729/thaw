@@ -49,6 +49,9 @@ impl<'ctx> HirCompiler<'ctx> {
         self.loop_scopes.clear();
         self.loop_promotion_scopes.clear();
         self.seed_global_variables();
+        // Unbounded async recursion would otherwise run the ramps off the stack.
+        // ponytail: throws synchronously (Node rejects the promise); a try/await caller sees the same RangeError.
+        self.emit_stack_overflow_guard()?;
 
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
         let frame = self
@@ -1146,6 +1149,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 )?;
                 return Ok(AsyncBlockExit::Rejected);
             }
+            // A native `try` (no await inside) in a resumed segment has no enclosing catch target: a
+            // throw out of its catch/finally body must reject the completion, not escape the resume.
+            let try_escape = if synchronous_catch.is_none() && matches!(stmt, HirStmt::Try(..)) {
+                let block = self.context.append_basic_block(self.current_function(), "async_try_escape");
+                self.push_catch_target(block);
+                Some(block)
+            } else {
+                None
+            };
             if let HirStmt::Let(name, ty, expr) = stmt {
                 if self.for_iteration_frame_slots.contains_key(name) {
                     self.store_for_iteration_cell(name, ty, expr)?;
@@ -1163,9 +1175,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.variables.insert(name.clone(), (slot, self.basic_type(ty)?));
                 }
             } else if self.compile_stmt(stmt)? {
+                self.finish_async_try_escape(try_escape, completion)?;
                 self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
                 return Ok(AsyncBlockExit::Returned);
             }
+            self.finish_async_try_escape(try_escape, completion)?;
             self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
             Ok(AsyncBlockExit::Continue)
             })();
@@ -1177,6 +1191,51 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
         Ok(AsyncBlockExit::Continue)
+    }
+
+    fn finish_async_try_escape(
+        &mut self,
+        escape: Option<inkwell::basic_block::BasicBlock<'ctx>>,
+        completion: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        let Some(escape) = escape else {
+            return Ok(());
+        };
+        self.pop_catch_target();
+        let after = self.context.append_basic_block(self.current_function(), "async_try_after");
+        let reachable = self.builder.get_insert_block().unwrap().get_terminator().is_none();
+        if reachable {
+            self.builder.build_unconditional_branch(after).map_err(|e| e.to_string())?;
+        }
+        self.builder.position_at_end(escape);
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let error = self
+            .builder
+            .build_load(ptr_ty, self.pending_exception().as_pointer_value(), "async_try_escape_error")
+            .map_err(|e| e.to_string())?
+            .into_pointer_value();
+        self.reject_promise_with_pending_exception(completion, error, "reject_try_escape")?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
+            .map_err(|e| e.to_string())?;
+        self.clear_pending_native_text()?;
+        self.builder
+            .build_store(self.pending_exception_object().as_pointer_value(), ptr_ty.const_null())
+            .map_err(|e| e.to_string())?;
+        self.builder
+            .build_store(
+                self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                self.context.i64_type().const_zero(),
+            )
+            .map_err(|e| e.to_string())?;
+        if self.current_function().get_type().get_return_type().is_some() {
+            self.builder.build_return(Some(&completion)).map_err(|e| e.to_string())?;
+        } else {
+            self.builder.build_return(None).map_err(|e| e.to_string())?;
+        }
+        // The caller keeps emitting into `after` (even when nothing branches to it), so it must stay open.
+        self.builder.position_at_end(after);
+        Ok(())
     }
 
     fn capture_pending_async_catch(

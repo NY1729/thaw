@@ -97,7 +97,7 @@ impl<'a> FnLowerer<'a> {
                 "name" => Some("__thaw_error_name"),
                 "cause" => Some("__thaw_error_cause"),
                 "code" => Some("__thaw_error_code"),
-                "stack" => Some("__thaw_error_stack"),
+                "stack" => Some("__thaw_error_stack_with_frames"),
                 "error" => Some("__thaw_error_suppressed_error"),
                 "suppressed" => Some("__thaw_error_suppressed"),
                 _ => None,

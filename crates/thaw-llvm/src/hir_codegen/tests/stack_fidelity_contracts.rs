@@ -49,7 +49,6 @@ function main(): void { console.log(names(h2(1))); }
 }
 
 #[test]
-#[ignore = "known gap vs Node: direct self-recursion yields an Error.stack with no frames at all"]
 fn stack_fidelity_recur() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
@@ -126,7 +125,6 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: arrow functions are missing from Error.stack frames (Node: f|g|main)"]
 fn stack_fidelity_arrow() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
@@ -333,7 +331,6 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: Error.stackTraceLimit / frames of a recursive call are empty"]
 fn stack_fidelity_limit() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
@@ -361,7 +358,7 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: errors thrown (not just created) in callees carry no frames"]
+#[ignore = "known gap vs Node: the `cause` of a caught error has no frames (its text copy loses the side table)"]
 fn stack_fidelity_rethrow() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
@@ -388,7 +385,6 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: stack overflow RangeError path segfaults after the first console.log"]
 fn stack_fidelity_deep() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
@@ -412,5 +408,23 @@ function main(): void {
     assert_eq!(
         compile_and_run(source, "stack_fidelity_deep"),
         "true Maximum call stack size exceeded\nRangeError: Maximum call stack size exceeded true at down\n"
+    );
+}
+
+#[test]
+fn stack_overflow_is_a_catchable_range_error_in_lambdas_async_and_methods() {
+    let source = r#"const f = (n: number): number => f(n + 1) + 1;
+class K { m(n: number): number { return this.m(n + 1) + 1; } }
+async function g(n: number): Promise<number> { return (await g(n + 1)) + 1; }
+async function main(): Promise<void> {
+  try { f(0); } catch (e: any) { console.log("arrow", e instanceof RangeError, e.message); }
+  try { new K().m(0); } catch (e: any) { console.log("method", e instanceof RangeError); }
+  try { await g(0); } catch (e: any) { console.log("async", e instanceof RangeError); }
+  console.log("after");
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "stack_overflow_lambda_async"),
+        "arrow true Maximum call stack size exceeded\nmethod true\nasync true\nafter\n"
     );
 }

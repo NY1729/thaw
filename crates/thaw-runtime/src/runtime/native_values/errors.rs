@@ -1158,6 +1158,13 @@ unsafe fn error_text_with_props(error: *const c_char, with_id: bool) -> *const c
     .unwrap_or_default();
     if with_id {
         overlay.push((ERROR_ID_KEY.to_string(), extras_key(error).to_string()));
+        // The Json/JS copy carries the full `stack` (frames recorded at construction), not just the
+        // header an earlier read cached; an assigned `stack` stays verbatim.
+        if with_extras(error, |extras| Some(extras.stack_user)) != Some(true) {
+            let full = serde_json::Value::String(unsafe { stack_text(error, true) }).to_string();
+            overlay.retain(|(key, _)| key != "stack");
+            overlay.push(("stack".to_string(), full));
+        }
     }
     if overlay.is_empty() {
         return error;

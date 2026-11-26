@@ -3159,8 +3159,8 @@ impl<'a> FnLowerer<'a> {
                                 [size, fill, encoding] => (size, Some(fill), Some(encoding)),
                                 _ => return Err("`Buffer.alloc` expects a size".into()),
                             };
-                            let size = self.coerce_primitive_to_number(size.clone())?;
-                            let size = if property.sym == *"alloc" { self.checked_buffer_size(size)? } else { size };
+                            let size = self.buffer_size_argument(size.clone())?;
+                            let size = self.checked_buffer_size(size)?;
                             let Some(fill) = fill else {
                                 return self.wrap_call_argument_bindings(
                                     HirExpr::Call(
@@ -3241,7 +3241,7 @@ impl<'a> FnLowerer<'a> {
                         // closure handed to a JS callback) reads as `Json`: pick by its shape.
                         if source_type == HirType::Json {
                             let encoding = match arguments.get(1) {
-                                Some(argument) => argument.clone(),
+                                Some(argument) => self.buffer_encoding_argument(argument.clone(), false)?,
                                 None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
                             };
                             let name = format!("__thaw_buffer_from_json_{}", self.next_binding);
@@ -3345,7 +3345,7 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         let encoding = match arguments.get(1) {
-                            Some(argument) => argument.clone(),
+                            Some(argument) => self.buffer_encoding_argument(argument.clone(), false)?,
                             None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
                         };
                         return self.wrap_call_argument_bindings(

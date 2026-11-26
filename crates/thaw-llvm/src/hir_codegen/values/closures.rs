@@ -2180,9 +2180,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
 
+            self.emit_stack_overflow_guard()?;
             match body {
                 HirExpr::Block(stmts) => {
-                    self.emit_stack_overflow_guard()?;
                     let terminated = self.compile_block(stmts)?;
                     if !terminated {
                         if *ret == HirType::Void {
@@ -2243,6 +2243,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.arena_variables = saved_arena_variables;
         self.builder.position_at_end(parent_block);
         result?;
+        self.last_lambda_symbol = Some(name.clone());
         Ok(closure.into())
     }
 
@@ -2260,6 +2261,15 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         if let HirExpr::Lambda(_, _, ret, body) = inner {
             let display = function_display_name(name);
+            // A named arrow shows up in `Error.stack` as `at <name>`; unnamed lambdas stay out of it.
+            if let Some(symbol) = self.last_lambda_symbol.take() {
+                if let Some(function) = self.module.get_function(&symbol) {
+                    if !display.starts_with("__thaw") && !Self::in_stack_frame_section(function) {
+                        self.mark_for_stack_frames(function, &symbol);
+                        self.lambda_frame_names.insert(symbol, display.clone());
+                    }
+                }
+            }
             if compiled.is_pointer_value() && !display.starts_with("__thaw") {
                 let kind = named_function_kind(ret, body);
                 self.compile_register_function_label(compiled, &format!("{kind}{display}"))?;

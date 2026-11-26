@@ -541,6 +541,11 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call_unread(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        // `(await x).m(..)`: bind the awaited receiver first so the async frame planner sees a
+        // plain `let` await and the call lowers against an ordinary identifier receiver.
+        if let Some(spilled) = self.lower_awaited_receiver_call(call)? {
+            return Ok(spilled);
+        }
         // `(0, eval)(code)` is the idiomatic indirect eval: the same call as `eval(code)`.
         if let Callee::Expr(callee) = &call.callee {
             if let Expr::Paren(paren) = callee.as_ref() {
@@ -816,6 +821,38 @@ impl<'a> FnLowerer<'a> {
     /// receiver the payload. Lower the operand without the assertion, unwrap it once (a runtime
     /// null throws Node's `Cannot read properties of null`), bind it to a plain name and
     /// dispatch the call on that name. Returns `None` when the receiver is not a cast/assertion.
+    fn lower_awaited_receiver_call(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(member) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let mut operand = member.obj.as_ref();
+        while let Expr::Paren(paren) = operand {
+            operand = paren.expr.as_ref();
+        }
+        if !matches!(operand, Expr::Await(_)) {
+            return Ok(None);
+        }
+        let value = self.lower_expr(operand)?;
+        let ty = self.infer_expr_type_inner(&value)?;
+        let name = format!("__thaw_awaited_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let mut routed = call.clone();
+        if let Callee::Expr(callee) = &mut routed.callee {
+            if let Expr::Member(routed_member) = callee.as_mut() {
+                *routed_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    name.clone().into(),
+                    member.span,
+                ));
+            }
+        }
+        let result = self.lower_call(&routed)?;
+        self.wrap_call_argument_bindings(result, &[(name, ty, value)]).map(Some)
+    }
+
     fn lower_nullable_receiver_call(
         &mut self,
         member: &MemberExpr,
