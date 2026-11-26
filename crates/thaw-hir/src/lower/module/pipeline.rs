@@ -2605,7 +2605,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &enum_values,
             &enum_reverse_values,
             Some(&call_constraints),
-        )?;
+        );
+        // JS: a global initialised from a not-yet-converged callee retries after the `any` sweep below.
+        let globals = match globals {
+            Err(_) if crate::lower::implicit_any() => Vec::new(),
+            other => other?,
+        };
         for global in globals {
             let ty = global_types.get_mut(&global.name).unwrap();
             if hir_type_contains_dynamic(ty) && *ty != global.ty {
@@ -2798,6 +2803,41 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     }
                 }
             }
+        }
+        // With every parameter now `any`, bodies and top-level initialisers that could not lower during the
+        // fixpoint converge; whatever return/global type is still unresolved afterwards is `any` too.
+        for _ in 0..4 {
+            for fn_decl in &fn_decls {
+                let name = fn_decl.ident.sym.to_string();
+                if !hir_type_contains_dynamic(&signatures[&name].ret) {
+                    continue;
+                }
+                if let Ok(function) = lower_fn_decl(
+                    fn_decl, &signatures, &interfaces, &generic_interfaces, &enum_values,
+                    &enum_reverse_values, &global_types, &immutable_globals, None,
+                ) {
+                    signatures.get_mut(&name).unwrap().ret = function.ret;
+                }
+            }
+            if let Ok(globals) = lower_global_decls(
+                &global_decls, &global_types, &signatures, &interfaces, &generic_interfaces,
+                &enum_values, &enum_reverse_values, None,
+            ) {
+                for global in globals {
+                    let ty = global_types.get_mut(&global.name).unwrap();
+                    if hir_type_contains_dynamic(ty) {
+                        *ty = global.ty;
+                    }
+                }
+            }
+        }
+        for signature in signatures.values_mut() {
+            if !signature.is_extern && signature.generic_type_params.is_empty() {
+                signature.ret = dynamic_to_json(&signature.ret);
+            }
+        }
+        for ty in global_types.values_mut() {
+            *ty = dynamic_to_json(ty);
         }
     }
     if let Some((name, signature)) = signatures.iter().find(|(_, signature)| {

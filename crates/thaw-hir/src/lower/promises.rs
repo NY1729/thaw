@@ -622,7 +622,9 @@ impl<'a> FnLowerer<'a> {
         // source-level Promise validation; ordinary physical callback shape
         // checks must still require their exact ABI.
         let accepts_callback_input = |actual: &HirType, supplied: &HirType| {
-            actual == &HirType::Json || callback_param_compatible(supplied, actual)
+            actual == &HirType::Json
+                || (implicit_any() && actual == &HirType::Dynamic)
+                || callback_param_compatible(supplied, actual)
         };
         // Extra optional parameters are fine: the caller passes fewer arguments and they read as undefined.
         let extra_params_optional = contract_rest.is_none()
@@ -1296,6 +1298,12 @@ impl<'a> FnLowerer<'a> {
                     unobservable_argument = true;
                     continue;
                 }
+                // JS: an argument bound inside a nested callback (`p.on('close', (code) => resolve(code))`) is `any`.
+                Err(_) if implicit_any() => {
+                    unobservable_argument = true;
+                    inferred = Some(HirType::Json);
+                    continue;
+                }
                 Err(error) => {
                     return Err(format!(
                         "cannot infer Promise type from resolve argument: {error}"
@@ -1324,7 +1332,9 @@ impl<'a> FnLowerer<'a> {
                 continue;
             }
             if let Some(expected) = &inferred {
-                if expected != &actual {
+                if expected != &actual && implicit_any() {
+                    inferred = Some(HirType::Json);
+                } else if expected != &actual {
                     return Err(format!(
                         "conflicting Promise resolve types: {expected:?} and {actual:?}"
                     ));
@@ -1358,6 +1368,10 @@ impl<'a> FnLowerer<'a> {
             // explicit `new Promise<T>(...)` type argument still
             // overrides this when the callback truly resolves with a
             // value some other way this static scan can't see.
+            // JS has no type argument: a handed-off `resolve` (`w.once('message', resolve)`) can carry anything.
+            if implicit_any() && explicit.is_none() {
+                return Ok((HirType::Json, false));
+            }
             return Ok((HirType::Void, false));
         }
         // `resolve` is never called or passed on (`new Promise((_, reject) => ...)`): it can only reject.

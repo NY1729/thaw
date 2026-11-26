@@ -516,6 +516,7 @@ include!("lower/module/classes.rs");
 include!("lower/module/pipeline.rs");
 include!("lower/module/globals.rs");
 
+include!("lower/implicit_any.rs");
 include!("lower/types.rs");
 
 include!("lower/metadata.rs");
