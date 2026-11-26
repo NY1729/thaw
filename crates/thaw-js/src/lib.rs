@@ -6281,10 +6281,8 @@ impl Interp {
             B::Add => {
                 let (lp, rp) = (l.clone(), r.clone());
                 if matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_)) {
-                    // the operand is borrowed, so this is one copy into a buffer with slack
-                    let mut s = self.to_str(&lp);
-                    s.push_joined(&self.to_str(&rp));
-                    Value::Str(s)
+                    let (ls, rs) = (self.to_str(&lp), self.to_str(&rp));
+                    Value::Str(JsStr::concat(&ls, &rs))
                 } else {
                     Value::Number(self.tonum_numeric(&lp)? + self.tonum_numeric(&rp)?)
                 }

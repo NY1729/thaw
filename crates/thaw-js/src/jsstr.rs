@@ -6,7 +6,7 @@
 //! never mutated: a shared value is copied once, into a fresh buffer with slack.
 
 use std::borrow::Borrow;
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
@@ -25,6 +25,84 @@ enum Repr {
     /// `len < BUF_MIN`, or a long string that arrived as an `Rc<str>` (no way to take its slack).
     Plain(Rc<str>),
     Buf(Rc<BufStr>),
+    /// `a + b` of long strings, joined lazily: the text is built (once) when something reads it.
+    Cat(Rc<CatNode>),
+}
+
+/// A pending concatenation. Cheap to make (no copy), flattened on first read of the bytes.
+struct CatNode {
+    /// Byte length of the joined text.
+    len: usize,
+    /// Unflattened nodes below and including this one (bounds the memory a long chain of small appends holds).
+    count: usize,
+    ascii: bool,
+    /// The text starts with a lone low surrogate / ends with a lone high one (so a later join may need the seam rule).
+    first_lone_low: bool,
+    last_lone_high: bool,
+    /// The operands; taken when the node is flattened.
+    kids: RefCell<Option<(JsStr, JsStr)>>,
+    flat: OnceCell<JsStr>,
+}
+
+impl CatNode {
+    /// The joined text. Walks the tree with an explicit stack, so a long left- or right-leaning chain cannot
+    /// overflow the native stack.
+    fn flat(&self) -> &JsStr {
+        self.flat.get_or_init(|| {
+            let mut out = String::with_capacity(self.len);
+            let mut stack: Vec<JsStr> = Vec::new();
+            if let Some((l, r)) = self.kids.borrow_mut().take() {
+                stack.push(r);
+                stack.push(l);
+            }
+            while let Some(x) = stack.pop() {
+                match &x.0 {
+                    Repr::Cat(c) => match c.flat.get() {
+                        Some(f) => out.push_str(f),
+                        None => {
+                            // an unshared node gives up its operands; a shared one keeps them for its other owners
+                            let kids = c.kids.borrow().clone();
+                            if let Some((l, r)) = kids {
+                                stack.push(r);
+                                stack.push(l);
+                            }
+                        }
+                    },
+                    _ => out.push_str(&x),
+                }
+            }
+            JsStr::from(out)
+        })
+    }
+
+    fn work(&self) -> usize {
+        if self.flat.get().is_some() {
+            0
+        } else {
+            self.count
+        }
+    }
+}
+
+impl Drop for CatNode {
+    /// Releases a long chain without recursing: operands that this node owns alone are unlinked first.
+    fn drop(&mut self) {
+        let mut stack: Vec<JsStr> = Vec::new();
+        if let Some((l, r)) = self.kids.get_mut().take() {
+            stack.push(l);
+            stack.push(r);
+        }
+        while let Some(x) = stack.pop() {
+            if let Repr::Cat(mut rc) = x.0 {
+                if let Some(n) = Rc::get_mut(&mut rc) {
+                    if let Some((l, r)) = n.kids.get_mut().take() {
+                        stack.push(l);
+                        stack.push(r);
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct BufStr {
@@ -107,6 +185,76 @@ fn backward(s: &str, u: usize, b: usize, ui: usize) -> Option<(usize, usize, cha
 }
 
 impl JsStr {
+    /// Byte length (`str::len`), without joining a pending concatenation.
+    #[inline]
+    pub fn len(&self) -> usize {
+        match &self.0 {
+            Repr::Plain(r) => r.len(),
+            Repr::Buf(b) => b.s.len(),
+            Repr::Cat(c) => c.len,
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Ends of the text for the seam rule: (starts with a lone low surrogate, ends with a lone high one).
+    fn seam_flags(&self) -> (bool, bool) {
+        let ends = |s: &str| {
+            let low = s.chars().next().and_then(crate::builtins::lone_unit);
+            let high = s.chars().next_back().and_then(crate::builtins::lone_unit);
+            (
+                matches!(low, Some(0xDC00..=0xDFFF)),
+                matches!(high, Some(0xD800..=0xDBFF)),
+            )
+        };
+        match &self.0 {
+            Repr::Plain(r) => ends(r),
+            Repr::Buf(b) => ends(&b.s),
+            Repr::Cat(c) => (c.first_lone_low, c.last_lone_high),
+        }
+    }
+
+    /// `a + b`. A long result is a pending join (no copy now, so `t = t + x` in a loop is linear); a short one, or
+    /// one whose seam would merge a surrogate pair, is built at once.
+    pub(crate) fn concat(a: &JsStr, b: &JsStr) -> JsStr {
+        if b.is_empty() {
+            return a.clone();
+        }
+        if a.is_empty() {
+            return b.clone();
+        }
+        let len = a.len() + b.len();
+        let (a_low, a_high) = a.seam_flags();
+        let (b_low, b_high) = b.seam_flags();
+        if len < BUF_MIN || (a_high && b_low) {
+            let mut s = a.clone();
+            s.push_joined(b);
+            return s;
+        }
+        let count = match (&a.0, &b.0) {
+            (Repr::Cat(x), Repr::Cat(y)) => x.work() + y.work(),
+            (Repr::Cat(x), _) | (_, Repr::Cat(x)) => x.work(),
+            _ => 0,
+        } + 1;
+        let node = Rc::new(CatNode {
+            len,
+            count,
+            ascii: a.is_ascii_cached() && b.is_ascii_cached(),
+            first_lone_low: a_low,
+            last_lone_high: b_high,
+            kids: RefCell::new(Some((a.clone(), b.clone()))),
+            flat: OnceCell::new(),
+        });
+        // a chain that outgrows its text (many tiny appends) is joined now, which bounds the nodes held
+        if count > 1024 + len / 128 {
+            return node.flat().clone();
+        }
+        JsStr(Repr::Cat(node))
+    }
+
     #[inline]
     fn buf(s: String) -> Self {
         JsStr(Repr::Buf(Rc::new(BufStr {
@@ -122,6 +270,7 @@ impl JsStr {
     fn locate_char(&self, ui: usize) -> Option<(usize, usize, char)> {
         match &self.0 {
             Repr::Plain(r) => locate(r, (0, 0), ui),
+            Repr::Cat(c) => c.flat().locate_char(ui),
             Repr::Buf(b) => {
                 let (u, by, c) = locate(&b.s, b.cursor.get(), ui)?;
                 b.cursor.set((u, by));
@@ -137,6 +286,7 @@ impl JsStr {
         }
         match &self.0 {
             Repr::Plain(r) => count16(r),
+            Repr::Cat(c) => c.flat().len16(),
             Repr::Buf(b) => {
                 if b.len16.get() == NO_LEN {
                     b.len16.set(count16(&b.s));
@@ -227,6 +377,7 @@ impl JsStr {
     pub fn into_rc(&self) -> Rc<str> {
         match &self.0 {
             Repr::Plain(r) => r.clone(),
+            Repr::Cat(c) => c.flat().into_rc(),
             Repr::Buf(b) => Rc::from(b.s.as_str()),
         }
     }
@@ -237,6 +388,7 @@ impl JsStr {
         match (&a.0, &b.0) {
             (Repr::Plain(x), Repr::Plain(y)) => Rc::ptr_eq(x, y),
             (Repr::Buf(x), Repr::Buf(y)) => Rc::ptr_eq(x, y),
+            (Repr::Cat(x), Repr::Cat(y)) => Rc::ptr_eq(x, y),
             _ => false,
         }
     }
@@ -246,6 +398,7 @@ impl JsStr {
     pub(crate) fn is_ascii_cached(&self) -> bool {
         match &self.0 {
             Repr::Plain(r) => scan_ascii(r),
+            Repr::Cat(c) => c.ascii,
             Repr::Buf(b) => match b.ascii.get() {
                 1 => true,
                 2 => false,
@@ -286,6 +439,7 @@ impl JsStr {
         match &self.0 {
             Repr::Buf(b) => Some(b.cursor.get()),
             Repr::Plain(_) => None,
+            Repr::Cat(c) => c.flat().cursor_for_test(),
         }
     }
 }
@@ -321,9 +475,14 @@ impl JsStr {
     /// `self += t`, with the lone-surrogate seam rule. A uniquely owned `Buf` grows in place
     /// (amortised O(t)); any other string is copied once into a buffer with slack and owned here.
     pub(crate) fn push_joined(&mut self, t: &str) {
+        // a pending join is flattened first; when it was the only owner its text is then uniquely ours
+        if let Repr::Cat(c) = &self.0 {
+            let flat = c.flat().clone();
+            *self = flat;
+        }
         let unique = match &mut self.0 {
             Repr::Buf(rc) => Rc::get_mut(rc),
-            Repr::Plain(_) => None,
+            Repr::Plain(_) | Repr::Cat(_) => None,
         };
         if let Some(b) = unique {
             crate::builtins::push_joined(&mut b.s, t);
@@ -353,6 +512,7 @@ impl Deref for JsStr {
     fn deref(&self) -> &str {
         match &self.0 {
             Repr::Plain(r) => r,
+            Repr::Cat(c) => c.flat().deref(),
             Repr::Buf(b) => b.s.as_str(),
         }
     }
@@ -589,5 +749,94 @@ mod tests {
         t.push_joined("é");
         assert_eq!(t.len(), 301);
         assert!(!is_plain(&t));
+    }
+
+    fn is_cat(s: &JsStr) -> bool {
+        matches!(s.0, Repr::Cat(_))
+    }
+
+    #[test]
+    fn jsstr_concat_is_lazy_and_reads_like_the_eager_join() {
+        let a = JsStr::from("a".repeat(300));
+        let b = JsStr::from("é".repeat(40));
+        let c = JsStr::concat(&a, &b);
+        assert!(is_cat(&c));
+        assert_eq!(c.len(), 300 + 80);
+        assert!(!c.is_ascii_cached());
+        assert_eq!(c.len16(), 340);
+        assert_eq!(&*c, format!("{}{}", "a".repeat(300), "é".repeat(40)));
+        // short results, empties and shared operands
+        assert!(!is_cat(&JsStr::concat(
+            &JsStr::from("ab"),
+            &JsStr::from("cd")
+        )));
+        assert!(JsStr::ptr_eq(&JsStr::concat(&a, &JsStr::from("")), &a));
+        let d = JsStr::concat(&c, &c);
+        assert_eq!(d.len(), 2 * c.len());
+        assert_eq!(&*d, format!("{}{}", &*c, &*c));
+        assert_eq!(c.unit_at(300), Some(0xE9));
+        assert_eq!(a.len(), 300);
+    }
+
+    #[test]
+    fn jsstr_concat_chain_is_linear_and_drops_without_recursion() {
+        let mut t = JsStr::from("x".repeat(300));
+        let mut want = "x".repeat(300);
+        for i in 0..200_000 {
+            let piece = JsStr::from((i % 10).to_string());
+            t = JsStr::concat(&t, &piece);
+            want.push_str(&(i % 10).to_string());
+        }
+        assert_eq!(t.len(), want.len());
+        assert_eq!(&*t, want.as_str());
+        // a right-leaning chain too
+        let mut r = JsStr::from("y".repeat(300));
+        for _ in 0..100_000 {
+            r = JsStr::concat(&JsStr::from("z"), &r);
+        }
+        assert_eq!(r.len(), 100_300);
+        assert!(r.starts_with("zzzz") && r.ends_with("yyyy"));
+        drop(r);
+    }
+
+    #[test]
+    fn jsstr_concat_merges_a_surrogate_pair_at_the_seam() {
+        let hi = crate::builtins::units_str(&[0xD83D]);
+        let lo = crate::builtins::units_str(&[0xDE00]);
+        let a = JsStr::from(format!("{}{hi}", "a".repeat(300)));
+        let b = JsStr::from(format!("{lo}{}", "b".repeat(300)));
+        let joined = JsStr::concat(&a, &b);
+        assert!(!is_cat(&joined));
+        assert_eq!(joined.len16(), 600 + 2);
+        assert!(joined.contains('\u{1F600}'));
+        // a pending join that ends in a lone high surrogate is also joined eagerly with a lone low one
+        let c = JsStr::concat(
+            &JsStr::from("a".repeat(300)),
+            &JsStr::from(format!("b{hi}")),
+        );
+        assert!(is_cat(&c));
+        let d = JsStr::concat(&c, &b);
+        assert_eq!(d.len16(), 300 + 1 + 2 + 300);
+        assert!(d.contains('\u{1F600}'));
+    }
+
+    #[test]
+    fn jsstr_push_joined_after_concat_appends_in_place() {
+        let mut t = JsStr::concat(&JsStr::from("a".repeat(300)), &JsStr::from("b".repeat(10)));
+        let before = copies_made();
+        t.push_joined("c");
+        t.push_joined("d");
+        assert_eq!(&*t, format!("{}{}cd", "a".repeat(300), "b".repeat(10)));
+        assert_eq!(
+            copies_made(),
+            before,
+            "an unshared pending join flattens into a uniquely owned buffer"
+        );
+        // an aliased pending join is not changed
+        let u = JsStr::concat(&JsStr::from("a".repeat(300)), &JsStr::from("b".repeat(10)));
+        let mut v = u.clone();
+        v.push_joined("!");
+        assert_eq!(u.len(), 310);
+        assert_eq!(v.len(), 311);
     }
 }
