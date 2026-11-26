@@ -3910,8 +3910,9 @@ fn native_process_report(
             value: u64::from(handled),
             error: ptr::null_mut(),
         },
+        // a listener that threw was a listener: only its own error is reported, not the original again
         Ok(Err(e)) | Err(e) => HandleResult {
-            value: 0,
+            value: 1,
             error: error_string(error_text(e)),
         },
     }
@@ -3937,9 +3938,31 @@ fn native_report_text(message: *const c_char) -> Option<String> {
     )
 }
 
+/// Set when an `uncaughtException` listener threw: Node then exits with status 7.
+pub(crate) static UNCAUGHT_HANDLER_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The exit status of a failed compiled process: 1, or 7 after an `uncaughtException` listener threw.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_failure_status() -> i32 {
+    if UNCAUGHT_HANDLER_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        7
+    } else {
+        1
+    }
+}
+
 /// A native uncaught exception: `process.emit('uncaughtExceptionMonitor')`, then `uncaughtException`.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_emit_uncaught_result(message: *const c_char) -> HandleResult {
+    let result = emit_uncaught_result(message);
+    if !result.error.is_null() {
+        UNCAUGHT_HANDLER_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    result
+}
+
+fn emit_uncaught_result(message: *const c_char) -> HandleResult {
     let Some(raw) = native_report_text(message) else {
         return HandleResult {
             value: 0,
@@ -3968,13 +3991,41 @@ pub extern "C" fn thaw_tjs_emit_unhandled_rejection_result(message: *const c_cha
             error: ptr::null_mut(),
         };
     };
-    native_process_report(&["unhandledRejection"], |it| {
+    native_process_report(&["unhandledRejection", "uncaughtException"], |it| {
         let reason = if raw.starts_with('\u{1}') {
             native_report_error(it, &raw)?
         } else {
             Value::str(&raw)
         };
-        it.emit("unhandledRejection", &[reason, Value::Undefined])
+        if it.listener_count("unhandledRejection") > 0 {
+            // the listener's second argument is a real (already rejected, handled) Promise
+            let promise = it.new_promise();
+            if let Kind::Promise(d) = &mut *promise.kind.borrow_mut() {
+                d.handled = true;
+            }
+            it.reject_promise(&promise, reason.clone());
+            return it.emit("unhandledRejection", &[reason, Value::Object(promise)]);
+        }
+        // Node's default `--unhandled-rejections=throw`: with no `unhandledRejection` listener the
+        // rejection becomes an uncaught exception (origin `unhandledRejection`); a non-Error reason
+        // is wrapped in an `UnhandledPromiseRejection` error.
+        let error = if raw.starts_with('\u{1}') {
+            reason
+        } else {
+            let shown = it.inspect(&reason, false);
+            let e = it.make_error(
+                "Error",
+                &format!("This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"{shown}\"."),
+            )?;
+            if let Value::Object(o) = &e {
+                crate::put(o, "name", Value::str("UnhandledPromiseRejection"));
+                crate::put(o, "code", Value::str("ERR_UNHANDLED_REJECTION"));
+            }
+            e
+        };
+        let origin = Value::str("unhandledRejection");
+        it.emit("uncaughtExceptionMonitor", &[error.clone(), origin.clone()])?;
+        it.emit("uncaughtException", &[error, origin])
     })
 }
 
@@ -7980,8 +8031,9 @@ pub extern "C" fn thaw_tjs_fatal_exit() {
     for handle in 0..count {
         let _ = with_package(handle, |p| {
             p.interp.drop_pending_work();
-            p.interp.set_exit_code(Some(1.0));
-            p.interp.emit_exit_once(1);
+            p.interp
+                .set_exit_code(Some(f64::from(thaw_tjs_failure_status())));
+            p.interp.emit_exit_once(thaw_tjs_failure_status());
             Ok::<(), HostError>(())
         });
     }
@@ -7993,7 +8045,7 @@ fn end_process_after_fatal() {
     let count = PACKAGES.with(|ps| ps.borrow().len());
     for handle in 0..count {
         let _ = with_package(handle, |p| {
-            terminate_process(&mut p.interp, 1);
+            terminate_process(&mut p.interp, thaw_tjs_failure_status());
             Ok::<(), HostError>(())
         });
     }

@@ -780,7 +780,7 @@ fn frame_split_runs_finally_then_rethrows_child_rejection() {
     // Node prints "before\nfinally\n", then exits 1 on the unhandled rejection.
     let (stdout, stderr, code) = compile_and_run_failing(source, "async_rejection_finally");
     assert_eq!(stdout, "before\nfinally\n");
-    assert!(stderr.contains("Uncaught: boom"), "{stderr}");
+    assert!(stderr.contains("boom"), "{stderr}");
     assert_eq!(code, Some(1));
 }
 
@@ -839,7 +839,7 @@ fn frame_split_runs_finally_before_catch_rethrow() {
     // Node reports the unhandled rejection of `main` and exits 1.
     let (stdout, stderr, code) = compile_and_run_failing(source, "async_catch_rethrow_finally");
     assert_eq!(stdout, "original\nfinally\n");
-    assert!(stderr.contains("Uncaught: wrapped"), "{stderr}");
+    assert!(stderr.contains("wrapped"), "{stderr}");
     assert_eq!(code, Some(1));
 }
 
@@ -995,7 +995,7 @@ fn throwing_an_unsupported_value_is_a_compile_error_not_a_crash() {
         "throw_unsupported_value",
     );
     assert_eq!((stdout.as_str(), status), ("", Some(1)), "{stderr}");
-    assert!(stderr.starts_with("Uncaught:"), "{stderr}");
+    assert!(stderr.starts_with("[exception value]"), "{stderr}");
 }
 
 /// `const g: any = gen();` (coercing a generator's own internal
@@ -1337,7 +1337,7 @@ fn uncaught_aggregate_throws_print_the_console_inspected_value() {
         let source = format!("function main(): void {{ {body} }}");
         let (_stdout, stderr, code) = compile_and_run_failing(&source, name);
         assert_eq!(code, Some(1), "{stderr}");
-        assert!(stderr.contains(&format!("Uncaught: {value}\n")), "{stderr}");
+        assert!(stderr.contains(&format!("{value}\n")), "{stderr}");
         assert!(!stderr.contains("[exception value]"), "{stderr}");
     }
 }

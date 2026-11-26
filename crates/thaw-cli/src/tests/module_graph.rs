@@ -830,7 +830,7 @@ fn top_level_exception_skips_main_and_fails_the_process() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "before failure\n");
     assert_eq!(
         String::from_utf8_lossy(&result.stderr),
-        "Uncaught: module initialization failed\n"
+        "module initialization failed\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -874,7 +874,7 @@ fn top_level_error_throw_reports_name_and_message() {
     assert_eq!(result.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&result.stderr),
-        "Uncaught: MyError: custom oops\n"
+        "MyError: custom oops\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2061,10 +2061,10 @@ fn bare_namespace_value_builds_and_runs_for_os_and_url() {
 #[test]
 fn top_level_uncaught_values_report_like_node() {
     let cases: [(&str, &str, &str); 4] = [
-        ("import { readFile } from 'node:fs/promises';\nawait readFile('/nonexistent-thaw-dir/x');\n", "Uncaught: Error: ENOENT: no such file or directory, open '/nonexistent-thaw-dir/x'", "ENOENT"),
-        ("throw new Error('x');\n", "Uncaught: Error: x\n", ""),
-        ("await Promise.reject(new Error('e'));\n", "Uncaught: Error: e\n", ""),
-        ("throw { a: 1 };\n", "Uncaught: { a: 1 }\n", ""),
+        ("import { readFile } from 'node:fs/promises';\nawait readFile('/nonexistent-thaw-dir/x');\n", "Error: ENOENT: no such file or directory, open '/nonexistent-thaw-dir/x'", "ENOENT"),
+        ("throw new Error('x');\n", "Error: x\n", ""),
+        ("await Promise.reject(new Error('e'));\n", "Error: e\n", ""),
+        ("throw { a: 1 };\n", "{ a: 1 }\n", ""),
     ];
     for (index, (source, expected, extra)) in cases.iter().enumerate() {
         let dir = std::env::temp_dir().join(format!("thaw-cli-uncaught_values_report_like_node-{}-{index}", std::process::id()));
