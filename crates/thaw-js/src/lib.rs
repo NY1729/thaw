@@ -367,6 +367,8 @@ pub struct ObjData {
     reg_idx: Cell<usize>,
     /// An object a native addon holds a finalizable reference to (`napi_weak`): its drop queues the release.
     watched: Cell<bool>,
+    /// Bit 0 `name`, bit 1 `length`: a closure's synthesized own key that was `delete`d (no real `Prop` to remove).
+    fn_gone: Cell<u8>,
 }
 
 impl ObjData {
@@ -484,6 +486,15 @@ impl ObjData {
         let proto = new_obj(Some(parent), Kind::Plain);
         put_hidden(&proto, "constructor", Value::Object(f));
         self.raw_props.borrow_mut()[i].slot = Slot::Data(Value::Object(proto));
+    }
+
+    pub(crate) fn synth_gone(&self, key: &str) -> bool {
+        self.fn_gone.get() & if key == "name" { 1 } else { 2 } != 0
+    }
+
+    pub(crate) fn mark_synth_gone(&self, key: &str) {
+        self.fn_gone
+            .set(self.fn_gone.get() | if key == "name" { 1 } else { 2 });
     }
 
     /// Position of own property `key` (pending deletions are compacted first, so the position indexes `raw_props`).
@@ -1514,6 +1525,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         closure_counted,
         reg_idx: Cell::new(gc_registry::NONE),
         watched: Cell::new(false),
+        fn_gone: Cell::new(0),
     });
     gc_registry::register_obj(&obj);
     account(&obj);
@@ -3171,7 +3183,9 @@ impl Interp {
                         Fast::Hit(Value::Number(b.borrow().len() as f64))
                     }
                     Kind::Closure { def, .. }
-                        if (key == "name" || key == "length") && find_own(o, key).is_none() =>
+                        if (key == "name" || key == "length")
+                            && find_own(o, key).is_none()
+                            && !o.synth_gone(key) =>
                     {
                         Fast::Hit(closure_name_or_length(def, key))
                     }
@@ -6667,7 +6681,9 @@ pub(crate) fn synth_fn_own(o: &Obj, key: &str) -> Option<Value> {
     }
     match &*o.kind.borrow() {
         Kind::Closure { def, .. }
-            if (key == "name" || key == "length") && find_own(o, key).is_none() =>
+            if (key == "name" || key == "length")
+                && find_own(o, key).is_none()
+                && !o.synth_gone(key) =>
         {
             Some(closure_name_or_length(def, key))
         }

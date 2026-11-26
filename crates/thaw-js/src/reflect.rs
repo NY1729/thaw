@@ -321,6 +321,9 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
     if !o.remove_prop_if(key, true) {
         return Ok(false);
     }
+    if matches!(key, "name" | "length") && matches!(&*o.kind.borrow(), Kind::Closure { .. }) {
+        o.mark_synth_gone(key);
+    }
     if let Some(id) = crate::host::native_error_target(it, o, key) {
         crate::host::native_error_write(id, key, None);
     }
