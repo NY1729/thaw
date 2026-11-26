@@ -5748,6 +5748,10 @@ fn error_object(it: &mut Interp, tagged: &str, id_hint: Option<u64>) -> Result<V
     let sync_off = std::mem::replace(&mut it.native_sync_off, true);
     let mut has_code = false;
     for (k, v) in fields {
+        // a native Error's own `stack` (compiled frames) replaces the interpreter's
+        if let (true, Native::Str(text), Value::Object(o)) = (k == "stack", &v, &err) {
+            crate::put_hidden(o, "stack", Value::str(text));
+        }
         if k != "name" && k != "message" && k != "stack" && !k.starts_with('\u{0}') {
             has_code |= k == "code";
             // a cause marker whose slot is gone keeps its raw text rather than becoming `undefined`

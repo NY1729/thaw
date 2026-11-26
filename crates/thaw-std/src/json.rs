@@ -10498,6 +10498,16 @@ fn error_value_from_text(value: *const c_char, bytes: &[u8]) -> Option<Value> {
     let mut fields = indexmap::IndexMap::new();
     fields.insert(b"name".to_vec(), name);
     fields.insert(b"message".to_vec(), message);
+    // The frames recorded at construction ride along, so `any`-typed reads of `stack` keep them.
+    let frames = unsafe { thaw_error_frames(value) };
+    let header = if frames.is_null() {
+        header
+    } else {
+        format!(
+            "{header}{}",
+            unsafe { CStr::from_ptr(frames) }.to_string_lossy()
+        )
+    };
     fields.insert(b"stack".to_vec(), Value::String(header));
     let merged = unsafe { thaw_error_with_props(value) };
     let merged = unsafe { CStr::from_ptr(merged) }.to_bytes();

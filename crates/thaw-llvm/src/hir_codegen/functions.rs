@@ -424,7 +424,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 // Class members read `Class.member` (`new Class` for the constructor body; its
                 // allocating wrapper is hidden); other compiler-made functions are anonymous like V8's.
                 let class_member = Self::class_member_frame_name(name);
-                let name = match class_member.as_deref() {
+                let name = match class_member.as_deref().or(self.lambda_frame_names.get(name).map(String::as_str)) {
                     Some(member) => member,
                     None if name.starts_with("__") || name.starts_with("thaw_") => "",
                     None => name,

@@ -54,7 +54,8 @@ fn frame_async_allocations_guard_null_before_field_writes() {
         body.iter().skip(start + 1).take_while(|line| !is_label(line))
             .copied().collect::<Vec<_>>().join("\n")
     };
-    let entry = block("entry");
+    // The stack-overflow guard owns `entry`; the frame allocation starts in `stack_ok`.
+    let entry = block("stack_ok");
     let frame_failed = block("async_frame_allocation_failed");
     let frame_ready = block("async_frame_allocation_ready");
     let completion_failed = block("async_completion_allocation_failed");
