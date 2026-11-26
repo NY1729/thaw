@@ -99,3 +99,23 @@ fn captured_top_level_lexicals() {
         out[0]
     );
 }
+
+#[test]
+fn nested_bindings_do_not_capture_same_named_outer_names() {
+    let out = same(
+        r#"
+        function a() { const h = err => err; try { throw 1 } catch (err) { return h(err) + 1 } }
+        function b() { try { throw 1 } catch (err) { return (() => err)() } }
+        function c() { let x = 1; const f = function (x) { return x }; return f(5) + x }
+        function d() { let x = 1; const f = function () { var x = 2; return x }; return f() + x }
+        function e1() { let x = 1; const f = function (y = x) { var x = 5; return y }; return f() }
+        function f2() { let x = 1; const f = () => { { let x = 7 } return x }; return f() }
+        function g() { let x = 1; const f = () => { const x = 3; return () => x }; return f()() + x }
+        function h() { const k = 1; const f = (k) => k; try { throw 5 } catch (k) { return f(k) } }
+        console.log(a(), b(), c(), d(), e1(), f2(), g(), h());
+        console.log(a(), b(), c(), d(), e1(), f2(), g(), h());
+        "#,
+        6,
+    );
+    assert_eq!(out[0], "2 1 6 3 1 1 4 5");
+}
