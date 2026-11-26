@@ -117,10 +117,19 @@ impl CompiledFn {
             ret: Value::Undefined,
         };
         let mut r = Ok(());
-        for (i, bind) in &self.param_binds {
-            let v = match args.get_mut(*i) {
-                Some(a) => std::mem::replace(a, Value::Undefined),
-                None => Value::Undefined,
+        for (i, rest, bind) in &self.param_binds {
+            let v = if *rest {
+                let tail = args.get_mut(*i..).unwrap_or(&mut []);
+                it.array(
+                    tail.iter_mut()
+                        .map(|a| std::mem::replace(a, Value::Undefined))
+                        .collect(),
+                )
+            } else {
+                match args.get_mut(*i) {
+                    Some(a) => std::mem::replace(a, Value::Undefined),
+                    None => Value::Undefined,
+                }
             };
             if let Err(e) = bind(it, &mut frame, v) {
                 r = Err(*e);

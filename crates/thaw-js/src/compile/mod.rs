@@ -838,8 +838,8 @@ pub(crate) struct CompiledFn {
     pub(crate) self_slot: Option<u32>,
     /// Per parameter position, the slot of that parameter name (a duplicate name shares its slot).
     pub(crate) param_slots: Vec<Option<u32>>,
-    /// Pattern parameters: (argument index, binder), run in order once the frame exists.
-    pub(crate) param_binds: Vec<(usize, pat::Bind)>,
+    /// Pattern parameters: (argument index, is a rest parameter, binder), run in order once the frame exists.
+    pub(crate) param_binds: Vec<(usize, bool, pat::Bind)>,
     /// Block body statements (empty for an expression body).
     pub(crate) body: Vec<St>,
     /// Arrow functions with an expression body.

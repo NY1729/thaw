@@ -179,7 +179,11 @@ pub(crate) fn compile(
                         g.declare_fn(n, true);
                     }
                 }
-                param_binds.push((i, pat::compile(&mut g, p, pat::Mode::Param)?));
+                let (rest, target) = match p {
+                    a::Pat::Rest(r) => (true, &*r.arg),
+                    p => (false, p),
+                };
+                param_binds.push((i, rest, pat::compile(&mut g, target, pat::Mode::Param)?));
                 param_slots.push(None);
                 continue;
             }

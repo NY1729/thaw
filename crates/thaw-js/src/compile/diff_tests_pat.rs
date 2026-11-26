@@ -137,3 +137,26 @@ fn default_parameters() {
     );
     assert!(out[0].starts_with("1,2,4 1,5,10 1,2,7 "), "{}", out[0]);
 }
+
+#[test]
+fn rest_parameters() {
+    let out = same(
+        r#"
+        function f(a, ...r) { return a + ':' + r.length + ':' + r.join('-') }
+        console.log(f(), f(1), f(1, 2), f(1, 2, 3, 4));
+        function g(...[x, y = 5]) { return x + y }
+        console.log(g(1), g(1, 2));
+        const h = (...r) => r.length;
+        console.log(h(), h(1, 2, 3));
+        function cap(...r) { return () => r }
+        console.log(cap(1, 2)().length);
+        function both(a = 1, { b } = { b: 2 }, ...r) { return a + b + r.length }
+        console.log(both(), both(5, { b: 1 }, 1, 1));
+        function arr(...r) { return Array.isArray(r) + ':' + arguments.length }
+        console.log(arr(1, 2));
+        console.log(f.length, g.length);
+        "#,
+        3,
+    );
+    assert_eq!(out[0], "undefined:0: 1:0: 1:1:2 1:3:2-3-4");
+}
