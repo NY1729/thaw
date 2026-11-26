@@ -63,7 +63,13 @@ fn main() {
     for name in ["Cargo.lock", "Cargo.toml"] {
         std::fs::read(root.join(name)).unwrap().hash(&mut hasher);
     }
-    for name in ["TARGET", "RUSTC", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "PROFILE"] {
+    for name in [
+        "TARGET",
+        "RUSTC",
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "PROFILE",
+    ] {
         std::env::var(name).unwrap_or_default().hash(&mut hasher);
     }
     println!("cargo:rustc-env=THAW_COMPILER_ID={:016x}", hasher.finish());
