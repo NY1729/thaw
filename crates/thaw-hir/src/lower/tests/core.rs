@@ -1973,3 +1973,28 @@ fn typeof_commonjs_globals_lower_to_undefined_like_esm() {
         panic!("{error}");
     }
 }
+
+#[test]
+fn returned_arrow_takes_its_return_type_from_the_declared_function_type() {
+    let module = thaw_parser::parse_typescript(
+        r#"function names(e: any): string {
+  const out: string[] = [];
+  for (const raw of String(e.stack).split("\n").slice(1)) {
+    const l = raw.trim().split(" (")[0];
+    if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
+    out.push(l.includes("/") ? "at <anon>" : l);
+    if (l === "at main" || l === "at async main") break;
+  }
+  return out.join("|");
+}
+function mk(): () => Error { const z = 1; return () => new Error("x" + z); }
+function main(): void {
+  const e = mk()();
+  console.log(names(e));
+  const e2 = (function iife(): Error { return new Error("i"); })();
+  console.log(names(e2));
+}"#,
+    )
+    .unwrap();
+    lower_module(&module).unwrap();
+}

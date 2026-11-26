@@ -147,7 +147,7 @@ function main(): void { console.log(names(g())); }
 }
 
 #[test]
-#[ignore = "known gap vs Node: compile error: function returning arrow that returns Error (value has type Function([], Json), expected Function([], Str))"]
+#[ignore = "known gap vs Node: anonymous arrows and named function-expression (iife) frames are not in the stack section"]
 fn stack_fidelity_closure() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
