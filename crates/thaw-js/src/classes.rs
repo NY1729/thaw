@@ -339,7 +339,7 @@ impl Interp {
                 *t.kind.borrow_mut() = std::mem::replace(&mut *n.kind.borrow_mut(), Kind::Plain);
                 *t.proto.borrow_mut() = proto;
                 *t.raw_props.borrow_mut() = std::mem::take(&mut *n.raw_props.borrow_mut());
-                *t.index.borrow_mut() = n.index.borrow_mut().take();
+                *t.raw_props.index.borrow_mut() = n.raw_props.index.borrow_mut().take();
                 t.ext.set(n.ext.get());
                 t.frozen.set(n.frozen.get());
                 t.len_ro.set(n.len_ro.get());

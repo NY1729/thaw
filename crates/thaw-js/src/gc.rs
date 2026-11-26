@@ -369,7 +369,7 @@ fn collect_nodes() -> usize {
             Some(Node::Obj(o)) => {
                 let (Ok(mut props), Ok(mut index), Ok(mut proto), Ok(mut kind), Ok(mut sparse)) = (
                     o.raw_props.try_borrow_mut(),
-                    o.index.try_borrow_mut(),
+                    o.raw_props.index.try_borrow_mut(),
                     o.proto.try_borrow_mut(),
                     o.kind.try_borrow_mut(),
                     o.sparse

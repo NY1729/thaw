@@ -15,7 +15,7 @@
 //! * scopes are `HashMap` chains (no slot resolution), no TDZ;
 //! * integer-keyed object properties are not ordered first; arrays have no holes.
 
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::{Rc, Weak};
 #[cfg(test)]
@@ -339,7 +339,7 @@ pub struct ObjData {
     /// Own properties in insertion order. Read it through `props()` when a slot's value matters;
     /// `raw_props` is for key, position and flag readers (a `LazyProto` placeholder has the flags
     /// of the real `prototype`).
-    raw_props: RefCell<Vec<Prop>>,
+    raw_props: PropVec,
     /// Set while a `Slot::LazyProto` placeholder may be in `raw_props`.
     lazy_proto: Cell<bool>,
     /// A closure from a prelude that Node implements natively: `toString` prints `[native code]`.
@@ -359,8 +359,6 @@ pub struct ObjData {
     /// and never cleared (`is_exotic`); an ordinary array keeps `length` = dense slots and the cell empty. One
     /// pointer wide, so an ordinary object's record does not grow past one word for this.
     sparse: OnceCell<Box<RefCell<SparseArr>>>,
-    /// Key -> position in `props`, built lazily for objects with many properties (`None` = stale).
-    index: RefCell<Option<FxMap<Rc<str>, usize>>>,
     /// Bytes this object has charged to the heap limit (`heap_limit`); credited back when it drops.
     charged: Cell<usize>,
     /// Created as a closure (`Kind::Closure`), so `mem_trace` counts it as one (kind may change later).
@@ -449,7 +447,7 @@ impl ObjData {
     }
 
     /// The own property table with a pending lazy `prototype` materialised first.
-    pub(crate) fn props(&self) -> &RefCell<Vec<Prop>> {
+    pub(crate) fn props(&self) -> &PropVec {
         self.force_lazy();
         &self.raw_props
     }
@@ -488,17 +486,25 @@ impl ObjData {
         self.raw_props.borrow_mut()[i].slot = Slot::Data(Value::Object(proto));
     }
 
-    /// Position of own property `key`.
+    /// Position of own property `key` (pending deletions are compacted first, so the position indexes `raw_props`).
     fn position(&self, key: &str) -> Option<usize> {
-        let props = self.raw_props.borrow();
+        self.raw_props.compact();
+        self.position_raw(key)
+    }
+
+    /// `position` over the physical vector: a pending-deletion tombstone is never found.
+    fn position_raw(&self, key: &str) -> Option<usize> {
+        let props = self.raw_props.v.borrow();
         if props.len() < INDEX_MIN {
             return props.iter().position(|p| &*p.key == key);
         }
-        let mut idx = self.index.borrow_mut();
+        let mut idx = self.raw_props.index.borrow_mut();
+        let tomb = tomb();
         let map = idx.get_or_insert_with(|| {
             props
                 .iter()
                 .enumerate()
+                .filter(|(_, p)| !Rc::ptr_eq(&p.key, &tomb))
                 .map(|(i, p)| (p.key.clone(), i))
                 .collect()
         });
@@ -507,8 +513,105 @@ impl ObjData {
 
     /// Remove own property `key`, if present.
     pub(crate) fn remove_prop(&self, key: &str) {
-        self.raw_props.borrow_mut().retain(|p| *p.key != *key);
-        *self.index.borrow_mut() = None;
+        self.remove_prop_if(key, false);
+    }
+
+    /// Remove own property `key`; false (nothing removed) when `need_configurable` and it is not configurable.
+    /// A large object only tombstones the slot, so a run of deletes is O(1) each; the next ordinary access
+    /// to `raw_props` compacts (order of the survivors unchanged).
+    pub(crate) fn remove_prop_if(&self, key: &str, need_configurable: bool) -> bool {
+        let Some(i) = self.position_raw(key) else {
+            return true;
+        };
+        let mut props = self.raw_props.v.borrow_mut();
+        if need_configurable && !props[i].configurable {
+            return false;
+        }
+        if props.len() < INDEX_MIN {
+            props.remove(i);
+            drop(props);
+            *self.raw_props.index.borrow_mut() = None;
+            return true;
+        }
+        let dead = std::mem::replace(
+            &mut props[i],
+            Prop {
+                key: tomb(),
+                slot: Slot::Data(Value::Undefined),
+                enumerable: false,
+                writable: false,
+                configurable: false,
+            },
+        );
+        drop(props);
+        drop(dead);
+        if let Some(map) = self.raw_props.index.borrow_mut().as_mut() {
+            map.remove(key);
+        }
+        true
+    }
+}
+
+thread_local! {
+    static TOMB: Rc<str> = Rc::from("\u{0}<deleted>");
+}
+
+/// The tombstone key; a fresh (never equal) one once the thread-local is gone, as objects drop at thread exit.
+fn tomb() -> Rc<str> {
+    TOMB.try_with(|t| t.clone())
+        .unwrap_or_else(|_| Rc::from("\u{0}<gone>"))
+}
+
+/// An object's own properties plus their key index. `delete` on a large object leaves a tombstone (see `compact`);
+/// every `borrow*` compacts first, so readers never see one.
+pub(crate) struct PropVec {
+    v: RefCell<Vec<Prop>>,
+    /// Key -> position in the vector, built lazily for objects with many properties (`None` = stale).
+    index: RefCell<Option<FxMap<Rc<str>, usize>>>,
+}
+
+impl PropVec {
+    fn new() -> Self {
+        PropVec {
+            v: RefCell::new(Vec::new()),
+            index: RefCell::new(None),
+        }
+    }
+
+    /// Tombstones exist exactly when a live index holds fewer keys than the vector has slots (a delete only
+    /// tombstones while the index is built, and dropping the index always follows a compaction).
+    fn compact(&self) {
+        let stale = match (self.index.try_borrow(), self.v.try_borrow()) {
+            (Ok(i), Ok(v)) => i.as_ref().is_some_and(|m| m.len() != v.len()),
+            _ => false,
+        };
+        if stale && TOMB.try_with(|_| ()).is_ok() {
+            let t = tomb();
+            self.v.borrow_mut().retain(|p| !Rc::ptr_eq(&p.key, &t));
+            *self.index.borrow_mut() = None;
+        }
+    }
+
+    pub(crate) fn borrow(&self) -> Ref<'_, Vec<Prop>> {
+        self.compact();
+        self.v.borrow()
+    }
+
+    pub(crate) fn borrow_mut(&self) -> RefMut<'_, Vec<Prop>> {
+        self.compact();
+        self.v.borrow_mut()
+    }
+
+    pub(crate) fn try_borrow(&self) -> Result<Ref<'_, Vec<Prop>>, std::cell::BorrowError> {
+        self.compact();
+        self.v.try_borrow()
+    }
+
+    pub(crate) fn try_borrow_mut(
+        &self,
+    ) -> Result<RefMut<'_, Vec<Prop>>, std::cell::BorrowMutError> {
+        self.compact();
+        self.v.try_borrow_mut()
     }
 }
 
@@ -1396,7 +1499,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
     let closure_counted = matches!(kind, Kind::Closure { .. });
     crate::mem_trace::obj_created(closure_counted);
     let obj = Rc::new(ObjData {
-        raw_props: RefCell::new(Vec::new()),
+        raw_props: PropVec::new(),
         lazy_proto: Cell::new(false),
         native_text: Cell::new(false),
         error_proto: Cell::new(false),
@@ -1407,7 +1510,6 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         len_ro: Cell::new(false),
         ext: Cell::new(0),
         sparse: OnceCell::new(),
-        index: RefCell::new(None),
         charged: Cell::new(0),
         closure_counted,
         reg_idx: Cell::new(gc_registry::NONE),
@@ -2310,7 +2412,7 @@ impl Interp {
                 .position(|k| **k == *p.key)
                 .unwrap_or(usize::MAX)
         });
-        *ap.index.borrow_mut() = None;
+        *ap.raw_props.index.borrow_mut() = None;
     }
 
     // ----- conversions -----
@@ -5371,8 +5473,8 @@ impl Interp {
                         return Ok(());
                     }
                 }
-                if let Some(items) = self.iter_items(&iterable) {
-                    for item in items {
+                if let Some(mut items) = self.iter_items_live(&iterable) {
+                    while let Some(item) = items.next(self) {
                         self.check_deadline()?;
                         let item = if f.is_await {
                             self.await_value(item)?
@@ -6533,8 +6635,9 @@ pub(crate) fn arg(args: &[Value], i: usize) -> Value {
 
 fn find_own(o: &Obj, key: &str) -> Option<(Slot, bool)> {
     o.force_key(key);
-    let i = o.position(key)?;
-    let props = o.raw_props.borrow();
+    // no compaction: a run of `delete`s keeps its tombstones while their keys are probed
+    let i = o.position_raw(key)?;
+    let props = o.raw_props.v.borrow();
     let p = &props[i];
     Some((p.slot.clone(), p.enumerable))
 }
@@ -6683,7 +6786,7 @@ pub(crate) fn push_prop(o: &ObjData, props: &mut Vec<Prop>, p: Prop) {
     let cap = props.capacity();
     props.push(p);
     grow_slots(o, std::mem::size_of::<Prop>(), cap, props.capacity());
-    if let Some(map) = o.index.borrow_mut().as_mut() {
+    if let Some(map) = o.raw_props.index.borrow_mut().as_mut() {
         map.insert(key, props.len() - 1);
     }
 }
@@ -7328,6 +7431,8 @@ mod job_barrier_tests;
 #[cfg(test)]
 mod leak_audit_tests;
 #[cfg(test)]
+mod live_iter_delete_order_tests;
+#[cfg(test)]
 mod mem_trace_tests;
 #[cfg(test)]
 mod names_tests;
@@ -7566,7 +7671,7 @@ impl Interp {
                 }
             }
             drop(props);
-            if let Ok(mut i) = o.index.try_borrow_mut() {
+            if let Ok(mut i) = o.raw_props.index.try_borrow_mut() {
                 *i = None;
             }
             if let Ok(mut p) = o.proto.try_borrow_mut() {

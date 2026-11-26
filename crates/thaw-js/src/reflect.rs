@@ -73,8 +73,9 @@ fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
         }
     }
     o.force_key(key);
-    let i = o.position(key)?;
-    let props = o.raw_props.borrow();
+    // no compaction: a run of `delete`s keeps its tombstones while their keys are probed
+    let i = o.position_raw(key)?;
+    let props = o.raw_props.v.borrow();
     Some((props[i].slot.clone(), props[i].writable && writable))
 }
 
@@ -317,12 +318,9 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
             }
         }
     }
-    if let Some(i) = o.position(key) {
-        if !o.raw_props.borrow()[i].configurable {
-            return Ok(false);
-        }
+    if !o.remove_prop_if(key, true) {
+        return Ok(false);
     }
-    o.remove_prop(key);
     if let Some(id) = crate::host::native_error_target(it, o, key) {
         crate::host::native_error_write(id, key, None);
     }

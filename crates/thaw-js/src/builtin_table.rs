@@ -120,7 +120,7 @@ pub(crate) fn set_fn_head(f: &Obj, name: &str, length: f64) {
     props.insert(0, head("name", Value::str(name)));
     props.insert(0, head("length", Value::Number(length)));
     drop(props);
-    *f.index.borrow_mut() = None;
+    *f.raw_props.index.borrow_mut() = None;
 }
 
 /// Owner path -> (its own `length`, its own `name`), from the `length`/`name` rows of the table.
