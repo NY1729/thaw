@@ -68,7 +68,7 @@ pub(crate) struct MapData {
     pub(crate) entries: Vec<(Value, Value)>,
     index: Option<FxMap<HKey, usize>>,
     /// Positions of live iterators, kept in step with `delete`/`clear`.
-    cursors: Vec<Weak<Cell<usize>>>,
+    cursors: Box<Vec<Weak<Cell<usize>>>>,
     /// Deleted slots in `entries`.
     dead: usize,
 }
@@ -160,7 +160,7 @@ pub(crate) struct SetData {
     pub(crate) items: Vec<Value>,
     index: Option<FxMap<HKey, usize>>,
     /// Positions of live iterators, kept in step with `delete`/`clear`.
-    cursors: Vec<Weak<Cell<usize>>>,
+    cursors: Box<Vec<Weak<Cell<usize>>>>,
     /// Deleted slots in `items`.
     dead: usize,
 }
