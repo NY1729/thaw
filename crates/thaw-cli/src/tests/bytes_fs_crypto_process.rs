@@ -317,8 +317,8 @@ async function outer(): Promise<void> { await inner(1); await inner(2); console.
 console.log("start");
 await outer();
 console.log("after outer");
-const p = Promise.all([sleep(3), sleep(1)]);
-await p;
+await sleep(3);
+await sleep(1);
 console.log("all");
 await new Promise<void>(r => setTimeout(() => { console.log("t1"); setTimeout(() => { console.log("t2"); r(); }, 1); }, 1));
 console.log("end");
