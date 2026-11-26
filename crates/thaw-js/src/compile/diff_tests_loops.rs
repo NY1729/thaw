@@ -112,3 +112,12 @@ fn for_in_keys_and_heads() {
     );
     assert!(out[0].starts_with("a,b 0,1 0,1 "), "{}", out[0]);
 }
+
+/// User iterators are pulled lazily and closed on break, return and throw (the recorded Node output).
+#[test]
+fn lazy_iteration_matches_off() {
+    same(
+        include_str!("../../tests/differential/lazy_iteration.js"),
+        1,
+    );
+}

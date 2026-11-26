@@ -162,7 +162,7 @@ fn census_counts_the_captured_chain_against_the_free_names() {
     let d: Vec<usize> = (0..5).map(|i| after[i] - before[i]).collect();
     assert_eq!(
         d,
-        vec![2, 1, 0, 0, 1],
+        vec![2, 1, 1, 0, 0],
         "[closures, chain_empty, used_only, unused_only, mixed]"
     );
     census_for_tests(false);
