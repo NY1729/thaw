@@ -1050,6 +1050,45 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// An unannotated arrow whose returns infer a `Union` (`any` absorbs it into `Json`) must store
+    /// each returned value in that layout, as a function declaration does through its signature.
+    fn coerce_inferred_union_returns(&mut self, stmts: &mut [HirStmt], inferred: &mut HirType) {
+        if let HirType::Union(members) = inferred {
+            if members.contains(&HirType::Json) {
+                *inferred = HirType::Json;
+            }
+        }
+        self.coerce_returns_to(stmts, inferred);
+    }
+
+    fn coerce_returns_to(&mut self, stmts: &mut [HirStmt], target: &HirType) {
+        if !matches!(target, HirType::Union(_) | HirType::Json) {
+            return;
+        }
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Return(Some(value)) => {
+                    let ty = self.infer_expr_type(value).ok();
+                    if ty.as_ref() != Some(target) && !matches!(ty, Some(HirType::Promise(_))) {
+                        if let Ok(coerced) = self.coerce_to_declared(target, value.clone()) {
+                            *value = coerced;
+                        }
+                    }
+                }
+                HirStmt::If(_, then_body, else_body) => {
+                    self.coerce_returns_to(then_body, target);
+                    self.coerce_returns_to(else_body, target);
+                }
+                HirStmt::While(_, body) | HirStmt::Finally(body, _) => self.coerce_returns_to(body, target),
+                HirStmt::Try(body, _, catch_body, _) => {
+                    self.coerce_returns_to(body, target);
+                    self.coerce_returns_to(catch_body, target);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn infer_generator_types(
         &self,
         body: &[HirStmt],

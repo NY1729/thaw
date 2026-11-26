@@ -679,7 +679,10 @@ impl<'a> FnLowerer<'a> {
                     if sparse_mapping_result && declared_return.is_none() {
                         lowerer.lower_sparse_mapping_returns(&mut stmts)?;
                     }
-                    let inferred = lowerer.infer_return_type(&stmts)?;
+                    let mut inferred = lowerer.infer_return_type(&stmts)?;
+                    if declared_return.is_none() && declared_async_result.is_none() {
+                        lowerer.coerce_inferred_union_returns(&mut stmts, &mut inferred);
+                    }
                     if arrow.is_async {
                         let has_await = stmts.iter().any(stmt_contains_await);
                         let only_tail_awaits =
@@ -1654,6 +1657,9 @@ impl<'a> FnLowerer<'a> {
                         lowerer.lower_sparse_mapping_returns(&mut stmts)?;
                     }
                     let mut inferred = lowerer.infer_return_type(&stmts)?;
+                    if expected_return.is_none() {
+                        lowerer.coerce_inferred_union_returns(&mut stmts, &mut inferred);
+                    }
                     // A body without a value `return` satisfies an `any` result: it yields `undefined`.
                     if inferred == HirType::Void && expected_return == Some(&HirType::Json) {
                         if !ast_block_terminates(&block.stmts) {

@@ -762,6 +762,16 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// A literal (`await 5`, `await null`, `await undefined`, `await -1`): nothing to join.
+    /// A computed primitive (`typeof x.y`, `a > b`, `!x`) is never a promise, so `await` of it is
+    /// `await Promise.resolve(value)`; calls and `new` are excluded (their type is the resolved one).
+    fn is_computed_await_operand(expr: &Expr) -> bool {
+        match expr {
+            Expr::Paren(paren) => Self::is_computed_await_operand(&paren.expr),
+            Expr::Unary(_) | Expr::Bin(_) | Expr::Member(_) | Expr::Update(_) => true,
+            _ => false,
+        }
+    }
+
     fn is_plain_await_operand(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Lit(_) => true,
@@ -5159,8 +5169,8 @@ impl<'a> FnLowerer<'a> {
                         value_type,
                         HirType::F64 | HirType::Bool | HirType::Str | HirType::StrLiteral(_)
                             | HirType::Null | HirType::Undefined
-                    ) && self.is_plain_await_operand(&await_expr.arg)
-                    // Only literals: a call such as `fetch(..)` is typed by its resolved value.
+                    ) && (self.is_plain_await_operand(&await_expr.arg) || Self::is_computed_await_operand(&await_expr.arg))
+                    // Only operands that are not calls: a call such as `fetch(..)` is typed by its resolved value.
                     {
                         // Awaiting a plain value is `await Promise.resolve(value)`
                         // (one microtask turn), not a raw await of a non-promise.
