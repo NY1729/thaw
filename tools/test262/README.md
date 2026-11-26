@@ -40,5 +40,5 @@ Flaky tolerance: `compare.py` re-runs every would-be regression once and drops t
 ## CI
 
 `.github/workflows/test262.yml`: label `thaw-js-measure` or manual dispatch; one build job, one matrix job per shard,
-`continue-on-error: true`, ratchet result in the job summary. To bump test262, edit `TEST262_COMMIT` and regenerate
+a failing shard fails the `ratchet` aggregate job (the required check), details in the job summary. To bump test262, edit `TEST262_COMMIT` and regenerate
 the baseline with `--update-baseline` in the same change.

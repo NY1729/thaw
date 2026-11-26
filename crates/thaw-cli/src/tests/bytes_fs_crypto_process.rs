@@ -264,6 +264,54 @@ async function main(): Promise<void> {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// `buf.write(str, [offset, [length,]] enc)` and `Buffer.alloc(n, fill, enc)` with a dynamic encoding.
+// Expected output from node 22.
+#[test]
+fn buffer_write_string_and_alloc_fill_encodings() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-buffer_write_string-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"function code(f: () => any): string { try { return "ok " + f(); } catch (e: any) { return e.code + " " + e.message; } }
+const b = Buffer.alloc(8);
+console.log(b.write("ab"), b.write("cd", 2), b.write("6566", 4, "hex"), b.write("xyz", 5, 2), b.write("zz", 6, 2, "latin1"), b);
+const dyn: string = JSON.parse('"nope"');
+console.log(code(() => b.write("a", 9)));
+console.log(code(() => b.write("a", -1)));
+console.log(code(() => b.write("a", 1.5)));
+console.log(code(() => b.write("a", 1, 9)));
+console.log(code(() => b.write("a", 1, 2.5)));
+console.log(code(() => b.write("a", 8)));
+console.log(code(() => b.write("a", dyn)));
+console.log(code(() => b.write("a", 0, dyn)));
+console.log(code(() => Buffer.alloc(4, "ab", dyn)));
+console.log(Buffer.alloc(5, "6162", "hex"));
+console.log(code(() => Buffer.from("ab").toString("bogus" as any)));
+console.log(code(() => Buffer.from("ab").toString(dyn)));
+"#;
+    std::fs::write(&entry, source).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "2 2 2 2 2 <Buffer 61 62 63 64 65 78 7a 7a>\n\
+         ERR_OUT_OF_RANGE The value of \"offset\" is out of range. It must be >= 0 && <= 8. Received 9\n\
+         ERR_OUT_OF_RANGE The value of \"offset\" is out of range. It must be >= 0 && <= 8. Received -1\n\
+         ERR_OUT_OF_RANGE The value of \"offset\" is out of range. It must be an integer. Received 1.5\n\
+         ERR_OUT_OF_RANGE The value of \"length\" is out of range. It must be >= 0 && <= 8. Received 9\n\
+         ERR_OUT_OF_RANGE The value of \"length\" is out of range. It must be an integer. Received 2.5\n\
+         ok 0\n\
+         ERR_UNKNOWN_ENCODING Unknown encoding: nope\n\
+         ERR_UNKNOWN_ENCODING Unknown encoding: nope\n\
+         ERR_UNKNOWN_ENCODING Unknown encoding: nope\n\
+         <Buffer 61 62 61 62 61>\n\
+         ERR_UNKNOWN_ENCODING Unknown encoding: bogus\n\
+         ERR_UNKNOWN_ENCODING Unknown encoding: nope\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 // `[...anyString]` spreads code points and bad encodings throw Node's codes. Expected output from node 22.
 #[test]
 fn any_string_spread_and_unknown_encodings() {
@@ -303,6 +351,45 @@ console.log(code(() => fs.writeFileSync(dir + "/f.txt", "y", "bogus" as any)));
          ok\n\
          ERR_INVALID_ARG_VALUE The argument 'encoding' is invalid encoding. Received 'bogus'\n\
          ERR_INVALID_ARG_VALUE The argument 'encoding' is invalid encoding. Received 'bogus'\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Top-level `await` must wait for timers, fs promises and rejections before running later
+/// statements. Expected output from node 22.
+#[test]
+fn top_level_await_waits_for_timers_and_fs() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-top_level_await-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+console.log("start");
+setTimeout(() => console.log("timer 5"), 5);
+Promise.resolve().then(() => console.log("micro"));
+await new Promise<void>((r) => setTimeout(r, 10));
+console.log("after sleep");
+const v = await new Promise<number>((r) => setTimeout(() => r(42), 5));
+console.log("value", v);
+fs.writeFileSync("FILE", "hi");
+const text = await fsp.readFile("FILE", "utf8");
+console.log("read", text);
+try {
+  await new Promise<void>((_, rej) => setTimeout(() => rej(new Error("boom")), 5));
+} catch (e: any) {
+  console.log("caught", e.message);
+}
+console.log("end");
+"#
+    .replace("FILE", &dir.join("f.txt").display().to_string());
+    std::fs::write(&entry, source).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{:?} out={} err={}", result.status, String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "start\nmicro\ntimer 5\nafter sleep\nvalue 42\nread hi\ncaught boom\nend\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

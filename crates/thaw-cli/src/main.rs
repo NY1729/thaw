@@ -913,6 +913,8 @@ fn build_to_output(args: &[String]) -> Result<PathBuf, String> {
             // Backend without instruction-selection optimisation: faster to compile, slower code.
             "--fast-compile" => fast_compile = true,
             "--shared-rt" => shared_rt = true,
+            // Declare npm bundles instead of loading them at startup; thaw-js loads one on first use.
+            "--lazy-packages" => std::env::set_var("THAW_LAZY_PACKAGES", "1"),
             "--rt-variant" => {
                 let value = build_option_value(args, i)?.unwrap();
                 i += 1;

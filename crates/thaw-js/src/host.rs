@@ -2023,9 +2023,12 @@ fn class_call(
             .map(|(p, _)| p)
             .ok_or_else(|| HostError::Bundle(stale_handle(*receiver as u64)))?,
         _ if package.is_empty() => default_realm(),
-        _ => BY_NAME
-            .with(|m| m.borrow().get(package).copied())
-            .ok_or_else(|| HostError::Bundle(not_loaded(package)))?,
+        _ => {
+            load_declared(package);
+            BY_NAME
+                .with(|m| m.borrow().get(package).copied())
+                .ok_or_else(|| HostError::Bundle(not_loaded(package)))?
+        }
     };
     let Native::Array(args) = Native::from_json(args_json)? else {
         return Err(HostError::Bundle("arguments must be a JSON array".into()));
@@ -8127,6 +8130,7 @@ fn export_path(name: &str, path: &str) -> String {
 
 /// The realm handle of loaded name `name` and the export path to read from it (see [`export_path`]).
 fn resolve_export(name: &str, path: &str) -> Option<(usize, String)> {
+    load_declared(name);
     let handle = BY_NAME.with(|m| m.borrow().get(name).copied())?;
     Some((handle, export_path(name, path)))
 }
@@ -8199,6 +8203,24 @@ pub extern "C" fn thaw_tjs_declare(name: *const c_char, bundle: *const c_char) -
     };
     PEER_SOURCES.with(|s| s.borrow_mut().insert(name, src));
     1
+}
+
+/// First use of a declared (`--lazy-packages`) package by the program: load it now. A load error is reported
+/// like `thaw_tjs_register`'s and leaves the name unloaded, so the caller's "not loaded" path follows.
+fn load_declared(name: &str) {
+    if BY_NAME.with(|m| m.borrow().contains_key(name)) {
+        return;
+    }
+    let Some(source) = PEER_SOURCES.with(|s| s.borrow().get(name).cloned()) else {
+        return;
+    };
+    if std::env::var_os("THAW_JS_TRACE").is_some() {
+        eprintln!("thaw-js: lazily loading package `{name}`");
+    }
+    if let Err(e) = register_bundle(name.to_string(), &source) {
+        eprintln!("thaw-js: failed to load package `{name}`: {e}");
+        LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());
+    }
 }
 
 /// Load `src` as package `name` and register it (the body of [`thaw_tjs_register`], also used by the peer
@@ -10266,6 +10288,21 @@ var __thaw_bundle_entry_key = "p/index.js";
         let pgx = register("pgx", &bundle(POOL_B));
         let drizzle = register("drizzle", &bundle(EAGER_A));
         assert_one_pool_instance(drizzle, pgx);
+    }
+
+    #[test]
+    fn declared_package_loads_on_first_program_use_only() {
+        let src = bundle("module.exports = { f: function () { return 7; } };");
+        declare("lazy-prog", &src);
+        assert!(!BY_NAME.with(|m| m.borrow().contains_key("lazy-prog")));
+        let (handle, path) = resolve_export("lazy-prog", "f").expect("loads on use");
+        assert_eq!(path, "f");
+        assert_eq!(
+            resolve_export("lazy-prog", "f").unwrap().0,
+            handle,
+            "second use does not reload"
+        );
+        assert!(resolve_export("never-declared", "f").is_none());
     }
 
     #[test]

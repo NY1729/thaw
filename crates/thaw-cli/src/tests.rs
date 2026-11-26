@@ -680,6 +680,37 @@ fn native_loop_reclaims_arena_between_turns() {
 }
 
 #[test]
+fn dynamic_add_alone_keeps_turn_resets() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-arena-add-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "interface It { id: number; name: string }\nconst txt = JSON.stringify([{ id: 1, name: \"a\" }]);\nfunction work(): number { const t = JSON.stringify([1]); const back = JSON.parse(txt) as It[]; return back.length + t.length; }\nasync function tick(i: number): Promise<number> { return i + 1; }\nasync function main(): Promise<void> { let n = 0; for (let r = 0; r < 20000; r++) { n += work(); n += await tick(r); } console.log(n); }\n",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    let result = Command::new(&output)
+        .env("THAW_ARENA_STATS", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(result.stdout, b"200090000\n");
+    let at = stderr
+        .find("resets=")
+        .unwrap_or_else(|| panic!("resets in {stderr}"));
+    let resets: u64 = stderr[at + 7..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(resets > 0, "{stderr}");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn json_roundtrip_in_async_loop_is_bounded() {
     let directory =
         std::env::temp_dir().join(format!("thaw-cli-arena-json-{}", std::process::id()));

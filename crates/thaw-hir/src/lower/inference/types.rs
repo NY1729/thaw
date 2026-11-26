@@ -2873,7 +2873,7 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
                     "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_native_iterator" | "__thaw_json_is_not_iterable"
                     | "__thaw_json_is_primitive_operand" => return Ok(HirType::Bool),
-                    "__thaw_is_unset_number" => return Ok(HirType::Bool),
+                    "__thaw_is_unset_number" | "__thaw_live_add_guard" => return Ok(HirType::Bool),
                     "__thaw_native_subclass_mark" => {
                         let Some(base) = args.first() else {
                             return Err("subclass mark expects a collection".into());
@@ -3110,7 +3110,7 @@ impl<'a> FnLowerer<'a> {
                     // the global engine context; `callDynamic` calls a
                     // top-level function it defined, by name, with `Json`
                     // args in and a `Json` result out.
-                    "loadScript" | "loadThawJs" => return Ok(HirType::Bool),
+                    "loadScript" | "loadThawJs" | "declareThawJs" => return Ok(HirType::Bool),
                     "callDynamic" => return Ok(HirType::Json),
                     "newDynamicFunction" | "__thaw_eval_class_token" => return Ok(HirType::JsValue),
                     "getDynamicValue" => return Ok(HirType::JsValue),

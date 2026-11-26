@@ -103,6 +103,34 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())
     }
 
+    /// `declareThawJs(package, bundleSource): boolean` (`--lazy-packages`): `thaw_tjs_declare`, the bundle
+    /// loads on the program's first use of the package.
+    fn compile_declare_thaw_js(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_thaw_js = true;
+        let [name, source] = args else {
+            return Err("declareThawJs expects a package name and a bundle source".to_string());
+        };
+        let name = self.compile_expr(name)?;
+        let source = self.compile_expr(source)?;
+        let declared = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_tjs_declare").unwrap(),
+                &[name.into(), source.into()],
+                "declare_thaw_js_u8",
+            )
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_tjs_declare did not return a value")?
+            .into_int_value();
+        let zero = self.context.i8_type().const_int(0, false);
+        self.builder
+            .build_int_compare(inkwell::IntPredicate::NE, declared, zero, "declare_thaw_js_ok")
+            .map(Into::into)
+            .map_err(|e| e.to_string())
+    }
+
     fn compile_load_native_addon(
         &mut self,
         args: &[HirExpr],

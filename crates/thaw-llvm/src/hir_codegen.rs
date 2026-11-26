@@ -530,6 +530,7 @@ pub struct HirCompiler<'ctx> {
     uses_intl: bool,
     /// The module imports `async_hooks`: a plain `await <literal>` reports its outer promise as the trigger.
     uses_async_hooks: bool,
+    live_add_branch: bool,
     /// Compiling the arguments of a thaw-js call (reset inside nested closure bodies): a `JsValue`
     /// converted to `Json` there is a thaw-js handle or callback marker.
     thaw_js_call_arguments: bool,
@@ -881,6 +882,7 @@ impl<'ctx> HirCompiler<'ctx> {
             uses_thaw_js: false,
             uses_intl: false,
             uses_async_hooks: false,
+            live_add_branch: true,
             thaw_js_call_arguments: false,
             commonjs_entry: false,
             uses_thaw_js_handles: false,
@@ -1072,6 +1074,12 @@ impl<'ctx> HirCompiler<'ctx> {
     /// for the process entry point.
     pub fn set_commonjs_entry(&mut self, commonjs: bool) {
         self.commonjs_entry = commonjs;
+    }
+
+    /// Whether a dynamic `+` also compiles its thaw-js branch (default). The CLI first compiles without it and
+    /// only recompiles with it when the program uses thaw-js anyway, so that branch alone never pulls in the engine.
+    pub fn set_live_add_branch(&mut self, enabled: bool) {
+        self.live_add_branch = enabled;
     }
 
     pub fn set_uses_async_hooks(&mut self, uses: bool) {

@@ -3176,9 +3176,10 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),
                                     vec![
                                         fill.clone(),
-                            encoding
-                                .cloned()
-                                .unwrap_or_else(|| HirExpr::Lit(HirLit::Str("utf8".to_string()))),
+                            match encoding {
+                                Some(encoding) => self.checked_buffer_encoding_argument(encoding.clone(), false)?,
+                                None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
+                            },
                                     ],
                                 ),
                                 HirType::Bytes => fill.clone(),

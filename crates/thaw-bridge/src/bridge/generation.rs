@@ -473,14 +473,27 @@ pub fn required_runtime_features(source: &str) -> std::collections::BTreeSet<&'s
 }
 
 pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
+    generate_module_init_with(bundles, false)
+}
+
+/// As [`generate_module_init`]; `lazy` (`--lazy-packages`) declares each bundle (`declareThawJs`) instead of
+/// loading it: thaw-js evaluates it on the program's first use.
+// ponytail: no "pure at load" scan yet, so lazy declares every plain bundle (opt-in flag); a package with
+// load-time global side effects or load errors now acts at first use. Add the scan before any default flip.
+pub fn generate_module_init_with(bundles: &[ModuleBundle], lazy: bool) -> String {
     if bundles.is_empty() {
         return String::new();
     }
     let mut out = String::from("function __thaw_module_init(): void {\n");
     for bundle in bundles {
         out.push_str(&format!("    // {}\n", bundle.package_name));
+        // realm/group views join another bundle's realm at load time: keep those eager
+        let lazy = lazy
+            && !bundle.js_source.contains("__thaw_bundle_realm")
+            && !bundle.js_source.contains("__thaw_bundle_group");
         out.push_str(&format!(
-            "    if (!loadThawJs(\"{}\", \"{}\")) throw new Error(\"failed to load module script\");\n",
+            "    if (!{}ThawJs(\"{}\", \"{}\")) throw new Error(\"failed to load module script\");\n",
+            if lazy { "declare" } else { "load" },
             escape_ts_string_literal(bundle.package_name),
             escape_ts_string_literal(bundle.js_source)
         ));

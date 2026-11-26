@@ -1581,7 +1581,16 @@ impl<'a> FnLowerer<'a> {
                         if let Some(source) = self.source_ret_type.clone().filter(|source| *source != ret_type) {
                             self.validate_storage_source(arg, &source)?;
                         }
-                        let value = self.lower_expr_with_expected_type(arg, Some(&ret_type))?;
+                        // A function literal returned where a function type is declared keeps that
+                        // type's exact result (`(): () => Error`), as a stored initializer does.
+                        let literal_for_function_type = matches!(arg.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
+                            && matches!(ret_type, HirType::Function(..));
+                        self.stored_arrow_initializer |= literal_for_function_type;
+                        let value = self.lower_expr_with_expected_type(arg, Some(&ret_type));
+                        if literal_for_function_type {
+                            self.stored_arrow_initializer = false;
+                        }
+                        let value = value?;
                         // An async function with an inferred result adopts a returned
                         // promise (`return p` behaves as `return await p`).
                         if self.async_return && ret_type == HirType::Dynamic {

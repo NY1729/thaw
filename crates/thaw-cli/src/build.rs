@@ -47,7 +47,7 @@ fn phase_mark(name: &str) {
 }
 
 /// Content-addressed object cache: LLVM's `default<O2>` + codegen is the dominant build cost and is a pure
-/// function of the module text, the pipeline selection and the compiler binary, so an identical module
+/// function of the module text, the pipeline selection and the compiler source hash, so an identical module
 /// (a rebuild with nothing relevant changed) reuses the stored object. `THAW_BUILD_CACHE=0` disables it,
 /// `THAW_BUILD_CACHE=<dir>` relocates it (default `$XDG_CACHE_HOME|~/.cache` + `/thaw/objects`).
 fn write_object_cached(
@@ -64,14 +64,7 @@ fn write_object_cached(
             .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
             .map(|base| base.join("thaw/objects")),
     };
-    let key = dir.as_ref().and_then(|_| {
-        // The thaw binary identity stands in for the HIR/LLVM compiler version.
-        let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
-        let mtime = exe
-            .modified()
-            .ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?;
+    let key = dir.as_ref().map(|_| {
         let mut hasher = Sha256::new();
         hasher.update(compiler.print_to_string());
         for name in ["THAW_CODEGEN_MIDEND", "THAW_CODEGEN_OPT", "THAW_KEEP_SYMBOLS"] {
@@ -81,12 +74,13 @@ fn write_object_cached(
         hasher.update(format!(
             "{:?}|{}|{}|{lib_mode}",
             codegen_opt_level().ok(),
-            exe.len(),
-            mtime.as_nanos()
+            // source-hash build id (compiler crates) + runtime fingerprint, from build.rs
+            env!("THAW_COMPILER_ID"),
+            env!("THAW_RUNTIME_FINGERPRINT"),
         ));
         hasher.update(inkwell::targets::TargetMachine::get_host_cpu_name().to_bytes());
         hasher.update(inkwell::targets::TargetMachine::get_host_cpu_features().to_bytes());
-        Some(format!("{:x}.o", hasher.finalize()))
+        format!("{:x}.o", hasher.finalize())
     });
     if let (Some(dir), Some(key)) = (&dir, &key) {
         if std::fs::copy(dir.join(key), obj_path).is_ok() {
@@ -1183,14 +1177,25 @@ fn build_with_native_mode_routed(
     }
 
     let context = Context::create();
-    let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
-    compiler.set_codegen_opt(codegen_opt_level()?);
-    compiler.set_commonjs_entry(module_graph::entry_is_commonjs(input, &user_source)?);
-    compiler.set_uses_async_hooks(user_source.contains("async_hooks"));
-    if let Some(lib) = lib_mode {
-        compiler.set_library_mode(lib.exports.clone());
-    }
-    compiler.compile_program(&program)?;
+    // First without the thaw-js branch of dynamic `+` (it alone would disable turn resets); redo with it
+    // only if the program uses thaw-js anyway, since live handles can then reach that `+`.
+    let commonjs_entry = module_graph::entry_is_commonjs(input, &user_source)?;
+    let mut live_add_branch = false;
+    let compiler = loop {
+        let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
+        compiler.set_codegen_opt(codegen_opt_level()?);
+        compiler.set_commonjs_entry(commonjs_entry);
+        compiler.set_uses_async_hooks(user_source.contains("async_hooks"));
+        compiler.set_live_add_branch(live_add_branch);
+        if let Some(lib) = lib_mode {
+            compiler.set_library_mode(lib.exports.clone());
+        }
+        compiler.compile_program(&program)?;
+        if live_add_branch || !compiler.uses_thaw_js() {
+            break compiler;
+        }
+        live_add_branch = true;
+    };
     phase_mark("llvm-ir");
     if compiler.native_timers_conflict() {
         return Err(NATIVE_TIMERS_NEED_ENGINE.to_string());
@@ -1926,10 +1931,11 @@ fn lld_is_preferred_only_for_dynamic_builds_when_installed() {
 /// package with a JavaScript bundle, which constructs would keep the thaw-js evaluator from running it.
 /// Package names loaded through `loadThawJs("<name>", ...)` in the generated shim.
 fn thaw_js_routed_packages(shim_source: &str) -> Vec<String> {
-    let mut names = shim_source
-        .match_indices("loadThawJs(\"")
-        .filter_map(|(index, marker)| {
-            let rest = &shim_source[index + marker.len()..];
+    let mut names = ["loadThawJs(\"", "declareThawJs(\""]
+        .into_iter()
+        .flat_map(|needle| shim_source.match_indices(needle).map(move |(i, m)| (i, m.len())))
+        .filter_map(|(index, len)| {
+            let rest = &shim_source[index + len..];
             rest.find('"').map(|end| rest[..end].to_string())
         })
         .collect::<Vec<_>>();
