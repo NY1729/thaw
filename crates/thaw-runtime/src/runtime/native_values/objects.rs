@@ -29,7 +29,7 @@ thread_local! {
     // the compiled object stores only that field's Boolean value. Keep the
     // marker beside the allocation so an extracted method can validate the
     // actual receiver after function values flow through aliases/containers.
-    static OBJECT_CLASS_IDENTITIES: RefCell<HashMap<usize, ObjectClassMetadata>> = RefCell::new(HashMap::new());
+    static OBJECT_CLASS_IDENTITIES: RefCell<PtrMap<ObjectClassMetadata>> = RefCell::new(PtrMap::default());
 }
 
 #[derive(Default)]
@@ -38,35 +38,77 @@ struct ObjectClassMetadata {
     hidden_markers: MarkerSet,
     // None keeps the static field-order fallback for ordinary fixed objects.
     // A copied object's physical slots can precede their actual creation.
-    own_key_order: Option<Vec<String>>,
+    #[allow(clippy::box_collection)]
+    own_key_order: Option<Box<Vec<String>>>,
 }
 
-/// Hidden compiler marker names of one object, shared per class: every instance of a class carries
-/// the same one or two marker strings, so an instance holds refcounted handles into `INTERNED`
-/// rather than its own hash set and copies (about 400 B and four mallocs per `new`).
+/// Hidden compiler marker names of one object. Every instance of a class holds the same one-marker
+/// set, so the set is a shared refcounted slice (copy-on-write) rather than a per-object allocation.
 #[derive(Clone, Default)]
-struct MarkerSet(Vec<std::rc::Rc<str>>);
+struct MarkerSet(Option<std::rc::Rc<Vec<std::rc::Rc<str>>>>);
 
 impl MarkerSet {
     fn contains(&self, marker: &str) -> bool {
-        self.0.iter().any(|known| &**known == marker)
+        self.0.as_ref().is_some_and(|known| known.iter().any(|known| &**known == marker))
     }
     fn insert(&mut self, marker: std::rc::Rc<str>) {
-        if !self.contains(&marker) {
-            self.0.push(marker);
+        if self.contains(&marker) {
+            return;
+        }
+        match &mut self.0 {
+            Some(known) => std::rc::Rc::make_mut(known).push(marker),
+            None => self.0 = Some(single_marker_set(marker)),
         }
     }
     fn remove(&mut self, marker: &str) -> bool {
-        let before = self.0.len();
-        self.0.retain(|known| &**known != marker);
-        self.0.len() != before
+        if !self.contains(marker) {
+            return false;
+        }
+        if let Some(known) = &mut self.0 {
+            std::rc::Rc::make_mut(known).retain(|known| &**known != marker);
+        }
+        true
     }
     fn extend(&mut self, markers: MarkerSet) {
-        for marker in markers.0 {
-            self.insert(marker);
+        for marker in markers.0.iter().flat_map(|known| known.iter()) {
+            self.insert(marker.clone());
         }
     }
 }
+
+type MarkerSetCache = HashMap<std::rc::Rc<str>, std::rc::Rc<Vec<std::rc::Rc<str>>>>;
+
+thread_local! {
+    static SINGLE_MARKER_SETS: RefCell<MarkerSetCache> =
+        RefCell::new(HashMap::new());
+}
+
+/// The shared `{marker}` set of a class (one allocation per distinct marker).
+fn single_marker_set(marker: std::rc::Rc<str>) -> std::rc::Rc<Vec<std::rc::Rc<str>>> {
+    SINGLE_MARKER_SETS.with(|sets| {
+        sets.borrow_mut().entry(marker.clone()).or_insert_with(|| std::rc::Rc::new(vec![marker])).clone()
+    })
+}
+
+/// Pointer-keyed hasher: object addresses are already well spread, SipHash is the cost.
+#[derive(Default)]
+struct PtrHasher(u64);
+
+impl std::hash::Hasher for PtrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    fn write_usize(&mut self, value: usize) {
+        self.0 = (value as u64 >> 3).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type PtrMap<V> = HashMap<usize, V, std::hash::BuildHasherDefault<PtrHasher>>;
 
 thread_local! {
     static INTERNED: RefCell<std::collections::HashSet<std::rc::Rc<str>>> =
@@ -342,7 +384,7 @@ pub extern "C" fn thaw_object_order_begin(object: *const u8) -> bool {
     }
     thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_CLASS_IDENTITIES.with(|stored| {
-        stored.borrow_mut().entry(object as usize).or_default().own_key_order = Some(Vec::new());
+        stored.borrow_mut().entry(object as usize).or_default().own_key_order = Some(Box::default());
     });
     true
 }
