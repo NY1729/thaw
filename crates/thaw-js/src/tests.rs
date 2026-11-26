@@ -13527,3 +13527,34 @@ fn date_conversions_propagate_abrupt_completions() {
         "RangeError|RangeError|RangeError|TypeError|RangeError|RangeError|TypeError|0"
     );
 }
+
+/// GlobalDeclarationInstantiation early errors across scripts (ES2024 16.1.7): redeclarations throw a
+/// SyntaxError, undefinable globals a TypeError, and a failing script declares nothing.
+#[test]
+fn global_declaration_instantiation_early_errors() {
+    let src = r#"
+      var out = [];
+      function t(s) { try { __thaw_eval_script(s); out.push('ok'); } catch (e) { out.push(e.constructor.name); } }
+      t('let a;'); t('let a;');
+      t('var v;'); t('let v;');
+      t('let w;'); t('var x1; var w;');
+      t('"use strict"; let s;'); t('var x2; let s;');
+      Object.defineProperty(globalThis, 'nc', { value: 1, configurable: false });
+      t('let nc;');
+      t('let undefined;');
+      Object.defineProperty(globalThis, 'acc', { get() {}, enumerable: true, configurable: false });
+      t('var x3; function acc() {}');
+      t('var x4; var acc;');
+      Object.preventExtensions(globalThis);
+      t('var brandNew;');
+      out.push(typeof x1 + typeof x2 + typeof x3 + typeof x4);
+      out.join(',')
+    "#;
+    let mut it = Interp::new();
+    it.install_eval_script();
+    let r = it.run(src).unwrap();
+    assert_eq!(
+        &*it.to_str(&r),
+        "ok,SyntaxError,ok,SyntaxError,ok,SyntaxError,ok,SyntaxError,SyntaxError,SyntaxError,TypeError,ok,TypeError,undefinedundefinedundefinedundefined"
+    );
+}

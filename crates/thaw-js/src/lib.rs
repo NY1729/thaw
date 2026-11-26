@@ -1625,6 +1625,9 @@ pub struct Interp {
     eval_completion: Option<(usize, Value)>,
     /// `(run id, span.lo)` of the block-level functions whose evaluation assigns their `var` binding (Annex B.3.3).
     annexb_ok: HashSet<(u32, u32)>,
+    /// top-level lexical names of strict scripts (their bindings live in a throwaway child scope, so the global
+    /// scope cannot see them); only `check_global_declarations` reads it
+    strict_script_lex: HashSet<Rc<str>>,
 }
 
 /// Finds a free use of `arguments` in a function body (not crossing non-arrow functions).
@@ -1772,6 +1775,7 @@ impl Interp {
             intrinsic_eval: None,
             eval_completion: None,
             annexb_ok: HashSet::new(),
+            strict_script_lex: HashSet::new(),
         };
         it.global.kind.set(SK_VAR);
         // a top-level script's `this` is globalThis (vm realms do the same in `vm::sub_realm`)
@@ -2023,7 +2027,21 @@ impl Interp {
     /// Global binding `name` as an own property of `globalThis`, or None when it is not one.
     pub(crate) fn global_prop(&self, name: &str) -> Option<GlobalProp> {
         let vars = self.global.vars.borrow();
-        let b = vars.get(name)?;
+        let Some(b) = vars.get(name) else {
+            // a property defined on the global object itself (not a binding)
+            return self
+                .global_object
+                .raw_props
+                .borrow()
+                .iter()
+                .find(|p| &*p.key == name)
+                .map(|p| GlobalProp {
+                    slot: p.slot.clone(),
+                    enumerable: p.enumerable,
+                    writable: p.writable,
+                    configurable: p.configurable,
+                });
+        };
         let (enumerable, writable, configurable) = global_view_flags(name, b)?;
         let accessor = node_accessor(name, b).and_then(|_| {
             self.global_accessors
@@ -4300,12 +4318,50 @@ impl Interp {
         }
     }
 
+    /// GlobalDeclarationInstantiation steps 3-12 (early errors, before anything is declared): a lexical name
+    /// that is already a var or lexical global, or a restricted (non-configurable) global property, and a var
+    /// name that is already a lexical global, throw a SyntaxError; a function or var the global object cannot
+    /// define throws a TypeError.
+    fn check_global_declarations(&mut self, stmts: &[a::Stmt], vars: &[Rc<str>]) -> R<()> {
+        let origin_of = |it: &Self, n: &str| it.global.vars.borrow().get(n).map(|b| b.origin);
+        for n in lexical_names(stmts) {
+            let restricted = self.global_prop(&n).is_some_and(|p| !p.configurable);
+            if restricted
+                || self.strict_script_lex.contains(&n)
+                || matches!(origin_of(self, &n), Some(Origin::Var | Origin::Lexical))
+            {
+                return self.throw_error(
+                    "SyntaxError",
+                    &format!("Identifier '{n}' has already been declared"),
+                );
+            }
+        }
+        for n in vars {
+            if self.strict_script_lex.contains(n) || origin_of(self, n) == Some(Origin::Lexical) {
+                return self.throw_error(
+                    "SyntaxError",
+                    &format!("Identifier '{n}' has already been declared"),
+                );
+            }
+        }
+        if let Some(n) = self.undefinable_global(stmts, vars) {
+            return self.throw_error("TypeError", &format!("Cannot declare global '{n}'"));
+        }
+        if starts_with_use_strict(stmts) {
+            self.strict_script_lex.extend(lexical_names(stmts));
+        }
+        Ok(())
+    }
+
     /// Declares and hoists the top-level `stmts` in the global scope, then runs them.
     fn run_global(&mut self, stmts: &[a::Stmt], script: bool) -> R<Value> {
         let global = self.global.clone();
         let origin = if script { Origin::Var } else { Origin::Prop };
         let strict_program = starts_with_use_strict(stmts);
         let (vars, annexb) = self.hoist(stmts, &[], strict_program);
+        if script {
+            self.check_global_declarations(stmts, &vars)?;
+        }
         for name in vars
             .iter()
             .chain(annexb.iter().filter(|n| self.annexb_global_ok(n)))
