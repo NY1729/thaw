@@ -1428,12 +1428,26 @@ pub unsafe extern "C" fn thaw_error_frames(error: *const c_char) -> *const c_cha
 /// on a plain object: `frame` and `ra` are the compiled caller's frame pointer and return address
 /// (see `caller_pcs`); without compiled frames it is V8's single anonymous frame.
 #[no_mangle]
-pub extern "C" fn thaw_error_stack_frames(frame: usize, ra: usize) -> *const c_char {
+pub extern "C" fn thaw_error_stack_frames(frame: usize, ra: usize, cut: *const c_char) -> *const c_char {
     let limit = thaw_error_stack_trace_limit();
     let lines = if limit < 1.0 {
         String::new()
     } else {
-        let lines = render_frames(&caller_pcs(frame, ra, (limit as usize).min(200)), limit as usize);
+        // `Error.captureStackTrace(o, fn)` drops the frames above and including the innermost `fn`.
+        let cut = if cut.is_null() { "".into() } else { unsafe { CStr::from_ptr(cut) }.to_string_lossy() };
+        let mut pcs = caller_pcs(frame, ra, if cut.is_empty() { (limit as usize).min(200) } else { 200 });
+        if !cut.is_empty() {
+            if let Some(table) = FN_TABLE.get() {
+                let named = |pc: usize| {
+                    let index = table.entries.partition_point(|entry| entry.address <= pc);
+                    pc >= table.lo && pc < table.hi && index > 0 && table.entries[index - 1].name == *cut
+                };
+                if let Some(at) = pcs.iter().position(|&pc| named(pc)) {
+                    pcs.drain(..=at);
+                }
+            }
+        }
+        let lines = render_frames(&pcs, limit as usize);
         if lines.is_empty() { "\n    at <anonymous>".to_string() } else { lines }
     };
     arena_c_string(&lines).map_or(std::ptr::null(), |value| value.cast())

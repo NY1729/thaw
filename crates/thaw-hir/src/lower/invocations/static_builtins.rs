@@ -6176,6 +6176,15 @@ impl<'a> FnLowerer<'a> {
                             return Err("`Error.captureStackTrace` expects a target object".into());
                         };
                         let mut statements = Vec::new();
+                        // A named function as `constructorOpt` cuts the frames above and including it.
+                        let cut_name = match arguments.get(1) {
+                            Some(HirExpr::Var(name) | HirExpr::FunctionRef(name, ..)) => name
+                                .strip_prefix("__thaw_user_")
+                                .or_else(|| name.strip_prefix("thaw_user_"))
+                                .unwrap_or(name)
+                                .to_string(),
+                            _ => String::new(),
+                        };
                         for extra in arguments.iter().skip(1) {
                             statements.push(HirStmt::Expr(extra.clone()));
                         }
@@ -6192,7 +6201,7 @@ impl<'a> FnLowerer<'a> {
                             // A plain object gets an own `stack` string built from its name/message.
                             statements.insert(0, HirStmt::Expr(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_capture_stack_trace".to_string())),
-                                vec![target],
+                                vec![target, HirExpr::Lit(HirLit::Str(cut_name))],
                             )));
                         } else {
                             statements.insert(0, HirStmt::Expr(target));
