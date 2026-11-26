@@ -2266,7 +2266,11 @@ impl<'ctx> HirCompiler<'ctx> {
         ];
         for block in function.get_basic_blocks() {
             // The guard's own cold path calls the shared error setter; it dies with the guard.
-            if block.get_name().to_string_lossy().starts_with("stack_overflow") {
+            if block
+                .get_name()
+                .to_string_lossy()
+                .starts_with("stack_overflow")
+            {
                 continue;
             }
             let mut next = block.get_first_instruction();
