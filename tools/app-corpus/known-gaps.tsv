@@ -15,7 +15,7 @@ server-rest-json.mjs	BUILD-FAIL	error: unsupported on thaw-js: destructuring req
 server-static.mjs	DIFF	stdout line 6: node=closed thaw=GET / 200 text/html; charset=utf-8 "<p>index</p>"
 task-runner.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot infer Promise type from resolve argument: unknown variable `code`
 text-templating.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.map()` requires a homogeneous array, got Json
-timers-scheduler.mjs	DIFF	stdout line 3: node=AbortError ABORT_ERR thaw=Error undefined
+timers-scheduler.mjs	DIFF	stdout line 3: node=AbortError ABORT_ERR thaw=[ 'micro', 'tick', 'immediate' ] imm
 ts-inventory.ts	BUILD-FAIL	error: unsupported on thaw-js: unsupported type annotation TsTypeQuery(TsTypeQuery { span: 30222..30237, expr_name: TsEntityName(Ident(Ident { span: 30229..30237, ctxt: #0, sym: "Category", optional: 
 url-router.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot access `.groups` because union member Nullable(Array(Optional(Str))) is not an object
 worker-eval-channel.mjs	DIFF	stdout line 1: node=[ { echo: 2 }, { echo: 4 }, { echo: 6 }, { echo: 8 } ] 10 0 thaw=[] 0 undefined

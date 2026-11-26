@@ -91,8 +91,7 @@ impl<'a> FnLowerer<'a> {
             .native_timer_set_kind(&Expr::Call(call.clone()))
             .ok_or("native timer call is not eligible")?;
         let callback = match call.args[0].expr.as_ref() {
-            // The timer discards the callback's value, so an expression body (`() => ac.abort()`) is `void`.
-            Expr::Arrow(arrow) => self.lower_contextual_arrow(arrow, &[], Some(&HirType::Void))?,
+            Expr::Arrow(arrow) => self.lower_contextual_arrow(arrow, &[], None)?,
             other => self.lower_expr(other)?,
         };
         let returns_timer_value = |ret: &HirType| matches!(ret, HirType::Void | HirType::F64 | HirType::Bool | HirType::Undefined);
@@ -128,7 +127,8 @@ impl<'a> FnLowerer<'a> {
 // `node:timers/promises` `setTimeout`/`setImmediate` on the native timer queue. The engine's own promise
 // timers run its loop to completion inside the call, so two pending sleeps would settle in call order and
 // an `AbortSignal` fired by a native timer could never interrupt one. The call is an immediately-invoked
-// arrow, so each argument is evaluated once; an omitted argument is `undefined`.
+// arrow, so each argument is evaluated once; an omitted argument is `undefined`. A call with an `options`
+// argument (`signal`) stays on the engine: a rejected Error loses its own `name`/`code` on the native path.
 const NATIVE_SLEEP: &str = r#"((delay: number, value: any, options: any): Promise<any> => new Promise<any>((resolve, reject) => {
   const signal: any = options ? options.signal : undefined;
   const fail = (): void => { const error: any = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; reject(error); };
@@ -150,9 +150,9 @@ impl<'a> FnLowerer<'a> {
             hex.strip_prefix(target.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with("__"))
         };
         let (min, max, schedule, clear) = if named("node:timers/promises::setTimeout") {
-            (1, 3, "setTimeout(() => resolve(value), delay)", "clearTimeout")
+            (1, 2, "setTimeout(() => resolve(value), delay)", "clearTimeout")
         } else if named("node:timers/promises::setImmediate") {
-            (0, 2, "setImmediate(() => resolve(value))", "clearImmediate")
+            (0, 1, "setImmediate(() => resolve(value))", "clearImmediate")
         } else {
             return Ok(None);
         };
@@ -173,7 +173,7 @@ impl<'a> FnLowerer<'a> {
         };
         // `setImmediate(value, options)` has no delay: the arrow's first parameter takes `undefined`.
         let mut args = call.args.clone();
-        if max == 2 {
+        if max == 1 {
             args.insert(0, swc_ecma_ast::ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(swc_ecma_ast::Lit::Num(swc_ecma_ast::Number { span: call.span, value: 0.0, raw: None }))) });
         }
         while args.len() < 3 {
