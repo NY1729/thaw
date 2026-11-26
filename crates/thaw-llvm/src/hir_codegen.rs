@@ -2751,7 +2751,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .run_passes(pipeline, &target_machine, PassBuilderOptions::create())
             .map_err(|e| format!("coroutine pass pipeline failed: {e}"))?;
         if std::env::var_os("THAW_TIMINGS").is_some() {
-            eprintln!("thaw-timing   llvm-passes({pipeline}): {} ms", started.elapsed().as_millis());
+            eprintln!(
+                "thaw-timing   llvm-passes({pipeline}): {} ms",
+                started.elapsed().as_millis()
+            );
         }
 
         target_machine

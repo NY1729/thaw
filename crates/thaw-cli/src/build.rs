@@ -39,7 +39,10 @@ fn phase_mark(name: &str) {
     }
     let now = std::time::Instant::now();
     if let Some(prev) = PHASE_MARK.with(|m| m.replace(Some(now))) {
-        eprintln!("thaw-timing {name}: {} ms", now.duration_since(prev).as_millis());
+        eprintln!(
+            "thaw-timing {name}: {} ms",
+            now.duration_since(prev).as_millis()
+        );
     }
 }
 
@@ -47,7 +50,11 @@ fn phase_mark(name: &str) {
 /// function of the module text, the pipeline selection and the compiler binary, so an identical module
 /// (a rebuild with nothing relevant changed) reuses the stored object. `THAW_BUILD_CACHE=0` disables it,
 /// `THAW_BUILD_CACHE=<dir>` relocates it (default `$XDG_CACHE_HOME|~/.cache` + `/thaw/objects`).
-fn write_object_cached(compiler: &HirCompiler, obj_path: &Path, lib_mode: bool) -> Result<(), String> {
+fn write_object_cached(
+    compiler: &HirCompiler,
+    obj_path: &Path,
+    lib_mode: bool,
+) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     let dir = match std::env::var_os("THAW_BUILD_CACHE") {
         Some(value) if value == "0" => None,
@@ -60,14 +67,23 @@ fn write_object_cached(compiler: &HirCompiler, obj_path: &Path, lib_mode: bool) 
     let key = dir.as_ref().and_then(|_| {
         // The thaw binary identity stands in for the HIR/LLVM compiler version.
         let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
-        let mtime = exe.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        let mtime = exe
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
         let mut hasher = Sha256::new();
         hasher.update(compiler.print_to_string());
         for name in ["THAW_CODEGEN_MIDEND", "THAW_CODEGEN_OPT", "THAW_KEEP_SYMBOLS"] {
             hasher.update(std::env::var(name).unwrap_or_default());
-            hasher.update([0]);
+            hasher.update([0u8]);
         }
-        hasher.update(format!("{:?}|{}|{}|{lib_mode}", codegen_opt_level().ok(), exe.len(), mtime.as_nanos()));
+        hasher.update(format!(
+            "{:?}|{}|{}|{lib_mode}",
+            codegen_opt_level().ok(),
+            exe.len(),
+            mtime.as_nanos()
+        ));
         hasher.update(inkwell::targets::TargetMachine::get_host_cpu_name().to_bytes());
         hasher.update(inkwell::targets::TargetMachine::get_host_cpu_features().to_bytes());
         Some(format!("{:x}.o", hasher.finalize()))
