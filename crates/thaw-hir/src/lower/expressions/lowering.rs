@@ -4585,6 +4585,8 @@ impl<'a> FnLowerer<'a> {
                         (HirType::Null, payload) | (payload, HirType::Null) => {
                             HirType::Nullable(Box::new(payload.clone()))
                         }
+                        // `c ? { name } : param` with an `any` param: an `any` arm absorbs the other.
+                        (HirType::Json, _) | (_, HirType::Json) => HirType::Json,
                         _ => HirType::Union(vec![consequent_type, alternate_type]),
                     };
                     consequent = self.coerce_to_declared(&result, consequent)?;
