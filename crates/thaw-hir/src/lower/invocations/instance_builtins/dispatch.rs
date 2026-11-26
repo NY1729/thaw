@@ -782,6 +782,10 @@ impl<'a> FnLowerer<'a> {
             "set" => 2,
             _ => return Ok(None),
         };
+        // A plain local RegExp keeps the native path, which writes `lastIndex` back onto the local.
+        if matches!(name, "test" | "exec") && matches!(member.obj.as_ref(), Expr::Ident(_)) {
+            return Ok(None);
+        }
         if call.args.len() != arity
             || call.args.iter().any(|argument| argument.spread.is_some())
             || !self.json_receiver_candidate(&member.obj)
