@@ -354,3 +354,42 @@ console.log(code(() => fs.writeFileSync(dir + "/f.txt", "y", "bogus" as any)));
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Top-level `await` must wait for timers, fs promises and rejections before running later
+/// statements. Expected output from node 22.
+#[test]
+fn top_level_await_waits_for_timers_and_fs() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-top_level_await-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+console.log("start");
+setTimeout(() => console.log("timer 5"), 5);
+Promise.resolve().then(() => console.log("micro"));
+await new Promise<void>((r) => setTimeout(r, 10));
+console.log("after sleep");
+const v = await new Promise<number>((r) => setTimeout(() => r(42), 5));
+console.log("value", v);
+fs.writeFileSync("FILE", "hi");
+const text = await fsp.readFile("FILE", "utf8");
+console.log("read", text);
+try {
+  await new Promise<void>((_, rej) => setTimeout(() => rej(new Error("boom")), 5));
+} catch (e: any) {
+  console.log("caught", e.message);
+}
+console.log("end");
+"#
+    .replace("FILE", &dir.join("f.txt").display().to_string());
+    std::fs::write(&entry, source).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success(), "{:?} out={} err={}", result.status, String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "start\nmicro\ntimer 5\nafter sleep\nvalue 42\nread hi\ncaught boom\nend\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

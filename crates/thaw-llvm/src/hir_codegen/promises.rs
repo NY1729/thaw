@@ -2614,6 +2614,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
         }
+        // `await <Promise<void>>` outside an async frame (top level, a plain closure) has no
+        // suspension point to hoist into: drive the event loop until it settles, like the typed
+        // `AwaitPromise` does for a value-carrying promise.
+        let void_promise = match inner {
+            HirExpr::PromiseNew(_, resolved, _, _) | HirExpr::PromiseNewMixed(_, resolved, _) => *resolved == HirType::Void,
+            _ => matches!(self.expr_hir_type(inner), Some(HirType::Promise(resolved)) if *resolved == HirType::Void),
+        };
+        if void_promise {
+            let promise = self.compile_promise_for_consumption(inner)?;
+            self.drive_promise_to_completion(promise)?;
+            return Ok(self.context.ptr_type(AddressSpace::default()).const_null().into());
+        }
         let value = self.compile_expr(inner)?;
         if !is_sleep {
             // User-defined async functions still use the V1 synchronous ABI.
@@ -2817,20 +2829,7 @@ impl<'ctx> HirCompiler<'ctx> {
         promise: PointerValue<'ctx>,
         resolved: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let result = self
-            .builder
-            .build_call(
-                self.module
-                    .get_function("thaw_runtime_await_blocking")
-                    .unwrap(),
-                &[promise.into()],
-                "await_typed_result",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("typed Promise did not settle")?
-            .into_pointer_value();
+        let result = self.call_await_blocking(promise)?;
         let state = self
             .builder
             .build_call(
@@ -2915,26 +2914,61 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(phi.as_basic_value())
     }
 
+    /// `thaw_runtime_await_blocking`, plus the thaw-js event loop when it is linked: a timer or worker
+    /// callback that settles `promise` through a dynamic (thaw-js) call runs only inside that loop
+    /// (as in the async `main` entry), so a pending promise gets one idle drain and a second wait.
+    fn call_await_blocking(&mut self, promise: PointerValue<'ctx>) -> Result<PointerValue<'ctx>, String> {
+        let await_blocking = self.module.get_function("thaw_runtime_await_blocking").unwrap();
+        let first = self.builder
+            .build_call(await_blocking, &[promise.into()], "await_blocking_result")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("typed Promise did not settle")?
+            .into_pointer_value();
+        if !self.uses_thaw_js {
+            return Ok(first);
+        }
+        let state = self.builder
+            .build_call(self.module.get_function("thaw_promise_state").unwrap(), &[promise.into()], "await_blocking_state")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("typed Promise has no state")?
+            .into_int_value();
+        let pending = self.builder
+            .build_int_compare(IntPredicate::EQ, state, self.context.i8_type().const_zero(), "await_blocking_pending")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let first_end = self.builder.get_insert_block().unwrap();
+        let drain = self.context.append_basic_block(function, "await_blocking_drain_js");
+        let merge = self.context.append_basic_block(function, "await_blocking_drained");
+        self.builder.build_conditional_branch(pending, drain, merge).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(drain);
+        self.builder
+            .build_call(self.module.get_function("thaw_tjs_run_event_loop").unwrap(), &[], "await_blocking_js_loop")
+            .map_err(|error| error.to_string())?;
+        let second = self.builder
+            .build_call(await_blocking, &[promise.into()], "await_blocking_result_after_js")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("typed Promise did not settle")?
+            .into_pointer_value();
+        let drain_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge);
+        let phi = self.builder
+            .build_phi(self.context.ptr_type(AddressSpace::default()), "await_blocking_settled")
+            .map_err(|error| error.to_string())?;
+        phi.add_incoming(&[(&first, first_end), (&second, drain_end)]);
+        Ok(phi.as_basic_value().into_pointer_value())
+    }
+
     /// The `Promise<void>` counterpart to `drive_promise_to_resolved_value`,
     /// for a resolved type with no native representation to `build_load`
     /// (`void` carries no payload). Drives the promise to completion,
     /// propagates a rejection as a pending thaw exception the same way,
     /// and destroys the promise -- without attempting to load a value.
     fn drive_promise_to_completion(&mut self, promise: PointerValue<'ctx>) -> Result<(), String> {
-        let result = self
-            .builder
-            .build_call(
-                self.module
-                    .get_function("thaw_runtime_await_blocking")
-                    .unwrap(),
-                &[promise.into()],
-                "await_void_result",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("typed Promise did not settle")?
-            .into_pointer_value();
+        let result = self.call_await_blocking(promise)?;
         let state = self
             .builder
             .build_call(
