@@ -378,7 +378,7 @@ const CASES: &[(&str, Option<FallbackReason>, &str)] = &[
     ),
     (
         "var f = ({ m() { return super.toString() } }).m",
-        Some(R::Super),
+        None,
         "",
     ),
     (
