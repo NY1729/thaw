@@ -2746,9 +2746,13 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.set_triple(&triple);
         self.module
             .set_data_layout(&target_machine.get_target_data().get_data_layout());
+        let started = std::time::Instant::now();
         self.module
             .run_passes(pipeline, &target_machine, PassBuilderOptions::create())
             .map_err(|e| format!("coroutine pass pipeline failed: {e}"))?;
+        if std::env::var_os("THAW_TIMINGS").is_some() {
+            eprintln!("thaw-timing   llvm-passes({pipeline}): {} ms", started.elapsed().as_millis());
+        }
 
         target_machine
             .write_to_file(&self.module, FileType::Object, path)
