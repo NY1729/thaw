@@ -2241,6 +2241,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     lower_ts_type(&annotation.type_ann, &interfaces, &generic_interfaces)
                 })
                 .transpose()?
+                .or_else(|| declarator.init.as_deref().and_then(|init| implicit_any_initializer_type(declaration.kind, init)))
                 .unwrap_or(HirType::Dynamic);
             let ty = storage_type(binding.id.span, ty);
             global_types.insert(name, ty);
