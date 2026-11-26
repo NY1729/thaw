@@ -556,8 +556,10 @@ thread_local! {
     static TOMB: Rc<str> = Rc::from("\u{0}<deleted>");
 }
 
+/// The tombstone key; a fresh (never equal) one once the thread-local is gone, as objects drop at thread exit.
 fn tomb() -> Rc<str> {
-    TOMB.with(|t| t.clone())
+    TOMB.try_with(|t| t.clone())
+        .unwrap_or_else(|_| Rc::from("\u{0}<gone>"))
 }
 
 /// An object's own properties plus their key index. `delete` on a large object leaves a tombstone (see `compact`);
@@ -583,7 +585,7 @@ impl PropVec {
             (Ok(i), Ok(v)) => i.as_ref().is_some_and(|m| m.len() != v.len()),
             _ => false,
         };
-        if stale {
+        if stale && TOMB.try_with(|_| ()).is_ok() {
             let t = tomb();
             self.v.borrow_mut().retain(|p| !Rc::ptr_eq(&p.key, &t));
             *self.index.borrow_mut() = None;
