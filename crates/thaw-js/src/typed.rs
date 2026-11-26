@@ -1545,14 +1545,10 @@ const TYPED_PRELUDE: &str = r#"
   Object.keys(detachedNames).forEach(function (n) {
     var orig = TP[n];
     if (typeof orig !== 'function') return;
-    // a method (not a constructor); ValidateTypedArray first: the receiver must be a typed array
-    var w = { [n]() {
-      if (!isTA(this)) throw new TypeError('this is not a typed array.');
+    def(TP, n, function () {
       if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + detachedNames[n] + ' on a detached ArrayBuffer');
       return orig.apply(this, arguments);
-    } }[n];
-    Object.defineProperty(w, 'length', { value: orig.length, configurable: true });
-    def(TP, n, w);
+    });
   });
   // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function (the guarded one now).
   def(TP, Symbol.iterator, TP.values);
