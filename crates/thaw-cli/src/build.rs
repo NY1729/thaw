@@ -47,7 +47,7 @@ fn phase_mark(name: &str) {
 }
 
 /// Content-addressed object cache: LLVM's `default<O2>` + codegen is the dominant build cost and is a pure
-/// function of the module text, the pipeline selection and the compiler binary, so an identical module
+/// function of the module text, the pipeline selection and the compiler source hash, so an identical module
 /// (a rebuild with nothing relevant changed) reuses the stored object. `THAW_BUILD_CACHE=0` disables it,
 /// `THAW_BUILD_CACHE=<dir>` relocates it (default `$XDG_CACHE_HOME|~/.cache` + `/thaw/objects`).
 fn write_object_cached(
@@ -65,13 +65,6 @@ fn write_object_cached(
             .map(|base| base.join("thaw/objects")),
     };
     let key = dir.as_ref().and_then(|_| {
-        // The thaw binary identity stands in for the HIR/LLVM compiler version.
-        let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
-        let mtime = exe
-            .modified()
-            .ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?;
         let mut hasher = Sha256::new();
         hasher.update(compiler.print_to_string());
         for name in ["THAW_CODEGEN_MIDEND", "THAW_CODEGEN_OPT", "THAW_KEEP_SYMBOLS"] {
@@ -81,8 +74,9 @@ fn write_object_cached(
         hasher.update(format!(
             "{:?}|{}|{}|{lib_mode}",
             codegen_opt_level().ok(),
-            exe.len(),
-            mtime.as_nanos()
+            // source-hash build id (compiler crates) + runtime fingerprint, from build.rs
+            env!("THAW_COMPILER_ID"),
+            env!("THAW_RUNTIME_FINGERPRINT"),
         ));
         hasher.update(inkwell::targets::TargetMachine::get_host_cpu_name().to_bytes());
         hasher.update(inkwell::targets::TargetMachine::get_host_cpu_features().to_bytes());
