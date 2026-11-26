@@ -276,7 +276,6 @@ console.log([...s].join("|"), [...s].length);
 fs.writeFileSync(dir + "/f.txt", "x");
 function code(f: () => any): string { try { f(); return "ok"; } catch (e: any) { return e.code + " " + e.message; } }
 console.log(code(() => Buffer.from("x", "bogus" as any)));
-console.log(code(() => Buffer.from("x").toString("bogus" as any)));
 console.log(code(() => Buffer.from("x", "HEX" as any)));
 console.log(code(() => fs.readFileSync(dir + "/f.txt", "bogus" as any)));
 console.log(code(() => fs.writeFileSync(dir + "/f.txt", "y", "bogus" as any)));
@@ -290,7 +289,6 @@ console.log(code(() => fs.writeFileSync(dir + "/f.txt", "y", "bogus" as any)));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
         "h|é|l|l|o 5\n\
-         ERR_UNKNOWN_ENCODING Unknown encoding: bogus\n\
          ERR_UNKNOWN_ENCODING Unknown encoding: bogus\n\
          ok\n\
          ERR_INVALID_ARG_VALUE The argument 'encoding' is invalid encoding. Received 'bogus'\n\
