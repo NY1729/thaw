@@ -3345,7 +3345,7 @@ impl<'a> FnLowerer<'a> {
                             );
                         }
                         let encoding = match arguments.get(1) {
-                            Some(argument) => self.buffer_encoding_argument(argument.clone(), false)?,
+                            Some(argument) => self.checked_buffer_encoding_argument(argument.clone(), false)?,
                             None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
                         };
                         return self.wrap_call_argument_bindings(

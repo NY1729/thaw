@@ -171,6 +171,43 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `buffer_encoding_argument`, plus Node's `ERR_UNKNOWN_ENCODING` for a string that names no
+    /// encoding (`Buffer.from(text, "bogus")`, `buf.toString("bogus")`). The runtime decoders
+    /// fall back to utf8 silently, so the check lives here. `Buffer.from` accepts `""` as utf8.
+    fn checked_buffer_encoding_argument(&mut self, encoding: HirExpr, to_text: bool) -> Result<HirExpr, String> {
+        const KNOWN: [&str; 12] = [
+            "utf8", "utf-8", "hex", "base64", "base64url", "ascii", "latin1", "binary", "ucs2", "ucs-2",
+            "utf16le", "utf-16le",
+        ];
+        let is_string = matches!(self.infer_expr_type(&encoding)?, HirType::Str | HirType::StrLiteral(_));
+        let encoding = self.buffer_encoding_argument(encoding, to_text)?;
+        if !is_string {
+            return Ok(encoding);
+        }
+        if let HirExpr::Lit(HirLit::Str(text)) = &encoding {
+            if KNOWN.contains(&text.to_ascii_lowercase().as_str()) || (text.is_empty() && !to_text) {
+                return Ok(encoding);
+            }
+        }
+        let name = format!("__thaw_buffer_encoding_checked_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Str);
+        let var = || HirExpr::Var(name.clone());
+        let lowered = || HirExpr::Call(Box::new(HirExpr::Var("__thaw_string_to_lower_case".into())), vec![var()]);
+        let equals = |known: &str| {
+            HirExpr::BinOp(BinOp::EqEqEq, Box::new(lowered()), Box::new(HirExpr::Lit(HirLit::Str(known.into()))))
+        };
+        let mut body = vec![HirStmt::Let(name.clone(), HirType::Str, encoding)];
+        for known in KNOWN {
+            body.push(HirStmt::If(equals(known), vec![HirStmt::Return(Some(var()))], Vec::new()));
+        }
+        if !to_text {
+            body.push(HirStmt::If(equals(""), vec![HirStmt::Return(Some(var()))], Vec::new()));
+        }
+        body.push(Self::node_error_throw("TypeError", "ERR_UNKNOWN_ENCODING", "Unknown encoding: ", Some(var())));
+        Ok(self.block_as_expr(HirExpr::Block(body), HirType::Str))
+    }
+
     /// `Buffer.alloc`-style size validation (`ERR_OUT_OF_RANGE` unless `0 <= size <= 2^53 - 1`).
     fn checked_buffer_size(&mut self, size: HirExpr) -> Result<HirExpr, String> {
         if matches!(&size, HirExpr::Lit(HirLit::F64(n)) if (0.0..=9007199254740991.0).contains(n)) {
