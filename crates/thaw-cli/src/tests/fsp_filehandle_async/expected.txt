@@ -1,0 +1,10 @@
+stat 5
+write-reject caught ERR_INVALID_ARG_TYPE
+write-rethrow caught ERR_INVALID_ARG_TYPE
+closed-rethrow caught EBADF
+nested-await-call undefined
+nested-await-stat true
+statfs number
+union-catch c
+union-return 1
+rethrow-after-await caught n

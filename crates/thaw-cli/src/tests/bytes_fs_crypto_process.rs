@@ -120,6 +120,23 @@ fn node_invalid_argument_types_throw_like_node() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Awaited FileHandle methods inside nested async arrows (try/catch/finally, rethrow, union returns,
+/// `(await x).m()` receivers) settle, reject and segfault-free like Node 22 (tests/fsp_filehandle_async/main.ts).
+#[test]
+fn fsp_filehandle_async_arrows_match_node() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-fsp_filehandle_async-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, include_str!("fsp_filehandle_async/main.ts")).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).current_dir(&dir).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), include_str!("fsp_filehandle_async/expected.txt"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn node_crypto_md5_sha3_hash_and_subtle_match_node() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-node_crypto_md5_sha3_hash_and_subtle_match_node-{}", std::process::id()));
