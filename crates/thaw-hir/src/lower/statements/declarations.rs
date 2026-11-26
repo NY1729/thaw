@@ -771,6 +771,7 @@ impl<'a> FnLowerer<'a> {
                         TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
                     )
                 )) { Some(HirType::Json) } else { annotated };
+                let annotated = annotated.or_else(|| implicit_any_initializer_type(var_decl.kind, init));
                 let source_annotation = annotated.clone();
                 let mut source_hint = self.source_value_hint(init).and_then(|hint| self.infer_expr_type(&hint).ok());
                 if has_dynamic_storage(binding.id.span) || has_dynamic_storage(init.span()) {
