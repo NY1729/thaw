@@ -1047,7 +1047,7 @@ impl<'a> FnLowerer<'a> {
 
     /// Methods only a native `ArrayBuffer` / `DataView` has, so only claimed for a `Bytes` receiver.
     fn is_native_view_only_method(property: &str) -> bool {
-        Self::dataview_accessor(property).is_some() || matches!(property, "transfer" | "transferToFixedLength")
+        Self::dataview_accessor(property).is_some() || matches!(property, "transfer" | "transferToFixedLength" | "write")
     }
 
     /// `ab.transfer(newLength?)` / `ab.transferToFixedLength(newLength?)`.
@@ -1217,6 +1217,95 @@ impl<'a> FnLowerer<'a> {
             )
         };
         self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    /// `buf.write(string, encoding?)` / `write(string, offset, encoding?)` /
+    /// `write(string, offset, length, encoding?)`: encodes the string, then copies
+    /// `min(length, space left)` bytes in place and returns the count (Node's contract).
+    // ponytail: a multi-byte character cut by the end of the buffer is written partially (Node drops it).
+    fn lower_native_bytes_write_string(&mut self, member: &MemberExpr, call: &CallExpr) -> Result<HirExpr, String> {
+        let receiver = self.lower_required_member_receiver(&member.obj, "write")?;
+        if self.infer_expr_type_inner(&receiver)? != HirType::Bytes {
+            return Err("`.write()` is only supported on a Buffer / Uint8Array".into());
+        }
+        let (arguments, mut bindings) = self.lower_native_spread_values(&call.args, "Buffer.write")?;
+        let receiver = self.bind_native_bytes_receiver(receiver, &mut bindings);
+        let text = arguments.first().cloned().ok_or("`Buffer.prototype.write` expects a string")?;
+        if arguments.len() > 4 {
+            return Err("`Buffer.prototype.write` expects a string, offset, length and encoding".into());
+        }
+        let text = match self.infer_expr_type(&text)? {
+            HirType::Str | HirType::StrLiteral(_) => text,
+            _ => self.coerce_primitive_to_string(text)?,
+        };
+        let is_text = |lowerer: &mut Self, index: usize| -> Result<bool, String> {
+            Ok(match arguments.get(index) {
+                Some(value) => matches!(lowerer.infer_expr_type(value)?, HirType::Str | HirType::StrLiteral(_)),
+                None => false,
+            })
+        };
+        let (offset, length, encoding) = if is_text(self, 1)? {
+            (None, None, arguments.get(1))
+        } else if is_text(self, 2)? {
+            (arguments.get(1), None, arguments.get(2))
+        } else {
+            (arguments.get(1), arguments.get(2), arguments.get(3))
+        };
+        let number = |lowerer: &mut Self, value: Option<&HirExpr>, default: f64| match value {
+            Some(value) => lowerer.coerce_primitive_to_number(value.clone()),
+            None => Ok(HirExpr::Lit(HirLit::F64(default))),
+        };
+        let (has_offset, has_length) = (offset.is_some(), length.is_some());
+        let offset = number(self, offset, 0.0)?;
+        let length = number(self, length, -1.0)?;
+        let offset = self.bind_bytes_number("__thaw_bytes_write_offset", offset, &mut bindings);
+        let length = self.bind_bytes_number("__thaw_bytes_write_length", length, &mut bindings);
+        let size = HirExpr::ArrayLen(Box::new(receiver.clone()));
+        let mut checks = Vec::new();
+        for (present, name, value) in [(has_offset, "offset", &offset), (has_length, "length", &length)] {
+            if present {
+                checks.push(Self::bytes_integer_range_check(name, value, &size));
+            }
+        }
+        let encoding = match encoding {
+            Some(encoding) => self.checked_buffer_encoding_argument(encoding.clone(), false)?,
+            None => HirExpr::Lit(HirLit::Str("utf8".into())),
+        };
+        let source = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_string".into())), vec![text, encoding]);
+        let mut result = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_bytes_copy".into())),
+            vec![source, receiver, offset, HirExpr::Lit(HirLit::F64(0.0)), length],
+        );
+        for check in checks.into_iter().rev() {
+            result = HirExpr::EvalThen(Box::new(check), Box::new(result));
+        }
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    /// Node's `validateInteger(value, name, 0, max)` as an expression that is `0` when valid
+    /// and throws `ERR_OUT_OF_RANGE` ("an integer" first, then the `>= 0 && <= max` range).
+    fn bytes_integer_range_check(name: &str, value: &HirExpr, max: &HirExpr) -> HirExpr {
+        let number = |n: f64| HirExpr::Lit(HirLit::F64(n));
+        let text = |t: String| HirExpr::Lit(HirLit::Str(t));
+        let to_text = |v: &HirExpr| HirExpr::Call(Box::new(HirExpr::Var("__thaw_number_to_string".into())), vec![v.clone()]);
+        let binary = |op: BinOp, l: &HirExpr, r: HirExpr| HirExpr::BinOp(op, Box::new(l.clone()), Box::new(r));
+        let branch = |c: HirExpr, t: HirExpr, o: HirExpr| HirExpr::Conditional(Box::new(c), Box::new(t), Box::new(o), HirType::F64);
+        let prefix = format!("The value of \"{name}\" is out of range. It must be ");
+        let not_integer = Self::bytes_range_throw(
+            vec![text(format!("{prefix}an integer. Received ")), to_text(value)],
+            "ERR_OUT_OF_RANGE",
+        );
+        let out_of_range = Self::bytes_range_throw(
+            vec![text(format!("{prefix}>= 0 && <= ")), to_text(max), text(". Received ".into()), to_text(value)],
+            "ERR_OUT_OF_RANGE",
+        );
+        let in_range = binary(BinOp::LtEq, value, max.clone());
+        let non_negative = binary(BinOp::GtEq, value, number(0.0));
+        branch(
+            binary(BinOp::EqEqEq, &binary(BinOp::Mod, value, number(1.0)), number(0.0)),
+            branch(non_negative, branch(in_range, number(0.0), out_of_range.clone()), out_of_range),
+            not_integer,
+        )
     }
 
     /// `source.copy(target, targetStart?, sourceStart?, sourceEnd?)` --

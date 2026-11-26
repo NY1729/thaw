@@ -909,6 +909,7 @@ impl<'a> FnLowerer<'a> {
                 self.lower_native_conversion_method(member, property, call)
             }
             "copy" => self.lower_native_bytes_copy(member, call),
+            "write" => self.lower_native_bytes_write_string(member, call),
             "toHex" | "toBase64" | "setFromHex" | "setFromBase64" => {
                 self.lower_native_bytes_encoding_method(member, property, call)
             }
