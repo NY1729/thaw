@@ -550,6 +550,8 @@ pub struct HirCompiler<'ctx> {
     /// Non-arrow Json receivers and live Json literals create owned boxes
     /// that may escape through generated globals or captured arena cells.
     tracks_owned_json_roots: bool,
+    /// `thaw_arena_poll` calls emitted at loop headers, pruned by `prune_arena_polls`.
+    arena_polls: Vec<inkwell::values::InstructionValue<'ctx>>,
     /// Emit the stack-overflow prologue guard; whole-program (`compile_program`) builds only.
     stack_guard: bool,
     /// True while compiling a thaw-js-backed dynamic call's own JSON-shaped
@@ -890,6 +892,7 @@ impl<'ctx> HirCompiler<'ctx> {
             tracks_physical_object_layouts: false,
             tracks_object_integrity: false,
             tracks_owned_json_roots: false,
+            arena_polls: Vec::new(),
             stack_guard: false,
             compiling_js_dynamic_arguments: false,
             validating_native_argument: false,
@@ -984,6 +987,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 (false, None) => self.emit_c_main_entry(),
             }
         }
+        // Polls the C `main` did not keep (Lambda, library exports) are dead weight.
+        self.prune_arena_polls(false);
 
         // These four are declared weak so a pure-native program (no JS engine) links without the thaw-js
         // archive; once the program uses thaw-js, a weak reference would not pull their definitions out
@@ -2660,6 +2665,8 @@ impl<'ctx> HirCompiler<'ctx> {
 include!("hir_codegen/console.rs");
 
 include!("hir_codegen/entrypoints.rs");
+
+include!("hir_codegen/safepoints.rs");
 
 impl<'ctx> HirCompiler<'ctx> {
     /// Renders the module as textual LLVM IR (handy for debugging / `thaw

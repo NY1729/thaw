@@ -1053,6 +1053,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         self.builder.position_at_end(header_bb);
+        let poll_index = self.emit_arena_poll()?;
         // The condition block, like the body, is re-entered on every
         // iteration via the backward branch below -- so a closure built
         // while compiling `cond` that captures a pre-loop variable needs
@@ -1075,6 +1076,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
         }
 
+        self.drop_idle_arena_poll(poll_index, header_bb);
         self.builder.position_at_end(after_bb);
         // `while (true)` with no `break` aimed at it never reaches `after_bb`, so
         // it terminates the enclosing block (a value-returning function may end

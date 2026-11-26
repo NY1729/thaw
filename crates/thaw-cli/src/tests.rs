@@ -711,6 +711,125 @@ fn dynamic_add_alone_keeps_turn_resets() {
 }
 
 #[test]
+fn sync_loops_reclaim_arena_at_safepoints() {
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-arena-safepoint-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    // `work` is only called directly, so its loops poll; the `map` callback's loop sits below a
+    // runtime frame and must not. `keep` lives across every reset.
+    std::fs::write(
+        &input,
+        "interface It { id: number; name: string }\nconst keep: It[] = [];\nfor (let i = 0; i < 50; i++) keep.push({ id: i, name: \"n\" + i });\nlet total = 0;\nfunction work(r: number): number {\n  const m = new Map<number, string>();\n  for (let i = 0; i < 2000; i++) m.set(i, \"v\" + i);\n  const back = JSON.parse(JSON.stringify(keep)) as It[];\n  const mapped = back.map((x) => { let s = \"\"; for (let k = 0; k < 3; k++) s += x.name; return s.length; });\n  let t = mapped.length + m.size;\n  for (let i = 0; i < 2000; i++) t += (m.get(i) as string).length;\n  return t + r;\n}\nfor (let r = 0; r < 300; r++) total += work(r);\nconsole.log(total + keep.length);\n",
+    )
+    .unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    for stress in ["0", "997"] {
+        let result = Command::new(&output)
+            .env("THAW_ARENA_STATS", "1")
+            .env("THAW_ARENA_STRESS", stress)
+            .env("THAW_ARENA_POISON", "1")
+            .output()
+            .unwrap();
+        assert_eq!(result.stdout, b"3326900\n");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let at = stderr.find("peak=").expect(&stderr);
+        let peak: u64 = stderr[at + 5..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // 372 MB are allocated in total.
+        assert!(peak < 32 << 20, "{stderr}");
+        assert!(!stderr.contains("resets=0 "), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn dynamic_any_objects_survive_safepoint_resets_in_maps_and_arrays() {
+    // `any` property access goes through thaw-js; objects kept across resets must stay readable.
+    let directory = std::env::temp_dir().join(format!("thaw-cli-arena-js1-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(&input, "const txt = JSON.stringify(Array.from({ length: 500 }, (_, i) => ({ id: i, name: \"n\" + i, o: { a: i } })));\nconst held: any[] = [];\nconst cache = new Map<string, any>();\nlet sum = 0;\nfor (let r = 0; r < 150; r++) {\n  const d: any = JSON.parse('{\"id\":' + r + ',\"o\":{\"a\":' + r + '},\"t\":[1,2,3]}');\n  if (r % 15 === 0) { held.push(d); cache.set(\"k\" + r, d); }\n  sum += d.o.a + d.id + d.t.length;\n  const junk: any = JSON.parse(txt);\n  for (let i = 0; i < junk.length; i += 50) sum += junk[i].o.a;\n}\nlet after = 0;\nfor (let i = 0; i < held.length; i++) { held[i].extra = i; after += held[i].o.a + held[i].t[2] + held[i].extra; }\nfor (const [k, v] of cache) after += k.length + (v as any).id;\nconsole.log(sum, after);\n").unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    for stress in ["0", "7"] {
+        let result = Command::new(&output)
+            .env("THAW_ARENA_STATS", "1")
+            .env("THAW_ARENA_STRESS", stress)
+            .env("THAW_ARENA_POISON", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "360300 1457\n",
+            "{stderr}"
+        );
+        assert!(!stderr.contains("resets=0 "), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn dynamic_any_objects_survive_safepoint_resets_in_class_fields() {
+    // `any` property access goes through thaw-js; objects kept across resets must stay readable.
+    let directory = std::env::temp_dir().join(format!("thaw-cli-arena-js2-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(&input, "class Box { v: any; constructor(v: any) { this.v = v; } }\nconst boxes: Box[] = [];\nconst txt = JSON.stringify(Array.from({ length: 400 }, (_, i) => ({ id: i, s: \"x\" + i })));\nlet acc = 0;\nfunction step(r: number): number {\n  const cur: any = JSON.parse(txt);\n  if (r % 10 === 0) boxes.push(new Box(cur[r % 400]));\n  let t = 0;\n  for (let i = 0; i < cur.length; i += 40) t += cur[i].id + cur[i].s.length;\n  return t;\n}\nfor (let r = 0; r < 200; r++) acc += step(r);\nlet out = 0;\nfor (const b of boxes) out += b.v.id * 2 + b.v.s.length;\nconsole.log(acc, out, boxes.length);\n").unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    for stress in ["0", "7"] {
+        let result = Command::new(&output)
+            .env("THAW_ARENA_STATS", "1")
+            .env("THAW_ARENA_STRESS", stress)
+            .env("THAW_ARENA_POISON", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "367200 3869 20\n",
+            "{stderr}"
+        );
+        assert!(!stderr.contains("resets=0 "), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn dynamic_any_object_survives_safepoint_resets_in_a_global() {
+    // `any` property access goes through thaw-js; objects kept across resets must stay readable.
+    let directory = std::env::temp_dir().join(format!("thaw-cli-arena-js3-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(&input, "const txt = JSON.stringify({ rows: Array.from({ length: 600 }, (_, i) => ({ id: i, tags: [\"a\", \"b\" + i] })) });\nlet keep: any = null;\nlet total = 0;\nfor (let r = 0; r < 120; r++) {\n  const doc: any = JSON.parse(txt);\n  if (r === 5) keep = doc.rows[7];\n  total += doc.rows.length + doc.rows[r].tags.length;\n  const copy: any = JSON.parse(JSON.stringify(doc.rows[r % 600]));\n  total += copy.id;\n}\nconsole.log(total, keep.id, keep.tags[1]);\n").unwrap();
+    run_build(&run_build_args(input.to_str().unwrap(), &output, None)).unwrap();
+    for stress in ["0", "7"] {
+        let result = Command::new(&output)
+            .env("THAW_ARENA_STATS", "1")
+            .env("THAW_ARENA_STRESS", stress)
+            .env("THAW_ARENA_POISON", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "79380 7 b7\n",
+            "{stderr}"
+        );
+        assert!(!stderr.contains("resets=0 "), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn json_roundtrip_in_async_loop_is_bounded() {
     let directory =
         std::env::temp_dir().join(format!("thaw-cli-arena-json-{}", std::process::id()));
@@ -787,7 +906,10 @@ fn compiled_app_exec_path_supports_node_eval() {
     assert_eq!(value["argv"], serde_json::json!([output, "tail"]));
     assert_eq!(
         value["execArgv"],
-        serde_json::json!(["-e", "process.stdout.write(JSON.stringify({ argv: process.argv, execArgv: process.execArgv }))"])
+        serde_json::json!([
+            "-e",
+            "process.stdout.write(JSON.stringify({ argv: process.argv, execArgv: process.execArgv }))"
+        ])
     );
     let _ = std::fs::remove_dir_all(directory);
 }

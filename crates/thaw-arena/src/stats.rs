@@ -14,6 +14,8 @@ thread_local! {
     pub(crate) static LIVE_AFTER_RESET: Cell<u64> = const { Cell::new(0) };
     pub(crate) static PEAK_PENDING: Cell<u64> = const { Cell::new(0) };
     pub(crate) static PEAK_BYTES: Cell<u64> = const { Cell::new(0) };
+    pub(crate) static RESET_NS: Cell<u64> = const { Cell::new(0) };
+    pub(crate) static HOOK_NS: Cell<u64> = const { Cell::new(0) };
     pub(crate) static CHUNKS: Cell<u64> = const { Cell::new(0) };
     static STRESS_TICKS: Cell<u64> = const { Cell::new(0) };
 }
@@ -130,6 +132,8 @@ pub fn stats_summary() -> String {
     sink.add("arena", "peak", get(&PEAK_BYTES).max(live + since));
     sink.add("arena", "resets", get(&RESETS));
     sink.add("arena", "reclaimed", get(&RECLAIMED_BYTES));
+    sink.add("arena", "reset_ms", get(&RESET_NS) / 1_000_000);
+    sink.add("arena", "hook_ms", get(&HOOK_NS) / 1_000_000);
     sink.add("arena", "chunks", crate::chunk_count() as u64);
     sink.add("arena", "peak_pending", get(&PEAK_PENDING));
     sink.add("arena", "tracing", u64::from(crate::is_tracing()));
