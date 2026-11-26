@@ -75,7 +75,8 @@ fn call_free_leaf_functions_drop_the_stack_guard_and_may_inline() {
         f.get_enum_attribute(inkwell::attributes::AttributeLoc::Function, noinline).is_some()
     };
     // Stack traces need the frame of a function that can run user code; a leaf has none to show.
-    assert!(!attr(leaf) && attr(recursive));
+    assert!(!attr(leaf), "leaf kept noinline:\n{}", leaf.print_to_string());
+    assert!(attr(recursive), "recursive lost noinline:\n{}", recursive.print_to_string());
     assert!(leaf.print_to_string().to_string().contains("br i1 false"), "{}", leaf.print_to_string());
     assert!(!recursive.print_to_string().to_string().contains("br i1 false"));
 }
