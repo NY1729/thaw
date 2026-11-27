@@ -8,8 +8,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "domain" => Some(
             r#"var EventEmitter = require('node:events'), stack = [];
-             // ponytail: Node keeps no-op newListener/removeListener as bare functions in _events; thaw's EventEmitter stores entry arrays, so two inert zero-length functions mimic the shape (listeners('newListener') would throw). Real fix: Node-style _events storage.
-             function Domain() { if (!(this instanceof Domain)) return new Domain(); Object.defineProperty(this, 'domain', { value: null, writable: true, configurable: true, enumerable: false }); EventEmitter.call(this); this.members = []; this._events.removeListener = function() {}; this._events.newListener = function() {}; }
+             function Domain() { if (!(this instanceof Domain)) return new Domain(); Object.defineProperty(this, 'domain', { value: null, writable: true, configurable: true, enumerable: false }); EventEmitter.call(this); this.members = []; this.on('removeListener', function() {}); this.on('newListener', function() {}); }
              Domain.prototype = Object.create(EventEmitter.prototype); Domain.prototype.constructor = Domain;
              Domain.prototype.enter = function() { stack.push(module.exports.active); module.exports.active = this; if (globalThis.process) process.domain = this; return this; };
              Domain.prototype.exit = function() { if (module.exports.active !== this) return this; module.exports.active = stack.length ? stack.pop() : null; if (globalThis.process) process.domain = module.exports.active || null; return this; };

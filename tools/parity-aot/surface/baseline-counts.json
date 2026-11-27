@@ -9,7 +9,8 @@
   "match": 19
  },
  "domain": {
-  "match": 32
+  "match": 31,
+  "output-diff": 1
  },
  "events": {
   "match": 57,
