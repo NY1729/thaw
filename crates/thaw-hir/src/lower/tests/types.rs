@@ -6159,6 +6159,27 @@ fn tagged_template_with_fixed_parameters_keeps_the_declared_count() {
 }
 
 #[test]
+fn implicit_any_object_literal_that_gains_a_property_later_is_a_growable_any() {
+    // JavaScript entries: `const h = {a: 1}; h.b = 2` is legal; a fixed record could not grow.
+    let source = r#"
+        function main(): void {
+            const h = { "content-type": "x" };
+            h.authorization = "Basic";
+            const keep = { a: 1 };
+            keep.a = 2;
+        }
+        "#;
+    let module = thaw_parser::parse_typescript(source).expect("parse error");
+    crate::set_implicit_any(true);
+    let grown = lower_module(&module);
+    crate::set_implicit_any(false);
+    grown.expect("a literal gaining a property lowers as any");
+    // Outside implicit-any (typed TypeScript) the same assignment is still an error.
+    let module = thaw_parser::parse_typescript(source).expect("parse error");
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
 fn top_level_const_arrow_params_are_inferred_from_call_sites_in_js_programs() {
     let module = thaw_parser::parse_typescript(
         "const sq = (x) => x * x; function main(): void { console.log(sq(4)); }",
