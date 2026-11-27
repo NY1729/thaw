@@ -1,7 +1,77 @@
 {
+ "assert": {
+  "match": 33,
+  "output-diff": 37,
+  "skipped": 2
+ },
+ "assert_strict": {
+  "match": 33,
+  "output-diff": 37,
+  "skipped": 2
+ },
+ "async_hooks": {
+  "match": 11,
+  "output-diff": 67,
+  "skipped": 5
+ },
+ "buffer": {
+  "match": 41,
+  "output-diff": 9,
+  "skipped": 130
+ },
+ "child_process": {
+  "match": 10,
+  "output-diff": 32
+ },
+ "cluster": {
+  "match": 40,
+  "output-diff": 5
+ },
+ "console": {
+  "match": 57,
+  "skipped": 19
+ },
+ "constants": {
+  "match": 224
+ },
+ "crypto": {
+  "match": 90,
+  "output-diff": 84,
+  "skipped": 401
+ },
+ "dgram": {
+  "match": 3,
+  "output-diff": 2,
+  "skipped": 40
+ },
+ "diagnostics_channel": {
+  "match": 18,
+  "output-diff": 1
+ },
+ "dns": {
+  "match": 70,
+  "output-diff": 21
+ },
+ "dns_promises": {
+  "match": 43,
+  "output-diff": 44
+ },
+ "domain": {
+  "match": 29,
+  "output-diff": 3
+ },
  "events": {
-  "match": 48,
+  "match": 49,
   "output-diff": 28
+ },
+ "fs": {
+  "match": 202,
+  "output-diff": 87,
+  "skipped": 8
+ },
+ "fs_promises": {
+  "match": 99,
+  "output-diff": 20
  },
  "globals": {
   "build-fail": 39,
@@ -10,16 +80,165 @@
   "skipped": 154
  },
  "http": {
-  "build-fail": 173,
-  "match": 195,
-  "output-diff": 114
+  "build-fail": 176,
+  "match": 197,
+  "output-diff": 115
+ },
+ "http2": {
+  "match": 43,
+  "output-diff": 228,
+  "skipped": 118
  },
  "https": {
-  "match": 132,
+  "match": 135,
   "output-diff": 11
  },
- "stream": {
-  "match": 314,
+ "inspector": {
+  "match": 53,
+  "output-diff": 11
+ },
+ "inspector_promises": {
+  "match": 53,
+  "output-diff": 11
+ },
+ "module": {
+  "match": 119,
+  "output-diff": 64,
+  "skipped": 4
+ },
+ "net": {
+  "match": 87,
+  "output-diff": 156
+ },
+ "os": {
+  "match": 82,
+  "output-diff": 89
+ },
+ "path": {
+  "build-fail": 7,
+  "match": 93,
+  "output-diff": 7
+ },
+ "path_posix": {
+  "build-fail": 7,
+  "match": 93,
+  "output-diff": 7
+ },
+ "path_win32": {
+  "build-fail": 7,
+  "match": 93,
+  "output-diff": 7
+ },
+ "perf_hooks": {
+  "match": 16,
+  "output-diff": 22,
+  "skipped": 63
+ },
+ "process": {
+  "build-fail": 3,
+  "match": 390,
+  "output-diff": 287
+ },
+ "punycode": {
+  "match": 12,
+  "output-diff": 4
+ },
+ "querystring": {
+  "match": 16,
+  "output-diff": 5
+ },
+ "readline": {
+  "match": 7,
+  "output-diff": 10,
+  "skipped": 26
+ },
+ "readline_promises": {
+  "match": 2,
+  "output-diff": 2,
+  "skipped": 32
+ },
+ "repl": {
+  "match": 8,
   "output-diff": 71
+ },
+ "stream": {
+  "match": 319,
+  "output-diff": 72
+ },
+ "stream_consumers": {
+  "match": 10
+ },
+ "stream_promises": {
+  "match": 4
+ },
+ "stream_web": {
+  "match": 39,
+  "output-diff": 5,
+  "skipped": 41
+ },
+ "string_decoder": {
+  "match": 8,
+  "output-diff": 1
+ },
+ "sys": {
+  "match": 80,
+  "output-diff": 72,
+  "skipped": 6
+ },
+ "timers": {
+  "match": 12,
+  "output-diff": 9
+ },
+ "timers_promises": {
+  "match": 4,
+  "output-diff": 3
+ },
+ "tls": {
+  "match": 105,
+  "output-diff": 100
+ },
+ "trace_events": {
+  "match": 4
+ },
+ "tty": {
+  "match": 4,
+  "skipped": 181
+ },
+ "url": {
+  "build-fail": 1,
+  "match": 43,
+  "output-diff": 25,
+  "skipped": 14
+ },
+ "util": {
+  "match": 115,
+  "output-diff": 37,
+  "skipped": 6
+ },
+ "util_types": {
+  "match": 60,
+  "output-diff": 26
+ },
+ "v8": {
+  "match": 15,
+  "output-diff": 52,
+  "skipped": 16
+ },
+ "vm": {
+  "match": 24,
+  "output-diff": 3
+ },
+ "wasi": {
+  "match": 1,
+  "skipped": 3
+ },
+ "worker_threads": {
+  "match": 25,
+  "output-diff": 4,
+  "skipped": 60
+ },
+ "zlib": {
+  "match": 294,
+  "output-diff": 239
  }
 }
