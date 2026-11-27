@@ -1,0 +1,5 @@
+{
+  "name": "declared builtin classes (dns.Resolver, BroadcastChannel, http/https Agent, ClientRequest, net.Stream, url.Url) are constructible through any",
+  "expect": "matched",
+  "source": "import * as dns from 'node:dns';\nimport * as wt from 'node:worker_threads';\nimport * as http from 'node:http';\nimport * as https from 'node:https';\nimport * as net from 'node:net';\nimport * as url from 'node:url';\nfunction t(n: string, C: any, a?: any, b?: any, c?: any) { try { const o = new C(a, b, c); console.log(n, 'new ok', typeof o); } catch (e: any) { console.log(n, 'THROW', e && e.message); } }\nt('dns.Resolver', dns.Resolver);\nt('wt.BroadcastChannel', wt.BroadcastChannel, 'x');\nt('http.Agent', http.Agent);\nt('http.ClientRequest', http.ClientRequest, 'http://127.0.0.1:1/');\nt('https.Agent', https.Agent);\nt('net.Stream', net.Stream);\nt('url.Url', url.Url);\nprocess.exit(0);\n"
+}
