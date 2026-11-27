@@ -832,11 +832,32 @@ pub(crate) fn crypto_import_key_json(bytes_hex: &str, is_der: bool, passphrase: 
     .to_string()
 }
 
+/// DER `DigestInfo` header (everything before the digest) of the digests the `rsa` crate has no typed
+/// `SigningKey` for (SHA-3 and RIPEMD-160): RSASSA-PKCS1-v1_5 is then signed over the in-house digest.
+fn rsa_pkcs1v15_extra_prefix(digest_algorithm: &str) -> Option<(Vec<u8>, usize)> {
+    let (oid, len): (&[u8], usize) = match digest_algorithm {
+        "sha3224" => (&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x07], 28),
+        "sha3256" => (&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08], 32),
+        "sha3384" => (&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x09], 48),
+        "sha3512" => (&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0a], 64),
+        "ripemd160" => (&[0x2b, 0x24, 0x03, 0x02, 0x01], 20),
+        _ => return None,
+    };
+    let algorithm = [&[0x06, oid.len() as u8][..], oid, &[0x05, 0x00]].concat();
+    let sequence = [&[0x30, algorithm.len() as u8][..], &algorithm].concat();
+    let total = sequence.len() + 2 + len;
+    Some((
+        [&[0x30, total as u8][..], &sequence, &[0x04, len as u8]].concat(),
+        len,
+    ))
+}
+
 fn digest_size_matches(digest_algorithm: &str) -> Result<(), String> {
     if matches!(
         digest_algorithm,
         "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512"
-    ) {
+    ) || rsa_pkcs1v15_extra_prefix(digest_algorithm).is_some()
+    {
         Ok(())
     } else {
         Err(format!("unsupported digest algorithm: {digest_algorithm}"))
@@ -981,7 +1002,20 @@ fn sign_rsa_pkcs1v15(
         "sha256" => rsa_pkcs1v15_sign_for!(key, sha2::Sha256, data),
         "sha384" => rsa_pkcs1v15_sign_for!(key, sha2::Sha384, data),
         "sha512" => rsa_pkcs1v15_sign_for!(key, sha2::Sha512, data),
-        _ => unreachable!("checked by digest_size_matches"),
+        other => {
+            let (prefix, hash_len) =
+                rsa_pkcs1v15_extra_prefix(other).ok_or("unsupported digest algorithm")?;
+            let hashed =
+                super::digest::digest_bytes(other, data).ok_or("unsupported digest algorithm")?;
+            key.sign(
+                rsa::Pkcs1v15Sign {
+                    hash_len: Some(hash_len),
+                    prefix: prefix.into(),
+                },
+                &hashed,
+            )
+            .map_err(|error| error.to_string())
+        }
     }
 }
 
@@ -1008,7 +1042,23 @@ fn verify_rsa_pkcs1v15(
         "sha256" => rsa_pkcs1v15_verify_for!(key, sha2::Sha256, data, signature),
         "sha384" => rsa_pkcs1v15_verify_for!(key, sha2::Sha384, data, signature),
         "sha512" => rsa_pkcs1v15_verify_for!(key, sha2::Sha512, data, signature),
-        _ => unreachable!("checked by digest_size_matches"),
+        other => {
+            let Some((prefix, hash_len)) = rsa_pkcs1v15_extra_prefix(other) else {
+                return false;
+            };
+            let Some(hashed) = super::digest::digest_bytes(other, data) else {
+                return false;
+            };
+            key.verify(
+                rsa::Pkcs1v15Sign {
+                    hash_len: Some(hash_len),
+                    prefix: prefix.into(),
+                },
+                &hashed,
+                signature,
+            )
+            .is_ok()
+        }
     }
 }
 
@@ -1032,7 +1082,9 @@ fn sign_rsa_pss(
         "sha256" => rsa_pss_sign_for!(key, sha2::Sha256, data),
         "sha384" => rsa_pss_sign_for!(key, sha2::Sha384, data),
         "sha512" => rsa_pss_sign_for!(key, sha2::Sha512, data),
-        _ => unreachable!("checked by digest_size_matches"),
+        other => Err(format!(
+            "RSA-PSS does not support the digest algorithm {other}"
+        )),
     }
 }
 
@@ -1059,7 +1111,9 @@ fn verify_rsa_pss(
         "sha256" => rsa_pss_verify_for!(key, sha2::Sha256, data, signature),
         "sha384" => rsa_pss_verify_for!(key, sha2::Sha384, data, signature),
         "sha512" => rsa_pss_verify_for!(key, sha2::Sha512, data, signature),
-        _ => unreachable!("checked by digest_size_matches"),
+        other => Err(format!(
+            "RSA-PSS does not support the digest algorithm {other}"
+        )),
     }
 }
 
