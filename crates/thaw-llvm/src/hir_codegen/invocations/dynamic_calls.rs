@@ -216,6 +216,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "thaw_tjs_resolve_handle_handle_result",
                 args,
             ),
+            "__thaw_js_await_handle" => self.compile_js_await_handle(args),
             "callDynamicValueMixed" => self.compile_call_dynamic_value_mixed(args),
             "callDynamicValueMixedExact" => self.compile_call_dynamic_value_mixed_exact(args),
             "callDynamicValueMixedNativeJson" => self.compile_call_dynamic_value_mixed_native_json(args),

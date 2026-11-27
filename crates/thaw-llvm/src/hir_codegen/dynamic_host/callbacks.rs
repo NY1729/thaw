@@ -2184,7 +2184,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_destroy_typed_input_if_detached(json, &HirType::Void, None)?;
                 ptr_type.const_null()
             } else {
-                let value = self.compile_typed_dynamic_result(json, resolved)?;
+                let value = if *resolved == HirType::JsValue {
+                    // `await <JsValue>`: the host settles with the new handle id as a number
+                    let id = self.compile_json_value_to_native(json, &HirType::F64)?.into_float_value();
+                    self.builder
+                        .build_float_to_signed_int(id, self.context.i64_type(), "tjs_settle_handle")
+                        .map_err(|error| error.to_string())?
+                        .into()
+                } else {
+                    self.compile_typed_dynamic_result(json, resolved)?
+                };
                 let slot = self.allocate_arena_cell(self.basic_type(resolved)?, "tjs_settle_result")?;
                 self.builder
                     .build_store(slot, value)

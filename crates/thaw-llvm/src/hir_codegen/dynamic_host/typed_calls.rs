@@ -1853,6 +1853,43 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok((pending_promise, pending_end, merge_block))
     }
 
+    /// `__thaw_js_await_handle(handle)`: a fresh native promise linked to the value behind `handle`
+    /// (`thaw_tjs_watch_handle`), which `await` then suspends on. Settles with a new handle.
+    pub(super) fn compile_js_await_handle(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        self.js_mark_handles_used();
+        let [handle] = args else {
+            return Err("__thaw_js_await_handle expects one handle".into());
+        };
+        let handle = self.compile_expr(handle)?;
+        let promise = self
+            .builder
+            .build_call(self.module.get_function("thaw_promise_new").unwrap(), &[], "js_await_promise")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_promise_new returned no value")?
+            .into_pointer_value();
+        // the watch holds its own reference until it settles
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_retain").unwrap(),
+                &[promise.into()],
+                "js_await_watch_retain",
+            )
+            .map_err(|error| error.to_string())?;
+        let insert = self.builder.get_insert_block().unwrap();
+        let settler = self.compile_thaw_js_pending_settler(&HirType::JsValue)?;
+        self.builder.position_at_end(insert);
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_tjs_watch_handle").unwrap(),
+                &[handle.into(), promise.into(), settler.into()],
+                "js_await_watch",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(promise.into())
+    }
+
     fn compile_typed_thaw_js_call_scoped(
         &mut self,
         signature: &DynamicSignature,

@@ -5159,9 +5159,14 @@ impl<'a> FnLowerer<'a> {
                 let value = self.lower_expr(realm_fetch.as_ref().unwrap_or(await_arg))?;
                 let value_type = self.infer_expr_type(&value)?;
                 if value_type == HirType::JsValue {
-                    Ok(HirExpr::Call(
-                        Box::new(HirExpr::Var("resolveDynamicValue".into())),
-                        vec![value],
+                    // a real suspension: a Promise still pending in thaw-js is linked to a native promise the
+                    // frame awaits, so native timers / IO run (and register work) meanwhile
+                    Ok(HirExpr::AwaitPromise(
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_js_await_handle".into())),
+                            vec![value],
+                        )),
+                        HirType::JsValue,
                     ))
                 } else if let HirType::Promise(resolved) = value_type {
                     if *resolved == HirType::Void {

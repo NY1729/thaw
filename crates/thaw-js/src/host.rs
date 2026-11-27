@@ -8473,6 +8473,8 @@ struct Watch {
     promise: Value,
     native: *mut c_void,
     settle: SettleFn,
+    /// The settled value is handed back as a new handle id (a `JsValue` await), not as JSON.
+    handle_result: bool,
 }
 
 thread_local! {
@@ -8497,6 +8499,7 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
                 promise,
                 native,
                 settle,
+                handle_result: false,
             })
         }),
         None => settle_native(
@@ -8505,6 +8508,43 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
             Err("thaw-js: invalid pending promise handle".into()),
         ),
     }
+}
+
+/// `await <JsValue>` of compiled code: links `native` (a fresh native promise) to the value behind `handle`.
+/// A Promise settles `native` once it leaves Pending (see `pump_watches`), a plain value at once; either way the
+/// result is a new handle id as decimal text. The input handle stays the caller's.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_watch_handle(handle: i64, native: *mut c_void, settle: SettleFn) {
+    let Some((package, value)) = (handle >= 0).then(|| slot(handle as u64)).flatten() else {
+        settle_native(
+            native,
+            settle,
+            Err("thaw-js: invalid JsValue handle".into()),
+        );
+        return;
+    };
+    let is_promise = with_package(package, |p| {
+        let is = p.interp.is_promise(&value);
+        if is {
+            // observed by the awaiting frame: its rejection is delivered there, not reported as unhandled
+            p.interp.mark_handled(&value);
+        }
+        Ok(is)
+    })
+    .unwrap_or(false);
+    if !is_promise {
+        settle_native(native, settle, Ok(store_handle(package, value).to_string()));
+        return;
+    }
+    WATCHES.with(|w| {
+        w.borrow_mut().push(Watch {
+            package,
+            promise: value,
+            native,
+            settle,
+            handle_result: true,
+        })
+    });
 }
 
 fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, String>) {
@@ -8550,6 +8590,7 @@ fn pump_watches() -> usize {
                 return Ok(None);
             };
             Ok(Some(match state {
+                Ok(v) if w.handle_result => Ok(store_handle(w.package, v).to_string()),
                 Ok(v) => from_value(&mut p.interp, &v, 0)
                     .map(|n| n.to_json_keeping_undefined())
                     .map_err(|e| e.to_string()),

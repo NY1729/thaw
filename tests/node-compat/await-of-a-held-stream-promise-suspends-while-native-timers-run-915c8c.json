@@ -1,0 +1,5 @@
+{
+  "name": "await of a held stream promise suspends while native timers run",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r: any = new Readable({ read() {} });\n  setTimeout(() => { r.push('a'); r.push(null); }, 20);\n  // the Promise settles only after the AOT timer above fires, with the AOT frame suspended on it\n  const out: any = await r.toArray();\n  console.log(out.length, String(out[0]));\n  let ticks = 0;\n  const t = setInterval(() => { ticks++; }, 5);\n  const r2: any = new Readable({ read() {} });\n  setTimeout(() => { r2.push('b'); r2.push(null); }, 40);\n  const out2: any = await r2.toArray();\n  clearInterval(t);\n  console.log(String(out2[0]), ticks >= 3);\n}\n"
+}

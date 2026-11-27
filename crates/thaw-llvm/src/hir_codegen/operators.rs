@@ -435,6 +435,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "getDynamicProperty"
                         | "callDynamicValueHandle"
                         | "resolveDynamicValue" => return Some(HirType::JsValue),
+                        "__thaw_js_await_handle" => return Some(HirType::Promise(Box::new(HirType::JsValue))),
                         "readDynamicValue"
                         | "callDynamicMethod"
                         | "__thaw_call_selected_dynamic_method"

@@ -3126,6 +3126,9 @@ impl<'a> FnLowerer<'a> {
                     "callDynamicValueHandle" | crate::compiler_helpers::TO_ITERATOR_EXACT | "__thaw_to_async_iterator_exact" =>
                         return Ok(HirType::JsValue),
                     "resolveDynamicValue" => return Ok(HirType::JsValue),
+                    "__thaw_js_await_handle" => {
+                        return Ok(HirType::Promise(Box::new(HirType::JsValue)))
+                    }
                     "callDynamicValueWithValue" => return Ok(HirType::Json),
                     "releaseDynamicValue" => return Ok(HirType::Bool),
                     "getDynamicProperty" => return Ok(HirType::JsValue),
