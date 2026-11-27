@@ -5,6 +5,7 @@
 #   JOBS         programs built in parallel (default 2); builds run under the heavytests slice (WRAP="" to disable)
 #   PARITY_AOT_CACHE  build+run cache dir (default $OUT/cache; key = thaw binary hash + program text)
 #   INV          reuse an existing inventory dir instead of running node (default: regenerate under $OUT/inventory)
+#   ARGS=1       omit/undef/null probes (gen_args.py) instead of the member matrix; report: $OUT/args.md; baseline args-counts.json
 # Non-gating. Exit 2 = harness error.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd); PA=$(dirname "$HERE"); REPO=$(cd "$PA/../.." && pwd)
@@ -18,9 +19,12 @@ INVD=${INV:-$OUT/inventory}
 mkdir -p "$OUT"
 [ -n "${INV:-}" ] || node "$HERE/inv.js" "$INVD" "${MODS[@]}" || exit 2
 rm -rf "$OUT/programs" "$OUT/thaw-js" "$OUT/node"
-python3 "$HERE/gen_surface.py" "$INVD" "$OUT/programs" "$@" || exit 2
+python3 "$HERE/gen_surface.py" ${ARGS:+--args} "$INVD" "$OUT/programs" "$@" || exit 2
 python3 "$PA/aot_run.py" --programs "$OUT/programs" --out "$OUT" --thaw "$THAW" --jobs "${JOBS:-2}" \
   --baseline "$HERE/known-gaps.json" > "$OUT/aot_run.log" 2>&1
 rc=$?; [ $rc -ne 2 ] || { tail -5 "$OUT/aot_run.log" >&2; exit 2; }
+if [ -n "${ARGS:-}" ]; then
+  python3 "$HERE/args_report.py" "$OUT" "$HERE/args-counts.json" ${WRITE_BASELINE:+--write-baseline}; echo "report: $OUT/args.md"; exit 0
+fi
 python3 "$HERE/report.py" "$OUT" "$HERE/baseline-counts.json" ${WRITE_BASELINE:+--write-baseline}
 echo "report: $OUT/surface.md"

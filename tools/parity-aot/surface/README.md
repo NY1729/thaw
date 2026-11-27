@@ -22,3 +22,16 @@ Committed inventory (all modules + globals, Node 22.23): `tools/parity-aot/inven
 Cache: `PARITY_AOT_CACHE` (default `$OUT/cache`), key = sha256(thaw binary, program text); a rerun with the same binary
 does no builds. Build-fail causes show the first diagnostic line; the probe id says which member.
 @types/node cross-check is not done (inventory is Node-only).
+
+## Optional-argument probes (omit / undef / null)
+
+Run: `ARGS=1 tools/parity-aot/surface/run.sh fs path ...` (report `$OUT/args.md`; counts baseline `args-counts.json`, separate
+from `baseline-counts.json`). Calls every function and method through `any` (the path a JS-side adapter takes) with
+arguments from `optional-args.json`, and compares what Node and thaw return (kind) or throw (`name[code]`):
+- `omit.<k>`: first k of the n arguments (k = n-1 .. n-4);  `undef.<i>` / `null.<i>`: argument i replaced.
+- `gen_optional_args.py --inv inventory --types <@types/node dir> --out optional-args.json [--md]` builds the table (per
+  function: `Function.length`, @types/node `?` per overload, `omit_from`, sample `base_args`). Get @types/node with
+  `npm install --ignore-scripts @types/node@22` in a fresh empty directory.
+- Sandbox: cwd-relative `sb/` (file `sb/f`, dir `sb/d`) is recreated before every probe; hosts/urls are loopback.
+  `args-excludes.json` lists the only functions never called (process exit/kill, spawn, DNS, ...), each with its reason.
+- Boundary with the wrong-type probes (r145): these probes only pass `undefined`/`null`/fewer arguments.

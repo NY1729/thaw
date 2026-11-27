@@ -168,6 +168,8 @@ def render_program(prog, lines, node):
         import gen_boundary
         return gen_boundary.render(lines, prog.get("imports") or [], node)
     text = gen_probes.render(lines, prog["module"], node)
+    if prog.get("prelude_extra"):   # surface --args: pe() helpers, inserted before main
+        text = text.replace("\nfunction main(): void {", prog["prelude_extra"] + "\nfunction main(): void {", 1)
     imports = prog.get("imports") or []
     if imports:
         head, rest = text.split("\n", 1)

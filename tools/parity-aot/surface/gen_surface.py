@@ -15,14 +15,54 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+import gen_args  # noqa: E402  (omit/undef/null probe rows)
 import gen_probes  # noqa: E402  (render, CTOR_ARGS)
 
 PER_PROGRAM = 40
+PFX = "surf"
 IDENT = re.compile(r"^[A-Za-z_$][\w$]*$")
 # Modules whose functions are called with no arguments (deterministic, no host side effects).
 SAFE_CALL = {"node:path", "node:path/posix", "node:path/win32", "node:url", "node:querystring", "node:string_decoder",
              "node:buffer", "node:punycode"}
 RECIPES = json.load(open(os.path.join(HERE, "recipes.json")))
+ARGS = False  # --args: only omit/undef/null probes (program prefix args_), printed by pe() with error code
+TABLE = os.path.join(HERE, "optional-args.json")
+# pe(): like p() but a thrown error prints name[code], a returned object prints its constructor only (not own keys:
+# instance internals differ between engines and are not what these probes look at), and every probe starts from a fresh
+# sandbox dir. A rejected promise is left to the unhandledRejection handler; the first call arms an exit timer so a listening server cannot hang.
+PE = r'''
+import * as __fs from "node:fs";
+let __armed: boolean = false;
+function reset(): void {
+  try {
+    __fs.rmSync("sb", { recursive: true, force: true });
+    __fs.mkdirSync("sb/d", { recursive: true });
+    __fs.writeFileSync("sb/f", "x");
+  } catch (e: any) { }
+}
+function shallow(v: any): string {
+  if (v !== null && typeof v === "object" && !Array.isArray(v)) { return "object " + ctorName(v); }
+  if (Array.isArray(v)) { return "array"; }
+  return show(v, 0);
+}
+function pe(name: string, f: () => any): void {
+  if (!__armed) {
+    __armed = true;
+    process.on("uncaughtException", (_e: any) => { });
+    process.on("unhandledRejection", (_e: any) => { });
+    setTimeout(() => { process.exit(0); }, 400);
+  }
+  console.log("@@ " + name);
+  reset();
+  try {
+    const r: any = f();
+    console.log(shallow(r));
+  } catch (e: any) {
+    const c: any = e.code;
+    console.log("THROW " + String(e.name) + (c !== undefined ? "[" + String(c) + "]" : "") + ": " + String(e.message).split("\n").join(" "));
+  }
+}
+'''
 
 
 def acc(base, name):
@@ -48,7 +88,10 @@ def gen(inv_dir, out_dir, only):
         def add(pid, body):
             rows.append((f"{key(mod)}.{pid}", body))
 
-        for e in inv["exports"]:
+        if ARGS:
+            table = json.load(open(TABLE))["rows"]
+            gen_args.arg_rows(mod, inv, table, RECIPES, add, lambda i, why: skips.append({"id": f"{key(mod)}.{i}", "reason": why}), glob)
+        for e in ([] if ARGS else inv["exports"]):
             n, kind = e["name"], e["kind"]
             X = n if glob else acc("M", n)
             if kind in ("function", "class", "getter", "object", "value"):
@@ -92,10 +135,10 @@ def gen(inv_dir, out_dir, only):
         for i in range(0, len(rows), PER_PROGRAM):
             chunk = rows[i:i + PER_PROGRAM]
             programs.append({
-                "name": f"surf_{key(mod)}.c{i // PER_PROGRAM:03d}", "corpus": f"surf_{key(mod)}", "family": f"surf_{key(mod)}",
-                "mode": "typed", "module": False,
+                "name": f"{PFX}_{key(mod)}.c{i // PER_PROGRAM:03d}", "corpus": f"{PFX}_{key(mod)}", "family": f"{PFX}_{key(mod)}",
+                "mode": "typed", "module": False, **({"prelude_extra": PE} if ARGS else {}),
                 "imports": [] if glob else [f'import * as M from "{mod}";'],
-                "probes": [{"name": pid, "api": [pid], "mode": "typed", "line": f'p({json.dumps(pid)}, () => {{ {body} }});',
+                "probes": [{"name": pid, "api": [pid], "mode": "typed", "line": f'{"pe" if ARGS else "p"}({json.dumps(pid)}, () => {{ {body} }});',
                             "arg_types": [], "shape": False} for pid, body in chunk]})
         total += len(rows)
     os.makedirs(out_dir, exist_ok=True)
@@ -104,6 +147,8 @@ def gen(inv_dir, out_dir, only):
         for suffix, node in ((".ts", False), (".mts", True)):
             with open(os.path.join(out_dir, prog["name"] + suffix), "w", encoding="utf-8") as fh:
                 text = gen_probes.render(lines, False, node)
+                if ARGS:
+                    text = text.replace("\nfunction main(): void {", PE + "\nfunction main(): void {", 1)
                 if prog["imports"]:
                     head, rest = text.split("\n", 1)
                     text = head + "\n" + prog["imports"][0] + "\n" + rest
@@ -118,6 +163,9 @@ def gen(inv_dir, out_dir, only):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
+    argv = [a for a in sys.argv[1:] if a != "--args"]
+    ARGS = len(argv) != len(sys.argv) - 1
+    PFX = "args" if ARGS else "surf"
+    if len(argv) < 2:
         sys.exit(__doc__)
-    gen(sys.argv[1], sys.argv[2], set(sys.argv[3:]))
+    gen(argv[0], argv[1], set(argv[2:]))

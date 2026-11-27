@@ -1,0 +1,19 @@
+{
+  "_doc": "Functions the omit/undef/null probes (gen_args.py) never call, only because the call has a host side effect that the sandbox (cwd-relative sb/ dir, loopback host/url) cannot contain. module/owner/name are regexes (full match; owner is the class or object path, empty for exports). Everything else is probed.",
+  "excludes": [
+    {"module": "node:process", "owner": "", "name": "exit|reallyExit|abort|kill|_kill|chdir|setuid|setgid|seteuid|setegid|setgroups|initgroups|umask|dlopen|binding|_linkedBinding|execve|openStdin|setUncaughtExceptionCaptureCallback|_debugProcess|_debugEnd|_startProfilerIdleNotifier|_stopProfilerIdleNotifier", "reason": "terminates, signals or re-identifies the harness process, or changes process-wide state"},
+    {"module": "globals|node:process", "owner": "(process\\.)?(stdout|stderr|stdin)", "name": ".*", "reason": "end/destroy/pause on the harness's own stdio would close the result stream"},
+    {"module": "globals", "owner": "process", "name": "exit|reallyExit|abort|kill|_kill|chdir|setuid|setgid|seteuid|setegid|setgroups|initgroups|umask|dlopen|binding|_linkedBinding|execve|openStdin|setUncaughtExceptionCaptureCallback|_debugProcess|_debugEnd|_startProfilerIdleNotifier|_stopProfilerIdleNotifier", "reason": "terminates, signals or re-identifies the harness process, or changes process-wide state"},
+    {"module": "node:console|globals", "owner": "(console)?", "name": "group|groupCollapsed|groupEnd|time|timeEnd|timeLog|trace|profile|profileEnd|timeStamp", "reason": "indentation/timer state leaks into later probes, or the output carries a stack/timing"},
+    {"module": "node:child_process", "owner": "", "name": "exec|execFile|execSync|execFileSync|spawn|spawnSync|fork", "reason": "starts a process"},
+    {"module": "node:child_process", "owner": "ChildProcess", "name": ".*", "reason": "starts or signals a process"},
+    {"module": "node:cluster", "owner": "", "name": "fork|setupPrimary|setupMaster|disconnect", "reason": "forks worker processes"},
+    {"module": "node:dns|node:dns/promises", "owner": "(Resolver|promises)?", "name": "lookup|lookupService|resolve.*|reverse", "reason": "queries the system DNS resolver (external network)"},
+    {"module": "node:os", "owner": "", "name": "setPriority", "reason": "renices a process"},
+    {"module": "node:v8", "owner": "", "name": "setFlagsFromString", "reason": "changes engine-wide flags"},
+    {"module": "node:inspector|node:inspector/promises", "owner": "", "name": "open|waitForDebugger", "reason": "opens a debugger port / blocks until a client attaches"},
+    {"module": "node:module", "owner": "", "name": "register|registerHooks|enableCompileCache", "reason": "installs process-wide loader hooks / writes a cache dir"},
+    {"module": "node:crypto", "owner": "", "name": "setFips|setEngine", "reason": "process-wide crypto provider state"},
+    {"module": "node:fs|node:fs/promises", "owner": "", "name": "watch|watchFile|createReadStream|createWriteStream", "reason": "long-lived handles; error is emitted asynchronously as an uncaught event, which the harness cannot attribute to a probe"}
+  ]
+}

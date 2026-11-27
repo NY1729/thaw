@@ -1,0 +1,232 @@
+{
+ "assert": {
+  "differ": 201,
+  "same": 97,
+  "skipped": 1
+ },
+ "assert_strict": {
+  "differ": 174,
+  "same": 97,
+  "skipped": 1
+ },
+ "async_hooks": {
+  "differ": 12,
+  "skipped": 5
+ },
+ "buffer": {
+  "differ": 31,
+  "same": 62,
+  "skipped": 93
+ },
+ "child_process": {
+  "same": 6,
+  "skipped": 11
+ },
+ "cluster": {
+  "differ": 18,
+  "skipped": 4
+ },
+ "console": {
+  "differ": 6,
+  "same": 3,
+  "skipped": 29
+ },
+ "crypto": {
+  "differ": 239,
+  "same": 145,
+  "skipped": 51
+ },
+ "dgram": {
+  "differ": 20,
+  "skipped": 25
+ },
+ "diagnostics_channel": {
+  "differ": 26,
+  "same": 22
+ },
+ "dns": {
+  "same": 6,
+  "skipped": 32
+ },
+ "dns_promises": {
+  "same": 6,
+  "skipped": 32
+ },
+ "domain": {
+  "differ": 15
+ },
+ "events": {
+  "differ": 171,
+  "same": 33
+ },
+ "fs": {
+  "build-fail": 63,
+  "differ": 486,
+  "same": 174,
+  "skipped": 11
+ },
+ "fs_promises": {
+  "build-fail": 51,
+  "differ": 156,
+  "skipped": 1
+ },
+ "globals": {
+  "differ": 294,
+  "same": 324,
+  "skipped": 88
+ },
+ "http": {
+  "differ": 64,
+  "same": 35,
+  "skipped": 27
+ },
+ "http2": {
+  "differ": 13,
+  "same": 17,
+  "skipped": 21
+ },
+ "https": {
+  "differ": 8,
+  "same": 16,
+  "skipped": 6
+ },
+ "inspector": {
+  "differ": 36,
+  "skipped": 2
+ },
+ "inspector_promises": {
+  "differ": 36,
+  "skipped": 2
+ },
+ "module": {
+  "differ": 64,
+  "same": 53,
+  "skipped": 5
+ },
+ "net": {
+  "differ": 63,
+  "same": 71
+ },
+ "os": {
+  "differ": 4,
+  "same": 2,
+  "skipped": 1
+ },
+ "path": {
+  "differ": 4,
+  "same": 194
+ },
+ "path_posix": {
+  "differ": 4,
+  "same": 194
+ },
+ "path_win32": {
+  "differ": 4,
+  "same": 194
+ },
+ "perf_hooks": {
+  "differ": 4,
+  "same": 2,
+  "skipped": 24
+ },
+ "process": {
+  "differ": 33,
+  "same": 42,
+  "skipped": 23
+ },
+ "punycode": {
+  "differ": 18
+ },
+ "querystring": {
+  "differ": 30,
+  "same": 30
+ },
+ "readline": {
+  "differ": 69,
+  "skipped": 1
+ },
+ "readline_promises": {
+  "differ": 12,
+  "skipped": 7
+ },
+ "repl": {
+  "differ": 31,
+  "same": 2
+ },
+ "stream": {
+  "differ": 274,
+  "same": 77
+ },
+ "stream_consumers": {
+  "differ": 15
+ },
+ "stream_promises": {
+  "differ": 22
+ },
+ "stream_web": {
+  "differ": 25,
+  "same": 2,
+  "skipped": 22
+ },
+ "string_decoder": {
+  "differ": 3,
+  "same": 9
+ },
+ "sys": {
+  "differ": 113,
+  "same": 115,
+  "skipped": 2
+ },
+ "timers": {
+  "differ": 15,
+  "same": 24
+ },
+ "timers_promises": {
+  "differ": 24
+ },
+ "tls": {
+  "differ": 87,
+  "same": 21
+ },
+ "trace_events": {
+  "differ": 3
+ },
+ "tty": {
+  "same": 3,
+  "skipped": 8
+ },
+ "url": {
+  "differ": 53,
+  "same": 70,
+  "skipped": 2
+ },
+ "util": {
+  "differ": 113,
+  "same": 115,
+  "skipped": 2
+ },
+ "util_types": {
+  "same": 129
+ },
+ "v8": {
+  "differ": 40,
+  "same": 44,
+  "skipped": 9
+ },
+ "vm": {
+  "differ": 15,
+  "same": 51
+ },
+ "wasi": {
+  "skipped": 3
+ },
+ "worker_threads": {
+  "differ": 12,
+  "same": 27,
+  "skipped": 18
+ },
+ "zlib": {
+  "differ": 1,
+  "same": 230
+ }
+}
