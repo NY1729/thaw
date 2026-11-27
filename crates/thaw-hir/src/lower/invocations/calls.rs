@@ -4611,6 +4611,78 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             let HirType::Tuple(elements) = &source_type else {
+                // A trailing spread of a statically unsized array / `any` into a callee with known
+                // parameters: read `source[i]` for every remaining fixed parameter and pass the
+                // rest as `source.slice(k)`; a missing element is `undefined`, as in JS.
+                // ponytail: extra elements past a rest-less callee are dropped (they only
+                // matter through `arguments`); an unknown callee still falls through to the error.
+                if matches!(source_type, HirType::Array(_) | HirType::Json)
+                    && call.args.last().is_some_and(|last| std::ptr::eq(last, arg))
+                    && param_types.as_ref().is_some_and(|params| {
+                        let fixed = params.len() - usize::from(rest_element.is_some());
+                        let element = match &source_type {
+                            HirType::Array(element) => Some(element.as_ref()),
+                            _ => None,
+                        };
+                        // A missing element reads as `undefined`, so every slot must be able to hold it.
+                        params.iter().take(fixed).skip(lowered_arguments.len()).all(|ty| {
+                            matches!(ty, HirType::Json | HirType::JsValue | HirType::Dynamic | HirType::Optional(_))
+                        }) && rest_element.is_none_or(|rest| {
+                            matches!(rest, HirType::Json | HirType::Dynamic) || element == Some(rest)
+                        })
+                    })
+                {
+                    let params = param_types.clone().unwrap_or_default();
+                    let fixed = params.len() - usize::from(rest_element.is_some());
+                    let rest_element = rest_element.cloned();
+                    let name = format!("__thaw_call_spread_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), source_type.clone());
+                    argument_bindings.push((name.clone(), source_type.clone(), value));
+                    let span = arg.expr.span();
+                    let source = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.as_str().into(), span));
+                    let start = lowered_arguments.len();
+                    for position in start..fixed {
+                        let member = Expr::Member(swc_ecma_ast::MemberExpr {
+                            span,
+                            obj: Box::new(source.clone()),
+                            prop: MemberProp::Computed(swc_ecma_ast::ComputedPropName {
+                                span,
+                                expr: Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number {
+                                    span,
+                                    value: (position - start) as f64,
+                                    raw: None,
+                                }))),
+                            }),
+                        });
+                        let item = self.lower_expr_with_expected_type(&member, params.get(position))?;
+                        lowered_arguments.push(item);
+                    }
+                    if let Some(element) = rest_element {
+                        let slice = Expr::Call(swc_ecma_ast::CallExpr {
+                            span,
+                            ctxt: Default::default(),
+                            callee: Callee::Expr(Box::new(Expr::Member(swc_ecma_ast::MemberExpr {
+                                span,
+                                obj: Box::new(source),
+                                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("slice".into(), span)),
+                            }))),
+                            args: vec![swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number {
+                                    span,
+                                    value: (fixed.saturating_sub(start)) as f64,
+                                    raw: None,
+                                }))),
+                            }],
+                            type_args: None,
+                        });
+                        let tail = self.lower_expr_with_expected_type(&slice, Some(&HirType::Array(Box::new(element))))?;
+                        lowered_arguments.push(tail);
+                        forwarded_rest_array = true;
+                    }
+                    continue;
+                }
                 return Err(format!(
                     "call spread source must have statically known tuple length, got {source_type:?}"
                 ));

@@ -1643,6 +1643,12 @@ impl<'a> FnLowerer<'a> {
             if actual == crate::caught_exception_carrier_type() {
                 return self.caught_carrier_as_json(value);
             }
+            // A Symbol in an `any` slot is its wire text as a Json string (`\u{3}<id>[:desc]`);
+            // `typeof`, printing and `String()` on a Json string recognise that text.
+            if actual == HirType::Symbol {
+                let key = self.coerce_primitive_to_string(value)?;
+                return self.coerce_to_declared(&HirType::Json, key);
+            }
             // A Union/Optional/Nullable/Nullish with a live `JsValue` member must be converted per
             // member (JsValue -> JsValueAsJson); the generic JsonSet route emits the
             // `__thaw_js_handle_id__` placeholder, which has no reviver when the callee is native.

@@ -6267,6 +6267,11 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
     if is_native_iterator(value) {
         return Node::Raw("Object [Generator] {}".to_string());
     }
+    if let Value::String(text) = value {
+        if is_symbol_key_wire(text.as_bytes()) {
+            return Node::Raw(symbol_text(text.as_bytes()));
+        }
+    }
     if let Some(source) = regexp_wrapper_property(value, "source") {
         let flags = regexp_wrapper_property(value, "flags")
             .and_then(|flags| flags.as_str().map(str::to_string))
@@ -6918,6 +6923,7 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
                 .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
                 .unwrap_or_else(|| text.clone())
         }
+        Value::String(value) if is_symbol_key_wire(value.as_bytes()) => symbol_text(value.as_bytes()),
         Value::String(value) => value.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
         other => inspect_json(other),
@@ -7179,6 +7185,7 @@ fn console_format(args: &[Value]) -> String {
                 .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
                 .unwrap_or_else(|| text.clone())
         }
+        Value::String(text) if is_symbol_key_wire(text.as_bytes()) => symbol_text(text.as_bytes()),
         Value::String(text) => text.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
         other => inspect_json(other),
@@ -8544,6 +8551,8 @@ pub unsafe extern "C" fn thaw_json_typeof(value: *const Value) -> *const c_char 
         Value::Bool(_) => c"boolean".as_ptr(),
         Value::Number(_) => c"number".as_ptr(),
         Value::BigInt(_) => c"bigint".as_ptr(),
+        // A Symbol held in `any` is its wire text.
+        Value::String(text) if is_symbol_key_wire(text.as_bytes()) => c"symbol".as_ptr(),
         Value::String(_) | Value::Wtf8(_) => c"string".as_ptr(),
     }
 }
