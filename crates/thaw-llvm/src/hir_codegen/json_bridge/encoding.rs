@@ -2055,62 +2055,18 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_array_wrap(data)
     }
 
+    /// The `Json` view of a byte buffer: a `Value::Bytes` aliasing the native view record.
     fn compile_native_bytes_to_json(
         &mut self,
         value: PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let object = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_object_new").unwrap(),
-                &[],
-                "bytes_json",
-            )
+        let record = self.compile_array_data(value)?;
+        self.builder
+            .build_call(self.module.get_function("thaw_json_from_bytes").unwrap(), &[record.into()], "bytes_json")
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or("thaw_json_object_new returned no value")?;
-        let ty_key = self.intern_string("type", "bytes_type_key")
-            .map_err(|error| error.to_string())?;
-        let ty_value = self.intern_string("Buffer", "bytes_type_value")
-            .map_err(|error| error.to_string())?;
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_json_object_set_string").unwrap(),
-                &[object.into(), ty_key.as_pointer_value().into(), ty_value.as_pointer_value().into()],
-                "set_bytes_type",
-            )
-            .map_err(|error| error.to_string())?;
-        let widened = self.compile_bytes_widened_handle(value)?;
-        let data = self.compile_native_array_to_json_with_undefined(widened, &HirType::F64, true)?;
-        let data_key = self.intern_string("data", "bytes_data_key")
-            .map_err(|error| error.to_string())?;
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_json_object_set_json").unwrap(),
-                &[object.into(), data_key.as_pointer_value().into(), data.into()],
-                "set_bytes_data",
-            )
-            .map_err(|error| error.to_string())?;
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_json_destroy").unwrap(),
-                &[data.into()],
-                "destroy_bytes_data",
-            )
-            .map_err(|error| error.to_string())?;
-        let branded = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_json_brand_wrapper").unwrap(),
-                &[object.into()],
-                "brand_bytes_json",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("thaw_json_brand_wrapper returned no value")?;
-        Ok(branded)
+            .ok_or_else(|| "thaw_json_from_bytes returned no value".to_string())
     }
 
     fn compile_native_array_to_json_with_undefined(

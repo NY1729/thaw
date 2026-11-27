@@ -707,6 +707,32 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_json_brand_wrapper" => {
                 return self.compile_single_arg_call("thaw_json_brand_wrapper", args, "JSON wrapper brand");
             }
+            "__thaw_json_from_bytes" => {
+                let [source] = args else {
+                    return Err("`__thaw_json_from_bytes` expects one operand".into());
+                };
+                let BasicValueEnum::PointerValue(handle) = self.compile_expr(source)? else {
+                    return Err("`__thaw_json_from_bytes` expects a byte buffer".into());
+                };
+                let record = self.compile_array_data(handle)?;
+                return self
+                    .builder
+                    .build_call(self.module.get_function("thaw_json_from_bytes").unwrap(), &[record.into()], "json_from_bytes")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_from_bytes returned no value".into());
+            }
+            "__thaw_json_as_bytes" => {
+                // The next `JsonAsNative` array decode aliases a `Bytes` source instead of copying.
+                let [decode] = args else {
+                    return Err("`__thaw_json_as_bytes` expects one operand".into());
+                };
+                self.json_array_as_bytes = true;
+                let result = self.compile_expr(decode);
+                self.json_array_as_bytes = false;
+                return result;
+            }
             "__thaw_json_clone" => {
                 let result = self.compile_single_arg_call(
                     "thaw_json_structured_clone",

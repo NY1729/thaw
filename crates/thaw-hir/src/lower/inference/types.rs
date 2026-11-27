@@ -2518,6 +2518,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "nested JSON assignment index")?;
                         return Ok(HirType::Json);
                     }
+                    "__thaw_json_from_bytes" => return Ok(HirType::Json),
+                    "__thaw_json_as_bytes" => {
+                        let [value] = args.as_slice() else {
+                            return Err("`__thaw_json_as_bytes` expects one operand".into());
+                        };
+                        return self.infer_expr_type(value);
+                    }
                     "__thaw_json_clone" => {
                         let [value] = args.as_slice() else {
                             return Err("structuredClone expects one operand".into());

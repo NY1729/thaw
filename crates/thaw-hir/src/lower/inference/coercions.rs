@@ -1985,22 +1985,8 @@ impl<'a> FnLowerer<'a> {
             // apart from an ordinary `number[]` of the same runtime
             // layout.
             if self.infer_expr_type_inner(&value)? == HirType::Bytes {
-                let widened = HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_bytes_to_array".into())),
-                    vec![value],
-                );
-                let data = self.wrap_native_value_as_json(widened, HirType::Array(Box::new(HirType::F64)))?;
-                let kind = self.wrap_native_value_as_json(
-                    HirExpr::Lit(HirLit::Str("Buffer".to_string())),
-                    HirType::Str,
-                )?;
-                return Ok(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
-                    vec![HirExpr::JsonObjectLit(
-                        vec![("type".into(), kind), ("data".into(), data)],
-                        HirType::Json,
-                    )],
-                ));
+                // A `Value::Bytes` aliasing the native view (no copy).
+                return Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_from_bytes".into())), vec![value]));
             }
             if let HirType::Object(fields) = &actual {
                 if !object_type_is_error_family(&actual)
