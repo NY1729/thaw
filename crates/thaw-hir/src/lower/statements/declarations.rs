@@ -772,6 +772,32 @@ impl<'a> FnLowerer<'a> {
                     )
                 )) { Some(HirType::Json) } else { annotated };
                 let annotated = annotated.or_else(|| implicit_any_initializer_type(var_decl.kind, init));
+                // JS entries: `const h = {a: 1}; h.b = 2;` grows the literal, so it is a dictionary-like `any` from the start.
+                let annotated = annotated.or_else(|| {
+                    let Expr::Object(literal) = init else { return None };
+                    if !implicit_any() || self.member_assignments.is_empty() {
+                        return None;
+                    }
+                    let mut keys = HashSet::new();
+                    for property in &literal.props {
+                        match property {
+                            swc_ecma_ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
+                                swc_ecma_ast::Prop::KeyValue(pair) => match &pair.key {
+                                    swc_ecma_ast::PropName::Ident(key) => keys.insert(key.sym.to_string()),
+                                    swc_ecma_ast::PropName::Str(key) => keys.insert(key.value.to_string_lossy().into_owned()),
+                                    _ => return None,
+                                },
+                                swc_ecma_ast::Prop::Shorthand(key) => keys.insert(key.sym.to_string()),
+                                _ => return None,
+                            },
+                            swc_ecma_ast::PropOrSpread::Spread(_) => return None,
+                        };
+                    }
+                    self.member_assignments
+                        .iter()
+                        .any(|(owner, prop)| *owner == name && !keys.contains(prop))
+                        .then_some(HirType::Json)
+                });
                 let source_annotation = annotated.clone();
                 let mut source_hint = self.source_value_hint(init).and_then(|hint| self.infer_expr_type(&hint).ok());
                 if has_dynamic_storage(binding.id.span) || has_dynamic_storage(init.span()) {
@@ -894,23 +920,36 @@ impl<'a> FnLowerer<'a> {
                     self.expression_function_object_array_property_discriminants(init);
                 let propagated_function_object_function_property_discriminants =
                     self.expression_function_object_function_property_discriminants(init);
-                let dynamic_call = matches!(
-                    init,
-                    Expr::Call(call)
-                        if matches!(
-                            &call.callee,
-                            Callee::Expr(callee)
-                                if match callee.as_ref() {
-                                    Expr::Ident(identifier) => self.scope
-                                        .get(&self.resolve_binding(identifier.sym.as_ref()))
-                                        == Some(&HirType::JsValue),
-                                    Expr::Member(member) => self
-                                        .infer_member_receiver_type(&member.obj)
-                                        == Some(HirType::JsValue),
-                                    _ => false,
-                                }
-                        )
-                );
+                // `recv.m(..)` and `recv?.m(..)` on a dynamic (`JsValue`) receiver are the same kind of call.
+                let dynamic_callee: Option<&Expr> = match init {
+                    Expr::Call(call) => match &call.callee {
+                        Callee::Expr(callee) => Some(callee.as_ref()),
+                        _ => None,
+                    },
+                    Expr::OptChain(chain) => match chain.base.as_ref() {
+                        swc_ecma_ast::OptChainBase::Call(call) => Some(call.callee.as_ref()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let dynamic_call = dynamic_callee.is_some_and(|callee| {
+                    let callee = match callee {
+                        Expr::OptChain(chain) => match chain.base.as_ref() {
+                            swc_ecma_ast::OptChainBase::Member(member) => Some(Expr::Member(member.clone())),
+                            _ => None,
+                        },
+                        other => Some(other.clone()),
+                    };
+                    match callee.as_ref() {
+                        Some(Expr::Ident(identifier)) => self.scope
+                            .get(&self.resolve_binding(identifier.sym.as_ref()))
+                            == Some(&HirType::JsValue),
+                        Some(Expr::Member(member)) => self
+                            .infer_member_receiver_type(&member.obj)
+                            == Some(HirType::JsValue),
+                        _ => false,
+                    }
+                });
                 // `const r = await fetch(u)` whose `r` is used as a receiver (`r.status`) is a Response.
                 let awaited_fetch = matches!(init, Expr::Await(a)
                     if matches!(a.arg.as_ref(), Expr::Call(c)

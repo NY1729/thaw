@@ -127,6 +127,8 @@ struct FnLowerer<'a> {
     /// same statement list (definite-assignment approximation).
     assigned_later: HashSet<Symbol>,
     awaited_bindings: HashSet<Symbol>,
+    /// `name -> property` pairs assigned as `name.prop = ...` anywhere in a statement list (JS entries grow object literals).
+    member_assignments: HashSet<(Symbol, Symbol)>,
     /// Names bound by a `catch (e)` clause. `typeof e` reports `"object"`
     /// for these (real JavaScript throws an `Error` object), even though
     /// the binding is stored as the tagged error *string* internally --

@@ -1,3 +1,4 @@
+use crate::json::Value;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -146,7 +147,7 @@ fn string_from_ptr(value: *const c_char) -> String {
 }
 
 #[no_mangle]
-pub extern "C" fn serveOnce(port: f64, body: *const c_char) -> *const c_char {
+pub extern "C" fn __thaw_serveOnce(port: f64, body: *const c_char) -> *const c_char {
     let body = string_from_ptr(body);
     CString::new(serve_once(port, |_, _| ResponseSpec::plain(body)).unwrap_or_default())
         .unwrap_or_default()
@@ -416,7 +417,7 @@ const CHUNKED_TERMINATOR: &[u8] = b"0\r\n\r\n";
 /// as the response body. A closure is `[code pointer][captures...]`; generated
 /// code accepts the closure address as its hidden first argument.
 #[no_mangle]
-pub extern "C" fn serveOnceWith(port: f64, callback: *const c_void) -> *const c_char {
+pub extern "C" fn __thaw_serveOnceWith(port: f64, callback: *const c_void) -> *const c_char {
     if callback.is_null() {
         return CString::default().into_raw();
     }
@@ -510,6 +511,20 @@ struct IncomingMessage {
     /// than one more `NativeClosure`, for a shape nothing here already
     /// needed.
     get_header: *const NativeClosure,
+    /// Node's `request.headers` (lowercased names; duplicates merged by Node's rules), `rawHeaders`
+    /// (`[name, value, ...]` in wire order and case), `headersDistinct`, `trailers`: plain Json values.
+    headers: *const Value,
+    raw_headers: *const Value,
+    headers_distinct: *const Value,
+    trailers: *const Value,
+    http_version: *const c_char,
+    http_version_major: f64,
+    http_version_minor: f64,
+    /// Boolean slots are a whole machine word so generated code reads them like any other field.
+    complete: u64,
+    aborted: u64,
+    /// `request.socket`: a Json object with the peer address fields.
+    socket: *const Value,
 }
 
 #[repr(C)]
@@ -526,6 +541,34 @@ struct ServerResponse {
     /// so an arbitrary byte sequence survives.
     write_bytes: *const NativeClosure,
     end_bytes: *const NativeClosure,
+    /// `response.statusMessage`; null means the default reason phrase for `statusCode`.
+    status_message: *const c_char,
+    headers_sent: u64,
+    writable_ended: u64,
+    writable_finished: u64,
+    finished: u64,
+    get_header: *const NativeClosure,
+    get_headers: *const NativeClosure,
+    get_header_names: *const NativeClosure,
+    has_header: *const NativeClosure,
+    remove_header: *const NativeClosure,
+    write_head: *const NativeClosure,
+    flush_headers: *const NativeClosure,
+    on: *const NativeClosure,
+    once: *const NativeClosure,
+    off: *const NativeClosure,
+    destroy: *const NativeClosure,
+    // EventEmitter members over the three events a native response emits.
+    add_listener: *const NativeClosure,
+    remove_listener: *const NativeClosure,
+    prepend_listener: *const NativeClosure,
+    prepend_once_listener: *const NativeClosure,
+    emit: *const NativeClosure,
+    listener_count: *const NativeClosure,
+    remove_all_listeners: *const NativeClosure,
+    event_names: *const NativeClosure,
+    set_max_listeners: *const NativeClosure,
+    get_max_listeners: *const NativeClosure,
 }
 
 #[derive(Clone)]
@@ -636,6 +679,28 @@ struct RequestContext {
     /// what `getHeader` looks up. Empty for the one-shot helpers (which
     /// never parse a real request head at all).
     _headers: Vec<(String, String)>,
+    /// Closures behind the Node-shaped `ServerResponse` members (`getHeader`, `writeHead`, `on`, ...).
+    res_get_header: NativeClosure,
+    res_get_headers: NativeClosure,
+    res_get_header_names: NativeClosure,
+    res_has_header: NativeClosure,
+    res_remove_header: NativeClosure,
+    res_write_head: NativeClosure,
+    res_flush_headers: NativeClosure,
+    res_on: NativeClosure,
+    res_once: NativeClosure,
+    res_off: NativeClosure,
+    res_destroy: NativeClosure,
+    res_emitter: [NativeClosure; 8],
+    /// Lowercased names whose last `setHeader` value was a number.
+    numeric_headers: Vec<String>,
+    /// `res.on/once("close" | "finish" | "drain", cb)`, in registration order.
+    response_listeners: Vec<ResponseListener>,
+    /// `req.on("close", cb)`: fired together with the response's `close`.
+    request_close_listeners: Vec<RequestListener>,
+    /// Owned Json values and strings the `IncomingMessage` pointers borrow from.
+    _request_json: Vec<*mut Value>,
+    _http_version: CString,
     // Backing storage the `IncomingMessage` pointers borrow from; never
     // read through directly (hence the underscores), just kept alive.
     _method: CString,
@@ -647,9 +712,10 @@ impl RequestContext {
         method: &str,
         target: &str,
         body: &[u8],
-        headers: &[(String, String)],
+        raw_headers: &[(String, String)],
         connection: *mut ConnectionState,
     ) -> Box<RequestContext> {
+        let headers = &merge_request_headers(raw_headers);
         let mut context = Box::new(RequestContext {
             connection,
             resumable: false,
@@ -670,6 +736,32 @@ impl RequestContext {
                 end_encoded: std::ptr::null(),
                 write_bytes: std::ptr::null(),
                 end_bytes: std::ptr::null(),
+                status_message: std::ptr::null(),
+                headers_sent: 0,
+                writable_ended: 0,
+                writable_finished: 0,
+                finished: 0,
+                get_header: std::ptr::null(),
+                get_headers: std::ptr::null(),
+                get_header_names: std::ptr::null(),
+                has_header: std::ptr::null(),
+                remove_header: std::ptr::null(),
+                write_head: std::ptr::null(),
+                flush_headers: std::ptr::null(),
+                on: std::ptr::null(),
+                once: std::ptr::null(),
+                off: std::ptr::null(),
+                destroy: std::ptr::null(),
+                add_listener: std::ptr::null(),
+                remove_listener: std::ptr::null(),
+                prepend_listener: std::ptr::null(),
+                prepend_once_listener: std::ptr::null(),
+                emit: std::ptr::null(),
+                listener_count: std::ptr::null(),
+                remove_all_listeners: std::ptr::null(),
+                event_names: std::ptr::null(),
+                set_max_listeners: std::ptr::null(),
+                get_max_listeners: std::ptr::null(),
             },
             request: IncomingMessage {
                 method: std::ptr::null(),
@@ -680,6 +772,16 @@ impl RequestContext {
                 body_hex: std::ptr::null(),
                 body_bytes: std::ptr::null(),
                 get_header: std::ptr::null(),
+                headers: std::ptr::null(),
+                raw_headers: std::ptr::null(),
+                headers_distinct: std::ptr::null(),
+                trailers: std::ptr::null(),
+                http_version: std::ptr::null(),
+                http_version_major: 1.0,
+                http_version_minor: 1.0,
+                complete: 0,
+                aborted: 0,
+                socket: std::ptr::null(),
             },
             request_on: NativeClosure::new(
                 request_add_listener as *const c_void,
@@ -717,6 +819,74 @@ impl RequestContext {
             request_end_listeners: Vec::new(),
             body_events_delivered: false,
             _headers: headers.to_vec(),
+            res_get_header: NativeClosure::new(
+                response_get_header as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            res_get_headers: NativeClosure::new(
+                response_get_headers as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            res_get_header_names: NativeClosure::new(
+                response_get_header_names as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            res_has_header: NativeClosure::new(
+                response_has_header as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            res_remove_header: NativeClosure::new(
+                response_remove_header as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            res_write_head: NativeClosure::new(
+                response_write_head as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            res_flush_headers: NativeClosure::new(
+                response_flush_headers as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            res_on: NativeClosure::new(response_on as *const c_void, std::ptr::null_mut()),
+            res_once: NativeClosure::new(response_once as *const c_void, std::ptr::null_mut()),
+            res_off: NativeClosure::new(response_off as *const c_void, std::ptr::null_mut()),
+            res_destroy: NativeClosure::new(
+                response_destroy as *const c_void,
+                std::ptr::null_mut(),
+            ),
+            res_emitter: [
+                NativeClosure::new(
+                    response_prepend_listener as *const c_void,
+                    std::ptr::null_mut(),
+                ),
+                NativeClosure::new(
+                    response_prepend_once_listener as *const c_void,
+                    std::ptr::null_mut(),
+                ),
+                NativeClosure::new(response_emit as *const c_void, std::ptr::null_mut()),
+                NativeClosure::new(
+                    response_listener_count as *const c_void,
+                    std::ptr::null_mut(),
+                ),
+                NativeClosure::new(
+                    response_remove_all_listeners as *const c_void,
+                    std::ptr::null_mut(),
+                ),
+                NativeClosure::new(response_event_names as *const c_void, std::ptr::null_mut()),
+                NativeClosure::new(
+                    response_set_max_listeners as *const c_void,
+                    std::ptr::null_mut(),
+                ),
+                NativeClosure::new(
+                    response_get_max_listeners as *const c_void,
+                    std::ptr::null_mut(),
+                ),
+            ],
+            numeric_headers: Vec::new(),
+            response_listeners: Vec::new(),
+            request_close_listeners: Vec::new(),
+            _request_json: Vec::new(),
+            _http_version: CString::new("1.1").unwrap_or_default(),
             set_header: NativeClosure::new(
                 response_set_header as *const c_void,
                 std::ptr::null_mut(),
@@ -756,6 +926,76 @@ impl RequestContext {
         context.request.body_hex = &context.request_body_hex;
         context.request.body_bytes = &context.request_body_bytes;
         context.request.get_header = &context.request_get_header;
+        for closure in [
+            &mut context.res_get_header,
+            &mut context.res_get_headers,
+            &mut context.res_get_header_names,
+            &mut context.res_has_header,
+            &mut context.res_remove_header,
+            &mut context.res_write_head,
+            &mut context.res_flush_headers,
+            &mut context.res_on,
+            &mut context.res_once,
+            &mut context.res_off,
+            &mut context.res_destroy,
+        ] {
+            closure.context = context_ptr.cast();
+        }
+        context.response.get_header = &context.res_get_header;
+        context.response.get_headers = &context.res_get_headers;
+        context.response.get_header_names = &context.res_get_header_names;
+        context.response.has_header = &context.res_has_header;
+        context.response.remove_header = &context.res_remove_header;
+        context.response.write_head = &context.res_write_head;
+        context.response.flush_headers = &context.res_flush_headers;
+        context.response.on = &context.res_on;
+        context.response.once = &context.res_once;
+        context.response.off = &context.res_off;
+        context.response.destroy = &context.res_destroy;
+        for closure in &mut context.res_emitter {
+            closure.context = context_ptr.cast();
+        }
+        // `addListener`/`removeListener` are Node's aliases of `on`/`off`: same closure.
+        context.response.add_listener = &context.res_on;
+        context.response.remove_listener = &context.res_off;
+        context.response.prepend_listener = &context.res_emitter[0];
+        context.response.prepend_once_listener = &context.res_emitter[1];
+        context.response.emit = &context.res_emitter[2];
+        context.response.listener_count = &context.res_emitter[3];
+        context.response.remove_all_listeners = &context.res_emitter[4];
+        context.response.event_names = &context.res_emitter[5];
+        context.response.set_max_listeners = &context.res_emitter[6];
+        context.response.get_max_listeners = &context.res_emitter[7];
+        // Node-shaped request values: built once per request, owned by the Json box registry.
+        let raw_flat: Vec<String> = raw_headers
+            .iter()
+            .flat_map(|(n, v)| [n.clone(), v.clone()])
+            .collect();
+        let distinct = distinct_request_headers(raw_headers);
+        let socket_peer = if connection.is_null() {
+            None
+        } else {
+            unsafe {
+                (*connection)
+                    .stream
+                    .as_ref()
+                    .and_then(|s| s.peer_addr().ok())
+            }
+        };
+        let json = [
+            crate::http_glue::merged_headers_json(headers),
+            crate::http_glue::string_array_json(&raw_flat),
+            crate::http_glue::distinct_headers_json(&distinct),
+            crate::http_glue::empty_object_json(),
+            crate::http_glue::socket_json(socket_peer),
+        ];
+        context.request.headers = json[0];
+        context.request.raw_headers = json[1];
+        context.request.headers_distinct = json[2];
+        context.request.trailers = json[3];
+        context.request.socket = json[4];
+        context.request.http_version = context._http_version.as_ptr();
+        context._request_json.extend(json);
         context
     }
 }
@@ -1005,6 +1245,7 @@ unsafe extern "C" fn request_body_bytes(environment: *const c_void) -> *mut u8 {
 /// byte array so an arbitrary byte sequence goes out verbatim.
 unsafe extern "C" fn response_write_bytes(environment: *const c_void, chunk: *const u8) -> bool {
     let context = request_context(environment);
+    context.response.headers_sent = 1;
     let bytes = native_bytes_to_vec(chunk);
     if stream_should_engage(context) {
         stream_write(context, &bytes);
@@ -1047,6 +1288,7 @@ unsafe extern "C" fn request_add_listener(
         "end" => context
             .request_end_listeners
             .push(RequestListener::new(callback as usize)),
+        "close" => request_add_close_listener(context, callback),
         _ => {}
     }
     true
@@ -1187,6 +1429,7 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
         }
     }
     if body_complete {
+        unsafe { (*context_ptr).request.complete = 1 };
         // Data callbacks may register an end listener for this same body.
         let end_listeners = unsafe { std::mem::take(&mut (*context_ptr).request_end_listeners) };
         for listener in end_listeners {
@@ -1206,27 +1449,434 @@ unsafe fn request_context(environment: *const c_void) -> &'static mut RequestCon
     &mut *(closure.context as *mut RequestContext)
 }
 
+/// A response event name Node emits on `ServerResponse` that this runtime can deliver.
+#[derive(Clone, Copy, PartialEq)]
+enum ResponseEvent {
+    Close,
+    Finish,
+    Drain,
+}
+
+struct ResponseListener {
+    event: ResponseEvent,
+    listener: RequestListener,
+    once: bool,
+}
+
+thread_local! {
+    /// Listeners whose event already happened; run from the server poll hook, i.e. asynchronously like Node.
+    static PENDING_RESPONSE_EVENTS: RefCell<Vec<RequestListener>> = const { RefCell::new(Vec::new()) };
+}
+
+fn response_event_named(name: &str) -> Option<ResponseEvent> {
+    match name {
+        "close" => Some(ResponseEvent::Close),
+        "finish" => Some(ResponseEvent::Finish),
+        "drain" => Some(ResponseEvent::Drain),
+        _ => None,
+    }
+}
+
+/// Moves the listeners for `event` onto the asynchronous delivery queue (`once` ones are consumed).
+fn queue_response_event(context: &mut RequestContext, event: ResponseEvent) {
+    let mut due = Vec::new();
+    context.response_listeners.retain(|entry| {
+        if entry.event != event {
+            return true;
+        }
+        due.push(entry.listener.clone());
+        !entry.once
+    });
+    if event == ResponseEvent::Close {
+        due.append(&mut std::mem::take(&mut context.request_close_listeners));
+    }
+    if !due.is_empty() {
+        PENDING_RESPONSE_EVENTS.with(|queue| queue.borrow_mut().extend(due));
+    }
+}
+
+/// `response.end()` happened: flags flip now, `finish` then `close` are delivered on a later turn.
+fn mark_response_ended(context: &mut RequestContext) {
+    context.response.headers_sent = 1;
+    if context.response.writable_ended != 0 {
+        return;
+    }
+    context.response.writable_ended = 1;
+    context.response.writable_finished = 1;
+    context.response.finished = 1;
+    context.request.complete = 1;
+    queue_response_event(context, ResponseEvent::Finish);
+    queue_response_event(context, ResponseEvent::Close);
+}
+
+/// The connection went away before the response finished: `close` only, with `writableFinished` still false.
+fn mark_response_aborted(context: &mut RequestContext) {
+    if context.response.writable_ended != 0 || context.response.writable_finished != 0 {
+        return;
+    }
+    context.request.aborted = 1;
+    queue_response_event(context, ResponseEvent::Close);
+}
+
+/// Runs the queued listeners; returns whether any ran so the host drains microtasks.
+fn deliver_pending_response_events() -> bool {
+    let batch = PENDING_RESPONSE_EVENTS.with(|queue| std::mem::take(&mut *queue.borrow_mut()));
+    let ran = !batch.is_empty();
+    for listener in batch {
+        let callback = listener.callback as *const c_void;
+        unsafe {
+            type Callback = unsafe extern "C" fn(*const c_void);
+            let code = *(callback as *const *const c_void);
+            let callback_fn: Callback = std::mem::transmute(code);
+            callback_fn(callback);
+        }
+    }
+    ran
+}
+
+fn add_response_listener(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+    once: bool,
+) -> bool {
+    if callback.is_null() {
+        return false;
+    }
+    let context = unsafe { request_context(environment) };
+    let Some(event) = response_event_named(&string_from_ptr(event)) else {
+        // `error`/`pipe`/`unpipe`/... never fire on this buffered server response.
+        return true;
+    };
+    // A listener added after the event already happened still runs once, like an already-ended stream's `close`.
+    let late = match event {
+        ResponseEvent::Close => {
+            context.response.writable_ended != 0 && context.response_listeners.is_empty()
+        }
+        _ => false,
+    };
+    let listener = RequestListener::new(callback as usize);
+    if late {
+        PENDING_RESPONSE_EVENTS.with(|queue| queue.borrow_mut().push(listener));
+    } else {
+        context.response_listeners.push(ResponseListener {
+            event,
+            listener,
+            once,
+        });
+    }
+    true
+}
+
+unsafe extern "C" fn response_on(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+) -> bool {
+    add_response_listener(environment, event, callback, false)
+}
+
+unsafe extern "C" fn response_once(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+) -> bool {
+    add_response_listener(environment, event, callback, true)
+}
+
+unsafe extern "C" fn response_prepend_listener(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+) -> bool {
+    prepend_response_listener(environment, event, callback, false)
+}
+
+unsafe extern "C" fn response_prepend_once_listener(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+) -> bool {
+    prepend_response_listener(environment, event, callback, true)
+}
+
+fn prepend_response_listener(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+    once: bool,
+) -> bool {
+    let before = unsafe { request_context(environment) }
+        .response_listeners
+        .len();
+    if !add_response_listener(environment, event, callback, once) {
+        return false;
+    }
+    let context = unsafe { request_context(environment) };
+    if context.response_listeners.len() > before {
+        let added = context
+            .response_listeners
+            .pop()
+            .expect("listener just added");
+        context.response_listeners.insert(0, added);
+    }
+    true
+}
+
+/// `response.emit(event)`: runs the matching listeners now (no arguments); true when there were any.
+unsafe extern "C" fn response_emit(environment: *const c_void, event: *const c_char) -> bool {
+    let context = request_context(environment);
+    let Some(event) = response_event_named(&string_from_ptr(event)) else {
+        return false;
+    };
+    let had = context
+        .response_listeners
+        .iter()
+        .any(|entry| entry.event == event);
+    queue_response_event(context, event);
+    if had {
+        deliver_pending_response_events();
+    }
+    had
+}
+
+unsafe extern "C" fn response_listener_count(
+    environment: *const c_void,
+    event: *const c_char,
+) -> f64 {
+    let context = request_context(environment);
+    response_event_named(&string_from_ptr(event)).map_or(0.0, |event| {
+        context
+            .response_listeners
+            .iter()
+            .filter(|entry| entry.event == event)
+            .count() as f64
+    })
+}
+
+unsafe extern "C" fn response_remove_all_listeners(
+    environment: *const c_void,
+    event: *const c_char,
+) -> bool {
+    let context = request_context(environment);
+    if let Some(event) = response_event_named(&string_from_ptr(event)) {
+        context
+            .response_listeners
+            .retain(|entry| entry.event != event);
+    }
+    true
+}
+
+unsafe extern "C" fn response_event_names(environment: *const c_void) -> *const Value {
+    let context = request_context(environment);
+    let mut names: Vec<String> = Vec::new();
+    for entry in &context.response_listeners {
+        let name = match entry.event {
+            ResponseEvent::Close => "close",
+            ResponseEvent::Finish => "finish",
+            ResponseEvent::Drain => "drain",
+        };
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    }
+    crate::http_glue::string_array_json(&names)
+}
+
+unsafe extern "C" fn response_set_max_listeners(_environment: *const c_void, _count: f64) -> bool {
+    true
+}
+
+unsafe extern "C" fn response_get_max_listeners(_environment: *const c_void) -> f64 {
+    10.0
+}
+
+unsafe extern "C" fn response_off(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+) -> bool {
+    let context = request_context(environment);
+    if let Some(event) = response_event_named(&string_from_ptr(event)) {
+        context.response_listeners.retain(|entry| {
+            !(entry.event == event && entry.listener.callback == callback as usize)
+        });
+    }
+    true
+}
+
+/// `response.destroy()`: drops the connection without a response, `close` fires with `writableFinished` false.
+unsafe extern "C" fn response_destroy(environment: *const c_void) -> bool {
+    let context = request_context(environment);
+    mark_response_aborted(context);
+    context.state.ended = true;
+    if !context.connection.is_null() && !context.abandoned {
+        mark_client_gone(&mut *context.connection);
+    }
+    true
+}
+
+unsafe extern "C" fn request_add_close_listener(
+    context: &mut RequestContext,
+    callback: *const c_void,
+) {
+    context
+        .request_close_listeners
+        .push(RequestListener::new(callback as usize));
+}
+
 unsafe extern "C" fn response_set_header(
     environment: *const c_void,
     name: *const c_char,
-    value: *const c_char,
+    value: *const Value,
 ) -> bool {
     let context = request_context(environment);
-    if context.headers_sent || context.state.ended {
+    if context.response.headers_sent != 0 || context.headers_sent || context.state.ended {
         return false;
     }
     let name = string_from_ptr(name);
-    let value = string_from_ptr(value);
+    let values = crate::http_glue::header_values_of(value);
+    let lower = name.to_ascii_lowercase();
+    context
+        .numeric_headers
+        .retain(|existing| *existing != lower);
+    if crate::http_glue::header_is_number(value) {
+        context.numeric_headers.push(lower);
+    }
+    set_response_header(context, name, values);
+    true
+}
+
+fn set_response_header(context: &mut RequestContext, name: String, values: Vec<String>) {
     context
         .state
         .headers
         .retain(|(existing, _)| !existing.eq_ignore_ascii_case(&name));
-    context.state.headers.push((name, value));
+    for value in values {
+        context.state.headers.push((name.clone(), value));
+    }
+}
+
+fn response_header_values(context: &RequestContext, name: &str) -> Vec<String> {
+    context
+        .state
+        .headers
+        .iter()
+        .filter(|(existing, _)| existing.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
+unsafe extern "C" fn response_get_header(
+    environment: *const c_void,
+    name: *const c_char,
+) -> *const Value {
+    let context = request_context(environment);
+    let name = string_from_ptr(name);
+    let numeric = context.numeric_headers.contains(&name.to_ascii_lowercase());
+    crate::http_glue::header_values_json(&response_header_values(context, &name), numeric)
+}
+
+fn response_header_groups(context: &RequestContext) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (name, value) in &context.state.headers {
+        let lower = name.to_ascii_lowercase();
+        match groups.iter_mut().find(|(key, _)| *key == lower) {
+            Some((_, values)) => values.push(value.clone()),
+            None => groups.push((lower, vec![value.clone()])),
+        }
+    }
+    groups
+}
+
+unsafe extern "C" fn response_get_headers(environment: *const c_void) -> *const Value {
+    let context = request_context(environment);
+    crate::http_glue::response_headers_json(
+        &response_header_groups(context),
+        &context.numeric_headers,
+    )
+}
+
+unsafe extern "C" fn response_get_header_names(environment: *const c_void) -> *const Value {
+    let context = request_context(environment);
+    let names: Vec<String> = response_header_groups(context)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    crate::http_glue::string_array_json(&names)
+}
+
+unsafe extern "C" fn response_has_header(environment: *const c_void, name: *const c_char) -> bool {
+    let context = request_context(environment);
+    !response_header_values(context, &string_from_ptr(name)).is_empty()
+}
+
+unsafe extern "C" fn response_remove_header(
+    environment: *const c_void,
+    name: *const c_char,
+) -> bool {
+    let context = request_context(environment);
+    if context.response.headers_sent != 0 || context.headers_sent || context.state.ended {
+        return false;
+    }
+    let name = string_from_ptr(name);
+    context
+        .state
+        .headers
+        .retain(|(existing, _)| !existing.eq_ignore_ascii_case(&name));
+    true
+}
+
+/// `response.writeHead(statusCode[, statusMessage][, headers])` (the lowering passes all three, `""`/undefined when absent).
+unsafe extern "C" fn response_write_head(
+    environment: *const c_void,
+    status: f64,
+    message: *const c_char,
+    headers: *const Value,
+) -> bool {
+    let context = request_context(environment);
+    if context.response.headers_sent != 0 || context.headers_sent || context.state.ended {
+        return false;
+    }
+    context.response.status_code = status;
+    if !message.is_null() && *message != 0 {
+        context.response.status_message = message;
+    }
+    for (name, values) in crate::http_glue::header_entries_of(headers) {
+        set_response_header(context, name, values);
+    }
+    context.response.headers_sent = 1;
+    frame_as_stream_unless_sized(context);
+    true
+}
+
+/// Node has already committed the head once `writeHead`/`flushHeaders` ran: without a `Content-Length`
+/// the body that follows is chunked, not length-framed.
+fn frame_as_stream_unless_sized(context: &mut RequestContext) {
+    if !context
+        .state
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        context.state.wrote = true;
+    }
+}
+
+/// `response.flushHeaders()`: the head goes out now (chunked) instead of with the first body bytes.
+unsafe extern "C" fn response_flush_headers(environment: *const c_void) -> bool {
+    let context = request_context(environment);
+    context.response.headers_sent = 1;
+    frame_as_stream_unless_sized(context);
+    if stream_should_engage(context) && !context.headers_sent && !context.state.ended {
+        stream_write(context, &[]);
+    }
     true
 }
 
 unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_char) -> bool {
     let context = request_context(environment);
+    context.response.headers_sent = 1;
     let bytes = string_from_ptr(chunk).into_bytes();
     if stream_should_engage(context) {
         stream_write(context, &bytes);
@@ -1327,6 +1977,7 @@ fn stream_or_buffer_end(context: &mut RequestContext, tail: Vec<u8>) {
     if bail_if_client_gone(context) {
         return;
     }
+    mark_response_ended(context);
     let force_stream = stream_should_engage(context) && !context.state.body.is_empty();
     if !context.headers_sent && !force_stream {
         context.state.body.extend(tail);
@@ -1508,7 +2159,7 @@ fn bail_if_client_gone(context: &mut RequestContext) -> bool {
 
 /// One-request native slice of Node's `createServer` callback shape.
 #[no_mangle]
-pub extern "C" fn createServerOnce(port: f64, callback: *const c_void) -> *const c_char {
+pub extern "C" fn __thaw_createServerOnce(port: f64, callback: *const c_void) -> *const c_char {
     if callback.is_null() {
         return CString::default().into_raw();
     }
@@ -1900,6 +2551,9 @@ pub extern "C" fn thaw_http_run_servers() {
         arm_idle_wakeup(sweep_idle_connections());
         let (empty, pending_event) = dispatch_server_events(active_servers());
         if empty && ACTIVE_CONNECTIONS.load(Ordering::Acquire) == 0 {
+            if pending_event {
+                continue;
+            }
             arm_idle_wakeup(None);
             return;
         }
@@ -1936,6 +2590,10 @@ fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
     // ServerState pointers, then invoke user code without the list
     // lock. A callback can also reopen the very server being closed.
     let registry = servers as *const Mutex<Vec<usize>> as usize;
+    // Response `finish`/`close` listeners queued by `res.end()` / a dropped client.
+    if deliver_pending_response_events() {
+        EVENT_EMITTED.store(true, Ordering::Release);
+    }
     let snapshot = servers.lock().unwrap().clone();
     let _dispatch_roots = snapshot
         .iter()
@@ -1985,6 +2643,8 @@ fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
                 && state.connections.load(Ordering::Acquire) == 0
                 && state.close_requested.load(Ordering::Acquire))
     });
+    let pending_event =
+        pending_event || PENDING_RESPONSE_EVENTS.with(|queue| !queue.borrow().is_empty());
     let active = current.iter().copied().collect::<HashSet<_>>();
     let empty = current.is_empty();
     drop(current);
@@ -2385,18 +3045,64 @@ fn parse_headers(request: &str) -> Vec<(String, String)> {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        let name = name.trim().to_ascii_lowercase();
-        let value = value.trim().to_string();
-        if let Some(existing) = headers
-            .iter_mut()
-            .find(|(key, _): &&mut (String, String)| *key == name)
-        {
-            existing.1 = value;
-        } else {
-            headers.push((name, value));
-        }
+        headers.push((name.trim().to_string(), value.trim().to_string()));
     }
     headers
+}
+
+/// Node's `request.headers`: lowercased names; a repeated name keeps its first value for the headers Node
+/// documents as discard-duplicates, joins `cookie` with `; `, and joins everything else with `, `.
+fn merge_request_headers(raw: &[(String, String)]) -> Vec<(String, String)> {
+    const DISCARD_DUPLICATES: &[&str] = &[
+        "age",
+        "authorization",
+        "content-length",
+        "content-type",
+        "etag",
+        "expires",
+        "from",
+        "host",
+        "if-modified-since",
+        "if-unmodified-since",
+        "last-modified",
+        "location",
+        "max-forwards",
+        "proxy-authorization",
+        "referer",
+        "retry-after",
+        "server",
+        "user-agent",
+    ];
+    let mut merged: Vec<(String, String)> = Vec::new();
+    for (name, value) in raw {
+        let name = name.to_ascii_lowercase();
+        match merged.iter_mut().find(|(key, _)| *key == name) {
+            Some(_) if DISCARD_DUPLICATES.contains(&name.as_str()) => {}
+            // `set-cookie` is the one header kept as an array; its entries are joined by `\n` here and split on read.
+            Some((_, existing)) if name == "set-cookie" => {
+                existing.push('\n');
+                existing.push_str(value);
+            }
+            Some((_, existing)) => {
+                existing.push_str(if name == "cookie" { "; " } else { ", " });
+                existing.push_str(value);
+            }
+            None => merged.push((name, value.clone())),
+        }
+    }
+    merged
+}
+
+fn distinct_request_headers(raw: &[(String, String)]) -> Vec<(String, Vec<String>)> {
+    let mut distinct: Vec<(String, Vec<String>)> = Vec::new();
+    for (name, value) in raw {
+        let name = name.to_ascii_lowercase();
+        match distinct.iter_mut().find(|(key, _)| *key == name) {
+            Some((_, values)) => values.push(value.clone()),
+            None => distinct.push((name, vec![value.clone()])),
+        }
+    }
+    distinct
 }
 
 /// Parses a complete request head (bytes up to and including `\r\n\r\n`).
@@ -2772,6 +3478,7 @@ fn finish_connection(connection: &mut ConnectionState) {
     // the free to the next event-loop turn.
     if !connection.response_ctx.is_null() {
         unsafe {
+            mark_response_aborted(&mut *connection.response_ctx);
             (*connection.response_ctx).connection = std::ptr::null_mut();
             (*connection.response_ctx).abandoned = true;
         }
@@ -4278,8 +4985,8 @@ mod tests {
         let closure = context.response.set_header;
         let set = |name: &str, value: &str| {
             let name = CString::new(name).unwrap();
-            let value = CString::new(value).unwrap();
-            unsafe { response_set_header(closure.cast(), name.as_ptr(), value.as_ptr()) }
+            let value = crate::http_glue::header_values_json(&[value.to_string()], false);
+            unsafe { response_set_header(closure.cast(), name.as_ptr(), value) }
         };
         assert!(set("X-Trace", "old"));
         assert!(set("X-Keep", "kept"));
@@ -4483,7 +5190,7 @@ mod tests {
         drop(probe);
         let server = thread::spawn(move || {
             let body = CString::new("hello thaw").unwrap();
-            let target = serveOnce(port as f64, body.as_ptr());
+            let target = __thaw_serveOnce(port as f64, body.as_ptr());
             unsafe { CStr::from_ptr(target) }
                 .to_string_lossy()
                 .into_owned()
@@ -4858,5 +5565,108 @@ mod tests {
         assert!(second.ends_with("/second"));
         assert_eq!(CALLBACKS.load(Ordering::Acquire), 2);
         assert!(unsafe { &*state }.closed.load(Ordering::Acquire));
+    }
+
+    /// Node's `request.headers` merge rules: first value wins for the discard-duplicates set, `cookie` joins with
+    /// `; `, `set-cookie` stays a list, everything else joins with `, `; `rawHeaders` keeps wire order and case.
+    #[test]
+    fn request_headers_follow_nodes_duplicate_rules() {
+        let raw = parse_headers(
+            "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\nX-Dup: 1\r\nx-dup: 2\r\nCookie: a=1\r\nCookie: b=2\r\nSet-Cookie: p\r\nSet-Cookie: q\r\n\r\n",
+        );
+        assert_eq!(raw[0], ("Host".to_string(), "a".to_string()));
+        let merged = merge_request_headers(&raw);
+        let get = |name: &str| {
+            merged
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(get("host"), Some("a"));
+        assert_eq!(get("x-dup"), Some("1, 2"));
+        assert_eq!(get("cookie"), Some("a=1; b=2"));
+        assert_eq!(get("set-cookie"), Some("p\nq"));
+        let distinct = distinct_request_headers(&raw);
+        assert_eq!(
+            distinct.iter().find(|(key, _)| key == "x-dup").unwrap().1,
+            vec!["1", "2"]
+        );
+    }
+
+    /// `setHeader` replaces every earlier value for the name (any case), keeps list values as repeated lines, and
+    /// `hasHeader`/`removeHeader`/`getHeaders` see them case-insensitively; `writeHead` merges its headers over them.
+    #[test]
+    fn response_header_api_is_case_insensitive_and_multi_valued() {
+        let mut context = RequestContext::new("GET", "/", &[], &[], std::ptr::null_mut());
+        set_response_header(&mut context, "X-A".into(), vec!["1".into()]);
+        set_response_header(&mut context, "x-a".into(), vec!["2".into(), "3".into()]);
+        assert_eq!(response_header_values(&context, "X-a"), vec!["2", "3"]);
+        let groups = response_header_groups(&context);
+        assert_eq!(
+            groups,
+            vec![("x-a".to_string(), vec!["2".to_string(), "3".to_string()])]
+        );
+        let environment = (&context.res_has_header as *const NativeClosure).cast::<c_void>();
+        let name = CString::new("X-A").unwrap();
+        assert!(unsafe { response_has_header(environment, name.as_ptr()) });
+        let environment = (&context.res_remove_header as *const NativeClosure).cast::<c_void>();
+        assert!(unsafe { response_remove_header(environment, name.as_ptr()) });
+        assert!(response_header_values(&context, "x-a").is_empty());
+    }
+
+    /// `finish` then `close` are queued (not run) by `end()`, `writableFinished` flips, and an aborted response only
+    /// queues `close` with `writableFinished` still false.
+    #[test]
+    fn response_end_and_abort_queue_events_with_the_right_flags() {
+        thread_local! { static SEEN: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) }; }
+        unsafe extern "C" fn finish(_: *const c_void) {
+            SEEN.with(|seen| seen.borrow_mut().push("finish"));
+        }
+        unsafe extern "C" fn close(_: *const c_void) {
+            SEEN.with(|seen| seen.borrow_mut().push("close"));
+        }
+        fn closure(function: unsafe extern "C" fn(*const c_void)) -> NativeClosure {
+            NativeClosure::new(function as *const c_void, std::ptr::null_mut())
+        }
+        for aborted in [false, true] {
+            SEEN.with(|seen| seen.borrow_mut().clear());
+            let mut context = RequestContext::new("GET", "/", &[], &[], std::ptr::null_mut());
+            let (on_finish, on_close) = (closure(finish), closure(close));
+            let environment = (&context.res_on as *const NativeClosure).cast::<c_void>();
+            for (name, callback) in [("finish", &on_finish), ("close", &on_close)] {
+                let name = CString::new(name).unwrap();
+                assert!(unsafe {
+                    response_on(
+                        environment,
+                        name.as_ptr(),
+                        (callback as *const NativeClosure).cast(),
+                    )
+                });
+            }
+            if aborted {
+                mark_response_aborted(&mut context);
+                assert_eq!(context.response.writable_finished, 0);
+            } else {
+                mark_response_ended(&mut context);
+                assert_eq!(
+                    (
+                        context.response.writable_finished,
+                        context.response.headers_sent
+                    ),
+                    (1, 1)
+                );
+            }
+            assert!(
+                SEEN.with(|seen| seen.borrow().is_empty()),
+                "listeners must not run synchronously"
+            );
+            assert!(deliver_pending_response_events());
+            let expected: &[&str] = if aborted {
+                &["close"]
+            } else {
+                &["finish", "close"]
+            };
+            assert_eq!(SEEN.with(|seen| seen.borrow().clone()), expected);
+        }
     }
 }

@@ -3255,14 +3255,14 @@ fn native_server_overload(
 ) -> Option<Value> {
     let is_function = |index: usize| matches!(args.get(index), Some(v) if v.is_callable());
     let target = match name {
-        "listen" if args.len() >= 3 && is_function(2) => "__listenWithHostCallback",
-        "listen" if args.len() == 2 && is_function(1) => "__listenWithCallback",
-        "close" if args.len() == 1 && is_function(0) => "__closeWithCallback",
+        "listen" if args.len() >= 3 && is_function(2) => "__thaw_listenWithHostCallback",
+        "listen" if args.len() == 2 && is_function(1) => "__thaw_listenWithCallback",
+        "close" if args.len() == 1 && is_function(0) => "__thaw_closeWithCallback",
         "on" if args.len() == 2
             && matches!(&args[0], Value::Str(_))
             && it.to_str(&args[0]).to_string() == "error" =>
         {
-            "__onError"
+            "__thaw_onError"
         }
         _ => return None,
     };

@@ -3570,9 +3570,9 @@ fn native_server_overloads_are_selected_by_method_name_and_arguments() {
     let text = |p: *mut c_char| unsafe { CStr::from_ptr(p).to_str().unwrap().to_string() };
     let src = r#"
       function tagged(tag) { return function () { return 'ran:' + tag; }; }
-      globalThis.srv = { listen: tagged('plain'), __listenWithCallback: tagged('withCallback'),
-        __listenWithHostCallback: tagged('host'), close: tagged('plainClose'),
-        __closeWithCallback: tagged('closeCallback'), on: tagged('plainOn'), __onError: tagged('onError') };
+      globalThis.srv = { listen: tagged('plain'), __thaw_listenWithCallback: tagged('withCallback'),
+        __thaw_listenWithHostCallback: tagged('host'), close: tagged('plainClose'),
+        __thaw_closeWithCallback: tagged('closeCallback'), on: tagged('plainOn'), __thaw_onError: tagged('onError') };
       globalThis.bare = { listen: tagged('plain'), close: tagged('plainClose'), on: tagged('plainOn') };
       globalThis.cbFn = function () {};
     "#;
