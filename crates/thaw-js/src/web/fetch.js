@@ -501,6 +501,8 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
         stream._reader = null; this._stream = null;
       }
     }
+    // Node keeps a stream's state in internal slots, so `_name` fields must not show up as own enumerable keys.
+    const hideStreamFields = target => { for (const key of Object.keys(target)) if (key.charCodeAt(0) === 95) Object.defineProperty(target, key, { enumerable: false }); };
     globalThis.ReadableStream = class ReadableStream {
       static from(iterable) {
         if (iterable === null || iterable === undefined) { const error = new TypeError('value is not iterable'); error.code = 'ERR_ARG_NOT_ITERABLE'; throw error; }
@@ -557,6 +559,7 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
         this._source = source; this._sourcePull = pull; this._sourceCancel = cancel; this._byteStream = type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._autoAllocateChunkSize = this._byteStream && autoAllocateChunkSize !== undefined ? autoAllocateChunkSize : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._capacityWaiters = []; this._state = 'readable'; this._closeRequested = false; this._disturbed = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
         this._controller = this._byteStream ? new ReadableByteStreamController(this) : new ReadableStreamDefaultController(this);
         Promise.resolve(start === undefined ? undefined : webApply(start, source, [this._controller])).then(() => { this._started = true; this._callPullIfNeeded(); }, error => this._controller.error(error));
+        hideStreamFields(this);
       }
       get locked() { return this._reader !== null; }
       getReader(options = {}) { if (options.mode === undefined) return new ReadableStreamDefaultReader(this); if (options.mode === 'byob') return new ReadableStreamBYOBReader(this); const error = new TypeError('invalid reader mode'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
@@ -855,6 +858,7 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
         this._controller = new WritableStreamDefaultController(this); this._setBackpressure(this._desiredSize() <= 0);
         if (start !== undefined) this._chain = Promise.resolve(webApply(start, sink, [this._controller])).catch(error => { this._errorStream(error); throw error; });
         this._started = false; Promise.resolve(this._chain).then(() => { this._started = true; }, () => { this._started = true; });
+        hideStreamFields(this);
       }
       get locked() { return this._writer !== null; }
       getWriter() { return new WritableStreamDefaultWriter(this); }
@@ -984,6 +988,7 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
           abort(error) { return Promise.resolve(callCancel(error)).then(() => readableController.error(error)); }
         }, writableQueueStrategy);
         controller._writable = writable;
+        hideStreamFields(this);
       }
     };
     Object.defineProperties(TransformStream.prototype, streamSides);
@@ -1018,8 +1023,8 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
         cancel: release
       });
     };
-    globalThis.CompressionStream = class CompressionStream { constructor(format) { const stream = compressionTransform('compress', format); this._readable = stream.readable; this._writable = stream.writable; } };
-    globalThis.DecompressionStream = class DecompressionStream { constructor(format) { const stream = compressionTransform('decompress', format); this._readable = stream.readable; this._writable = stream.writable; } };
+    globalThis.CompressionStream = class CompressionStream { constructor(format) { const stream = compressionTransform('compress', format); this._readable = stream.readable; this._writable = stream.writable; hideStreamFields(this); } };
+    globalThis.DecompressionStream = class DecompressionStream { constructor(format) { const stream = compressionTransform('decompress', format); this._readable = stream.readable; this._writable = stream.writable; hideStreamFields(this); } };
     Object.defineProperties(globalThis.CompressionStream.prototype, streamSides);
     Object.defineProperties(globalThis.DecompressionStream.prototype, streamSides);
     const queuingStrategyMarks = new WeakMap();
@@ -1043,10 +1048,10 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
     Object.defineProperties(CountQueuingStrategy.prototype, Object.getOwnPropertyDescriptors({ get size() { return countSize; } }));
     globalThis.ByteLengthQueuingStrategy = ByteLengthQueuingStrategy;
     globalThis.CountQueuingStrategy = CountQueuingStrategy;
-    globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); let pendingHigh = ''; const transform = new TransformStream({ transform(chunk, controller) { let text = pendingHigh + String(chunk); pendingHigh = ''; const last = text.charCodeAt(text.length - 1); if (last >= 0xd800 && last <= 0xdbff) { pendingHigh = text.slice(-1); text = text.slice(0, -1); } if (text) controller.enqueue(encoder.encode(text)); }, flush(controller) { if (pendingHigh) controller.enqueue(encoder.encode(pendingHigh)); } }); this._readable = transform.readable; this._writable = transform.writable; } };
+    globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); let pendingHigh = ''; const transform = new TransformStream({ transform(chunk, controller) { let text = pendingHigh + String(chunk); pendingHigh = ''; const last = text.charCodeAt(text.length - 1); if (last >= 0xd800 && last <= 0xdbff) { pendingHigh = text.slice(-1); text = text.slice(0, -1); } if (text) controller.enqueue(encoder.encode(text)); }, flush(controller) { if (pendingHigh) controller.enqueue(encoder.encode(pendingHigh)); } }); this._readable = transform.readable; this._writable = transform.writable; hideStreamFields(this); } };
     Object.defineProperties(globalThis.TextEncoderStream.prototype, streamSides);
     Object.defineProperties(globalThis.TextEncoderStream.prototype, Object.getOwnPropertyDescriptors({ get encoding() { return 'utf-8'; } }));
-    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const bytes = streamBytes(chunk, true); if (!bytes) throw new TypeError('chunk must be an ArrayBuffer or view'); const text = decoder.decode(bytes, { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this._readable = transform.readable; this._writable = transform.writable; this._decoder = decoder; } };
+    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const bytes = streamBytes(chunk, true); if (!bytes) throw new TypeError('chunk must be an ArrayBuffer or view'); const text = decoder.decode(bytes, { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this._readable = transform.readable; this._writable = transform.writable; this._decoder = decoder; hideStreamFields(this); } };
     Object.defineProperties(globalThis.TextDecoderStream.prototype, streamSides);
     Object.defineProperties(globalThis.TextDecoderStream.prototype, Object.getOwnPropertyDescriptors({ get encoding() { return this._decoder.encoding; }, get fatal() { return this._decoder.fatal; }, get ignoreBOM() { return this._decoder.ignoreBOM; } }));
   }
@@ -1447,8 +1452,8 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
               } else if (!settled) { settled = true; cleanup(); resolve(response); }
             });
             active.once('error', function(error) { finishReject(networkFailure(error)); });
-            if (bytes.length) active.write(bytes);
-            active.end();
+            // One `end(bytes)` keeps the request length-framed; write() then end() would be chunked like Node.
+            active.end(bytes.length ? bytes : undefined);
           } catch (error) { finishReject(error); }
         }
         dispatch(request.url, request.method, body, false, initialHeaders);

@@ -1,0 +1,5 @@
+{
+  "name": "filesystem stream round trip",
+  "expect": "matched",
+  "source": "import { createReadStream, createWriteStream } from 'node:fs'; import { once } from 'node:events'; async function main(): Promise<void> { const path = '/tmp/thaw-fs-stream.txt'; const output = createWriteStream(path); output.end('streamed'); await once(output, 'finish'); const input = createReadStream(path, { encoding: 'utf8' }); let text: string = ''; input.on('data', (chunk: any): void => { text += String(chunk); }); await once(input, 'end'); console.log(text); }"
+}

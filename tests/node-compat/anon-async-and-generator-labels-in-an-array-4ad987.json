@@ -1,0 +1,5 @@
+{
+  "name": "anon async and generator labels in an array",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log([async () => 1, async function () { await 0; }, function* () {}, async function* () {}]);\n}\n"
+}

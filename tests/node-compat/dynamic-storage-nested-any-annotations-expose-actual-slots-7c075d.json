@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage nested any annotations expose actual slots",
+  "expect": "matched",
+  "source": "function main(): void { const xs: number[] = [1]; const holder: {slot: any} = {slot: xs}; holder.slot[0] = {x: 7}; console.log(typeof xs[0]); }"
+}

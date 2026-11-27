@@ -1,0 +1,5 @@
+{
+  "name": "process high resolution time",
+  "expect": "matched",
+  "source": "import { hrtime } from 'node:process'; function main(): void { const start: number[] = hrtime(); const elapsed: number[] = hrtime(start); console.log(start.length, elapsed.length, start[0] >= 0, elapsed[0] >= 0); }"
+}

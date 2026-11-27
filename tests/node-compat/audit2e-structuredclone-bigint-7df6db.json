@@ -1,0 +1,5 @@
+{
+  "name": "audit2e structuredClone bigint",
+  "expect": "matched",
+  "source": "function main(): void { console.log(structuredClone({ n: [1n], b: 5n, u: undefined, s: \"x\" })); }"
+}

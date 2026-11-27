@@ -1,0 +1,5 @@
+{
+  "name": "generator as any for of break runs finally",
+  "expect": "matched",
+  "source": "function* early() { try { yield 1; yield 2; } finally { console.log(\"closed\"); } }\nfunction main(): void {\n  const e: any = early();\n  for (const v of e) { console.log(v); break; }\n  console.log(e.next());\n}"
+}

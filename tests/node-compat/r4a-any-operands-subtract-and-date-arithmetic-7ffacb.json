@@ -1,0 +1,5 @@
+{
+  "name": "r4a any operands subtract and Date arithmetic",
+  "expect": "matched",
+  "source": "function sub(a: any, b: any) { return a - b; } function main(): void { console.log(sub(5, 2), sub(\"5\", 2)); const a = new Date(1000); const b = new Date(0); console.log((a as any) - (b as any)); console.log((new Date(1000) as any) * 2, (new Date(1000) as any) - 1); }"
+}

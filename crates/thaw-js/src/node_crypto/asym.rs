@@ -832,8 +832,58 @@ pub(crate) fn crypto_import_key_json(bytes_hex: &str, is_der: bool, passphrase: 
     .to_string()
 }
 
+/// DER `DigestInfo` header (everything before the digest) of the digests the `rsa` crate has no typed
+/// `SigningKey` for (SHA-3 and RIPEMD-160): RSASSA-PKCS1-v1_5 is then signed over the in-house digest.
+fn rsa_pkcs1v15_extra_prefix(digest_algorithm: &str) -> Option<(Vec<u8>, usize)> {
+    let (oid, len): (&[u8], usize) = match digest_algorithm {
+        "sha3224" => (&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x07], 28),
+        "sha3256" => (&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08], 32),
+        "sha3384" => (&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x09], 48),
+        "sha3512" => (&[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0a], 64),
+        "ripemd160" => (&[0x2b, 0x24, 0x03, 0x02, 0x01], 20),
+        _ => return None,
+    };
+    let algorithm = [&[0x06, oid.len() as u8][..], oid, &[0x05, 0x00]].concat();
+    let sequence = [&[0x30, algorithm.len() as u8][..], &algorithm].concat();
+    let total = sequence.len() + 2 + len;
+    Some((
+        [&[0x30, total as u8][..], &sequence, &[0x04, len as u8]].concat(),
+        len,
+    ))
+}
+
+/// ECDSA over the digest the caller named (`createSign('sha256')` on a P-384 key signs a SHA-256 digest, as OpenSSL
+/// does); a digest this module cannot compute falls back to the curve's own digest.
+macro_rules! ecdsa_sign_with_digest {
+    ($key:expr, $alg:expr, $data:expr) => {{
+        use signature::hazmat::PrehashSigner;
+        match super::digest::digest_bytes($alg, $data) {
+            Some(hashed) => $key
+                .sign_prehash(&hashed)
+                .map_err(|error| error.to_string())?,
+            None => $key.sign($data),
+        }
+    }};
+}
+
+macro_rules! ecdsa_verify_with_digest {
+    ($curve:ident, $key:expr, $alg:expr, $data:expr, $signature:expr) => {{
+        use signature::hazmat::PrehashVerifier;
+        $curve::ecdsa::Signature::from_der($signature).is_ok_and(|sig| {
+            match super::digest::digest_bytes($alg, $data) {
+                Some(hashed) => $key.verify_prehash(&hashed, &sig).is_ok(),
+                None => $key.verify($data, &sig).is_ok(),
+            }
+        })
+    }};
+}
+
 fn digest_size_matches(digest_algorithm: &str) -> Result<(), String> {
-    if matches!(digest_algorithm, "sha1" | "sha256" | "sha384" | "sha512") {
+    if matches!(
+        digest_algorithm,
+        "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512"
+    ) || rsa_pkcs1v15_extra_prefix(digest_algorithm).is_some()
+    {
         Ok(())
     } else {
         Err(format!("unsupported digest algorithm: {digest_algorithm}"))
@@ -858,15 +908,18 @@ pub(crate) fn crypto_asymmetric_sign_hex(
             sign_rsa_pkcs1v15(&key, digest_algorithm, data)
         }
         ParsedKey::EcPrivateP256(key) => {
-            let signature: p256::ecdsa::Signature = key.sign(data);
+            let signature: p256::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::EcPrivateP384(key) => {
-            let signature: p384::ecdsa::Signature = key.sign(data);
+            let signature: p384::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::EcPrivateP521(key) => {
-            let signature: p521::ecdsa::Signature = key.sign(data);
+            let signature: p521::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::Ed25519Private(key) => {
@@ -890,13 +943,14 @@ pub(crate) fn crypto_asymmetric_sign_pss_hex(
     digest_algorithm: &str,
     pem: &str,
     data: &[u8],
+    salt_length: Option<i32>,
 ) -> Result<Vec<u8>, String> {
     digest_size_matches(digest_algorithm)?;
     let ParsedKey::RsaPrivate(key) = parse_key(pem).ok_or("invalid or unsupported private key")?
     else {
         return Err("RSA-PSS requires an RSA private key".to_string());
     };
-    sign_rsa_pss(&key, digest_algorithm, data)
+    sign_rsa_pss(&key, digest_algorithm, data, salt_length)
 }
 
 /// Mirrors `crypto_asymmetric_sign_hex`: verifies `signature` against
@@ -917,18 +971,12 @@ pub(crate) fn crypto_asymmetric_verify(
             digest_size_matches(digest_algorithm)?;
             verify_rsa_pkcs1v15(&key, digest_algorithm, data, signature)
         }
-        ParsedKey::EcPrivateP256(key) => p256::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP256(key) => p256::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
-        ParsedKey::EcPrivateP384(key) => p384::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP384(key) => p384::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
-        ParsedKey::EcPrivateP521(key) => p521::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| p521::ecdsa::VerifyingKey::from(&*key).verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP521(key) => p521::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
+        ParsedKey::EcPrivateP256(key) => ecdsa_verify_with_digest!(p256, key.verifying_key(), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP256(key) => ecdsa_verify_with_digest!(p256, &key, digest_algorithm, data, signature),
+        ParsedKey::EcPrivateP384(key) => ecdsa_verify_with_digest!(p384, key.verifying_key(), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP384(key) => ecdsa_verify_with_digest!(p384, &key, digest_algorithm, data, signature),
+        ParsedKey::EcPrivateP521(key) => ecdsa_verify_with_digest!(p521, &p521::ecdsa::VerifyingKey::from(&*key), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP521(key) => ecdsa_verify_with_digest!(p521, &key, digest_algorithm, data, signature),
         ParsedKey::Ed25519Private(key) => ed25519_dalek::Signature::from_slice(signature)
             .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
         ParsedKey::Ed25519Public(key) => ed25519_dalek::Signature::from_slice(signature)
@@ -948,6 +996,7 @@ pub(crate) fn crypto_asymmetric_verify_pss(
     pem: &str,
     data: &[u8],
     signature: &[u8],
+    salt_length: Option<i32>,
 ) -> Result<bool, String> {
     digest_size_matches(digest_algorithm)?;
     let key = match parse_key(pem).ok_or("invalid or unsupported public/private key")? {
@@ -955,7 +1004,7 @@ pub(crate) fn crypto_asymmetric_verify_pss(
         ParsedKey::RsaPublic(key) => *key,
         _ => return Err("RSA-PSS requires an RSA key".to_string()),
     };
-    verify_rsa_pss(&key, digest_algorithm, data, signature)
+    verify_rsa_pss(&key, digest_algorithm, data, signature, salt_length)
 }
 
 macro_rules! rsa_pkcs1v15_sign_for {
@@ -972,11 +1021,26 @@ fn sign_rsa_pkcs1v15(
     data: &[u8],
 ) -> Result<Vec<u8>, String> {
     match digest_algorithm {
+        "md5" => rsa_pkcs1v15_sign_for!(key, md5::Md5, data),
         "sha1" => rsa_pkcs1v15_sign_for!(key, sha1::Sha1, data),
+        "sha224" => rsa_pkcs1v15_sign_for!(key, sha2::Sha224, data),
         "sha256" => rsa_pkcs1v15_sign_for!(key, sha2::Sha256, data),
         "sha384" => rsa_pkcs1v15_sign_for!(key, sha2::Sha384, data),
         "sha512" => rsa_pkcs1v15_sign_for!(key, sha2::Sha512, data),
-        _ => unreachable!("checked by digest_size_matches"),
+        other => {
+            let (prefix, hash_len) =
+                rsa_pkcs1v15_extra_prefix(other).ok_or("unsupported digest algorithm")?;
+            let hashed =
+                super::digest::digest_bytes(other, data).ok_or("unsupported digest algorithm")?;
+            key.sign(
+                rsa::Pkcs1v15Sign {
+                    hash_len: Some(hash_len),
+                    prefix: prefix.into(),
+                },
+                &hashed,
+            )
+            .map_err(|error| error.to_string())
+        }
     }
 }
 
@@ -997,44 +1061,122 @@ fn verify_rsa_pkcs1v15(
     signature: &[u8],
 ) -> bool {
     match digest_algorithm {
+        "md5" => rsa_pkcs1v15_verify_for!(key, md5::Md5, data, signature),
         "sha1" => rsa_pkcs1v15_verify_for!(key, sha1::Sha1, data, signature),
+        "sha224" => rsa_pkcs1v15_verify_for!(key, sha2::Sha224, data, signature),
         "sha256" => rsa_pkcs1v15_verify_for!(key, sha2::Sha256, data, signature),
         "sha384" => rsa_pkcs1v15_verify_for!(key, sha2::Sha384, data, signature),
         "sha512" => rsa_pkcs1v15_verify_for!(key, sha2::Sha512, data, signature),
-        _ => unreachable!("checked by digest_size_matches"),
+        other => {
+            let Some((prefix, hash_len)) = rsa_pkcs1v15_extra_prefix(other) else {
+                return false;
+            };
+            let Some(hashed) = super::digest::digest_bytes(other, data) else {
+                return false;
+            };
+            key.verify(
+                rsa::Pkcs1v15Sign {
+                    hash_len: Some(hash_len),
+                    prefix: prefix.into(),
+                },
+                &hashed,
+                signature,
+            )
+            .is_ok()
+        }
     }
 }
 
-macro_rules! rsa_pss_sign_for {
-    ($key:expr, $digest:ty, $data:expr) => {{
-        let signing_key = rsa::pss::SigningKey::<$digest>::new($key.clone());
-        let signature: rsa::pss::Signature = signing_key.sign($data);
-        Ok(signature.to_vec())
-    }};
+/// A buffering `DynDigest` over the in-house `digest_bytes`, so RSA-PSS (EMSA-PSS and MGF1) works for every digest
+/// Node accepts (SHA-1/2/3, MD5, RIPEMD-160), not only those the `rsa` crate has typed digests for.
+#[derive(Clone)]
+struct BufferedDigest {
+    algorithm: String,
+    buffer: Vec<u8>,
+    size: usize,
+}
+
+impl BufferedDigest {
+    fn new(algorithm: &str) -> Option<Self> {
+        let size = super::digest::digest_bytes(algorithm, b"")?.len();
+        Some(Self {
+            algorithm: algorithm.to_string(),
+            buffer: Vec::new(),
+            size,
+        })
+    }
+}
+
+impl sha2::digest::DynDigest for BufferedDigest {
+    fn update(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    fn finalize_into(self, out: &mut [u8]) -> Result<(), sha2::digest::InvalidBufferSize> {
+        let mut this = self;
+        this.finalize_into_reset(out)
+    }
+
+    fn finalize_into_reset(
+        &mut self,
+        out: &mut [u8],
+    ) -> Result<(), sha2::digest::InvalidBufferSize> {
+        if out.len() != self.size {
+            return Err(sha2::digest::InvalidBufferSize);
+        }
+        let hashed = super::digest::digest_bytes(&self.algorithm, &self.buffer)
+            .ok_or(sha2::digest::InvalidBufferSize)?;
+        out.copy_from_slice(&hashed);
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.buffer.clear();
+    }
+
+    fn output_size(&self) -> usize {
+        self.size
+    }
+
+    fn box_clone(&self) -> Box<dyn sha2::digest::DynDigest> {
+        Box::new(self.clone())
+    }
+}
+
+/// Node's `saltLength`: `-1` = digest length, `-2` = maximum (sign default) / auto-detect (verify default).
+fn pss_scheme(digest_algorithm: &str, salt_len: usize) -> Result<rsa::Pss, String> {
+    let digest = BufferedDigest::new(digest_algorithm)
+        .ok_or_else(|| format!("unsupported digest algorithm: {digest_algorithm}"))?;
+    Ok(rsa::Pss {
+        blinded: false,
+        digest: Box::new(digest),
+        salt_len,
+    })
+}
+
+fn pss_max_salt(key_bits: usize, hash_len: usize) -> usize {
+    ((key_bits - 1).div_ceil(8)).saturating_sub(hash_len + 2)
 }
 
 fn sign_rsa_pss(
     key: &RsaPrivateKey,
     digest_algorithm: &str,
     data: &[u8],
+    salt_length: Option<i32>,
 ) -> Result<Vec<u8>, String> {
-    match digest_algorithm {
-        "sha1" => rsa_pss_sign_for!(key, sha1::Sha1, data),
-        "sha256" => rsa_pss_sign_for!(key, sha2::Sha256, data),
-        "sha384" => rsa_pss_sign_for!(key, sha2::Sha384, data),
-        "sha512" => rsa_pss_sign_for!(key, sha2::Sha512, data),
-        _ => unreachable!("checked by digest_size_matches"),
-    }
-}
-
-macro_rules! rsa_pss_verify_for {
-    ($key:expr, $digest:ty, $data:expr, $signature:expr) => {{
-        let Ok(signature) = rsa::pss::Signature::try_from($signature) else {
-            return Ok(false);
-        };
-        let verifying_key = rsa::pss::VerifyingKey::<$digest>::new($key.clone());
-        Ok(verifying_key.verify($data, &signature).is_ok())
-    }};
+    use rsa::traits::PublicKeyParts;
+    let hashed = super::digest::digest_bytes(digest_algorithm, data)
+        .ok_or_else(|| format!("unsupported digest algorithm: {digest_algorithm}"))?;
+    let salt_len = match salt_length {
+        None | Some(-2) => pss_max_salt(key.n().bits(), hashed.len()),
+        Some(-1) => hashed.len(),
+        Some(n) if n >= 0 => n as usize,
+        Some(_) => return Err("invalid RSA-PSS salt length".to_string()),
+    };
+    let scheme = pss_scheme(digest_algorithm, salt_len)?;
+    key.sign_with_rng(&mut rsa::rand_core::OsRng, scheme, &hashed)
+        .map_err(|error| error.to_string())
 }
 
 fn verify_rsa_pss(
@@ -1042,13 +1184,27 @@ fn verify_rsa_pss(
     digest_algorithm: &str,
     data: &[u8],
     signature: &[u8],
+    salt_length: Option<i32>,
 ) -> Result<bool, String> {
-    match digest_algorithm {
-        "sha1" => rsa_pss_verify_for!(key, sha1::Sha1, data, signature),
-        "sha256" => rsa_pss_verify_for!(key, sha2::Sha256, data, signature),
-        "sha384" => rsa_pss_verify_for!(key, sha2::Sha384, data, signature),
-        "sha512" => rsa_pss_verify_for!(key, sha2::Sha512, data, signature),
-        _ => unreachable!("checked by digest_size_matches"),
+    use rsa::traits::PublicKeyParts;
+    let hashed = super::digest::digest_bytes(digest_algorithm, data)
+        .ok_or_else(|| format!("unsupported digest algorithm: {digest_algorithm}"))?;
+    let try_salt = |salt_len: usize| -> Result<bool, String> {
+        let scheme = pss_scheme(digest_algorithm, salt_len)?;
+        Ok(key.verify(scheme, &hashed, signature).is_ok())
+    };
+    match salt_length {
+        None | Some(-2) => {
+            for salt_len in (0..=pss_max_salt(key.n().bits(), hashed.len())).rev() {
+                if try_salt(salt_len)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Some(-1) => try_salt(hashed.len()),
+        Some(n) if n >= 0 => try_salt(n as usize),
+        Some(_) => Ok(false),
     }
 }
 

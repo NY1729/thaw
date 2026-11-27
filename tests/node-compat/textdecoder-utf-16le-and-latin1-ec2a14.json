@@ -1,0 +1,5 @@
+{
+  "name": "TextDecoder utf-16le and latin1",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(new TextDecoder(\"utf-16le\").decode(new Uint8Array([104, 0, 105, 0])));\n  console.log(new TextDecoder(\"utf-16le\").decode(new Uint8Array([0x3d, 0xd8, 0x00, 0xde, 0x41, 0])));\n  console.log(new TextDecoder(\"latin1\").decode(new Uint8Array([233, 65, 0x80])));\n  console.log(new TextDecoder(\"latin1\").encoding, new TextDecoder(\"utf-16\").encoding);\n}\n"
+}

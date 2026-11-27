@@ -1,0 +1,5 @@
+{
+  "name": "readline line events",
+  "expect": "matched",
+  "source": "import { createInterface } from 'node:readline'; import { Readable } from 'node:stream'; function main(): void { const lines: string[] = []; const input = Readable.from(['one\\n', 'two\\n']); const reader = createInterface({ input, terminal: false }); reader.on('line', (line: string): void => { lines.push(line); }); reader.on('close', (): void => console.log(lines.join(','))); input.resume(); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "nd4 Date string conversion of an invalid or valid date",
+  "expect": "matched",
+  "source": "function main(): void {\n  const d = new Date(NaN);\n  console.log(String(d), `${d}`, \"x\" + d, d.toString(), d.getTime(), JSON.stringify(d));\n  const v = new Date(0);\n  console.log(String(v) === v.toString(), `${v}` === v.toString(), (\"\" + v) === v.toString());\n}\n"
+}

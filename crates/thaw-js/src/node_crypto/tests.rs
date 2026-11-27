@@ -326,8 +326,9 @@ fn pbkdf2_sha256_600k_iterations_stays_within_budget() {
         "669cfe52482116fda1aa2cbe409b2f56c8e4563752b7a28f6eaab614ee005178"
     );
     assert!(
-        // ~4 s in a debug build on a quiet host; the guard only has to catch an order-of-magnitude slowdown.
-        elapsed.as_secs_f64() < 20.0,
+        // ~4 s in a debug build on a quiet host; the guard only has to catch an order-of-magnitude slowdown
+        // (more room when the suite runs in parallel on a loaded machine).
+        elapsed < crate::tests::slow_test_deadline(20),
         "pbkdf2-sha256 with 600000 iterations took {elapsed:?}"
     );
 }
@@ -1407,5 +1408,17 @@ const run = (label, f) => { try { const r = f(); console.log(label + ' => OK ' +
             r#"createHmac(sha256) no key | TypeError ERR_INVALID_ARG_TYPE | The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey. Received undefined"#,
             r#"createCipheriv(cbc,key16) no iv | TypeError ERR_INVALID_ARG_TYPE | The "iv" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received undefined"#,
         ]
+    );
+}
+
+#[test]
+fn rsa_md5_and_sha224_signatures_verify() {
+    // an md5WithRSA SPKAC made by openssl (md5 signatures verify in Node builds that allow them)
+    let spkac = "MIIBPzCBqTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA5QOumLWNzeBxNTrz6sZ/744g8/T4L9gvDLaqvbBCJHknjAodt9gTV/wepphSGI/lqADc+xIaNkFKSydIJA0jNzL/2oZ4E//trmN2RP3sqFxSaHFz3N5Ox+Dw+f1S7WX7JTb7vR+ZTAckyABsNIEtoiNapBNBtgVqE9xIqLTqb+sCAwEAARYFaGVsbG8wDQYJKoZIhvcNAQEEBQADgYEA2C++mzdr22dT3ALJ9kukk7ixe4ALEKD+HAwnfO6kmaonLzcEddWqcwgSFWB54q4lHycojeS2beB9zMZCl9p0wROkaXMuDEBexh+yC70LXfC7DyGhq4SpGxcionl8PSSsmeIWSF63yjAJbqdUiWy3JroitDGcWLIkdSsdCFmgaCQ=";
+    assert_eq!(
+        run(&format!(
+            "var m = globalThis.__thaw_crypto_module; console.log(m.Certificate.verifySpkac('{spkac}'), m.Certificate.exportChallenge('{spkac}').toString());"
+        )),
+        "true hello"
     );
 }

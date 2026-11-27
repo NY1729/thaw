@@ -1,0 +1,5 @@
+{
+  "name": "icu Number toLocaleString decimal locales",
+  "expect": "matched",
+  "source": "function main(): void { const n = 1234567.891; console.log(n.toLocaleString(\"en-US\"), n.toLocaleString(\"de-DE\"), n.toLocaleString(\"fr-FR\"), n.toLocaleString(\"ja-JP\"), n.toLocaleString(\"es-ES\"), (1234.5).toLocaleString(\"es-ES\"), (-0.5).toLocaleString(\"en-US\"), (0).toLocaleString(\"en-US\")); }"
+}

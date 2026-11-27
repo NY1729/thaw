@@ -1,0 +1,5 @@
+{
+  "name": "computed symbol key with omitted enumerable is non-enumerable: excluded from keys, assign and spread",
+  "expect": "matched",
+  "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7, writable: true, configurable: true } });\n  console.log(o[S], Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n  const c: any = Object.assign({}, o);\n  console.log(c[S], Object.getOwnPropertySymbols(c).length);\n  const sp: any = { ...o };\n  console.log(sp[S], Object.getOwnPropertySymbols(sp).length, Object.keys(o).join());\n}"
+}

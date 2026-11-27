@@ -1,0 +1,5 @@
+{
+  "name": "nd8 fs copyFileSync flags, fsyncSync and mkdtempSync suffix",
+  "expect": "matched",
+  "source": "import * as fs from \"node:fs\";\nimport * as os from \"node:os\";\nfunction main(): void {\n  const dir = fs.mkdtempSync(os.tmpdir() + \"/nd8-\");\n  console.log(dir.length - (os.tmpdir() + \"/nd8-\").length);\n  const a = dir + \"/a\";\n  const b = dir + \"/b\";\n  fs.writeFileSync(a, \"x\");\n  fs.copyFileSync(a, b, 0);\n  try { fs.copyFileSync(a, b, fs.constants.COPYFILE_EXCL); } catch (e: any) { console.log(e.code); }\n  const fd = fs.openSync(a, \"r+\");\n  fs.fsyncSync(fd);\n  fs.fdatasyncSync(fd);\n  fs.closeSync(fd);\n  const entries = fs.readdirSync(dir, { withFileTypes: true });\n  console.log(entries.sort((x, y) => x.name < y.name ? -1 : 1).map((e) => e.name));\n  fs.rmSync(dir, { recursive: true });\n}\n"
+}

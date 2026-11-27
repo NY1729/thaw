@@ -1,0 +1,5 @@
+{
+  "name": "non-enumerable symbol key is skipped by Object.assign, spread and rest",
+  "expect": "matched",
+  "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1, [S]: 2 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  const c: any = Object.assign({}, o);\n  console.log(c[S], c[T], Object.getOwnPropertySymbols(c).length);\n  const sp: any = { ...o };\n  console.log(sp[S], sp[T], Object.getOwnPropertySymbols(sp).length);\n  const { a, ...rest }: any = o;\n  console.log(a, rest[S], rest[T], Object.getOwnPropertySymbols(rest).length);\n}"
+}

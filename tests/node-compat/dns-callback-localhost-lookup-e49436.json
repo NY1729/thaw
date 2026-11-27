@@ -1,0 +1,5 @@
+{
+  "name": "dns callback localhost lookup",
+  "expect": "matched",
+  "source": "import { lookup } from 'node:dns'; function main(): void { lookup('localhost', (error: unknown, address: string, family: number): void => console.log(error === null, address.length > 0, family === 4 || family === 6)); }"
+}

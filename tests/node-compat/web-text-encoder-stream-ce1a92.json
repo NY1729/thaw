@@ -1,0 +1,5 @@
+{
+  "name": "web text encoder stream",
+  "expect": "matched",
+  "source": "import { TextEncoderStream } from 'node:stream/web'; async function main(): Promise<void> { const stream = new TextEncoderStream(); const writer = stream.writable.getWriter(); const reader = stream.readable.getReader(); const pending = reader.read(); await writer.write('Hi'); const result = await pending; await writer.close(); console.log(result.value.length, result.value[0], result.value[1]); }"
+}

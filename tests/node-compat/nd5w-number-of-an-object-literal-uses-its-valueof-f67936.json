@@ -1,0 +1,5 @@
+{
+  "name": "nd5w Number of an object literal uses its valueOf",
+  "expect": "matched",
+  "source": "function main(): void { console.log(Number({ valueOf() { return 7; } }), +{ valueOf() { return 8; } }); const o = { valueOf() { return 9; } }; console.log(Number(o)); }"
+}

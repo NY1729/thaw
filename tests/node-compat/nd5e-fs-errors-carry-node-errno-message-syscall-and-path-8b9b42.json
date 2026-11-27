@@ -1,0 +1,5 @@
+{
+  "name": "nd5e fs errors carry node errno, message, syscall and path",
+  "expect": "matched",
+  "source": "import fs from \"node:fs\";\nfunction t(f: () => void): void {\n  try { f(); } catch (e: any) { console.log(Object.keys(e), e.errno, e.code, e.syscall, e.path, e.dest, e.message); }\n}\nfunction main(): void {\n  t(() => { fs.readFileSync(\"/nonexistent/x\"); });\n  t(() => { fs.readdirSync(\"/etc/hostname\"); });\n  t(() => { fs.rmdirSync(\"/nonexistent\"); });\n  t(() => { fs.readFileSync(\"/etc\"); });\n  t(() => { fs.renameSync(\"/nonexistent/a\", \"/nonexistent/b\"); });\n  t(() => { fs.statSync(\"/nonexistent\"); });\n  const st = fs.statSync(\"/etc/hostname\");\n  console.log(Object.keys(st).slice(0, 10));\n}\n"
+}

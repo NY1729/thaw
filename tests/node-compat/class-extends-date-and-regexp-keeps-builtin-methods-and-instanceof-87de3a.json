@@ -1,0 +1,5 @@
+{
+  "name": "class extends Date and RegExp keeps builtin methods and instanceof",
+  "expect": "matched",
+  "source": "class MyDate extends Date { fmt(): string { return this.toISOString().slice(0, 10); } }\nclass MyRe extends RegExp { hit(s: string): boolean { return this.test(s); } }\nfunction main(): void {\n  const d = new MyDate(86400000);\n  console.log(d.fmt(), d instanceof Date, d instanceof MyDate, d.getTime());\n  const r = new MyRe('a+');\n  console.log(r.hit('caat'), r.hit('zzz'), r instanceof RegExp, r.source);\n}"
+}

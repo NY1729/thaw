@@ -1,0 +1,5 @@
+{
+  "name": "worker inherits environment data",
+  "expect": "matched",
+  "source": "import { Worker, setEnvironmentData } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  setEnvironmentData('w2.key', { a: 1 });\n  const worker = new Worker(`const { parentPort, getEnvironmentData } = require('node:worker_threads'); parentPort.postMessage(JSON.stringify(getEnvironmentData('w2.key')) + ' ' + typeof getEnvironmentData('missing'));`, { eval: true });\n  const text: string = await new Promise<string>((resolve) => { worker.once('message', (v: any) => { resolve(String(v)); }); });\n  console.log(text);\n  await worker.terminate();\n}"
+}

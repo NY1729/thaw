@@ -1,0 +1,5 @@
+{
+  "name": "parentPort onmessage handler runs",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.onmessage = (event) => { parentPort.postMessage('got ' + JSON.stringify(event.data)); parentPort.close(); };`, { eval: true });\n  worker.on('message', (v: any) => { console.log(v); });\n  worker.postMessage({ k: 1 });\n  await new Promise<void>((resolve) => { worker.on('exit', () => { resolve(); }); });\n}"
+}

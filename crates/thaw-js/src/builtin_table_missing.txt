@@ -491,11 +491,6 @@ performance	@@kHandlers
 performance	@@performance
 process	@@kCapture
 process	@@shapeMode
-process._events	newListener
-process._events	removeListener
-process._events	warning
-process._events.warning	length
-process._events.warning	name
 process._events.warning	prototype
 process._linkedBinding	prototype
 process._linkedBinding.prototype	constructor

@@ -1,0 +1,5 @@
+{
+  "name": "zlib gzip round trip",
+  "expect": "matched",
+  "source": "import { gzipSync, gunzipSync } from 'node:zlib'; function main(): void { const compressed = gzipSync('hello'); console.log(gunzipSync(compressed).toString(), compressed.toString('hex').slice(0, 4)); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "node:os signals/errno and node:constants values match Node",
+  "expect": "matched",
+  "source": "import * as os from 'node:os';\nimport * as C from 'node:constants';\nfunction main(): void {\n  console.log(typeof os.constants.signals.SIGINT, os.constants.signals.SIGINT, os.constants.errno.ENOENT);\n  console.log(typeof C.O_CREAT, C.O_CREAT, C.E2BIG, C.SIGTERM, C.S_IFMT, C.RTLD_NOW, typeof C.defaultCoreCipherList);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage dynamic rest packed owner retains self cycles",
+  "expect": "matched",
+  "source": "function cycle(...values: number[][]): any { const exposed: any = values; exposed[0] = exposed; return exposed; } function main(): void { const result: any = cycle([]); console.log(result[0] === result, Array.isArray(result)); }"
+}

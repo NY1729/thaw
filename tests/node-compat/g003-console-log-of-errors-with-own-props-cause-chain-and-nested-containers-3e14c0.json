@@ -1,0 +1,5 @@
+{
+  "name": "g003 console.log of errors with own props, cause chain and nested containers",
+  "expect": "matched",
+  "source": "function main(): void { const inner = new RangeError(\"deep\") as any; inner.stack = \"RangeError: deep\"; const e = new Error(\"wrap\", { cause: inner }) as any; e.stack = \"Error: wrap\"; e.code = \"E_X\"; console.log(e); console.log({ e }); console.log([e]); }"
+}

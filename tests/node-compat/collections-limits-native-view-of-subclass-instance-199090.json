@@ -1,0 +1,5 @@
+{
+  "name": "collections limits: native view of subclass instance",
+  "expect": "matched",
+  "source": "class Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nclass Reg extends Map<string, number> { n = 1; }\nclass Bag extends Set<number> { }\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2);\n  const a: number[] = s;\n  console.log(a, a instanceof Stack, a.length, a.map(x => x + 1));\n  const r = new Reg(); r.set(\"a\", 1);\n  const m: Map<string, number> = r;\n  console.log(m, m instanceof Reg, m.get(\"a\"), m.size);\n  const b = new Bag(); b.add(3);\n  const st: Set<number> = b;\n  console.log(st, st instanceof Bag, st.has(3));\n}\n"
+}

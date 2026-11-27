@@ -1,0 +1,6 @@
+{
+  "name": "unhandled timer exception exits with failure",
+  "expect": "matched",
+  "exitCode": 1,
+  "source": "function main(): void { setTimeout(() => { throw new Error('timer fatal'); }, 0); }"
+}

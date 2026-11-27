@@ -1,0 +1,5 @@
+{
+  "name": "console.log of an inline Date and Date array",
+  "expect": "matched",
+  "source": "function main(): void { console.log(new Date(0)); console.log([new Date(0)]); }"
+}

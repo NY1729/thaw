@@ -1,0 +1,5 @@
+{
+  "name": "audit2 class field initialised with new Map/Set and an enum member needs no annotation",
+  "expect": "matched",
+  "source": "const State = { Idle: 0, Running: 1 } as const;\ntype State = 0 | 1;\nclass M {\n  private m = new Map<string, number>();\n  seen = new Set<string>();\n  state = State.Idle;\n  set(k: string, v: number) { this.m.set(k, v); this.seen.add(k); }\n  size() { return this.m.size + this.seen.size; }\n  go() { this.state = State.Running; }\n}\nfunction main(): void { const m = new M(); m.set(\"a\", 1); m.go(); console.log(m.size(), m.state); }"
+}

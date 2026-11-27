@@ -1,0 +1,5 @@
+{
+  "name": "os resource metadata",
+  "expect": "matched",
+  "source": "import { arch, cpus, freemem, totalmem, uptime } from 'node:os'; function main(): void { console.log(arch().length > 0, cpus().length > 0, totalmem() > 0, freemem() >= 0, uptime() >= 0); }"
+}

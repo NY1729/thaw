@@ -1,0 +1,5 @@
+{
+  "name": "trace events category lifecycle",
+  "expect": "matched",
+  "source": "import { createTracing, getEnabledCategories } from 'node:trace_events'; function main(): void { const tracing = createTracing({ categories: ['node'] }); console.log(tracing.enabled); tracing.enable(); console.log(tracing.enabled, String(getEnabledCategories()).includes('node')); tracing.disable(); console.log(tracing.enabled); }"
+}

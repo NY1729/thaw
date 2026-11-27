@@ -1,0 +1,5 @@
+{
+  "name": "crypto scrypt callback",
+  "expect": "matched",
+  "source": "import { scrypt } from 'node:crypto'; function main(): void { scrypt('password', 'salt', 8, { N: 16 }, (error: unknown, value): void => console.log(JSON.stringify(error), error === null, value.toString('hex'))); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "crypto cipher streaming blocks",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; import { createCipheriv } from 'node:crypto'; function main(): void { const cipher = createCipheriv('aes-256-cbc', Buffer.alloc(32), Buffer.alloc(16)); const first = cipher.update('abcdefghijklmnopqrstuvwxyz012345'); const last = cipher.final(); console.log(first.length, last.length, Buffer.concat([first, last]).length); }"
+}

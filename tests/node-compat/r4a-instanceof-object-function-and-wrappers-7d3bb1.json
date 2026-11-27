@@ -1,0 +1,5 @@
+{
+  "name": "r4a instanceof Object Function and wrappers",
+  "expect": "matched",
+  "source": "function main(): void { const m: Map<string, number> = new Map(); console.log(m instanceof Object, m instanceof Function, m instanceof Promise); const f: () => number = () => 1; console.log(f instanceof Function, f instanceof Object); const s: any = \"x\"; console.log(s instanceof String, 5 instanceof Number); }"
+}

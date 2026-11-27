@@ -1,0 +1,5 @@
+{
+  "name": "error assigned properties are enumerable own keys",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e: Error = new Error(\"boom\");\n  (e as any).code = \"E_X\";\n  console.log(Object.keys(e), (e as any).code, e.message, String(e));\n  const plain = new Error(\"p\");\n  console.log(Object.keys(plain), Object.getOwnPropertyNames(plain));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "native collection iterator spread",
+  "expect": "matched",
+  "source": "function main():void { const m = new Map<string,number>(); m.set(\"a\",1); m.set(\"b\",2); const a:any=m; console.log([...a.keys()].join(\",\"), [...a.values()].join(\",\"), [...a].length); }"
+}

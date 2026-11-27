@@ -1,0 +1,5 @@
+{
+  "name": "any callback param array identity after mutation",
+  "expect": "matched",
+  "source": "import { EventEmitter } from \"node:events\";\nfunction main(): void { const arr = [1, 2]; const ee = new EventEmitter(); ee.on(\"e\", (o: any) => { o.push(3); console.log(o === arr, arr.length); }); ee.emit(\"e\", arr); }\n"
+}

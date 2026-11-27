@@ -1,0 +1,5 @@
+{
+  "name": "queueMicrotask uncaught exception",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { process.once('uncaughtException', (error) => { console.log(error.message); }); queueMicrotask(() => { throw new Error('microtask boom'); }); await Promise.resolve(); }"
+}

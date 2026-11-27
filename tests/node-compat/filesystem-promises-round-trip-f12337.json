@@ -1,0 +1,5 @@
+{
+  "name": "filesystem promises round trip",
+  "expect": "matched",
+  "source": "import { readFile, unlink, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const path: string = '/tmp/thaw-node-compat-promises.txt'; await writeFile(path, 'async'); console.log(await readFile(path, 'utf8')); await unlink(path); }"
+}

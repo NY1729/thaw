@@ -1,0 +1,5 @@
+{
+  "name": "nd5a Buffer isEncoding compare swap and URL canParse",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(Buffer.isEncoding(\"utf8\"), Buffer.isEncoding(\"HEX\"), Buffer.isEncoding(\"nope\"));\n  console.log(Buffer.compare(Buffer.from(\"a\"), Buffer.from(\"b\")), Buffer.compare(Buffer.from(\"b\"), Buffer.from(\"a\")), Buffer.compare(Buffer.from(\"a\"), Buffer.from(\"a\")));\n  const b = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);\n  console.log(b.swap16().toString(\"hex\"));\n  console.log(b.swap32().toString(\"hex\"));\n  console.log(b.swap64().toString(\"hex\"));\n  console.log(URL.canParse(\"http://x.com\"), URL.canParse(\"nope\"));\n}\n"
+}

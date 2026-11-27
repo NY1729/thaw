@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure set iter write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const s = new Set<Buffer>([b]);\n  for (const x of s) x[0] = 65;\n  console.log(b.toString(), s.size);\n}\n"
+}

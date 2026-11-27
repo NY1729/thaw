@@ -1,0 +1,5 @@
+{
+  "name": "defineProperties evaluates computed keys and descriptor values once in source order",
+  "expect": "matched",
+  "source": "function main(): void {\n  const log: string[] = [];\n  const key = (label: string): string => { log.push('key ' + label); return label; };\n  const tick = (label: string): number => { log.push('val ' + label); return log.length; };\n  const o: any = Object.defineProperties({}, {\n    [key('a')]: { value: tick('a'), enumerable: true, writable: true, configurable: true },\n    [key('b')]: { value: tick('b'), enumerable: true, writable: true, configurable: true },\n    c: { value: tick('c'), enumerable: true, writable: true, configurable: true },\n  });\n  console.log(log.join('|'));\n  console.log(o.a, o.b, o.c, Object.keys(o).join());\n}"
+}

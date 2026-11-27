@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure async param write",
+  "expect": "matched",
+  "source": "async function w(v: Buffer): Promise<void> { v[0] = 90; }\nfunction main(): void {\n  const b = Buffer.from(\"hi\");\n  (async () => { await w(b); console.log(b.toString(), b[0]); })();\n}\n"
+}

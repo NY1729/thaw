@@ -1,0 +1,5 @@
+{
+  "name": "bigint arbitrary precision: values beyond 64 bits do not wrap",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(2n ** 64n, 2n ** 100n, 10n ** 20n, 1n << 70n);\n  let x = 1n; let i = 1n;\n  while (i <= 25n) { x *= i; i++; }\n  console.log(x);\n  console.log(BigInt.asUintN(64, -1n), BigInt.asIntN(64, 18446744073709551615n), BigInt.asIntN(8, 255n));\n  console.log(BigInt(1e21), BigInt(\"123456789012345678901234567890\") + 1n);\n  console.log(9223372036854775807n * 9223372036854775807n);\n}"
+}

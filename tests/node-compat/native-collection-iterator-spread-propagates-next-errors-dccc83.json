@@ -1,0 +1,5 @@
+{
+  "name": "native collection iterator spread propagates next errors",
+  "expect": "matched",
+  "source": "function main():void { const m=new Map<string,number>();m.set(\"a\",1);const a:any=m;const it:any=a.keys();it.next=()=>{throw new Error(\"next failed\");};try {const xs:any=[...it];console.log(xs.length);} catch(e:any){console.log(e.message);} }"
+}

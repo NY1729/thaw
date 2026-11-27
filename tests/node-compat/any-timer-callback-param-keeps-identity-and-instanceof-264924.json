@@ -1,0 +1,5 @@
+{
+  "name": "any timer callback param keeps identity and instanceof",
+  "expect": "matched",
+  "source": "class C { x = 1; }\nconst c = new C();\nfunction main(): void {\n  setTimeout((o: any) => { o.x = 5; console.log(o === c, o instanceof C, c.x); }, 1, c);\n}\n"
+}

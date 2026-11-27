@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: optional on any",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: any = { a: { c: () => 5, d: (x: number) => x + 1 }, arr: [1] };\n  console.log(o.a.c?.());\n  console.log(o.z?.());\n  console.log(o.a.zz?.());\n  console.log(o.a.d?.(4));\n  console.log(o.arr?.[0], o.q?.[0]);\n  let calls = 0;\n  const f = () => { calls++; return 1; };\n  console.log(o.nothing?.[f()], calls);\n  const i = 0;\n  console.log(o.arr?.[i]);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "util promisify rejection",
+  "expect": "matched",
+  "source": "import { promisify } from 'node:util'; function read(callback: (error: unknown) => void): void { callback(new Error('denied')); } async function main(): Promise<void> { const wrapped = promisify(read); try { await wrapped(); } catch (error) { console.log(String(error)); } }"
+}

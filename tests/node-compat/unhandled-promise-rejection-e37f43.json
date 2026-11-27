@@ -1,0 +1,5 @@
+{
+  "name": "unhandled promise rejection",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { process.once('unhandledRejection', (reason) => console.log(reason.message)); Promise.reject(new Error('reject boom')); await Promise.resolve(); }"
+}

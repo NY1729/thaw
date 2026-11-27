@@ -1949,6 +1949,17 @@ fn function_length_rest_only_is_zero() {
 }
 
 #[test]
+fn function_length_marker_in_the_last_parameter_name_overrides_the_count() {
+    let debug = lower_function_length_program(
+        "function a(path: string, callback__length_3: (e: number) => void) {} function b(...rest__length_2: number[]) {} \
+         function c(...__length_4: number[]) {} \
+         function main(): void { console.log(a.length, b.length, c.length); }",
+    )
+    .expect("marked function length lowers");
+    assert!(debug.contains("F64(3.0)") && debug.contains("F64(2.0)") && debug.contains("F64(4.0)"), "{debug}");
+}
+
+#[test]
 fn function_length_through_alias_matches_node() {
     let debug = lower_function_length_program(
         "function f(a: number, b: number) {} const g = f; function main(): void { console.log(g.length); }",

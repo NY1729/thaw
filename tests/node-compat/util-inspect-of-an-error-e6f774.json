@@ -1,0 +1,5 @@
+{
+  "name": "util.inspect of an Error",
+  "expect": "matched",
+  "source": "import { inspect } from 'node:util'; function main(): void {   const e = new Error('boom');   const s = inspect(e);   console.log(s.split('\\n')[0]);   console.log(s.split('\\n').slice(1).every((l: string) => l.startsWith('    at ')));   console.log(String(e.stack).split('\\n')[0]);   console.log(inspect(new TypeError('t')).split('\\n')[0]); }"
+}

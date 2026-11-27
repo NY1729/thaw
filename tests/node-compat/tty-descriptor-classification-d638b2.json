@@ -1,0 +1,5 @@
+{
+  "name": "tty descriptor classification",
+  "expect": "matched",
+  "source": "import { isatty } from 'node:tty'; function main(): void { console.log(isatty(-1), isatty(999999)); }"
+}

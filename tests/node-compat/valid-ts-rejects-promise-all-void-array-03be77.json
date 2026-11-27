@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: promise all void array",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const out: number[] = [];\n  const arr = [1, 2, 3];\n  await Promise.all(arr.map(async (n) => { out.push(n * 2); }));\n  console.log(out.join(\",\"));\n  const r = await Promise.all(arr.map(async (n) => n + 1));\n  console.log(r.join(\",\"));\n  const tasks = [1, 2].map(async (n) => { await Promise.resolve(n); console.log(\"task\", n); });\n  await Promise.all(tasks);\n  console.log(\"end\");\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic any-typed Promise all race any reject paths and AggregateError errors order",
+  "expect": "matched",
+  "source": "function main(): void {\n  const P: any = Promise;\n  P.all([P.reject(3), P.resolve(4)]).catch((e: any): void => { console.log('all ' + e); });\n  P.race([P.reject(5), P.resolve(6)]).catch((e: any): void => { console.log('race ' + e); });\n  P.any([P.reject(7), P.reject(8)]).catch((e: any): void => { console.log('any ' + e.errors.join(',')); });\n  P.any([P.reject(9), P.resolve(10)]).then((v: any): void => { console.log('any-mixed ' + v); });\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "stackless errors with a cause print bracketed",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = new Error(\"plain\", { cause: \"x\" }) as any;\n  a.stack = \"Error: plain\";\n  console.log(a);\n  const inner = new RangeError(\"deep\") as any;\n  inner.stack = \"RangeError: deep\";\n  const b = new Error(\"wrap\", { cause: inner }) as any;\n  b.stack = \"Error: wrap\";\n  console.log(b);\n  console.log([b]);\n}\n"
+}

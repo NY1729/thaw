@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite transactions and isTransaction",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE t (v INTEGER)');\n  console.log(db.isTransaction);\n  db.exec('BEGIN');\n  console.log(db.isTransaction);\n  db.prepare('INSERT INTO t VALUES (?)').run(1);\n  db.exec('ROLLBACK');\n  console.log(db.isTransaction, db.prepare('SELECT count(*) AS n FROM t').get().n);\n  db.exec('BEGIN');\n  db.prepare('INSERT INTO t VALUES (?)').run(2);\n  db.exec('COMMIT');\n  console.log(db.isTransaction, db.prepare('SELECT v FROM t').all().map((r: any) => r.v).join(','));\n  db.close();\n}"
+}

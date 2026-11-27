@@ -1,0 +1,5 @@
+{
+  "name": "r2b class length counts constructor parameters before a default",
+  "expect": "matched",
+  "source": "class Q { constructor(a: number, b: string) {} } class R { constructor(a: number, b = 2, c?: string) {} } class S {} function main(): void { console.log(Q.length, R.length, S.length); }"
+}

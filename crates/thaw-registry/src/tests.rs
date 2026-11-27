@@ -1506,7 +1506,7 @@ fn builtin_sources_parse_for_the_defined_method_names() {
 #[test]
 fn node_path_bundle_text_is_pinned() {
     // the node:path bundle must stay byte-identical when its source moves to thaw-node-builtins; the only
-    // intended change since is dropping module.exports.default/__esModule (Node's path has neither): 52641 -> 52551 bytes
+    // intended changes since: dropping module.exports.default/__esModule (Node's path has neither): 52641 -> 52551 bytes; path.matchesGlob/_makeLong (r152): -> 56476 bytes
     let bundle = builtin_bundle_with("node:path", &[]).unwrap();
     let hex: String = Sha256::digest(bundle.as_bytes())
         .iter()
@@ -1514,7 +1514,7 @@ fn node_path_bundle_text_is_pinned() {
         .collect();
     assert_eq!(
         hex,
-        "02c836a37668275d3415443998c62ac3e06c185637c7877d53dab4696994d631",
+        "f85fe009d7cb187ede693fcafe624a78266c695fafab038bfb34123881e5fdcb",
         "node:path bundle sha256 ({} bytes)",
         bundle.len()
     );
@@ -1533,7 +1533,7 @@ fn builtin_bundle_sha256(specifier: &str) -> String {
 fn node_util_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:util"),
-        "9e21c0ba19eebc1792ea88a8b0c3afba197c42285b8638910620ff463094fb19",
+        "7d97e0443dcde2382e6a6b0ddd2e57b8cfc2d0d3221f8426dd304ce5b3a7bf19",
         "node:util bundle sha256"
     );
 }
@@ -1542,7 +1542,7 @@ fn node_util_bundle_text_is_pinned() {
 fn node_events_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:events"),
-        "dc90a5ecc6c00dbb5b7d753059c3ff8630b613650f361d0ee512d264453c8ca9",
+        "bc6761f3cbe27cf3b0a2d8b7dc3b937471ce5ef3ae8b29b1a7c62afab264de5c",
         "node:events bundle sha256"
     );
 }
@@ -1551,8 +1551,8 @@ fn node_events_bundle_text_is_pinned() {
 fn node_url_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:url"),
-        // node:url bundles node:path: the hash moved from ed14c972... when #958 dropped path's .default/__esModule
-        "bff034e4789a94d1b47f8fcc11aff3667bd932755cc116a17c110481e9841a5f",
+        // node:url bundles node:path: the hash moved from ed14c972... when #958 dropped path's .default/__esModule; then to 2ea12be4... when url.Url was added
+        "74e76b1cbc53ec656ec2085f57347bded69f8b8275733d5325981e1c1bc23546",
         "node:url bundle sha256"
     );
 }

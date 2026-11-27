@@ -1,0 +1,5 @@
+{
+  "name": "net IP classification",
+  "expect": "matched",
+  "source": "import { isIP, isIPv4, isIPv6 } from 'node:net'; function main(): void { console.log(isIP('127.0.0.1'), isIPv4('127.0.0.1'), isIPv6('::1'), isIP('invalid')); }"
+}

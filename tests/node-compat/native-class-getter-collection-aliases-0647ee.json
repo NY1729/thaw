@@ -1,0 +1,5 @@
+{
+  "name": "native class getter collection aliases",
+  "expect": "matched",
+  "source": "const sharedMap = new Map<string,number>();\nconst sharedSet = new Set<number>();\nclass Store {\n  get map(): Map<string,number> { return sharedMap; }\n  get set(): Set<number> { return sharedSet; }\n  calls = 0;\n  getMap(): Map<string,number> { this.calls += 1; return this.map; }\n  getSet(): Set<number> { return this.set; }\n  fresh(): Map<string,number> { return new Map<string,number>(); }\n}\nasync function main():Promise<void> {\n const s=new Store(); const a:any=s;\n const m:any=a.getMap(); const t:any=a.getSet();\n m.set(\"a\",1); t.add(2);\n console.log(s.map.get(\"a\"),s.set.has(2),m===a.getMap(),t===a.getSet(),m===a.map,t===a.set,s.calls);\n s.map.set(\"b\",3);s.set.add(4); console.log(m.get(\"b\"),t.has(4));\n await new Promise<void>((resolve)=>setTimeout(resolve,1));m.set(\"c\",5);console.log(s.map.get(\"c\"));\n const x:any=a.fresh(); const y:any=a.fresh();x.set(\"x\",7);console.log(x===y,y.has(\"x\"));\n}"
+}

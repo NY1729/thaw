@@ -1,0 +1,5 @@
+{
+  "name": "stream duplex options",
+  "expect": "matched",
+  "source": "import { Duplex } from 'node:stream'; import { once } from 'node:events'; async function main(): Promise<void> { const writes: string[] = []; const stream = new Duplex({ read(): void {}, write(chunk, _encoding, callback): void { writes.push(chunk.toString()); callback(); } }); const reads: string[] = []; stream.on('data', (chunk): void => { reads.push(chunk.toString()); }); stream.push('read'); stream.push(null); stream.end('write'); await once(stream, 'end'); console.log(reads.join(''), writes.join('')); }"
+}

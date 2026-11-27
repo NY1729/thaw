@@ -102,7 +102,7 @@ fn url_builtin_supports_legacy_parse_and_format() {
     let empty_node_modules = temp_registry("builtin_url_legacy_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4); // index + url + path + querystring (legacy url.parse/format)
     let result = run_js(&bundle);
     assert_eq!(
         result,
@@ -813,17 +813,17 @@ fn repl_server_evaluates_input_and_drives_commands() {
     let dir = temp_registry("builtin_repl_server");
     fs::write(
             dir.join("index.js"),
-            "var repl = require('node:repl'); module.exports = function () { var output = { text: '', write: function(value) { this.text += value; } }, events = [], server = repl.start({ prompt: 'thaw> ', output: output, historySize: 2, replMode: repl.REPL_MODE_STRICT, writer: function(value) { return '<' + String(value) + '>'; } }); server.on('result', function(value) { events.push(value); }); server.on('exit', function() { events.push('exit'); }); server.defineCommand('double', { help: 'double a value', action: function(value) { this.write(String(Number(value) * 2)); } }); server.write('20 + 22'); server.write('.double 5'); server.write('1'); server.write('2'); var history = server.history.slice(); server.setPrompt('next> '); server.displayPrompt(); var setup = false; server.setupHistory('/tmp/history', function(error) { setup = !error; }); server.write('.exit'); return Promise.resolve().then(function() { return [server instanceof repl.REPLServer, server.closed, server.last, server.context._, history, events, setup, output.text, typeof repl.writer({ answer: 42 }), repl._builtinLibs.length, repl.REPL_MODE_SLOPPY !== repl.REPL_MODE_STRICT]; }); };",
+            "var repl = require('node:repl'); module.exports = function () { var output = { text: '', write: function(value) { this.text += value; } }, events = [], server = repl.start({ prompt: 'thaw> ', output: output, historySize: 2, replMode: repl.REPL_MODE_STRICT, writer: function(value) { return '<' + String(value) + '>'; } }); server.on('result', function(value) { events.push(value); }); server.on('exit', function() { events.push('exit'); }); server.defineCommand('double', { help: 'double a value', action: function(value) { this.write(String(Number(value) * 2)); } }); server.write('20 + 22'); server.write('.double 5'); server.write('1'); server.write('2'); var history = server.history.slice(); server.setPrompt('next> '); server.displayPrompt(); var setup = false; server.setupHistory('/tmp/history', function(error) { setup = !error; }); server.write('.exit'); return Promise.resolve().then(function() { return [server instanceof repl.REPLServer, server.closed, server.last, server.context._, history, events, setup, output.text, typeof repl.writer({ answer: 42 }), repl._builtinLibs.length > 0, repl.REPL_MODE_SLOPPY !== repl.REPL_MODE_STRICT]; }); };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_repl_server_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 5);
+    assert_eq!(file_count, 7);
     let result = run_js(&bundle);
     assert_eq!(
         result,
-        r#"[true,true,2,2,["2","1"],[42,10,1,2,"exit"],true,"thaw> <42>\nthaw> <10>\nthaw> <1>\nthaw> <2>\nthaw> next> ","string",0,true]"#
+        r#"[true,true,2,2,["2","1"],[42,10,1,2,"exit"],true,"thaw> <42>\nthaw> <10>\nthaw> <1>\nthaw> <2>\nthaw> next> ","string",true,true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

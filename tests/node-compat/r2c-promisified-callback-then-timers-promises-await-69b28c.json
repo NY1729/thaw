@@ -1,0 +1,5 @@
+{
+  "name": "r2c promisified callback then timers/promises await",
+  "expect": "matched",
+  "source": "import * as util from \"node:util\";\nimport { setTimeout as st } from \"node:timers/promises\";\nfunction cb(a: number, f: (e: Error | null, r?: number) => void) { setImmediate(() => f(null, a * 2)); }\nconst p = util.promisify(cb);\nasync function run() {\n  console.log(await p(2));\n  console.log(await st(1, \"v\"));\n  setTimeout(() => console.log(\"global timer still works\"), 1);\n}\nfunction main(): void { run(); }"
+}

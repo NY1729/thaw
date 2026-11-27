@@ -1,0 +1,5 @@
+{
+  "name": "r2c node:buffer File export dns.promises and import.meta.resolve",
+  "expect": "matched",
+  "source": "import { File } from \"node:buffer\";\nimport * as dns from \"node:dns\";\nfunction main(): void {\n  const f = new File([\"xyz\"], \"n.txt\", { lastModified: 5 });\n  console.log(f.name, f.size, f.lastModified);\n  dns.promises.lookup(\"127.0.0.1\").then((r: any) => console.log(r));\n  console.log(typeof import.meta.resolve);\n}"
+}

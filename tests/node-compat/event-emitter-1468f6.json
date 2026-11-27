@@ -1,0 +1,5 @@
+{
+  "name": "event emitter",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); events.on('value', (value: number): void => console.log(value)); events.emit('value', 42); }"
+}
