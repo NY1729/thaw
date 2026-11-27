@@ -34,7 +34,8 @@ unsafe extern "C" {
 
 const THAW_FD_READABLE: u8 = 1;
 const THAW_FD_WRITABLE: u8 = 2;
-const MAX_REQUEST_HEAD: usize = 64 * 1024;
+/// Node's default `maxHeaderSize`: a request head past it is answered 431.
+const MAX_REQUEST_HEAD: usize = 16 * 1024;
 const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 
 /// How the request body's length is framed, parsed from the head once
@@ -105,8 +106,27 @@ fn decode_chunked_body_incremental(bytes: &[u8], start: usize) -> Option<(Vec<u8
         let Some(line_end) = rest.windows(2).position(|pair| pair == b"\r\n") else {
             return Some((body, offset, false));
         };
-        let size =
-            usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).ok()?.trim(), 16).ok()?;
+        // `<hex>[;extension]`: only hex digits are a valid size (llhttp is strict about it).
+        let size_text = rest[..line_end].split(|&byte| byte == b';').next()?;
+        if size_text.is_empty() || !size_text.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let size = usize::from_str_radix(std::str::from_utf8(size_text).ok()?, 16).ok()?;
+        if size == 0 {
+            // Trailer lines, then the blank line that ends the body.
+            let mut position = line_end + 2;
+            loop {
+                let line = rest[position..].windows(2).position(|pair| pair == b"\r\n");
+                let Some(line) = line else {
+                    return Some((body, offset, false));
+                };
+                position += line + 2;
+                if line == 0 {
+                    offset += position;
+                    return Some((body, offset, true));
+                }
+            }
+        }
         let after_size = &rest[line_end + 2..];
         if after_size.len() < size + 2 {
             return Some((body, offset, false));
@@ -115,9 +135,6 @@ fn decode_chunked_body_incremental(bytes: &[u8], start: usize) -> Option<(Vec<u8
             return None;
         }
         offset += line_end + 2 + size + 2;
-        if size == 0 {
-            return Some((body, offset, true));
-        }
         body.extend_from_slice(&after_size[..size]);
     }
 }
@@ -160,6 +177,12 @@ struct ResponseSpec {
     body: Vec<u8>,
     /// HEAD, 1xx, 204 and 304 carry no body: no framing is added and no body byte is sent.
     bodyless: bool,
+    /// `write`+`end` without a framing header: Node appends `Transfer-Encoding: chunked` after `Connection`.
+    auto_chunked: bool,
+    /// Chunk boundaries (end offsets in `body`) when the body is chunk-framed; empty means one chunk.
+    chunk_ends: Vec<usize>,
+    /// `writeHead(status, message)` / `statusMessage`; `None` is the standard phrase.
+    reason: Option<String>,
 }
 
 /// Node's `_hasBody == false` cases: a HEAD request, or a 1xx/204/304 status.
@@ -174,6 +197,9 @@ impl ResponseSpec {
             headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
             body: body.into_bytes(),
             bodyless: false,
+            auto_chunked: false,
+            chunk_ends: Vec::new(),
+            reason: None,
         }
     }
 }
@@ -324,11 +350,17 @@ fn http_date_at(secs: i64) -> String {
 /// Node's header order: caller headers, `Date`, `Connection`, `Keep-Alive`, then the body framing.
 fn render_head(
     status: u16,
+    reason: Option<&str>,
     headers: &[(String, String)],
     framing: &str,
     keep_alive: bool,
 ) -> String {
-    let mut head = format!("HTTP/1.1 {} {}\r\n", status, status_reason(status));
+    let reason = reason.unwrap_or_else(|| status_reason(status));
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\n",
+        status,
+        reason.replace(['\r', '\n'], "")
+    );
     for (name, value) in headers {
         head.push_str(&name.replace(['\r', '\n'], ""));
         head.push_str(": ");
@@ -355,35 +387,79 @@ fn is_transfer_encoding(name: &str) -> bool {
     name.eq_ignore_ascii_case("Transfer-Encoding")
 }
 
-fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
+fn placed_or(placed: bool, framing: &str) -> String {
+    if placed {
+        String::new()
+    } else {
+        framing.to_string()
+    }
+}
+
+fn render_response(response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
+    render_response_for(response_spec, keep_alive, false)
+}
+
+/// An HTTP/1.0 client gets no chunked framing and, without a caller `Content-Length`, no framing header at all
+/// (the body ends when the connection closes), like Node.
+fn render_response_for(mut response_spec: ResponseSpec, keep_alive: bool, http10: bool) -> Vec<u8> {
     if response_spec.bodyless {
         // Caller headers (including an explicit Content-Length) go out untouched.
-        return render_head(response_spec.status, &response_spec.headers, "", keep_alive)
-            .into_bytes();
+        return render_head(
+            response_spec.status,
+            response_spec.reason.as_deref(),
+            &response_spec.headers,
+            "",
+            keep_alive,
+        )
+        .into_bytes();
     }
     // A caller-set `Transfer-Encoding: chunked` means the body is chunk-framed, not length-framed.
-    let chunked = response_spec.headers.iter().any(|(name, value)| {
-        is_transfer_encoding(name) && value.to_ascii_lowercase().contains("chunked")
-    });
-    response_spec.headers.retain(|(name, _)| {
-        !(name.eq_ignore_ascii_case("Content-Length") || chunked && is_transfer_encoding(name))
-    });
-    let (framing, body) = if chunked {
-        let mut body = if response_spec.body.is_empty() {
-            Vec::new()
+    let chunked = (response_spec.auto_chunked && !http10)
+        || response_spec.headers.iter().any(|(name, value)| {
+            is_transfer_encoding(name) && value.to_ascii_lowercase().contains("chunked")
+        });
+    // Node leaves a caller-set framing header where the caller put it; only an absent one is appended.
+    let length = response_spec.body.len().to_string();
+    let mut placed = false;
+    let mut headers = Vec::with_capacity(response_spec.headers.len());
+    for (name, value) in std::mem::take(&mut response_spec.headers) {
+        let framing_header = if chunked {
+            is_transfer_encoding(&name)
         } else {
-            frame_chunk(&response_spec.body)
+            name.eq_ignore_ascii_case("Content-Length")
         };
+        if framing_header {
+            if !placed {
+                placed = true;
+                headers.push((name, value));
+            }
+        } else if !name.eq_ignore_ascii_case("Content-Length") {
+            headers.push((name, value));
+        }
+    }
+    response_spec.headers = headers;
+    let (framing, body) = if chunked {
+        let mut body = Vec::new();
+        let mut start = 0;
+        let mut ends = std::mem::take(&mut response_spec.chunk_ends);
+        ends.push(response_spec.body.len());
+        for end in ends {
+            if end > start {
+                body.extend(frame_chunk(&response_spec.body[start..end]));
+                start = end;
+            }
+        }
         body.extend_from_slice(CHUNKED_TERMINATOR);
-        ("Transfer-Encoding: chunked\r\n".to_string(), body)
+        (placed_or(placed, "Transfer-Encoding: chunked\r\n"), body)
     } else {
         (
-            format!("Content-Length: {}\r\n", response_spec.body.len()),
+            placed_or(placed || http10, &format!("Content-Length: {length}\r\n")),
             response_spec.body,
         )
     };
     let mut response = render_head(
         response_spec.status,
+        response_spec.reason.as_deref(),
         &response_spec.headers,
         &framing,
         keep_alive,
@@ -397,21 +473,41 @@ fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8>
 /// is produced: `Transfer-Encoding: chunked` since the total length
 /// isn't known when the head goes out. Any caller-set `Content-Length`
 /// or `Transfer-Encoding` is dropped (it would contradict or duplicate the chunked framing).
-fn render_streaming_head(status: u16, headers: &[(String, String)], keep_alive: bool) -> Vec<u8> {
+fn render_streaming_head(
+    status: u16,
+    reason: Option<&str>,
+    headers: &[(String, String)],
+    keep_alive: bool,
+    http10: bool,
+) -> Vec<u8> {
+    if http10 {
+        // No framing header of our own; a caller `Content-Length` stays as given.
+        return render_head(status, reason, headers, "", keep_alive).into_bytes();
+    }
+    // A caller-set `Transfer-Encoding` stays where the caller put it (Node); otherwise it is appended.
+    let mut placed = false;
     let headers: Vec<(String, String)> = headers
         .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"))
         .filter(|(name, _)| {
-            !name.eq_ignore_ascii_case("Content-Length") && !is_transfer_encoding(name)
+            let keep = !is_transfer_encoding(name) || !placed;
+            placed |= is_transfer_encoding(name);
+            keep
         })
-        .cloned()
+        .map(|(name, value)| {
+            if is_transfer_encoding(name) {
+                (name.clone(), "chunked".to_string())
+            } else {
+                (name.clone(), value.clone())
+            }
+        })
         .collect();
-    render_head(
-        status,
-        &headers,
-        "Transfer-Encoding: chunked\r\n",
-        keep_alive,
-    )
-    .into_bytes()
+    let framing = if placed {
+        ""
+    } else {
+        "Transfer-Encoding: chunked\r\n"
+    };
+    render_head(status, reason, &headers, framing, keep_alive).into_bytes()
 }
 
 /// One `Transfer-Encoding: chunked` chunk: `<hex len>\r\n<bytes>\r\n`.
@@ -474,6 +570,17 @@ struct ResponseState {
     ended: bool,
     /// A `write(...)` was buffered in the synchronous burst: Node would already have sent a chunked head.
     wrote: bool,
+    /// End offset in `body` of each `write`/`end` payload: Node frames every one as its own chunk.
+    chunk_ends: Vec<usize>,
+}
+
+impl ResponseState {
+    fn push_body(&mut self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            self.body.extend(bytes);
+            self.chunk_ends.push(self.body.len());
+        }
+    }
 }
 
 #[repr(C)]
@@ -714,6 +821,8 @@ struct RequestContext {
     /// Owned Json values and strings the `IncomingMessage` pointers borrow from.
     _request_json: Vec<*mut Value>,
     _http_version: CString,
+    /// Owned copy of the `writeHead` status message that `response.status_message` points at.
+    _status_message: CString,
     // Backing storage the `IncomingMessage` pointers borrow from; never
     // read through directly (hence the underscores), just kept alive.
     _method: CString,
@@ -740,6 +849,7 @@ impl RequestContext {
                 body: Vec::new(),
                 ended: false,
                 wrote: false,
+                chunk_ends: Vec::new(),
             },
             response: ServerResponse {
                 status_code: 200.0,
@@ -900,6 +1010,7 @@ impl RequestContext {
             request_close_listeners: Vec::new(),
             _request_json: Vec::new(),
             _http_version: CString::new("1.1").unwrap_or_default(),
+            _status_message: CString::default(),
             set_header: NativeClosure::new(
                 response_set_header as *const c_void,
                 std::ptr::null_mut(),
@@ -1007,6 +1118,10 @@ impl RequestContext {
         context.request.headers_distinct = json[2];
         context.request.trailers = json[3];
         context.request.socket = json[4];
+        if !connection.is_null() && unsafe { (*connection).http10 } {
+            context._http_version = CString::new("1.0").unwrap_or_default();
+            context.request.http_version_minor = 0.0;
+        }
         context.request.http_version = context._http_version.as_ptr();
         context._request_json.extend(json);
         context
@@ -1265,7 +1380,7 @@ unsafe extern "C" fn response_write_bytes(environment: *const c_void, chunk: *co
     } else {
         context.state.wrote = true;
         if !context_is_bodyless(context) {
-            context.state.body.extend(bytes);
+            context.state.push_body(bytes);
         }
     }
     true
@@ -1384,7 +1499,15 @@ fn sync_request_body_buffer(connection: &mut ConnectionState, context: &mut Requ
                 // `write_response`, gated on `body_complete` alone, which
                 // doesn't distinguish "genuinely finished" from "gave up"
                 // -- both correctly force a close here).
-                None => (Vec::new(), connection.body_scan_offset, true),
+                None => {
+                    if connection.response.is_empty() && !context.headers_sent {
+                        if let Some(stream) = connection.stream.as_mut() {
+                            let _ = stream.write_all(&rejection_bytes(&Reject::BadRequest));
+                        }
+                    }
+                    mark_client_gone(connection);
+                    (Vec::new(), connection.body_scan_offset, true)
+                }
             }
         }
     };
@@ -1859,7 +1982,8 @@ unsafe extern "C" fn response_write_head(
     }
     context.response.status_code = status;
     if !message.is_null() && *message != 0 {
-        context.response.status_message = message;
+        context._status_message = std::ffi::CStr::from_ptr(message).to_owned();
+        context.response.status_message = context._status_message.as_ptr();
     }
     for (name, values) in crate::http_glue::header_entries_of(headers) {
         set_response_header(context, name, values);
@@ -1906,7 +2030,7 @@ unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_
         // response, so only the headers differ: `finish_response` frames it chunked.
         context.state.wrote = true;
         if !context_is_bodyless(context) {
-            context.state.body.extend(bytes);
+            context.state.push_body(bytes);
         }
     }
     true
@@ -1953,6 +2077,19 @@ fn stream_should_engage(context: &RequestContext) -> bool {
     context.resumable && !context.connection.is_null() && !context_is_bodyless(context)
 }
 
+/// The caller's `statusMessage`, if any.
+fn reason_of(context: &RequestContext) -> Option<String> {
+    let message = context.response.status_message;
+    if message.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 fn context_is_bodyless(context: &RequestContext) -> bool {
     response_is_bodyless(
         &context._method.to_string_lossy(),
@@ -1965,21 +2102,36 @@ fn context_is_bodyless(context: &RequestContext) -> bool {
 /// suspended, as the leading chunk), then `payload` as its own chunk.
 fn stream_head_and_chunk(context: &mut RequestContext, payload: &[u8]) -> Vec<u8> {
     let mut outbound = Vec::new();
+    let http10 = unsafe { (*context.connection).http10 };
+    let raw = unframed_body(http10, &context.state.headers);
+    // HTTP/1.0 has no chunked encoding: the body is written raw and ends when the connection closes.
+    let frame = |bytes: &[u8]| {
+        if raw {
+            bytes.to_vec()
+        } else {
+            frame_chunk(bytes)
+        }
+    };
     if !context.headers_sent {
         context.headers_sent = true;
+        if http10 {
+            http10_keep_alive(unsafe { &mut *context.connection }, &context.state.headers);
+        }
         let keep_alive = unsafe { (*context.connection).keep_alive };
         outbound.extend(render_streaming_head(
             normalize_status(context.response.status_code),
+            reason_of(context).as_deref(),
             &context.state.headers,
             keep_alive,
+            raw,
         ));
         let pending = std::mem::take(&mut context.state.body);
         if !pending.is_empty() {
-            outbound.extend(frame_chunk(&pending));
+            outbound.extend(frame(&pending));
         }
     }
     if !payload.is_empty() {
-        outbound.extend(frame_chunk(payload));
+        outbound.extend(frame(payload));
     }
     outbound
 }
@@ -2008,12 +2160,17 @@ fn stream_or_buffer_end(context: &mut RequestContext, tail: Vec<u8>) {
     mark_response_ended(context);
     let force_stream = stream_should_engage(context) && !context.state.body.is_empty();
     if !context.headers_sent && !force_stream {
-        context.state.body.extend(tail);
+        context.state.push_body(tail);
         finish_response(context);
         return;
     }
     let mut outbound = stream_head_and_chunk(context, &tail);
-    outbound.extend_from_slice(CHUNKED_TERMINATOR);
+    if !unframed_body(
+        unsafe { (*context.connection).http10 },
+        &context.state.headers,
+    ) {
+        outbound.extend_from_slice(CHUNKED_TERMINATOR);
+    }
     context.state.ended = true;
     let connection = unsafe { &mut *context.connection };
     connection.streaming = true;
@@ -2046,12 +2203,26 @@ fn park_pending_context(
     }
     context.headers_sent = true;
     connection.streaming = true;
+    if connection.http10 {
+        http10_keep_alive(connection, &context.state.headers);
+    }
     let mut head = render_streaming_head(
         normalize_status(context.response.status_code),
+        reason_of(context).as_deref(),
         &context.state.headers,
-        keep_alive,
+        if connection.http10 {
+            connection.keep_alive
+        } else {
+            keep_alive
+        },
+        unframed_body(connection.http10, &context.state.headers),
     );
-    head.extend(frame_chunk(&std::mem::take(&mut context.state.body)));
+    let body = std::mem::take(&mut context.state.body);
+    if unframed_body(connection.http10, &context.state.headers) {
+        head.extend(body);
+    } else {
+        head.extend(frame_chunk(&body));
+    }
     connection.response = head;
     connection.written = 0;
     true
@@ -2078,21 +2249,24 @@ fn finish_response(context: &mut RequestContext) {
     }
     let connection = unsafe { &mut *context.connection };
     connection.awaiting_handler = false;
-    let mut headers = std::mem::take(&mut context.state.headers);
+    let headers = std::mem::take(&mut context.state.headers);
     let bodyless = context_is_bodyless(context);
-    if !bodyless
+    let auto_chunked = !bodyless
         && context.state.wrote
-        && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
-    {
-        headers.push(("Transfer-Encoding".into(), "chunked".into()));
-    }
+        && !headers.iter().any(|(name, _)| {
+            is_transfer_encoding(name) || name.eq_ignore_ascii_case("Content-Length")
+        });
     let spec = ResponseSpec {
         status: normalize_status(context.response.status_code),
         headers,
         body: std::mem::take(&mut context.state.body),
         bodyless,
+        auto_chunked,
+        chunk_ends: std::mem::take(&mut context.state.chunk_ends),
+        reason: reason_of(context),
     };
-    connection.response = render_response(spec, connection.keep_alive);
+    http10_keep_alive(connection, &spec.headers);
+    connection.response = render_response_for(spec, connection.keep_alive, connection.http10);
     // Deliberately does not write here: this runs inside the async
     // handler's resume, and any handler code after `response.end(...)`
     // still expects a live `ServerResponse`. Re-arming for writability
@@ -2278,15 +2452,14 @@ fn run_server_callback(
         }
     }
     if context.state.ended || connection.is_null() {
-        let mut headers = std::mem::take(&mut context.state.headers);
+        let headers = std::mem::take(&mut context.state.headers);
         let bodyless = context_is_bodyless(&context);
-        if !bodyless
+        let auto_chunked = !bodyless
             && context.state.wrote
             && !connection.is_null()
-            && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
-        {
-            headers.push(("Transfer-Encoding".into(), "chunked".into()));
-        }
+            && !headers.iter().any(|(name, _)| {
+                is_transfer_encoding(name) || name.eq_ignore_ascii_case("Content-Length")
+            });
         // `finish`/`close` listeners read `res.*` through the context pointer: run them while it is alive.
         deliver_pending_response_events();
         CallbackOutcome::Ready(ResponseSpec {
@@ -2294,6 +2467,9 @@ fn run_server_callback(
             headers,
             body: std::mem::take(&mut context.state.body),
             bodyless,
+            auto_chunked,
+            chunk_ends: std::mem::take(&mut context.state.chunk_ends),
+            reason: reason_of(&context),
         })
     } else {
         context.resumable = true;
@@ -2315,6 +2491,9 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
                 headers: context.state.headers.clone(),
                 body: context.state.body.clone(),
                 bodyless: context_is_bodyless(&context),
+                auto_chunked: false,
+                chunk_ends: context.state.chunk_ends.clone(),
+                reason: reason_of(&context),
             }
         }
     }
@@ -2403,6 +2582,8 @@ struct ConnectionState {
     /// the response finishes: reuse the connection for another request
     /// instead of closing it.
     keep_alive: bool,
+    /// The request line said HTTP/1.0: no chunked framing; the body is close-delimited unless the caller set a `Content-Length`.
+    http10: bool,
     /// True between an `async` handler suspending and its eventual
     /// `response.end(...)`. While set, `connection_ready` ignores socket
     /// events -- the handler's resumed continuation drives the response
@@ -2823,6 +3004,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         written: 0,
         watcher: 0,
         keep_alive: false,
+        http10: false,
         awaiting_handler: false,
         response_ctx: std::ptr::null_mut(),
         streaming: false,
@@ -3033,6 +3215,33 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
 /// pre-existing limitation), and reusing the connection while unread
 /// body bytes are still sitting in the stream would desync every
 /// request after this one, which is worse than just not reusing it.
+/// Node keeps an HTTP/1.0 connection alive only when the response carries a caller-set `Content-Length`.
+/// The body goes out as-is, without chunk framing: an HTTP/1.0 client, or a caller-set `Content-Length`.
+fn unframed_body(http10: bool, headers: &[(String, String)]) -> bool {
+    http10
+        || headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+}
+
+fn http10_keep_alive(connection: &mut ConnectionState, headers: &[(String, String)]) {
+    if connection.http10
+        && !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+    {
+        connection.keep_alive = false;
+    }
+}
+
+fn request_is_http10(head: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(head);
+    head.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next_back())
+        .is_some_and(|version| version.eq_ignore_ascii_case("HTTP/1.0"))
+}
+
 fn negotiate_keep_alive(request: &str) -> bool {
     let mut lines = request.lines();
     let Some(request_line) = lines.next() else {
@@ -3150,16 +3359,18 @@ fn distinct_request_headers(raw: &[(String, String)]) -> Vec<(String, Vec<String
 
 /// Parses a complete request head (bytes up to and including `\r\n\r\n`).
 fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan, Vec<(String, String)>) {
-    let head = String::from_utf8_lossy(head);
+    // Node decodes the request line and header values as latin1, not UTF-8.
+    let head: String = head.iter().map(|&byte| char::from(byte)).collect();
+    let head = head.as_str();
     let mut request_line = head.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET").to_string();
     let target = request_line.next().unwrap_or("/").to_string();
     (
         method,
         target,
-        negotiate_keep_alive(&head),
-        parse_body_plan(&head),
-        parse_headers(&head),
+        negotiate_keep_alive(head),
+        parse_body_plan(head),
+        parse_headers(head),
     )
 }
 
@@ -3179,15 +3390,220 @@ fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan, Vec<(String, Stri
 /// is still accumulated in `connection.request`/`context._raw_body`,
 /// bounded by `MAX_REQUEST_BODY` as before -- streaming here is about
 /// matching Node's actual timing/API contract, not backpressure.
+/// Why a request head is refused before the handler runs (llhttp's strict rules plus Node's own checks).
+#[derive(Debug, PartialEq)]
+enum Reject {
+    /// `400 Bad Request` + `Connection: close` (an llhttp `HPE_*` error).
+    BadRequest,
+    /// `431 Request Header Fields Too Large` (`HPE_HEADER_OVERFLOW`).
+    HeaderTooLarge,
+    /// An HTTP/1.1 request without `Host`.
+    MissingHost,
+    /// An `Expect` other than `100-continue`.
+    ExpectationFailed,
+    /// `CONNECT` without a `connect` listener: Node closes the socket without a response.
+    CloseSilently,
+}
+
+const KNOWN_METHODS: &[&str] = &[
+    "ACL",
+    "BIND",
+    "CHECKOUT",
+    "CONNECT",
+    "COPY",
+    "DELETE",
+    "GET",
+    "HEAD",
+    "LINK",
+    "LOCK",
+    "M-SEARCH",
+    "MERGE",
+    "MKACTIVITY",
+    "MKCALENDAR",
+    "MKCOL",
+    "MOVE",
+    "NOTIFY",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PROPFIND",
+    "PROPPATCH",
+    "PURGE",
+    "PUT",
+    "QUERY",
+    "REBIND",
+    "REPORT",
+    "SEARCH",
+    "SOURCE",
+    "SUBSCRIBE",
+    "TRACE",
+    "UNBIND",
+    "UNLINK",
+    "UNLOCK",
+    "UNSUBSCRIBE",
+];
+
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// Scans the buffered request head. `Ok(Some(end))` is a complete, acceptable head ending at `end`; `Ok(None)` needs
+/// more bytes; `Err` is a reason to answer with an error and close, found as early as the bytes allow.
+fn scan_head(buffer: &[u8]) -> Result<Option<usize>, Reject> {
+    let mut start = 0;
+    let mut first = true;
+    let mut content_lengths = 0;
+    let mut has_te = false;
+    let mut te_chunked_last = false;
+    let mut has_host = false;
+    let mut http11 = false;
+    let mut connect = false;
+    let mut expect: Option<String> = None;
+    loop {
+        let Some(newline) = buffer[start..].iter().position(|&byte| byte == b'\n') else {
+            return if buffer.len() > MAX_REQUEST_HEAD {
+                Err(Reject::HeaderTooLarge)
+            } else {
+                Ok(None)
+            };
+        };
+        let end = start + newline + 1;
+        if end > MAX_REQUEST_HEAD {
+            return Err(Reject::HeaderTooLarge);
+        }
+        if newline == 0 || buffer[start + newline - 1] != b'\r' {
+            return Err(Reject::BadRequest);
+        }
+        let line = &buffer[start..start + newline - 1];
+        start = end;
+        if first {
+            first = false;
+            let mut parts = line.split(|&byte| byte == b' ');
+            let (Some(method), Some(target), Some(version), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                return Err(Reject::BadRequest);
+            };
+            let method = std::str::from_utf8(method).map_err(|_| Reject::BadRequest)?;
+            if !KNOWN_METHODS.contains(&method)
+                || target.is_empty()
+                || target.iter().any(|&byte| byte <= b' ' || byte == 0x7f)
+                || !(version == b"HTTP/1.1" || version == b"HTTP/1.0")
+            {
+                return Err(Reject::BadRequest);
+            }
+            http11 = version == b"HTTP/1.1";
+            connect = method == "CONNECT";
+            continue;
+        }
+        if line.is_empty() {
+            if content_lengths > 1 || (has_te && (content_lengths > 0 || !te_chunked_last)) {
+                return Err(Reject::BadRequest);
+            }
+            if http11 && !has_host {
+                return Err(Reject::MissingHost);
+            }
+            if expect
+                .as_deref()
+                .is_some_and(|value| !value.eq_ignore_ascii_case("100-continue"))
+            {
+                return Err(Reject::ExpectationFailed);
+            }
+            if connect {
+                return Err(Reject::CloseSilently);
+            }
+            return Ok(Some(start));
+        }
+        if line[0] == b' ' || line[0] == b'\t' {
+            return Err(Reject::BadRequest);
+        }
+        let Some(colon) = line.iter().position(|&byte| byte == b':') else {
+            return Err(Reject::BadRequest);
+        };
+        let (name, value) = (&line[..colon], &line[colon + 1..]);
+        if name.is_empty() || !name.iter().all(|&byte| is_token_byte(byte)) {
+            return Err(Reject::BadRequest);
+        }
+        if value
+            .iter()
+            .any(|&byte| (byte < b' ' && byte != b'\t') || byte == 0x7f)
+        {
+            return Err(Reject::BadRequest);
+        }
+        let name = String::from_utf8_lossy(name).to_ascii_lowercase();
+        let value = String::from_utf8_lossy(value)
+            .trim_matches([' ', '\t'])
+            .to_string();
+        match name.as_str() {
+            "content-length" => {
+                content_lengths += 1;
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(Reject::BadRequest);
+                }
+            }
+            "transfer-encoding" => {
+                has_te = true;
+                te_chunked_last = value
+                    .rsplit(',')
+                    .next()
+                    .is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked"));
+            }
+            "host" => has_host = true,
+            "expect" => expect = Some(value),
+            _ => {}
+        }
+    }
+}
+
+/// The bytes Node writes for a refused request head.
+fn rejection_bytes(reject: &Reject) -> Vec<u8> {
+    match reject {
+        Reject::CloseSilently => Vec::new(),
+        Reject::BadRequest => b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".to_vec(),
+        Reject::HeaderTooLarge => {
+            b"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n".to_vec()
+        }
+        Reject::MissingHost => format!(
+            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nDate: {}\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            http_date()
+        )
+        .into_bytes(),
+        Reject::ExpectationFailed => format!(
+            "HTTP/1.1 417 Expectation Failed\r\nDate: {}\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            http_date()
+        )
+        .into_bytes(),
+    }
+}
+
+/// Answers a refused head and closes: nothing reaches the handler.
+fn reject_request(connection: &mut ConnectionState, reject: &Reject) -> Option<bool> {
+    connection.response = rejection_bytes(reject);
+    connection.written = 0;
+    connection.keep_alive = false;
+    connection.body_complete = true;
+    connection.dispatched = true;
+    write_response(connection);
+    Some(false)
+}
+
 fn try_buffered_request(connection_ptr: *mut ConnectionState) -> Option<bool> {
     {
         let connection = unsafe { &mut *connection_ptr };
         if connection.head_end == 0 {
-            let index = connection
+            // llhttp skips blank lines before the request line.
+            let blank = connection
                 .request
-                .windows(4)
-                .position(|bytes| bytes == b"\r\n\r\n")?;
-            connection.head_end = index + 4;
+                .chunks(2)
+                .take_while(|pair| *pair == b"\r\n")
+                .count()
+                * 2;
+            connection.request.drain(..blank);
+            match scan_head(&connection.request) {
+                Ok(Some(end)) => connection.head_end = end,
+                Ok(None) => return None,
+                Err(reject) => return reject_request(connection, &reject),
+            }
             let (_, _, _, body_plan, _) = parse_head(&connection.request[..connection.head_end]);
             connection.body_plan = body_plan;
             // Deliberately *not* pre-marking `body_complete` here even for
@@ -3287,6 +3703,14 @@ fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
         let (method, target, keep_alive, _, headers) =
             parse_head(&connection.request[..connection.head_end]);
         let callback = unsafe { &*connection.server }.callback as *const c_void;
+        if headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("expect") && value.trim().eq_ignore_ascii_case("100-continue")
+        }) {
+            // Node's default `checkContinue`: the interim response goes out before the handler runs.
+            if let Some(stream) = connection.stream.as_mut() {
+                let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+            }
+        }
         // The head is in and the handler is about to run -- cleared
         // unconditionally here; `run_server_callback` re-arms it as a
         // body-arrival deadline right after, once `sync_request_body_buffer`
@@ -3295,6 +3719,7 @@ fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
         // Set before running the handler: an `async` handler that suspends
         // won't return through here, and `finish_response` needs the
         // negotiated value when it renders the response later.
+        connection.http10 = request_is_http10(&connection.request[..connection.head_end]);
         connection.keep_alive = keep_alive;
         (method, target, keep_alive, headers, callback)
     };
@@ -3323,7 +3748,9 @@ fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
     }
     match outcome {
         CallbackOutcome::Ready(spec) => {
-            connection.response = render_response(spec, keep_alive);
+            http10_keep_alive(connection, &spec.headers);
+            connection.response =
+                render_response_for(spec, connection.keep_alive, connection.http10);
             true
         }
         CallbackOutcome::Pending(context) => park_pending_context(connection, context, keep_alive),
@@ -4539,6 +4966,7 @@ mod tests {
             written: 0,
             watcher: 0,
             keep_alive: false,
+            http10: false,
             awaiting_handler: false,
             response_ctx: std::ptr::null_mut(),
             streaming: false,
@@ -4923,6 +5351,7 @@ mod tests {
             written: 0,
             watcher: 0,
             keep_alive: false,
+            http10: false,
             awaiting_handler: false,
             response_ctx: std::ptr::null_mut(),
             streaming: false,
@@ -5008,6 +5437,7 @@ mod tests {
             written: 0,
             watcher: 0,
             keep_alive: false,
+            http10: false,
             awaiting_handler: true,
             response_ctx: std::ptr::null_mut(),
             streaming: true,
@@ -5089,23 +5519,163 @@ mod tests {
                 headers: vec![("Transfer-Encoding".into(), "chunked".into())],
                 body: b"x".to_vec(),
                 bodyless: false,
+                auto_chunked: false,
+                chunk_ends: Vec::new(),
+                reason: None,
             },
             true,
         );
         let text = String::from_utf8(response).unwrap();
         assert!(text.contains("Keep-Alive: timeout=5\r\n"), "{text}");
         assert!(
-            text.ends_with("Transfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n"),
+            text.starts_with("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n")
+                && text.ends_with("\r\n\r\n1\r\nx\r\n0\r\n\r\n"),
             "{text}"
         );
         assert!(!text.contains("Content-Length"), "{text}");
         let streamed = String::from_utf8(render_streaming_head(
             200,
+            None,
             &[("transfer-encoding".into(), "chunked".into())],
+            false,
             false,
         ))
         .unwrap();
         assert_eq!(streamed.matches("ransfer-").count(), 1, "{streamed}");
+    }
+
+    #[test]
+    fn http10_response_is_close_delimited_unless_the_caller_set_a_length() {
+        let spec = |headers: Vec<(&str, &str)>, auto_chunked| ResponseSpec {
+            status: 200,
+            headers: headers
+                .into_iter()
+                .map(|(n, v)| (n.into(), v.into()))
+                .collect(),
+            body: b"hello".to_vec(),
+            bodyless: false,
+            auto_chunked,
+            chunk_ends: Vec::new(),
+            reason: None,
+        };
+        let plain = render_response_for(spec(vec![("X-A", "1")], true), false, true);
+        assert_eq!(
+            without_date(&plain),
+            b"HTTP/1.1 200 OK\r\nX-A: 1\r\nConnection: close\r\n\r\nhello"
+        );
+        let sized = render_response_for(spec(vec![("Content-Length", "5")], false), true, true);
+        assert_eq!(
+            without_date(&sized),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\nhello"
+        );
+    }
+
+    #[test]
+    fn custom_status_message_replaces_the_reason_phrase() {
+        let mut spec = ResponseSpec::plain(String::new());
+        spec.reason = Some("Custom Msg".into());
+        let response = render_response(spec, false);
+        assert!(response.starts_with(b"HTTP/1.1 200 Custom Msg\r\n"));
+    }
+
+    #[test]
+    fn scan_head_refuses_what_llhttp_refuses() {
+        let ok = |head: &str| scan_head(head.as_bytes());
+        assert_eq!(ok("GET / HTTP/1.1\r\nHost: x\r\n\r\n"), Ok(Some(27)));
+        assert_eq!(ok("GET / HTTP/1.1\r\nHost: x\r\n"), Ok(None));
+        for bad in [
+            "GET\r\n\r\n",
+            "GET / HTTP/9.9\r\nHost: x\r\n\r\n",
+            "get / HTTP/1.1\r\nHost: x\r\n\r\n",
+            "GET / HTTP/1.1\nHost: x\n\n",
+            "GET / HTTP/1.1\r\nHost: x\r\nX-F: a\r\n  b\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: x\r\nX-S : a\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: x\r\ngarbage\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: x\r\nX: a\0b\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: identity\r\n\r\n",
+        ] {
+            assert_eq!(ok(bad), Err(Reject::BadRequest), "{bad:?}");
+        }
+        assert_eq!(ok("GET / HTTP/1.1\r\n\r\n"), Err(Reject::MissingHost));
+        assert_eq!(ok("GET / HTTP/1.0\r\n\r\n"), Ok(Some(18)));
+        let big = format!(
+            "GET / HTTP/1.1\r\nHost: x\r\nX: {}\r\n\r\n",
+            "a".repeat(20000)
+        );
+        assert_eq!(scan_head(big.as_bytes()), Err(Reject::HeaderTooLarge));
+        assert_eq!(
+            ok("POST / HTTP/1.1\r\nHost: x\r\nExpect: foo\r\n\r\n"),
+            Err(Reject::ExpectationFailed)
+        );
+    }
+
+    #[test]
+    fn every_write_is_its_own_chunk() {
+        let response = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: Vec::new(),
+                body: b"hello".to_vec(),
+                bodyless: false,
+                auto_chunked: true,
+                chunk_ends: vec![2, 5],
+                reason: None,
+            },
+            false,
+        );
+        assert_eq!(
+            without_date(&response),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn caller_framing_headers_keep_their_position() {
+        let spec = |headers: Vec<(&str, &str)>| ResponseSpec {
+            status: 200,
+            headers: headers
+                .into_iter()
+                .map(|(n, v)| (n.into(), v.into()))
+                .collect(),
+            body: b"hello".to_vec(),
+            bodyless: false,
+            auto_chunked: false,
+            chunk_ends: Vec::new(),
+            reason: None,
+        };
+        let length = render_response(
+            spec(vec![("X-A", "1"), ("Content-Length", "99"), ("X-B", "2")]),
+            false,
+        );
+        assert_eq!(
+            without_date(&length),
+            b"HTTP/1.1 200 OK\r\nX-A: 1\r\nContent-Length: 99\r\nX-B: 2\r\nConnection: close\r\n\r\nhello"
+        );
+        let chunked = render_response(
+            spec(vec![("Transfer-Encoding", "chunked"), ("X-A", "1")]),
+            false,
+        );
+        assert_eq!(
+            without_date(&chunked),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX-A: 1\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+        );
+        let streamed = render_streaming_head(
+            200,
+            None,
+            &[
+                ("X-A".into(), "1".into()),
+                ("Transfer-Encoding".into(), "chunked".into()),
+            ],
+            false,
+            false,
+        );
+        assert_eq!(
+            without_date(&streamed),
+            b"HTTP/1.1 200 OK\r\nX-A: 1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        );
     }
 
     #[test]
@@ -5118,6 +5688,9 @@ mod tests {
                 headers: vec![("Content-Length".into(), "5".into())],
                 body: b"hello".to_vec(),
                 bodyless: true,
+                auto_chunked: false,
+                chunk_ends: Vec::new(),
+                reason: None,
             },
             false,
         );
@@ -5139,10 +5712,13 @@ mod tests {
                 ],
                 body: "é".as_bytes().to_vec(),
                 bodyless: false,
+                auto_chunked: false,
+                chunk_ends: Vec::new(),
+                reason: None,
             },
             true,
         );
-        assert_eq!(without_date(&response), "HTTP/1.1 200 OK\r\nX-Trace: kept\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 2\r\n\r\né".as_bytes());
+        assert_eq!(without_date(&response), "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nX-Trace: kept\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\né".as_bytes());
 
         let response = render_response(
             ResponseSpec {
@@ -5150,6 +5726,9 @@ mod tests {
                 headers: vec![("X-Trace".into(), "kept".into())],
                 body: b"ok".to_vec(),
                 bodyless: false,
+                auto_chunked: false,
+                chunk_ends: Vec::new(),
+                reason: None,
             },
             false,
         );
@@ -5184,11 +5763,14 @@ mod tests {
                 headers: context.state.headers.clone(),
                 body: Vec::new(),
                 bodyless: false,
+                auto_chunked: false,
+                chunk_ends: Vec::new(),
+                reason: None,
             },
             false,
         );
         assert_eq!(without_date(&buffered), b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
-        let streamed = render_streaming_head(200, &context.state.headers, false);
+        let streamed = render_streaming_head(200, None, &context.state.headers, false, false);
         assert_eq!(without_date(&streamed), b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n");
         context.headers_sent = true;
         assert!(!set("X-TRACE", "too late"));

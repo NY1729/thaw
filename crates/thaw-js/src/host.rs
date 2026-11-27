@@ -6250,6 +6250,14 @@ fn poll_native_promise(it: &mut Interp, p: Obj, promise: usize, finish: usize) -
     it.defer_tick(check)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether this thread's event loop honours `TEST_SERVER_POLL` / `TEST_UNHANDLED_FAILURE`. The hooks are
+    /// process-wide statics, so only the thread a hook test spawns for its loop (`guarded`) opts in; a loop a
+    /// parallel test runs elsewhere must not see another test's fake server or latched rejection.
+    pub(crate) static TEST_HOOKS_APPLY: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Test stand-in for the compiled runtime's `thaw_http_poll_servers` (process-wide, like the symbol).
 #[cfg(test)]
 pub(crate) static TEST_SERVER_POLL: std::sync::Mutex<Option<extern "C" fn() -> u8>> =
@@ -6372,7 +6380,11 @@ pub(crate) fn native_servers_live() -> bool {
 /// callback ran. Looked up like `drain_native`; 0 without thaw-std. Any thread may call it (process-wide state).
 fn poll_native_servers() -> u8 {
     #[cfg(test)]
-    let test_poll = *TEST_SERVER_POLL.lock().unwrap();
+    let test_poll = if TEST_HOOKS_APPLY.with(Cell::get) {
+        *TEST_SERVER_POLL.lock().unwrap()
+    } else {
+        None
+    };
     #[cfg(test)]
     let r = match test_poll {
         Some(poll) => poll(),
@@ -6412,8 +6424,10 @@ pub(crate) static TEST_UNHANDLED_FAILURE: std::sync::Mutex<Option<extern "C" fn(
 fn native_unhandled_failure() -> bool {
     #[cfg(test)]
     {
-        if let Some(peek) = *TEST_UNHANDLED_FAILURE.lock().unwrap() {
-            return peek() != 0;
+        if TEST_HOOKS_APPLY.with(Cell::get) {
+            if let Some(peek) = *TEST_UNHANDLED_FAILURE.lock().unwrap() {
+                return peek() != 0;
+            }
         }
     }
     RUNTIME_HOOKS

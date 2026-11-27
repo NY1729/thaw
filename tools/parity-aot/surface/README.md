@@ -32,3 +32,9 @@ Declaration drift (not probes, run against the committed inventory; no thaw buil
   dns codes, process.config) -> `crates/thaw-registry/src/registry/builtins/surface_data.rs`, merged into `module.exports` by
   `builtins.rs`. Needs the pinned Node 22.23.
 - `unsupported.json`: what is deliberately not implemented, with the reason.
+
+`arity_sync.py` makes declared `Function.length` match Node's (inventory is the source). A builtin declaration reports
+Node's arity through the name of its LAST parameter, `cb__length_3` / `...rest__length_0` (read by `source_parameter_count`
+in thaw-hir); the parameter list itself, so overload resolution and callback lowering, is unchanged. Usage:
+`arity_sync.py [--fix] [--module fs,zlib,...]` (no `--module`: every module that already allows markers; `--module X`
+reports/fixes only X and allows markers on it). Check the module's callback tests after `--fix` on a new module.

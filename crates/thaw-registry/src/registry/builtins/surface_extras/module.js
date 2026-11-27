@@ -25,7 +25,7 @@
   M.getCompileCacheDir = function getCompileCacheDir() { return undefined; };
   M.flushCompileCache = function flushCompileCache() {};
   var home = (typeof process !== 'undefined' && process.env && process.env.HOME) || '';
-  M.globalPaths = home ? [home + '/.node_modules', home + '/.node_libraries'] : [];
+  M.globalPaths = (home ? [home + '/.node_modules', home + '/.node_libraries'] : []).concat([dirname(dirname(process.execPath || '/usr/bin/node')) + '/lib/node']);
   M._pathCache = Object.create(null);
   M._debug = function () {};
   M._initPaths = function _initPaths() {};
@@ -63,5 +63,60 @@
     }
     return false;
   };
+  // Module.wrap / wrapper, and the prototype methods Node defines on every Module.
+  var wrapper = ['(function (exports, require, module, __filename, __dirname) { ', '\n});'];
+  // accessors in Node: reachable as Module.wrap, but not named exports of the ESM namespace
+  Object.defineProperty(M, 'wrapper', { value: wrapper, writable: true, configurable: true, enumerable: false });
+  Object.defineProperty(M, 'wrap', { value: function wrap(script) { return wrapper[0] + script + wrapper[1]; }, writable: true, configurable: true, enumerable: false });
+  var MP = M.prototype;
+  Object.defineProperty(MP, 'isPreloading', { get: function isPreloading() { return false; }, configurable: true });
+  MP.require = function require(id) {
+    if (typeof id !== 'string') throw argError('id', 'of type string', id);
+    if (id === '') { var e = new TypeError("The argument 'id' must be a non-empty string. Received ''"); e.code = 'ERR_INVALID_ARG_VALUE'; throw e; }
+    return M.createRequire(this.filename || process.cwd() + '/')(id);
+  };
+  MP.load = function load(filename) {
+    if (typeof filename !== 'string') throw argError('filename', 'of type string', filename);
+    this.filename = filename; this.paths = M._nodeModulePaths(dirname(filename));
+    this.exports = M.createRequire(filename)(filename); this.loaded = true;
+  };
+  MP._compile = function _compile(content, filename) {
+    var fn = (0, eval)(M.wrap(content)), req = M.createRequire(filename || process.cwd() + '/');
+    return fn.call(this.exports, this.exports, req, this, filename, dirname(filename || ''));
+  };
+  // nearest package.json of what `specifier` names from `base`; existence checks go through the host's fs call, because
+  // this bundle must not import node:fs
+  function fileExists(p) {
+    try { return typeof __thaw_fs === 'function' && JSON.parse(__thaw_fs('exists', p, '', false)).exists === true; } catch (e) { return false; }
+  }
+  M.findPackageJSON = function findPackageJSON(specifier, base = 'data:') {
+    if (arguments.length === 0) { var m = new TypeError('The "specifier" argument must be specified'); m.code = 'ERR_MISSING_ARGS'; throw m; }
+    specifier = String(specifier);
+    if (typeof base === 'object' && base !== null && typeof base.href === 'string') base = base.href;
+    if (typeof base !== 'string') throw argError('base', 'of type string', base);
+    if (base.indexOf('file://') === 0) base = decodeURIComponent(base.slice(7));
+    if (specifier.indexOf('file://') === 0) specifier = decodeURIComponent(specifier.slice(7));
+    var baseDir = base.charAt(0) === '/' ? dirname(base) : process.cwd();
+    function missing() { var e = new Error("Cannot find module '" + specifier + "' imported from " + base); e.code = 'ERR_MODULE_NOT_FOUND'; return e; }
+    if (specifier.charAt(0) !== '.' && specifier.charAt(0) !== '/') {
+      var parts = specifier.split('/'), name = specifier.charAt(0) === '@' ? parts.slice(0, 2).join('/') : parts[0];
+      for (var dir = baseDir; ; dir = dirname(dir)) {
+        var candidate = (dir === '/' ? '' : dir) + '/node_modules/' + name + '/package.json';
+        if (fileExists(candidate)) return candidate;
+        if (dir === '/') throw missing();
+      }
+    }
+    var resolved = absolute(specifier.charAt(0) === '/' ? specifier : baseDir + '/' + specifier);
+    if (!fileExists(resolved)) throw missing();
+    for (var up = dirname(resolved); ; up = dirname(up)) {
+      var file = (up === '/' ? '' : up) + '/package.json';
+      if (fileExists(file)) return file;
+      if (up === '/') return undefined;
+    }
+  };
+  // 0 = file, 1 = directory, -2 = missing (libuv ENOENT), as Module._stat
+  Object.defineProperty(M, '_stat', { value: function _stat(filename) {
+    try { var r = JSON.parse(__thaw_fs('stat', String(filename), '', false)); return r.ok ? (r.directory ? 1 : 0) : -2; } catch (e) { return -2; }
+  }, writable: true, configurable: true, enumerable: false });
   M.runMain = function runMain(main) { return M._load(main || process.argv[1], null, true); };
 })();

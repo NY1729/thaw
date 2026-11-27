@@ -138,14 +138,19 @@ impl Interp {
         ] {
             put(&features, key, Value::Bool(value));
         }
-        put(&features, "typescript", Value::Bool(false));
+        put(&features, "typescript", Value::str("strip"));
         put(p, "features", Value::Object(features));
         let report = self.native(|it, _, _| Ok(Value::Object(report_object(it))));
         define_accessor(p, "report", Some(report), None, true);
         let source_maps = self.native(|_, _, _| Ok(Value::Bool(SOURCE_MAPS.with(Cell::get))));
         define_accessor(p, "sourceMapsEnabled", Some(source_maps), None, true);
-        // ponytail: always empty; thaw-js does not record which builtins it has loaded
-        let load_list = self.array(Vec::new());
+        // Node 22 start-up list of an ESM entry point (data/node22_module_load_list.txt); thaw-js does not record which builtins it loads
+        let load_list = self.array(
+            include_str!("data/node22_module_load_list.txt")
+                .lines()
+                .map(Value::str)
+                .collect(),
+        );
         put(p, "moduleLoadList", load_list);
         // ponytail: `_preload_modules` is always empty (no preload list is read); its -ec flags come from the table
         let preload = self.array(Vec::new());

@@ -4,7 +4,7 @@
 //! `_maxListeners` the limit. The methods are natives on the emitter prototype: a JS prelude would be
 //! parsed in every realm. The Rust hooks in eventloop.rs read the state with `listener_count` and
 //! dispatch through the `emit` property, so a patched `process.emit` is seen, as in Node.
-//! ponytail: no Node default `newListener`/`removeListener`/`warning` entries and no `EventEmitter`
+//! ponytail: the Node default `newListener`/`removeListener`/`warning` entries are no-ops and there are no `EventEmitter`
 //! statics (`defaultMaxListeners`, `once`); add them when a package needs them.
 
 use crate::eventloop::node_error;
@@ -74,8 +74,24 @@ impl Interp {
             put_hidden(c, "prototype", Value::Object(process_proto.clone()));
         }
         *p.proto.borrow_mut() = Some(process_proto);
-        put(p, "_events", Value::Object(new_obj(None, Kind::Plain)));
-        put(p, "_eventsCount", Value::Number(0.0));
+        // Node's own start-up listeners (signal wiring and the warning printer), as no-ops here.
+        let events = new_obj(None, Kind::Plain);
+        for (name, count) in [("newListener", 2), ("removeListener", 2), ("warning", 1)] {
+            let hooks: Vec<Value> = (0..count)
+                .map(|_| self.native(|_, _, _| Ok(Value::Undefined)))
+                .collect();
+            let value = if count == 1 {
+                hooks[0].clone()
+            } else {
+                self.array(hooks)
+            };
+            if count == 1 {
+                name_and_length(&value, "onWarning", 1.0);
+            }
+            put(&events, name, value);
+        }
+        put(p, "_events", Value::Object(events));
+        put(p, "_eventsCount", Value::Number(3.0));
         put(p, "_maxListeners", Value::Undefined);
     }
 
