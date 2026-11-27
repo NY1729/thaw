@@ -971,8 +971,11 @@ fn generate_registry_shims_pass(
                 continue;
             }
             for class in &pkg.classes {
-                if let Some(arities) =
-                    observed_constructor_arities.get(&format!("{local}.{}", class.name))
+                // A thaw-js class is named `pkg::Class`; the source writes `ns.Class`.
+                let short = class.name.rsplit("::").next().unwrap_or(&class.name);
+                if let Some(arities) = observed_constructor_arities
+                    .get(&format!("{local}.{}", class.name))
+                    .or_else(|| observed_constructor_arities.get(&format!("{local}.{short}")))
                 {
                     constructor_arities_for_package
                         .entry(class.name.clone())
