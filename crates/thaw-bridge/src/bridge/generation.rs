@@ -478,8 +478,63 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
 
 /// As [`generate_module_init`]; `lazy` (`--lazy-packages`) declares each bundle (`declareThawJs`) instead of
 /// loading it: thaw-js evaluates it on the program's first use.
-// ponytail: no "pure at load" scan yet, so lazy declares every plain bundle (opt-in flag); a package with
-// load-time global side effects or load errors now acts at first use. Add the scan before any default flip.
+/// Only bundles that [`pure_at_load`] accepts are declared; the rest load eagerly as before.
+const BUILTIN_ROOTS: [&str; 12] = [
+    "globalThis", "global", "Object.prototype", "Array.prototype", "String.prototype", "Function.prototype",
+    "Number.prototype", "Promise.prototype", "Date.prototype", "RegExp.prototype", "Map.prototype", "Set.prototype",
+];
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// Static scan: false when the bundle text may change global state while it loads (`process.on`, writes to a
+/// global or a builtin prototype, `defineProperty` on them), so it keeps loading eagerly. Conservative: it
+/// reads the whole bundle, not only the entry module, and `__thaw_*` runtime globals are ignored.
+// ponytail: text scan, not an AST walk of the entry module; upgrade if too many packages stay eager.
+pub fn pure_at_load(src: &str) -> bool {
+    src.lines().map(str::trim_start).filter(|l| !l.starts_with('*') && !l.starts_with("//")).all(line_is_pure)
+}
+
+fn line_is_pure(line: &str) -> bool {
+    if ["process.on(", "process.once(", "process.addListener(", "process.setUncaughtExceptionCaptureCallback("]
+        .iter()
+        .any(|m| line.contains(m))
+    {
+        return false;
+    }
+    for root in BUILTIN_ROOTS {
+        if line.contains("defineProperty(") && line.contains(&format!("defineProperty({root},")) {
+            return false;
+        }
+        for (at, _) in line.match_indices(root) {
+            if line[..at].chars().next_back().is_some_and(|c| is_ident(c) || c == '.') {
+                continue;
+            }
+            let tail = &line[at + root.len()..];
+            let after = if let Some(t) = tail.strip_prefix('.') {
+                let end = t.find(|c: char| !is_ident(c)).unwrap_or(t.len());
+                if t[..end].starts_with("__thaw_") {
+                    continue;
+                }
+                &t[end..]
+            } else if let Some(t) = tail.strip_prefix('[') {
+                match t.find(']') {
+                    Some(i) => &t[i + 1..],
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
+            let after = after.trim_start();
+            if after.starts_with('=') && !after.starts_with("==") {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub fn generate_module_init_with(bundles: &[ModuleBundle], lazy: bool) -> String {
     if bundles.is_empty() {
         return String::new();
@@ -490,7 +545,8 @@ pub fn generate_module_init_with(bundles: &[ModuleBundle], lazy: bool) -> String
         // realm/group views join another bundle's realm at load time: keep those eager
         let lazy = lazy
             && !bundle.js_source.contains("__thaw_bundle_realm")
-            && !bundle.js_source.contains("__thaw_bundle_group");
+            && !bundle.js_source.contains("__thaw_bundle_group")
+            && pure_at_load(bundle.js_source);
         out.push_str(&format!(
             "    if (!{}ThawJs(\"{}\", \"{}\")) throw new Error(\"failed to load module script\");\n",
             if lazy { "declare" } else { "load" },
