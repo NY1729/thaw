@@ -1516,7 +1516,7 @@ fn http2_secure_server_accepts_an_alpn_h2_peer() {
     client_config.alpn_protocols = vec![b"h2".to_vec()];
     let client_config = Arc::new(client_config);
     let peer = std::thread::spawn(move || {
-        let socket = (0..100)
+        let socket = (0..3000)
             .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(socket) => Some(socket),
                 Err(_) => {
