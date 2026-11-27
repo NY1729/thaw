@@ -382,9 +382,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     .is_some_and(|chain| !chain.split('\u{1f}').any(thaw_hir::is_error_family_name))
             });
             let before = std::mem::replace(&mut self.encoding_class_instance_fields, class_instance);
+            self.optional_native_args = optional_native_args(fields, name);
             let set = self.compile_json_object_set_native_with_undefined(
                 json, key.as_pointer_value(), value, &value_type, preserve_undefined, false,
             );
+            self.optional_native_args.clear();
             self.encoding_class_instance_fields = before;
             set?;
         }
@@ -2774,4 +2776,15 @@ impl<'ctx> HirCompiler<'ctx> {
 /// The recursive-layout key whose registered layout is exactly `ty`, if any.
 fn recursive_key_for_layout(ty: &HirType) -> Option<String> {
     thaw_hir::recursive_key_for_layout(ty)
+}
+
+/// Arguments of a native method field that Node lets a JS caller omit (`res.end()`): the native closure keeps its
+/// required ABI, so the JS-facing adapter fills an omitted/`undefined` argument with the Node default (an empty chunk).
+// ponytail: hand-kept; generate from tools/parity-aot/inventory/node_http.json arities if more entries are needed.
+fn optional_native_args(fields: &[(String, HirType)], name: &str) -> Vec<bool> {
+    let server_response = fields.iter().any(|(field, _)| field == "__thaw_endBytes");
+    match name {
+        "end" if server_response => vec![true],
+        _ => Vec::new(),
+    }
 }

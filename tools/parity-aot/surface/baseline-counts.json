@@ -1,7 +1,52 @@
 {
+ "async_hooks": {
+  "match": 78,
+  "skipped": 5
+ },
+ "child_process": {
+  "match": 42
+ },
+ "cluster": {
+  "match": 45
+ },
+ "console": {
+  "match": 57,
+  "skipped": 19
+ },
+ "constants": {
+  "match": 224
+ },
+ "crypto": {
+  "match": 156,
+  "output-diff": 18,
+  "skipped": 401
+ },
+ "diagnostics_channel": {
+  "match": 19
+ },
+ "dns": {
+  "match": 88,
+  "output-diff": 3
+ },
+ "dns_promises": {
+  "match": 83,
+  "output-diff": 4
+ },
+ "domain": {
+  "match": 31,
+  "output-diff": 1
+ },
  "events": {
   "match": 57,
   "output-diff": 20
+ },
+ "fs": {
+  "match": 288,
+  "output-diff": 1,
+  "skipped": 8
+ },
+ "fs_promises": {
+  "match": 119
  },
  "globals": {
   "match": 652,
@@ -13,11 +58,76 @@
   "match": 195,
   "output-diff": 114
  },
+ "http2": {
+  "match": 270,
+  "output-diff": 1,
+  "skipped": 118
+ },
  "https": {
   "match": 146
+ },
+ "inspector": {
+  "match": 64
+ },
+ "module": {
+  "match": 180,
+  "output-diff": 3,
+  "skipped": 4
+ },
+ "os": {
+  "match": 171
+ },
+ "path": {
+  "match": 106,
+  "output-diff": 1
+ },
+ "perf_hooks": {
+  "match": 38,
+  "skipped": 63
+ },
+ "process": {
+  "match": 430
+ },
+ "readline": {
+  "match": 17,
+  "skipped": 26
+ },
+ "repl": {
+  "match": 79
  },
  "stream": {
   "match": 375,
   "output-diff": 16
+ },
+ "sys": {
+  "match": 152,
+  "skipped": 6
+ },
+ "trace_events": {
+  "match": 4
+ },
+ "util": {
+  "match": 150,
+  "output-diff": 2,
+  "skipped": 6
+ },
+ "util_types": {
+  "match": 86
+ },
+ "v8": {
+  "match": 59,
+  "output-diff": 8,
+  "skipped": 16
+ },
+ "vm": {
+  "match": 27
+ },
+ "worker_threads": {
+  "match": 29,
+  "skipped": 60
+ },
+ "zlib": {
+  "match": 415,
+  "output-diff": 118
  }
 }

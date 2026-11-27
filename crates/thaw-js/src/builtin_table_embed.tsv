@@ -3191,6 +3191,11 @@ process._debugEnd	length	data	--c	number	0	-	-	-	-
 process._debugEnd	name	data	--c	string	-	_debugEnd	-	-	-
 process._debugProcess	length	data	--c	number	0	-	-	-	-
 process._debugProcess	name	data	--c	string	-	_debugProcess	-	-	-
+process._events	newListener	data	wec	object	-	-	-	-	-
+process._events	removeListener	data	wec	object	-	-	-	-	-
+process._events	warning	data	wec	function	1	onWarning	1	-	-
+process._events.warning	length	data	--c	number	1	-	-	-	-
+process._events.warning	name	data	--c	string	-	onWarning	-	-	-
 process._fatalException	length	data	--c	number	2	-	-	-	-
 process._fatalException	name	data	--c	string	-		-	-	-
 process._getActiveHandles	length	data	--c	number	0	-	-	-	-
