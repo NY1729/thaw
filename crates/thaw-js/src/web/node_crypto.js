@@ -925,6 +925,14 @@ function x509Parse(der) {
       for (var g of derChildren(der, inner)) { var gv = der.subarray(g.body, g.end); if (g.tag === 0x82) names.push('DNS:' + gv.toString('latin1')); else if (g.tag === 0x81) names.push('email:' + gv.toString('latin1')); else if (g.tag === 0x86) names.push('URI:' + gv.toString('latin1')); else if (g.tag === 0x87) names.push('IP Address:' + (gv.length === 4 ? Array.from(gv).join('.') : gv.toString('hex').match(/.{4}/g).map(function (h) { return h.replace(/^0+(?=.)/, ''); }).join(':').toUpperCase())); }
       out.san = names.join(', ');
     } else if (oid === '2.5.29.19') { var bc = derChildren(der, inner); out.ca = bc.length > 0 && bc[0].tag === 0x01 && der[bc[0].body] !== 0; }
+    else if (oid === '2.5.29.15') out.noCertSign = !(der[inner.body + 1] & 0x04);
+    else if (oid === '1.3.6.1.5.5.7.1.1') {
+      out.aia = [];
+      for (var ad of derChildren(der, inner)) {
+        var adk = derChildren(der, ad), method = derOid(der, adk[0]), label = method === '1.3.6.1.5.5.7.48.1' ? 'OCSP' : method === '1.3.6.1.5.5.7.48.2' ? 'CA Issuers' : method;
+        out.aia.push([label + ' - ' + (adk[1].tag === 0x86 ? 'URI' : adk[1].tag === 0x82 ? 'DNS' : adk[1].tag === 0x81 ? 'email' : 'unknown'), der.subarray(adk[1].body, adk[1].end).toString('latin1')]);
+      }
+    }
     else if (oid === '2.5.29.37') out.eku = derChildren(der, inner).map(function (o) { return derOid(der, o); });
   }
   return out;
@@ -948,7 +956,7 @@ class X509Certificate {
   get subject() { return this._x.subject; }
   get issuer() { return this._x.issuer; }
   get subjectAltName() { return this._x.san; }
-  get infoAccess() { return undefined; }
+  get infoAccess() { var a = this._x.aia; return a ? a.map(function (e) { return e[0] + ':' + e[1]; }).join('\n') : undefined; }
   get issuerCertificate() { return undefined; }
   get validFrom() { return x509Date(this._x.notBefore); }
   get validTo() { return x509Date(this._x.notAfter); }
@@ -961,7 +969,29 @@ class X509Certificate {
   get serialNumber() { var h = this._x.serial.toString('hex').toUpperCase().replace(/^(00)+(?=.)/, ''); return h; }
   get raw() { return Buffer.from(this._der); }
   get publicKey() { return createPublicKey(spkiPem(this._x.spki)); }
-  get ca() { return this._x.ca; }
+  get ca() { return this._x.ca && !this._x.noCertSign; }
+  toLegacyObject() {
+    var x = this._x, obj = function (text) { var o = {}; for (var line of text.split('\n')) { var eq = line.indexOf('='), k = line.slice(0, eq), v = line.slice(eq + 1); o[k] = k in o ? [].concat(o[k], v) : v; } return o; };
+    var out = { subject: obj(x.subject), issuer: obj(x.issuer) };
+    if (x.san !== undefined) out.subjectaltname = x.san;
+    if (x.aia) { var info = {}; for (var e of x.aia) (info[e[0]] = info[e[0]] || []).push(e[1]); out.infoAccess = info; }
+    out.ca = this.ca;
+    try {
+      var spki = derChildren(derBytes(x.spki), derRead(derBytes(x.spki), 0)), bits = derBytes(x.spki).subarray(spki[1].body + 1, spki[1].end), key = derRead(bits, 0), kids = derChildren(bits, key);
+      if (kids.length === 2 && kids[0].tag === 0x02) {
+        var n = bits.subarray(kids[0].body, kids[0].end), ex = bits.subarray(kids[1].body, kids[1].end);
+        while (n.length > 1 && n[0] === 0) n = n.subarray(1);
+        out.modulus = n.toString('hex').toUpperCase(); out.bits = (n.length - 1) * 8 + (32 - Math.clz32(n[0]));
+        out.exponent = '0x' + BigInt('0x' + ex.toString('hex')).toString(16);
+      }
+    } catch (_) {}
+    out.pubkey = Buffer.from(x.spki).subarray(0); 
+    out.valid_from = this.validFrom; out.valid_to = this.validTo;
+    out.fingerprint = this.fingerprint; out.fingerprint256 = this.fingerprint256; out.fingerprint512 = this.fingerprint512;
+    if (x.eku) out.ext_key_usage = x.eku;
+    out.serialNumber = this.serialNumber; out.raw = this.raw;
+    return out;
+  }
   toString() { var b64 = this._der.toString('base64').replace(/(.{64})/g, '$1\n').replace(/\n$/, ''); return '-----BEGIN CERTIFICATE-----\n' + b64 + '\n-----END CERTIFICATE-----\n'; }
   toJSON() { return this.toString(); }
   checkHost(name) {
@@ -981,6 +1011,7 @@ class X509Certificate {
     try { return new Verify(alg).update(this._x.tbs).verify(key, this._x.sig); } catch (_) { return false; }
   }
 }
+function derBytes(b) { return b; }
 function spkiPem(spki) { return '-----BEGIN PUBLIC KEY-----\n' + spki.toString('base64').replace(/(.{64})/g, '$1\n').replace(/\n$/, '') + '\n-----END PUBLIC KEY-----\n'; }
 Object.assign(cryptoModule, { KeyObject: KeyObject, X509Certificate: X509Certificate, Certificate: Certificate, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
   Sign: Sign, Verify: Verify, createSign: createSign, createVerify: createVerify, sign: sign, verify: verify,
