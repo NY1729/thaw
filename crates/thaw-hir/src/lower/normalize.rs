@@ -3332,3 +3332,46 @@ pub fn annotate_escaping_record_bindings(module: &Module) -> Module {
     module.visit_mut_with(&mut Annotate(&escaping));
     module
 }
+
+/// JS programs: a `{}` written as a field of an object literal (`{ params: {} }`) is later filled in
+/// dynamically (`ctx.params = { ...groups }`). A fixed empty record would drop those keys, so the
+/// field is an `any` object, as `({}) as any`.
+pub fn widen_empty_object_fields(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    use swc_ecma_visit::{VisitMut, VisitMutWith};
+    struct Widen;
+    impl VisitMut for Widen {
+        fn visit_mut_object_lit(&mut self, object: &mut ObjectLit) {
+            object.visit_mut_children_with(self);
+            for property in &mut object.props {
+                let PropOrSpread::Prop(property) = property else { continue };
+                let Prop::KeyValue(KeyValueProp { value, .. }) = property.as_mut() else { continue };
+                if matches!(value.as_ref(), Expr::Object(inner) if inner.props.is_empty()) {
+                    // `JSON.parse("{}")` is a fresh `any` object.
+                    let ident = |name: &str| Ident::new_no_ctxt(name.into(), swc_common::DUMMY_SP);
+                    **value = Expr::Call(CallExpr {
+                        span: swc_common::DUMMY_SP,
+                        ctxt: Default::default(),
+                        callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                            span: swc_common::DUMMY_SP,
+                            obj: Box::new(Expr::Ident(ident("JSON"))),
+                            prop: MemberProp::Ident(IdentName::new("parse".into(), swc_common::DUMMY_SP)),
+                        }))),
+                        args: vec![ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Lit(Lit::Str(Str {
+                                span: swc_common::DUMMY_SP,
+                                value: "{}".into(),
+                                raw: None,
+                            }))),
+                        }],
+                        type_args: None,
+                    });
+                }
+            }
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Widen);
+    module
+}
