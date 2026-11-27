@@ -1261,12 +1261,6 @@ impl Interp {
             let Some(t) = Self::typed_of(this) else {
                 return it.throw_error("TypeError", "this is not a typed array.");
             };
-            if t.gone() {
-                return it.throw_error(
-                    "TypeError",
-                    "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer",
-                );
-            }
             let off = match arg(a, 1) {
                 Value::Undefined => 0,
                 v => {
@@ -1279,13 +1273,25 @@ impl Interp {
                     n as usize
                 }
             };
+            // the offset's conversion may have detached the target (or the source): that is a TypeError
+            if t.gone() {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer",
+                );
+            }
             // spec: a typed array source is copied after its checks; an array-like's length is checked before any element
-            // is read, and a resize made by a getter in between just drops the writes past the new end
-            let mut array_like = false;
+            // is read, then each element is read and written in turn (a getter sees the earlier writes)
             let src: Vec<Value> = if let Some(s) = Self::typed_of(&arg(a, 0)) {
+                if s.gone() {
+                    return it.throw_error(
+                        "TypeError",
+                        "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer",
+                    );
+                }
                 it.check_mix(s.ty, t.ty)?;
                 // same element type: the bytes copy as they are (no f64 round trip per element)
-                if s.ty == t.ty && !s.gone() {
+                if s.ty == t.ty {
                     let n = s.cur_len();
                     if off + n > t.cur_len() {
                         return it.throw_error("RangeError", "offset is out of bounds");
@@ -1295,10 +1301,28 @@ impl Interp {
                     t.data.borrow_mut()[at..at + bytes.len()].copy_from_slice(&bytes);
                     return Ok(Value::Undefined);
                 }
-                s.to_values()
+                let v = s.to_values();
+                if off + v.len() > t.cur_len() {
+                    return it.throw_error("RangeError", "offset is out of bounds");
+                }
+                v
             } else {
-                match it.iter_items(&arg(a, 0)) {
-                    Some(i) => i,
+                // a plain dense array is read in one go; everything else is an array-like read element by element
+                let items = match &arg(a, 0) {
+                    v @ Value::Object(o)
+                        if matches!(&*o.kind.borrow(), Kind::Array(_)) && !o.is_exotic() =>
+                    {
+                        it.iter_items(v)
+                    }
+                    _ => None,
+                };
+                match items {
+                    Some(i) => {
+                        if off + i.len() > t.cur_len() {
+                            return it.throw_error("RangeError", "offset is out of bounds");
+                        }
+                        i
+                    }
                     None => {
                         let n = it.get(&arg(a, 0), "length")?;
                         let n = it.tonum(&n)?;
@@ -1310,18 +1334,14 @@ impl Interp {
                         if off + n > t.cur_len() {
                             return it.throw_error("RangeError", "offset is out of bounds");
                         }
-                        array_like = true;
-                        let mut v = Vec::new();
                         for i in 0..n {
-                            v.push(it.get(&arg(a, 0), &i.to_string())?);
+                            let v = it.get(&arg(a, 0), &i.to_string())?;
+                            t.set_value(it, off + i, &v)?;
                         }
-                        v
+                        return Ok(Value::Undefined);
                     }
                 }
             };
-            if !array_like && off + src.len() > t.cur_len() {
-                return it.throw_error("RangeError", "offset is out of bounds");
-            }
             for (i, v) in src.iter().enumerate() {
                 t.set_value(it, off + i, v)?;
             }
@@ -1420,11 +1440,22 @@ impl Interp {
                     "Cannot perform %TypedArray%.prototype.with on a detached ArrayBuffer",
                 );
             }
-            let n = t.cur_len();
+            // the relative index, then the value's conversion (which may detach or shrink), then the bounds
             let rel = match it.tonum(&arg(a, 0))?.trunc() {
                 x if x.is_nan() => 0.0,
                 x => x,
             };
+            let scratch = it.typed_with_len(t.ty, 1);
+            let sc = Self::typed_of(&scratch).unwrap();
+            sc.set_value(it, 0, &arg(a, 1))?;
+            let value = sc.get_value(0).unwrap_or(Value::Undefined);
+            if t.gone() {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform %TypedArray%.prototype.with on a detached ArrayBuffer",
+                );
+            }
+            let n = t.cur_len();
             let idx = if rel < 0.0 { n as f64 + rel } else { rel };
             let in_range = idx >= 0.0 && idx < n as f64;
             let at = if in_range { idx as usize } else { n };
@@ -1433,7 +1464,7 @@ impl Interp {
             let size = t.ty.size();
             let bytes = n * size;
             o.data.borrow_mut()[..bytes].copy_from_slice(&t.data.borrow()[t.off..t.off + bytes]);
-            o.set_value(it, at, &arg(a, 1))?;
+            o.set_value(it, at, &value)?;
             if !in_range {
                 return it.throw_error("RangeError", "Invalid typed array index");
             }
@@ -1477,121 +1508,255 @@ const TYPED_PRELUDE: &str = r#"
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
   function gone(t) { return isTA(t) && (detGet.call(t.buffer) || __thaw_ta_oob(t)); }
   Object.defineProperty(SharedArrayBuffer.prototype, TAG, { value: 'SharedArrayBuffer', configurable: true });
-  ['forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex', 'reduce', 'reduceRight', 'fill', 'at', 'toString', 'keys', 'values', 'entries'].forEach(function (n) {
+  ['at', 'toString', 'keys', 'values', 'entries'].forEach(function (n) {
     if (AP[n]) def(TP, n, AP[n]);
   });
   // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function. Compiled `Array.from(view)` and `for..of` use the protocol.
   def(TP, Symbol.iterator, TP.values);
+  var rApply = Reflect.apply, rConstruct = Reflect.construct;
+  var SPECIES = Symbol.species, ITER = Symbol.iterator;
+  function toInt(v) { var x = +v; return x !== x ? 0 : (x === Infinity || x === -Infinity ? x : Math.trunc(x) + 0); }
+  function relIndex(v, len, d) {
+    if (v === undefined) return d;
+    var x = toInt(v);
+    return x < 0 ? Math.max(len + x, 0) : Math.min(x, len);
+  }
+  function needFn(f) { if (typeof f !== 'function') throw new TypeError('callback is not a function'); }
   def(TP, 'toLocaleString', function () {
     var len = this.length, out = '';
     for (var i = 0; i < len; i++) {
       if (i) out += ',';
       var v = this[i];
-      if (v !== undefined && v !== null) out += v.toLocaleString();
+      if (v !== undefined && v !== null) out += `${v.toLocaleString()}`;
     }
     return out;
   });
   def(TP, 'indexOf', function (v, from) {
-    from = from === undefined ? 0 : (from < 0 ? Math.max(this.length + from, 0) : from);
-    for (var i = from; i < this.length; i++) if (this[i] === v) return i;
+    var len = this.length;
+    if (len === 0) return -1;
+    var n = toInt(from);
+    if (n === Infinity) return -1;
+    if (n === -Infinity) n = 0;
+    for (var k = n >= 0 ? n : Math.max(len + n, 0); k < len; k++) if (k in this && this[k] === v) return k;
     return -1;
   });
   def(TP, 'lastIndexOf', function (v, from) {
-    from = from === undefined ? this.length - 1 : (from < 0 ? this.length + from : Math.min(from, this.length - 1));
-    for (var i = from; i >= 0; i--) if (this[i] === v) return i;
+    var len = this.length;
+    if (len === 0) return -1;
+    var n = arguments.length > 1 ? toInt(from) : len - 1;
+    if (n === -Infinity) return -1;
+    for (var k = n >= 0 ? Math.min(n, len - 1) : len + n; k >= 0; k--) if (k in this && this[k] === v) return k;
     return -1;
   });
   def(TP, 'join', function (sep) {
-    sep = sep === undefined ? ',' : String(sep);
+    var len = this.length;
+    var s = sep === undefined ? ',' : `${sep}`;
     var out = '';
-    for (var i = 0; i < this.length; i++) out += (i ? sep : '') + this[i];
+    for (var k = 0; k < len; k++) {
+      if (k > 0) out += s;
+      var e = this[k];
+      if (e !== undefined) out += e;
+    }
     return out;
   });
   def(TP, 'includes', function (v, from) {
-    for (var i = from || 0; i < this.length; i++) if (this[i] === v || (v !== v && this[i] !== this[i])) return true;
+    var len = this.length;
+    if (len === 0) return false;
+    var n = toInt(from);
+    if (n === Infinity) return false;
+    if (n === -Infinity) n = 0;
+    for (var k = n >= 0 ? n : Math.max(len + n, 0); k < len; k++) {
+      var e = this[k];
+      if (e === v || (e !== e && v !== v)) return true;
+    }
     return false;
   });
   def(TP, 'reverse', function () {
     for (var i = 0, j = this.length - 1; i < j; i++, j--) { var t = this[i]; this[i] = this[j]; this[j] = t; }
     return this;
   });
-  // TypedArraySpeciesCreate: the default constructor of each kind is captured here, before user code runs
-  var DEFAULTS = {};
-  ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'].forEach(function (n) {
-    if (typeof globalThis[n] === 'function') DEFAULTS[n] = globalThis[n];
+  def(TP, 'forEach', function (f, t) {
+    var len = this.length; needFn(f);
+    for (var k = 0; k < len; k++) rApply(f, t, [this[k], k, this]);
   });
+  def(TP, 'some', function (f, t) {
+    var len = this.length; needFn(f);
+    for (var k = 0; k < len; k++) if (rApply(f, t, [this[k], k, this])) return true;
+    return false;
+  });
+  def(TP, 'every', function (f, t) {
+    var len = this.length; needFn(f);
+    for (var k = 0; k < len; k++) if (!rApply(f, t, [this[k], k, this])) return false;
+    return true;
+  });
+  [['find', false, false], ['findIndex', false, true], ['findLast', true, false], ['findLastIndex', true, true]].forEach(function (d) {
+    var back = d[1], wantIndex = d[2];
+    def(TP, d[0], { [d[0]]: function (f, t) {
+      var len = this.length; needFn(f);
+      for (var i = 0; i < len; i++) {
+        var k = back ? len - 1 - i : i, v = this[k];
+        if (rApply(f, t, [v, k, this])) return wantIndex ? k : v;
+      }
+      return wantIndex ? -1 : undefined;
+    } }[d[0]]);
+  });
+  [['reduce', false], ['reduceRight', true]].forEach(function (d) {
+    var back = d[1];
+    def(TP, d[0], { [d[0]]: function (f, init) {
+      var len = this.length; needFn(f);
+      var i = 0, acc;
+      if (arguments.length >= 2) acc = init;
+      else {
+        if (len === 0) throw new TypeError('Reduce of empty array with no initial value');
+        acc = this[back ? len - 1 : 0]; i = 1;
+      }
+      for (; i < len; i++) { var k = back ? len - 1 - i : i; acc = rApply(f, undefined, [acc, this[k], k, this]); }
+      return acc;
+    } }[d[0]]);
+  });
+  // TypedArraySpeciesCreate: the default constructor of each kind is captured here, before user code runs
+  var DEFAULTS = {}, SCRATCH = {};
+  ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'].forEach(function (n) {
+    if (typeof globalThis[n] === 'function') { DEFAULTS[n] = globalThis[n]; SCRATCH[n] = new DEFAULTS[n](1); }
+  });
+  // ToNumber / ToBigInt of `v` as `o`'s element type, done once (the engine's own element conversion)
+  function coerce(o, v) { var s = SCRATCH[o[TAG]]; s[0] = v; return s[0]; }
   var isBig = function (o) { return /^Big/.test(o[TAG]); };
   function speciesCtor(o) {
     var dflt = DEFAULTS[o[TAG]], C = o.constructor;
     if (C === undefined) return dflt;
     if ((typeof C !== 'object' && typeof C !== 'function') || C === null) throw new TypeError('object.constructor is not an object');
-    var S = C[Symbol.species];
+    var S = C[SPECIES];
     if (S === undefined || S === null) return dflt;
     if (typeof S !== 'function') throw new TypeError('object.constructor[Symbol.species] is not a constructor');
     return S;
   }
+  // TypedArrayCreateFromConstructor: construct, validate, and check the length of a single-length request
+  function createFrom(C, args) {
+    var r = rConstruct(C, args);
+    if (!isTA(r) || gone(r)) throw new TypeError('constructor did not return a TypedArray');
+    if (args.length === 1 && typeof args[0] === 'number' && r.length < args[0]) throw new TypeError('constructor returned a too short TypedArray');
+    return r;
+  }
   function speciesCreate(o, args, count) {
-    var r = Reflect.construct(speciesCtor(o), args);
-    if (!isTA(r) || gone(r)) throw new TypeError('species constructor did not return a TypedArray');
+    var r = createFrom(speciesCtor(o), args);
     if (isBig(r) !== isBig(o)) throw new TypeError('Content type mismatch');
     if (count !== undefined && r.length < count) throw new TypeError('species constructor returned a too short TypedArray');
     return r;
   }
+  def(TP, 'fill', function (value, start, end) {
+    var len = this.length;
+    value = coerce(this, value);
+    var k = relIndex(start, len, 0), fin = relIndex(end, len, len);
+    if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.fill on a detached ArrayBuffer');
+    fin = Math.min(fin, this.length);
+    for (; k < fin; k++) this[k] = value;
+    return this;
+  });
   def(TP, 'map', function (f, t) {
     var len = this.length;
-    if (typeof f !== 'function') throw new TypeError(String(f) + ' is not a function');
+    needFn(f);
     var r = speciesCreate(this, [len], len);
-    for (var i = 0; i < len; i++) r[i] = f.call(t, this[i], i, this);
+    for (var i = 0; i < len; i++) r[i] = rApply(f, t, [this[i], i, this]);
     return r;
   });
   def(TP, 'filter', function (f, t) {
     var kept = [], len = this.length;
-    if (typeof f !== 'function') throw new TypeError(String(f) + ' is not a function');
-    for (var i = 0; i < len; i++) if (f.call(t, this[i], i, this)) kept.push(this[i]);
+    needFn(f);
+    for (var i = 0; i < len; i++) { var v = this[i]; if (rApply(f, t, [v, i, this])) kept.push(v); }
     var r = speciesCreate(this, [kept.length], kept.length);
     for (var j = 0; j < kept.length; j++) r[j] = kept[j];
     return r;
   });
+  function sortValues(vals, cmp) {
+    if (cmp !== undefined) return vals.sort(function (x, y) { var v = +cmp(x, y); return v !== v ? 0 : v; });
+    return vals.sort(function (x, y) {
+      if (x < y) return -1;
+      if (x > y) return 1;
+      if (x === 0 && y === 0) { var nx = Object.is(x, -0), ny = Object.is(y, -0); return nx && !ny ? -1 : !nx && ny ? 1 : 0; }
+      if (x !== x) return y !== y ? 0 : 1;
+      if (y !== y) return -1;
+      return 0;
+    });
+  }
+  function vals(o, len) { var a = []; for (var i = 0; i < len; i++) a.push(o[i]); return a; }
+  function validate(o, name) {
+    if (!isTA(o)) throw new TypeError('this is not a typed array.');
+    if (gone(o)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + name + ' on a detached ArrayBuffer');
+  }
   def(TP, 'sort', function (cmp) {
-    var a = Array.from(this);
-    a.sort(cmp || function (x, y) { return x < y ? -1 : x > y ? 1 : 0; });
-    for (var i = 0; i < a.length; i++) this[i] = a[i];
+    if (cmp !== undefined && typeof cmp !== 'function') throw new TypeError('The comparison function must be either a function or undefined');
+    validate(this, 'sort');
+    var len = this.length, a = sortValues(vals(this, len), cmp);
+    for (var i = 0; i < len; i++) this[i] = a[i];
     return this;
   });
-  def(TP, 'toSorted', function (cmp) { return nSlice.call(this, 0, this.length).sort(cmp); });
+  def(TP, 'toSorted', function (cmp) {
+    if (cmp !== undefined && typeof cmp !== 'function') throw new TypeError('The comparison function must be either a function or undefined');
+    validate(this, 'toSorted');
+    var len = this.length, r = new DEFAULTS[this[TAG]](len), a = sortValues(vals(this, len), cmp);
+    for (var i = 0; i < len; i++) r[i] = a[i];
+    return r;
+  });
   def(TP, 'toReversed', function () { return nSlice.call(this, 0, this.length).reverse(); });
   def(TP, 'copyWithin', function (target, start, end) {
-    var n = this.length, vals = Array.from(this);
-    target = target < 0 ? Math.max(n + target, 0) : Math.min(target, n);
-    start = start === undefined ? 0 : (start < 0 ? Math.max(n + start, 0) : Math.min(start, n));
-    end = end === undefined ? n : (end < 0 ? Math.max(n + end, 0) : Math.min(end, n));
-    for (var i = 0; i < end - start && target + i < n; i++) this[target + i] = vals[start + i];
+    var len = this.length;
+    var to = relIndex(target, len, 0), from = relIndex(start, len, 0), fin = relIndex(end, len, len);
+    var count = Math.min(fin - from, len - to);
+    if (count > 0) {
+      if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.copyWithin on a detached ArrayBuffer');
+      var now = this.length;
+      if (from < to && to < from + count) for (var i = count - 1; i >= 0; i--) { if (from + i < now && to + i < now) this[to + i] = this[from + i]; }
+      else for (var j = 0; j < count; j++) { if (from + j < now && to + j < now) this[to + j] = this[from + j]; }
+    }
     return this;
   });
   // %TypedArray%.from / .of: own on %TypedArray% only; the concrete constructors inherit them.
   var TAC = Object.getPrototypeOf(Uint8Array);
+  function isCtor(C) { try { rConstruct(function () {}, [], C); return true; } catch (e) { return false; } }
   def(TAC, 'from', function from(src) {
-    var mapFn = arguments[1], thisArg = arguments[2];
-    var items = Array.from(src);
-    if (mapFn) items = items.map(function (v, i) { return mapFn.call(thisArg, v, i); });
-    return new this(items);
+    var C = this, mapFn = arguments[1], thisArg = arguments[2];
+    if (!isCtor(C)) throw new TypeError(String(C) + ' is not a constructor');
+    if (mapFn !== undefined && typeof mapFn !== 'function') throw new TypeError(String(mapFn) + ' is not a function');
+    var using = src === undefined || src === null ? src[ITER] : Object(src)[ITER];
+    if (using !== undefined && using !== null && typeof using !== 'function') throw new TypeError('source[Symbol.iterator] is not a function');
+    var items;
+    if (using !== undefined && using !== null) items = Array.from({ [ITER]: function () { return rApply(using, src, []); } });
+    else { var o = Object(src), n = Math.min(Math.max(toInt(o.length), 0), 9007199254740991); items = []; for (var i = 0; i < n; i++) items.push(o[i]); }
+    var len = items.length, r = createFrom(C, [len]);
+    for (var k = 0; k < len; k++) {
+      var v = items[k];
+      if (mapFn !== undefined) v = rApply(mapFn, thisArg, [v, k]);
+      if (!Reflect.set(r, k, v)) throw new TypeError('Cannot set element ' + k);
+    }
+    return r;
   });
-  def(TAC, 'of', function of() { return new this(Array.from(arguments)); });
+  def(TAC, 'of', function of() {
+    var C = this, len = arguments.length;
+    if (!isCtor(C)) throw new TypeError(String(C) + ' is not a constructor');
+    var r = createFrom(C, [len]);
+    for (var k = 0; k < len; k++) if (!Reflect.set(r, k, arguments[k])) throw new TypeError('Cannot set element ' + k);
+    return r;
+  });
+  [TAC, ArrayBuffer].forEach(function (C) {
+    if (!Object.prototype.hasOwnProperty.call(C, SPECIES))
+      Object.defineProperty(C, SPECIES, { get: Object.getOwnPropertyDescriptor({ get [SPECIES]() { return this; } }, SPECIES).get, configurable: true });
+  });
   // Detached-buffer guard for the methods V8 checks (message names as V8 prints them).
   var detachedNames = { forEach: 'forEach', some: 'some', every: 'every', find: 'find', findIndex: 'findIndex',
     findLast: 'findLast', findLastIndex: 'findIndexLast', reduce: 'reduce', reduceRight: 'reduceRight', fill: 'fill',
     at: 'at', keys: 'keys', values: 'values', entries: 'entries', join: 'join', includes: 'includes',
-    indexOf: 'indexOf', lastIndexOf: 'lastIndexOf', map: 'map', filter: 'filter', sort: 'sort',
-    toSorted: 'toSorted', toReversed: 'toReversed', reverse: 'reverse', copyWithin: 'copyWithin',
+    indexOf: 'indexOf', lastIndexOf: 'lastIndexOf', map: 'map', filter: 'filter',
+    toReversed: 'toReversed', reverse: 'reverse', copyWithin: 'copyWithin',
     toString: 'join', toLocaleString: 'toLocaleString' };
   Object.keys(detachedNames).forEach(function (n) {
     var orig = TP[n];
     if (typeof orig !== 'function') return;
-    def(TP, n, function () {
+    def(TP, n, { [n]: function () {
       if (n !== 'toString' && !isTA(this)) throw new TypeError('this is not a typed array.');
       if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + detachedNames[n] + ' on a detached ArrayBuffer');
       return orig.apply(this, arguments);
-    });
+    } }[n]);
   });
   // slice / subarray: a user species constructor builds the result; the default (and Buffer) keep the native path
   function relIdx(v, len, d) {
@@ -1617,11 +1782,33 @@ const TYPED_PRELUDE: &str = r#"
   });
   def(TP, 'subarray', function (begin, end) {
     if (!isTA(this)) throw new TypeError('this is not a typed array.');
-    var len = this.length, s = relIdx(begin, len, 0), e = relIdx(end, len, len), C = speciesCtor(this);
+    var len = this.length, off = this.byteOffset, buf = this.buffer, tracking = __thaw_ta_track(this);
+    var s = relIdx(begin, len, 0), e = relIdx(end, len, len), C = speciesCtor(this);
     if (plainCtor(C, this)) return nSub.call(this, s, end === undefined ? undefined : e);
-    var args = [this.buffer, this.byteOffset + s * this.BYTES_PER_ELEMENT];
-    args.push(Math.max(e - s, 0)); // ponytail: a length-tracking source loses tracking in the species path
+    var args = [buf, off + s * this.BYTES_PER_ELEMENT];
+    if (!(end === undefined && tracking)) args.push(Math.max(e - s, 0));
     return speciesCreate(this, args);
+  });
+  // ArrayBuffer.prototype.slice: relative indices, then SpeciesConstructor and the checks on what it builds
+  var abSlice = ArrayBuffer.prototype.slice, AB = ArrayBuffer;
+  def(ArrayBuffer.prototype, 'slice', function slice(start, end) {
+    if (detGet.call(this)) throw new TypeError('Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer');
+    var len = this.byteLength, first = relIdx(start, len, 0), fin = relIdx(end, len, len), n = Math.max(fin - first, 0);
+    var C = this.constructor, S = AB;
+    if (C !== undefined) {
+      if ((typeof C !== 'object' && typeof C !== 'function') || C === null) throw new TypeError('object.constructor is not an object');
+      var sp = C[SPECIES];
+      if (sp !== undefined && sp !== null) { if (!isCtor(sp)) throw new TypeError('object.constructor[Symbol.species] is not a constructor'); S = sp; }
+    }
+    if (S === AB) return rApply(abSlice, this, [first, fin]);
+    var r = rConstruct(S, [n]);
+    if (detGet.call(r)) throw new TypeError('species constructor returned a detached ArrayBuffer');
+    if (r === this) throw new TypeError('species constructor returned the same ArrayBuffer');
+    if (r.byteLength < n) throw new TypeError('species constructor returned a too small ArrayBuffer');
+    if (detGet.call(this)) throw new TypeError('Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer');
+    var avail = Math.max(Math.min(n, this.byteLength - first), 0);
+    if (avail > 0) new Uint8Array(r).set(new Uint8Array(this, first, avail));
+    return r;
   });
   // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function (the guarded one now).
   def(TP, Symbol.iterator, TP.values);
