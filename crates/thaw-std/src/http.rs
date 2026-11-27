@@ -158,6 +158,13 @@ struct ResponseSpec {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// HEAD, 1xx, 204 and 304 carry no body: no framing is added and no body byte is sent.
+    bodyless: bool,
+}
+
+/// Node's `_hasBody == false` cases: a HEAD request, or a 1xx/204/304 status.
+fn response_is_bodyless(method: &str, status: u16) -> bool {
+    method.eq_ignore_ascii_case("HEAD") || matches!(status, 100..=199 | 204 | 304)
 }
 
 impl ResponseSpec {
@@ -166,6 +173,7 @@ impl ResponseSpec {
             status: 200,
             headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
             body: body.into_bytes(),
+            bodyless: false,
         }
     }
 }
@@ -348,6 +356,11 @@ fn is_transfer_encoding(name: &str) -> bool {
 }
 
 fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
+    if response_spec.bodyless {
+        // Caller headers (including an explicit Content-Length) go out untouched.
+        return render_head(response_spec.status, &response_spec.headers, "", keep_alive)
+            .into_bytes();
+    }
     // A caller-set `Transfer-Encoding: chunked` means the body is chunk-framed, not length-framed.
     let chunked = response_spec.headers.iter().any(|(name, value)| {
         is_transfer_encoding(name) && value.to_ascii_lowercase().contains("chunked")
@@ -1251,7 +1264,9 @@ unsafe extern "C" fn response_write_bytes(environment: *const c_void, chunk: *co
         stream_write(context, &bytes);
     } else {
         context.state.wrote = true;
-        context.state.body.extend(bytes);
+        if !context_is_bodyless(context) {
+            context.state.body.extend(bytes);
+        }
     }
     true
 }
@@ -1890,7 +1905,9 @@ unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_
         // send the whole thing -- nothing has observed a partial
         // response, so only the headers differ: `finish_response` frames it chunked.
         context.state.wrote = true;
-        context.state.body.extend(bytes);
+        if !context_is_bodyless(context) {
+            context.state.body.extend(bytes);
+        }
     }
     true
 }
@@ -1933,7 +1950,14 @@ unsafe extern "C" fn response_end(environment: *const c_void, chunk: *const c_ch
 /// with a `Content-Length`, which no client can distinguish from a
 /// stream since the handler hasn't yielded.
 fn stream_should_engage(context: &RequestContext) -> bool {
-    context.resumable && !context.connection.is_null()
+    context.resumable && !context.connection.is_null() && !context_is_bodyless(context)
+}
+
+fn context_is_bodyless(context: &RequestContext) -> bool {
+    response_is_bodyless(
+        &context._method.to_string_lossy(),
+        normalize_status(context.response.status_code),
+    )
 }
 
 /// Builds the bytes for one streamed `write`: the chunked response head
@@ -2055,13 +2079,18 @@ fn finish_response(context: &mut RequestContext) {
     let connection = unsafe { &mut *context.connection };
     connection.awaiting_handler = false;
     let mut headers = std::mem::take(&mut context.state.headers);
-    if context.state.wrote && !headers.iter().any(|(name, _)| is_transfer_encoding(name)) {
+    let bodyless = context_is_bodyless(context);
+    if !bodyless
+        && context.state.wrote
+        && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
+    {
         headers.push(("Transfer-Encoding".into(), "chunked".into()));
     }
     let spec = ResponseSpec {
         status: normalize_status(context.response.status_code),
         headers,
         body: std::mem::take(&mut context.state.body),
+        bodyless,
     };
     connection.response = render_response(spec, connection.keep_alive);
     // Deliberately does not write here: this runs inside the async
@@ -2250,7 +2279,9 @@ fn run_server_callback(
     }
     if context.state.ended || connection.is_null() {
         let mut headers = std::mem::take(&mut context.state.headers);
-        if context.state.wrote
+        let bodyless = context_is_bodyless(&context);
+        if !bodyless
+            && context.state.wrote
             && !connection.is_null()
             && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
         {
@@ -2262,6 +2293,7 @@ fn run_server_callback(
             status: normalize_status(context.response.status_code),
             headers,
             body: std::mem::take(&mut context.state.body),
+            bodyless,
         })
     } else {
         context.resumable = true;
@@ -2282,6 +2314,7 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
                 status: normalize_status(context.response.status_code),
                 headers: context.state.headers.clone(),
                 body: context.state.body.clone(),
+                bodyless: context_is_bodyless(&context),
             }
         }
     }
@@ -5055,6 +5088,7 @@ mod tests {
                 status: 200,
                 headers: vec![("Transfer-Encoding".into(), "chunked".into())],
                 body: b"x".to_vec(),
+                bodyless: false,
             },
             true,
         );
@@ -5075,6 +5109,25 @@ mod tests {
     }
 
     #[test]
+    fn bodyless_response_adds_no_framing_and_keeps_explicit_length() {
+        assert!(response_is_bodyless("HEAD", 200) && response_is_bodyless("GET", 204));
+        assert!(response_is_bodyless("GET", 304) && !response_is_bodyless("GET", 200));
+        let response = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: vec![("Content-Length".into(), "5".into())],
+                body: b"hello".to_vec(),
+                bodyless: true,
+            },
+            false,
+        );
+        assert_eq!(
+            without_date(&response),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
     fn buffered_response_uses_one_computed_content_length() {
         let response = render_response(
             ResponseSpec {
@@ -5085,6 +5138,7 @@ mod tests {
                     ("cOnTeNt-LeNgTh".into(), "123".into()),
                 ],
                 body: "é".as_bytes().to_vec(),
+                bodyless: false,
             },
             true,
         );
@@ -5095,6 +5149,7 @@ mod tests {
                 status: 200,
                 headers: vec![("X-Trace".into(), "kept".into())],
                 body: b"ok".to_vec(),
+                bodyless: false,
             },
             false,
         );
@@ -5128,6 +5183,7 @@ mod tests {
                 status: 200,
                 headers: context.state.headers.clone(),
                 body: Vec::new(),
+                bodyless: false,
             },
             false,
         );
