@@ -171,7 +171,7 @@ if (expected === undefined) expected = 1;
 if (typeof expected !== 'number') throw argError('ERR_INVALID_ARG_TYPE', TypeError, 'The "expected" argument must be of type number. Received ' + received(expected));
 if (!(expected >= 1 && expected <= 4294967295) || expected % 1 !== 0) throw argError('ERR_OUT_OF_RANGE', RangeError, 'The value of "expected" is out of range. It must be >= 1 && <= 4294967295. Received ' + expected);
 var entry = { fn: fn, expected: expected, calls: [] };
-var tracked = function() { entry.calls.push({ thisArg: this, arguments: Array.prototype.slice.call(arguments) }); return fn.apply(this, arguments); };
+var tracked = function() { entry.calls.push({ thisArg: this === globalThis ? undefined : this, arguments: Array.prototype.slice.call(arguments) }); return fn.apply(this, arguments); };
 entry.tracked = tracked; this._tracked.push(entry); return tracked;
 };
 CallTracker.prototype._find = function(tracked) {
