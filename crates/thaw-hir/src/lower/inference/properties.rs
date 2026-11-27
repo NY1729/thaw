@@ -69,6 +69,27 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn peel_nullable_member(element: &HirType) -> (Option<&HirType>, &HirType) {
+        match element {
+            HirType::Nullable(payload) => (Some(payload.as_ref()), payload.as_ref()),
+            other => (None, other),
+        }
+    }
+
+    /// `.groups` / `.index` / `.input` of a `RegExp.exec` result array (`string | undefined` elements).
+    fn regex_array_member_type(member: &HirType, property: &str) -> Option<HirType> {
+        let HirType::Array(element) = member else { return None };
+        if element.as_ref() != &HirType::Optional(Box::new(HirType::Str)) {
+            return None;
+        }
+        match property {
+            "groups" => Some(HirType::Dictionary(Box::new(HirType::Optional(Box::new(HirType::Str))))),
+            "index" => Some(HirType::F64),
+            "input" => Some(HirType::Str),
+            _ => None,
+        }
+    }
+
     fn lower_union_property_read(
         &mut self,
         object: HirExpr,
@@ -204,8 +225,12 @@ impl<'a> FnLowerer<'a> {
             }
             // A `boolean` member is the `false` of an `a && b` chain: reading a property off it is
             // `undefined` (it stays in a truthy-narrowed union because falsiness is not tracked).
+            let (_, element) = Self::peel_nullable_member(element);
             let field = if *element == HirType::Bool {
                 HirType::Undefined
+            } else if let Some(field) = Self::regex_array_member_type(element, property) {
+                has_property = true;
+                field
             } else {
                 let HirType::Object(fields) = element else {
                     return Err(format!(
@@ -269,17 +294,47 @@ impl<'a> FnLowerer<'a> {
                     index,
                     elements.to_vec(),
                 );
-            let fields = match element {
-                HirType::Object(fields) => Some(fields),
-                _ => None, // `boolean`, validated above
+            let (nullable_payload, member) = Self::peel_nullable_member(element);
+            let union_value = match nullable_payload {
+                Some(payload) => {
+                    // A truthy-narrowed `T | null` member keeps its `Nullable` wrapper: a null
+                    // payload throws like a null receiver, otherwise read through the payload.
+                    statements.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(
+                                Box::new(HirExpr::Var(parameter.clone())), elements.to_vec(),
+                            )),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
+                        vec![HirStmt::If(
+                            HirExpr::NullableIsNone(Box::new(union_value.clone()), payload.clone()),
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                                "\u{1}TypeError\u{1}Cannot read properties of null (reading '{property}')"
+                            ))))],
+                            Vec::new(),
+                        )],
+                        Vec::new(),
+                    ));
+                    HirExpr::NullableValue(Box::new(union_value), payload.clone())
+                }
+                None => union_value,
             };
-            let (field, field_type) = match fields.map(|fields| Ok::<_, String>((fields, Self::optional_fixed_object_property_read_type(fields, property)?))).transpose()? {
+            let fields = match member {
+                HirType::Object(fields) => Some(fields),
+                _ => None, // `boolean`, regex array or other, validated above
+            };
+            let regex_read = Self::regex_array_member_type(member, property).map(|ty| {
+                let helper = match property { "groups" => "__thaw_regex_exec_groups", "index" => "__thaw_regex_exec_index", _ => "__thaw_regex_exec_input" };
+                (HirExpr::Call(Box::new(HirExpr::Var(helper.into())), vec![union_value.clone()]), ty)
+            });
+            let (field, field_type) = if let Some(read) = regex_read { read } else { match fields.map(|fields| Ok::<_, String>((fields, Self::optional_fixed_object_property_read_type(fields, property)?))).transpose()? {
                 Some((fields, Some(field_type))) => (
                     self.lower_fixed_object_property_read(union_value, fields, property)?,
                     field_type,
                 ),
                 _ => (HirExpr::Lit(HirLit::Undefined), HirType::Undefined),
-            };
+            } };
             let returns = if field_types.len() == 1 {
                 vec![HirStmt::Return(Some(field))]
             } else {
