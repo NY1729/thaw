@@ -202,6 +202,34 @@ impl<'a> FnLowerer<'a> {
                 &[(receiver_name, receiver_type, receiver)],
             );
         }
+        // A mixed-type literal (`[1, 'x', null]`) is a tuple; its read-only Array methods run on its
+        // Json form (the elements keep their JavaScript types).
+        if matches!(
+            property.sym.as_ref(),
+            "map" | "filter" | "reduce" | "reduceRight" | "some" | "every" | "find" | "findIndex" | "findLast"
+                | "findLastIndex" | "forEach" | "indexOf" | "lastIndexOf" | "includes" | "join" | "slice"
+                | "concat" | "at" | "flat" | "flatMap"
+        ) && matches!(self.peek_type_without_lowering(&member.obj), Some(HirType::Tuple(_)))
+        {
+            let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+            if let HirType::Tuple(elements) = self.infer_expr_type_inner(&receiver)? {
+                if elements.iter().all(Self::spread_json_encodable_type) {
+                    let json = self.coerce_to_declared(&HirType::Json, receiver)?;
+                    let name = format!("__thaw_tuple_json_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), HirType::Json);
+                    let mut synthetic_member = member.clone();
+                    *synthetic_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        name.clone().into(),
+                        member.span,
+                    ));
+                    let mut synthetic_call = call.clone();
+                    synthetic_call.callee = Callee::Expr(Box::new(Expr::Member(synthetic_member.clone())));
+                    let result = self.lower_native_instance_builtin(&synthetic_member, property, &synthetic_call)?;
+                    return self.wrap_call_argument_bindings(result, &[(name, HirType::Json, json)]);
+                }
+            }
+        }
         if let Some(result) = self.lower_bytes_generic_array_method(member, property, call)? {
             return Ok(result);
         }
