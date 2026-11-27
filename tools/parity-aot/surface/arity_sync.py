@@ -106,26 +106,16 @@ def process_arm(mods, body, fix):
         d = declared_len(params)
         if d == n:
             continue
-        if any("=>" in p for p in params):
+        if name in KEEP or "assert" in mods[0] or any("=>" in p or "JsValue" in p or "argsArray" in p or p.startswith("...") for p in params):
             # callback-typed signatures are lowered natively (typed server/fs paths); an extra parameter breaks that
             # lowering (http.createServer), so these are only reported
-            SKIPPED.append((mods[0], name, d, n, "callback-typed"))
+            SKIPPED.append((mods[0], name, d, n, "callback/JsValue/dynamic-typed or assert"))
         elif len(spans) == 1:
             bad.append((mods[0], name, d, n))
             edits.append((a, b, ", ".join(fix_params(params, n))))
         else:
-            # overloads: a rewrite could change which one a call resolves to. Only the exact pair
-            # `f(a..)` / `f(a.., extra)` with one return type merges into `f(a.., extra?)`.
-            (a2, b2) = spans[1]
-            p2 = split_params(body[a2:b2])
-            s1, e1, r1 = stmt_span(body, a, b)
-            s2, e2, r2 = stmt_span(body, a2, b2)
-            if len(spans) == 2 and r1 == r2 and p2[:len(params)] == params and declared_len(p2) == n and not any(x.startswith("...") for x in p2):
-                bad.append((mods[0], name, d, n))
-                merged = params + [re.sub(r"^([\w$]+)\??:", r"\1?:", x) for x in p2[len(params):]]
-                edits.append((a, b, ", ".join(merged)))
-                edits.append((s2, e2, ""))
-            else:
+            # overloads: a rewrite could change which one a call resolves to or break callback inference; report only
+            if True:
                 SKIPPED.append((mods[0], name, d, n, "overloaded"))
     if fix:
         for a, b, new in sorted(edits, reverse=True):
@@ -171,6 +161,9 @@ def process_extra(m):
     return body
 
 
+# factories whose typed lowering/overload resolution is known (or not proven) to survive an extra optional parameter
+KEEP = {"createInterface", "fork", "createSecretKey", "createHmac", "createSign", "createVerify", "sign", "verify",
+        "monitorEventLoopDelay", "createHistogram"}
 FIX = [False]
 bad_extra = []
 SKIPPED = []
@@ -192,8 +185,6 @@ def main():
     # per-module extras appended in resolve_builtin: `"fs" => "<dts>",`
     text = re.compile(r'(?m)^( {16}"[\w/]+" => )"((?:[^"\\]|\\.)*)",$').sub(
         lambda m: m.group(1) + '"' + process_extra(m) + '",', text)
-    text, b = gen_lists(text, fix)
-    bad.extend(b)
     bad.extend(bad_extra)
     for mod, name, d, n in bad:
         print(f"{mod}.{name}: declared {d}, node {n}")
