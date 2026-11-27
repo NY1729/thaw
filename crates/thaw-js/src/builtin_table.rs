@@ -222,6 +222,10 @@ impl Interp {
                             set_fn_head(&o, row.name, length);
                             if row.has_prototype == Some(false) {
                                 o.remove_prop("prototype");
+                                // Proxy is the one prototype-less constructor
+                                if row.name != "Proxy" {
+                                    o.no_ctor.set(true);
+                                }
                             }
                         }
                     }

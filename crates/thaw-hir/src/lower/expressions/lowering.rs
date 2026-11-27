@@ -1568,7 +1568,8 @@ impl<'a> FnLowerer<'a> {
                         return self.coerce_to_declared(&dictionary, value);
                     }
                 }
-                self.lower_expr(&assertion.expr)
+                let value = self.lower_expr(&assertion.expr)?;
+                self.bytes_as_any(value, &assertion.type_ann)
             }
             Expr::TsTypeAssertion(assertion) => {
                 if let Some(literal) =
@@ -1576,7 +1577,8 @@ impl<'a> FnLowerer<'a> {
                 {
                     return Ok(literal);
                 }
-                self.lower_expr(&assertion.expr)
+                let value = self.lower_expr(&assertion.expr)?;
+                self.bytes_as_any(value, &assertion.type_ann)
             }
             Expr::TsSatisfies(satisfies) => self.lower_satisfies(satisfies),
             Expr::TsNonNull(assertion) => self.lower_non_null_assertion(assertion),
@@ -7049,6 +7051,15 @@ impl<'a> FnLowerer<'a> {
         self.expected_arrow_return_hint = None;
         self.expected_collection_hint = None;
         result
+    }
+
+    /// `buffer as any`: a byte buffer asserted to `any` is the `any` value (a `Value::Bytes`
+    /// aliasing the view), not a still-typed buffer.
+    fn bytes_as_any(&mut self, value: HirExpr, type_ann: &TsType) -> Result<HirExpr, String> {
+        if any_like_assertion_target(type_ann) == Some(false) && self.infer_expr_type_inner(&value)? == HirType::Bytes {
+            return self.coerce_to_declared(&HirType::Json, value);
+        }
+        Ok(value)
     }
 
     /// `[..] as any[]` / `[..] as any` / `<any[]>[..]` / `{..} as any`: the assertion hands the

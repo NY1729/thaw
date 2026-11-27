@@ -2081,6 +2081,20 @@ impl<'ctx> HirCompiler<'ctx> {
         let function = self
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
+        // A function the source wrote (see `thaw_hir::USER_FN_MARK`) gets a frame in `Error.stack`.
+        let user_mark = user_function_mark(body);
+        if let Some((line, col, via, frame_name, file)) = &user_mark {
+            self.mark_for_stack_frames(function, &name);
+            if !file.is_empty() {
+                self.stack_locs.insert(name.clone(), SourceLoc { file: file.clone(), line: *line, col: *col });
+            }
+            if !frame_name.is_empty() {
+                self.lambda_frame_names.insert(name.clone(), frame_name.clone());
+            }
+            if !via.is_empty() {
+                self.frame_vias.insert(name.clone(), via.clone());
+            }
+        }
         let (entry, this_adapter) = if params
             .first()
             .is_some_and(|param| param.name == "__thaw_this")
@@ -2183,6 +2197,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.emit_stack_overflow_guard()?;
             match body {
                 HirExpr::Block(stmts) => {
+                    let stmts = if user_mark.is_some() { &stmts[1..] } else { stmts };
                     let terminated = self.compile_block(stmts)?;
                     if !terminated {
                         if *ret == HirType::Void {
@@ -2202,6 +2217,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     }
                 }
                 expr => {
+                    let expr = match expr {
+                        HirExpr::EvalThen(_, inner) if user_mark.is_some() => inner.as_ref(),
+                        expr => expr,
+                    };
                     if *ret == HirType::Void {
                         if self.promise_expression_needs_discard(expr) {
                             self.compile_and_discard_promise_expression(expr)?;
@@ -2264,8 +2283,10 @@ impl<'ctx> HirCompiler<'ctx> {
             // A named arrow shows up in `Error.stack` as `at <name>`; unnamed lambdas stay out of it.
             if let Some(symbol) = self.last_lambda_symbol.take() {
                 if let Some(function) = self.module.get_function(&symbol) {
-                    if !display.starts_with("__thaw") && !Self::in_stack_frame_section(function) {
-                        self.mark_for_stack_frames(function, &symbol);
+                    if !display.starts_with("__thaw") {
+                        if !Self::in_stack_frame_section(function) {
+                            self.mark_for_stack_frames(function, &symbol);
+                        }
                         self.lambda_frame_names.insert(symbol, display.clone());
                     }
                 }
@@ -2648,4 +2669,20 @@ fn has_async_resolver(expr: &HirExpr) -> bool {
         }),
         _ => false,
     }
+}
+
+/// `(line, col, via, name, file)` of the `thaw_hir::USER_FN_MARK` a lowered source function starts its body with.
+fn user_function_mark(body: &HirExpr) -> Option<(u32, u32, String, String, String)> {
+    let mark = match body {
+        HirExpr::Block(stmts) => match stmts.first()? {
+            HirStmt::Expr(mark) => mark,
+            _ => return None,
+        },
+        HirExpr::EvalThen(mark, _) => mark,
+        _ => return None,
+    };
+    let HirExpr::Lit(HirLit::Str(text)) = mark else { return None };
+    let mut fields = text.strip_prefix(thaw_hir::USER_FN_MARK)?.strip_prefix('\u{1}')?.splitn(5, '\u{1}');
+    let (line, col) = (fields.next()?.parse().ok()?, fields.next()?.parse().ok()?);
+    Some((line, col, fields.next()?.into(), fields.next()?.into(), fields.next()?.into()))
 }

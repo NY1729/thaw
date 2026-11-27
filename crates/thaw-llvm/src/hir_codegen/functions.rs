@@ -447,6 +447,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     },
                     None => pointer.const_null(),
                 };
+                let via = match self.frame_vias.get(function.get_name().to_string_lossy().as_ref()) {
+                    Some(via) => self.intern_string(via, "stack_fn_via").map_err(|e| e.to_string())?.as_pointer_value(),
+                    None => pointer.const_null(),
+                };
                 let i32_type = self.context.i32_type();
                 let (line, col) = loc.map_or((0, 0), |loc| (loc.line, loc.col));
                 Ok(self.context.const_struct(
@@ -456,6 +460,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         file.into(),
                         i32_type.const_int(line.into(), false).into(),
                         i32_type.const_int(col.into(), false).into(),
+                        via.into(),
                     ],
                     false,
                 ))
@@ -466,7 +471,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let i32_type = self.context.i32_type();
         let entry_type = self.context.struct_type(
-            &[pointer.into(), pointer.into(), pointer.into(), i32_type.into(), i32_type.into()],
+            &[pointer.into(), pointer.into(), pointer.into(), i32_type.into(), i32_type.into(), pointer.into()],
             false,
         );
         let table = self.module.add_global(entry_type.array_type(entries.len() as u32), None, "thaw_stack_table");

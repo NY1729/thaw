@@ -158,6 +158,13 @@ struct ResponseSpec {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// HEAD, 1xx, 204 and 304 carry no body: no framing is added and no body byte is sent.
+    bodyless: bool,
+}
+
+/// Node's `_hasBody == false` cases: a HEAD request, or a 1xx/204/304 status.
+fn response_is_bodyless(method: &str, status: u16) -> bool {
+    method.eq_ignore_ascii_case("HEAD") || matches!(status, 100..=199 | 204 | 304)
 }
 
 impl ResponseSpec {
@@ -166,6 +173,7 @@ impl ResponseSpec {
             status: 200,
             headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
             body: body.into_bytes(),
+            bodyless: false,
         }
     }
 }
@@ -348,6 +356,11 @@ fn is_transfer_encoding(name: &str) -> bool {
 }
 
 fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
+    if response_spec.bodyless {
+        // Caller headers (including an explicit Content-Length) go out untouched.
+        return render_head(response_spec.status, &response_spec.headers, "", keep_alive)
+            .into_bytes();
+    }
     // A caller-set `Transfer-Encoding: chunked` means the body is chunk-framed, not length-framed.
     let chunked = response_spec.headers.iter().any(|(name, value)| {
         is_transfer_encoding(name) && value.to_ascii_lowercase().contains("chunked")
@@ -1251,7 +1264,9 @@ unsafe extern "C" fn response_write_bytes(environment: *const c_void, chunk: *co
         stream_write(context, &bytes);
     } else {
         context.state.wrote = true;
-        context.state.body.extend(bytes);
+        if !context_is_bodyless(context) {
+            context.state.body.extend(bytes);
+        }
     }
     true
 }
@@ -1890,7 +1905,9 @@ unsafe extern "C" fn response_write(environment: *const c_void, chunk: *const c_
         // send the whole thing -- nothing has observed a partial
         // response, so only the headers differ: `finish_response` frames it chunked.
         context.state.wrote = true;
-        context.state.body.extend(bytes);
+        if !context_is_bodyless(context) {
+            context.state.body.extend(bytes);
+        }
     }
     true
 }
@@ -1933,7 +1950,14 @@ unsafe extern "C" fn response_end(environment: *const c_void, chunk: *const c_ch
 /// with a `Content-Length`, which no client can distinguish from a
 /// stream since the handler hasn't yielded.
 fn stream_should_engage(context: &RequestContext) -> bool {
-    context.resumable && !context.connection.is_null()
+    context.resumable && !context.connection.is_null() && !context_is_bodyless(context)
+}
+
+fn context_is_bodyless(context: &RequestContext) -> bool {
+    response_is_bodyless(
+        &context._method.to_string_lossy(),
+        normalize_status(context.response.status_code),
+    )
 }
 
 /// Builds the bytes for one streamed `write`: the chunked response head
@@ -2055,13 +2079,18 @@ fn finish_response(context: &mut RequestContext) {
     let connection = unsafe { &mut *context.connection };
     connection.awaiting_handler = false;
     let mut headers = std::mem::take(&mut context.state.headers);
-    if context.state.wrote && !headers.iter().any(|(name, _)| is_transfer_encoding(name)) {
+    let bodyless = context_is_bodyless(context);
+    if !bodyless
+        && context.state.wrote
+        && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
+    {
         headers.push(("Transfer-Encoding".into(), "chunked".into()));
     }
     let spec = ResponseSpec {
         status: normalize_status(context.response.status_code),
         headers,
         body: std::mem::take(&mut context.state.body),
+        bodyless,
     };
     connection.response = render_response(spec, connection.keep_alive);
     // Deliberately does not write here: this runs inside the async
@@ -2250,7 +2279,9 @@ fn run_server_callback(
     }
     if context.state.ended || connection.is_null() {
         let mut headers = std::mem::take(&mut context.state.headers);
-        if context.state.wrote
+        let bodyless = context_is_bodyless(&context);
+        if !bodyless
+            && context.state.wrote
             && !connection.is_null()
             && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
         {
@@ -2262,6 +2293,7 @@ fn run_server_callback(
             status: normalize_status(context.response.status_code),
             headers,
             body: std::mem::take(&mut context.state.body),
+            bodyless,
         })
     } else {
         context.resumable = true;
@@ -2282,6 +2314,7 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
                 status: normalize_status(context.response.status_code),
                 headers: context.state.headers.clone(),
                 body: context.state.body.clone(),
+                bodyless: context_is_bodyless(&context),
             }
         }
     }
@@ -2333,6 +2366,8 @@ struct ServerState {
     pending_listening: AtomicBool,
     pending_errors: Mutex<Vec<ServerError>>,
     close_requested: AtomicBool,
+    /// Address of this server's `Server` record, so `listening` can be kept current.
+    record: AtomicUsize,
 }
 
 #[derive(Clone, Copy)]
@@ -2609,6 +2644,7 @@ fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
     for &address in &snapshot {
         let state = unsafe { &*(address as *const ServerState) };
         if state.pending_listening.swap(false, Ordering::AcqRel) {
+            set_listening(state, true);
             emit_event(&state.listening_listeners);
         }
         let errors = std::mem::take(&mut *state.pending_errors.lock().unwrap());
@@ -3521,6 +3557,21 @@ struct Server {
     on_error: *const NativeClosure,
     listen_with_host_callback: *const NativeClosure,
     address: *const NativeClosure,
+    close_all_connections: *const NativeClosure,
+    close_idle_connections: *const NativeClosure,
+    get_connections: *const NativeClosure,
+    ref_: *const NativeClosure,
+    unref: *const NativeClosure,
+    /// Boolean slot is a whole machine word, like `IncomingMessage::complete`.
+    listening: u64,
+    // ponytail: these knobs are readable/writable members only; the server keeps its own fixed
+    // limits. Wire them into the connection sweep when a program needs the behaviour.
+    timeout: f64,
+    headers_timeout: f64,
+    request_timeout: f64,
+    keep_alive_timeout: f64,
+    max_headers_count: f64,
+    max_requests_per_socket: f64,
 }
 
 #[repr(C)]
@@ -3694,6 +3745,68 @@ unsafe extern "C" fn server_listen_many(
         .into_raw()
 }
 
+fn set_listening(state: &ServerState, on: bool) {
+    let record = state.record.load(Ordering::Acquire) as *mut Server;
+    if !record.is_null() {
+        unsafe { (*record).listening = on as u64 };
+    }
+}
+
+/// Closes this server's connections: only the idle keep-alive ones, or every one.
+fn close_server_connections(state: &ServerState, idle_only: bool) {
+    let tracked: Vec<usize> = tracked_connections().lock().unwrap().clone();
+    for address in tracked {
+        let connection = unsafe { &mut *(address as *mut ConnectionState) };
+        if !std::ptr::eq(connection.server, state) {
+            continue;
+        }
+        let idle = !connection.awaiting_handler
+            && !connection.dispatched
+            && !connection.streaming
+            && connection.response_ctx.is_null()
+            && connection.request.is_empty()
+            && connection.response.is_empty();
+        if !idle_only || idle {
+            finish_connection(connection);
+        }
+    }
+}
+
+unsafe extern "C" fn server_close_all_connections(environment: *const c_void) -> bool {
+    let closure = &*(environment as *const NativeClosure);
+    close_server_connections(&*(closure.context as *const ServerState), false);
+    true
+}
+
+unsafe extern "C" fn server_close_idle_connections(environment: *const c_void) -> bool {
+    let closure = &*(environment as *const NativeClosure);
+    close_server_connections(&*(closure.context as *const ServerState), true);
+    true
+}
+
+/// `server.getConnections(cb)`: `cb("", count)`; the error slot is an empty string (Node passes null).
+unsafe extern "C" fn server_get_connections(
+    environment: *const c_void,
+    callback: *const c_void,
+) -> bool {
+    if callback.is_null() {
+        return false;
+    }
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    let count = state.connections.load(Ordering::Acquire) as f64;
+    type Callback = unsafe extern "C" fn(*const c_void, *const c_char, f64);
+    let code = *(callback as *const *const c_void);
+    let callback_fn: Callback = std::mem::transmute(code);
+    callback_fn(callback, c"".as_ptr(), count);
+    true
+}
+
+// ponytail: ref/unref are accepted; an unref'd server still keeps the event loop alive.
+unsafe extern "C" fn server_ref(_environment: *const c_void) -> bool {
+    true
+}
+
 unsafe extern "C" fn server_close(environment: *const c_void) -> bool {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
@@ -3744,6 +3857,9 @@ fn close_server_state(state: &ServerState) -> bool {
     if was_open {
         state.close_requested.store(true, Ordering::Release);
     }
+    set_listening(state, false);
+    // Node's `server.close()` also drops idle keep-alive connections.
+    close_server_connections(state, true);
     let watcher = state.watcher.swap(0, Ordering::AcqRel);
     if watcher != 0 {
         unsafe { thaw_runtime_unwatch_fd(watcher) };
@@ -3769,6 +3885,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         pending_listening: AtomicBool::new(false),
         pending_errors: Mutex::new(Vec::new()),
         close_requested: AtomicBool::new(false),
+        record: AtomicUsize::new(0),
     }));
     let listen = Box::into_raw(Box::new(NativeClosure::new(
         server_listen as *const c_void,
@@ -3806,6 +3923,16 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         server_address as *const c_void,
         state.cast(),
     )));
+    let extra = |function: *const c_void| {
+        let closure = Box::into_raw(Box::new(NativeClosure::new(function, state.cast())));
+        thaw_arena::replace_reference(closure as usize, 0, state as usize);
+        closure as *const NativeClosure
+    };
+    let close_all_connections = extra(server_close_all_connections as *const c_void);
+    let close_idle_connections = extra(server_close_idle_connections as *const c_void);
+    let get_connections = extra(server_get_connections as *const c_void);
+    let ref_ = extra(server_ref as *const c_void);
+    let unref = extra(server_ref as *const c_void);
     let server = Box::into_raw(Box::new(Server {
         listen,
         listen_with_callback,
@@ -3816,7 +3943,20 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         on_error,
         listen_with_host_callback,
         address,
+        close_all_connections,
+        close_idle_connections,
+        get_connections,
+        ref_,
+        unref,
+        listening: 0,
+        timeout: 0.0,
+        headers_timeout: 60000.0,
+        request_timeout: 300000.0,
+        keep_alive_timeout: 5000.0,
+        max_headers_count: 0.0,
+        max_requests_per_socket: 0.0,
     }));
+    unsafe { (*state).record.store(server as usize, Ordering::Release) };
     let state_address = state as usize;
     thaw_arena::replace_reference(server as usize, 0, state_address);
     for closure in [
@@ -3829,6 +3969,11 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         on_error,
         listen_with_host_callback,
         address,
+        close_all_connections as *mut NativeClosure,
+        close_idle_connections as *mut NativeClosure,
+        get_connections as *mut NativeClosure,
+        ref_ as *mut NativeClosure,
+        unref as *mut NativeClosure,
     ] {
         thaw_arena::replace_reference(closure as usize, 0, state_address);
     }
@@ -3899,6 +4044,7 @@ mod tests {
             pending_listening: AtomicBool::new(true),
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
+            record: AtomicUsize::new(0),
         })
     }
 
@@ -4379,6 +4525,7 @@ mod tests {
             pending_listening: AtomicBool::new(false),
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
+            record: AtomicUsize::new(0),
         });
         let head = b"POST /body HTTP/1.1\r\nContent-Length: 5\r\n\r\n";
         let mut request = head.to_vec();
@@ -4765,6 +4912,7 @@ mod tests {
             pending_listening: AtomicBool::new(false),
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
+            record: AtomicUsize::new(0),
         });
         let connection = Box::into_raw(Box::new(ConnectionState {
             stream: None,
@@ -4940,6 +5088,7 @@ mod tests {
                 status: 200,
                 headers: vec![("Transfer-Encoding".into(), "chunked".into())],
                 body: b"x".to_vec(),
+                bodyless: false,
             },
             true,
         );
@@ -4960,6 +5109,25 @@ mod tests {
     }
 
     #[test]
+    fn bodyless_response_adds_no_framing_and_keeps_explicit_length() {
+        assert!(response_is_bodyless("HEAD", 200) && response_is_bodyless("GET", 204));
+        assert!(response_is_bodyless("GET", 304) && !response_is_bodyless("GET", 200));
+        let response = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: vec![("Content-Length".into(), "5".into())],
+                body: b"hello".to_vec(),
+                bodyless: true,
+            },
+            false,
+        );
+        assert_eq!(
+            without_date(&response),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
     fn buffered_response_uses_one_computed_content_length() {
         let response = render_response(
             ResponseSpec {
@@ -4970,6 +5138,7 @@ mod tests {
                     ("cOnTeNt-LeNgTh".into(), "123".into()),
                 ],
                 body: "é".as_bytes().to_vec(),
+                bodyless: false,
             },
             true,
         );
@@ -4980,6 +5149,7 @@ mod tests {
                 status: 200,
                 headers: vec![("X-Trace".into(), "kept".into())],
                 body: b"ok".to_vec(),
+                bodyless: false,
             },
             false,
         );
@@ -5013,6 +5183,7 @@ mod tests {
                 status: 200,
                 headers: context.state.headers.clone(),
                 body: Vec::new(),
+                bodyless: false,
             },
             false,
         );
@@ -5249,6 +5420,7 @@ mod tests {
             pending_listening: AtomicBool::new(false),
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
+            record: AtomicUsize::new(0),
         });
         let server_state = Arc::clone(&state);
         let server = thread::spawn(move || run_server_many(port as f64, &server_state, usize::MAX));
@@ -5306,6 +5478,7 @@ mod tests {
             pending_listening: AtomicBool::new(false),
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
+            record: AtomicUsize::new(0),
         }));
         unsafe { (*callback).context = state.cast() };
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
@@ -5399,6 +5572,7 @@ mod tests {
             pending_listening: AtomicBool::new(false),
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
+            record: AtomicUsize::new(0),
         }));
         unsafe { (*callback).context = state.cast() };
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
@@ -5534,6 +5708,7 @@ mod tests {
             pending_listening: AtomicBool::new(false),
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
+            record: AtomicUsize::new(0),
         }));
         unsafe { (*callback).context = state.cast() };
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
