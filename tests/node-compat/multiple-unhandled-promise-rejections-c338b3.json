@@ -1,0 +1,5 @@
+{
+  "name": "multiple unhandled promise rejections",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { process.on('unhandledRejection', (reason) => console.log(reason.message)); const first = Promise.reject(new Error('first')); const second = Promise.reject(new Error('second')); await Promise.resolve(); console.log(typeof first, typeof second); }"
+}

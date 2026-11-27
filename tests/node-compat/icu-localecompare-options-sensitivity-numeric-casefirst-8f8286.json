@@ -1,0 +1,5 @@
+{
+  "name": "icu localeCompare options sensitivity numeric caseFirst",
+  "expect": "matched",
+  "source": "function main(): void { console.log(\"a\".localeCompare(\"A\", \"en\", { sensitivity: \"base\" }), \"a\".localeCompare(\"á\", \"en\", { sensitivity: \"base\" }), \"a\".localeCompare(\"á\", \"en\", { sensitivity: \"accent\" }), \"a10\".localeCompare(\"a2\", \"en\", { numeric: true }), \"a10\".localeCompare(\"a2\", \"en\"), \"a\".localeCompare(\"A\", \"en\", { caseFirst: \"upper\" }), \"a b\".localeCompare(\"ab\", \"en\", { ignorePunctuation: true })); }"
+}

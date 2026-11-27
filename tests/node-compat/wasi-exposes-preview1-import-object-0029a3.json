@@ -1,0 +1,5 @@
+{
+  "name": "wasi exposes preview1 import object",
+  "expect": "matched",
+  "source": "import { WASI } from 'node:wasi'; function main(): void { const wasi = new WASI({ version: 'preview1' }); const imports = wasi.getImportObject(); console.log(imports.wasi_snapshot_preview1 !== undefined); }"
+}

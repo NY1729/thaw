@@ -1,0 +1,5 @@
+{
+  "name": "infer zlib callback params",
+  "expect": "matched",
+  "source": "import zlib from \"node:zlib\";\nfunction main(): void {\n  zlib.gzip(\"cb\", (e, b) => zlib.gunzip(b, (e2, r) => console.log(\"cb\", e, e2, r.toString())));\n}"
+}

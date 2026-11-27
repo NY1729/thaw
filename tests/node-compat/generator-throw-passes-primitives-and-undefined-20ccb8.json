@@ -1,0 +1,5 @@
+{
+  "name": "generator throw passes primitives and undefined",
+  "expect": "matched",
+  "source": "function* g(): Generator<any, void, unknown> {\n  try { yield 1; } catch (error) { yield error; }\n}\nfunction main(): void {\n  const it = g();\n  it.next();\n  console.log(it.throw(7).value);\n  const it2 = g();\n  it2.next();\n  console.log(it2.throw(\"s\").value);\n  const it3 = g();\n  it3.next();\n  console.log(it3.throw(undefined).value);\n}\n"
+}

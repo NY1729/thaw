@@ -1,0 +1,5 @@
+{
+  "name": "audit2 dictionary array values are shared and mutable",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: { [k: string]: number[] } = { x: [1] };\n  o.x.push(2);\n  console.log(o);\n  const g: Record<string, string[]> = {};\n  g[\"a\"] = [\"x\"]; g[\"a\"].push(\"y\"); console.log(g);\n  const groups: Record<string, string[]> = {};\n  for (const w of [\"apple\", \"avocado\", \"banana\"]) { const k = w[0]; const l = groups[k] || (groups[k] = []); l.push(w); }\n  console.log(groups);\n  const m: Record<string, number[]> = {};\n  (m[\"k\"] ??= []).push(1); (m[\"k\"] ??= []).push(2);\n  console.log(m, m.k.length, m[\"k\"][1] + 1);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "r2a hole array join",
+  "expect": "matched",
+  "source": "function main(): void { const a = new Array(3); console.log(a.length, a.join(\"-\")); console.log(new Array(2).join()); }"
+}

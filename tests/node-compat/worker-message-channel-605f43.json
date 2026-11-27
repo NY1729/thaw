@@ -1,0 +1,5 @@
+{
+  "name": "worker message channel",
+  "expect": "matched",
+  "source": "import { MessageChannel } from 'node:worker_threads'; async function main(): Promise<void> { const channel = new MessageChannel(); const received = new Promise<Json>((resolve) => { channel.port2.on('message', (value) => { resolve(value); }); }); channel.port1.postMessage({ value: 42 }); const value = await received; console.log(value.value); channel.port1.close(); channel.port2.close(); }"
+}

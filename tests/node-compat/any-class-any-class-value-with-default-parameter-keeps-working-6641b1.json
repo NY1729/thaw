@@ -1,0 +1,5 @@
+{
+  "name": "any class any class value with default parameter keeps working",
+  "expect": "matched",
+  "source": "class P { n: number; tag: string; constructor(n: number, tag: string = \"t\") { this.n = n; this.tag = tag; } get twice(): number { return this.n * 2; } }\nfunction main(): void {\n  const k: any = P; const o = new k(21, \"z\");\n  console.log(o.n, o.tag, o.twice);\n  const d = new k(1); console.log(d.tag);\n}\n"
+}

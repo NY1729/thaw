@@ -1,0 +1,5 @@
+{
+  "name": "nd4 async function returning a timer promise waits for it",
+  "expect": "matched",
+  "source": "async function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function sleepTyped(ms: number): Promise<void> { return new Promise<void>(r => setTimeout(r, ms)); }\nasync function f(n: number) { await sleep(n); return n * 2; }\nfunction other(): Promise<number> { return new Promise<number>(r => setTimeout(() => r(7), 20)); }\nasync function adopt() { return other(); }\nclass C { async m() { return sleep(20); } async n(): Promise<void> { return sleepTyped(20); } }\nasync function main(): Promise<void> {\n  const t = Date.now();\n  await sleep(40);\n  console.log(Date.now() - t >= 35);\n  await sleepTyped(40);\n  console.log(Date.now() - t >= 75);\n  console.log(await Promise.race([f(30), f(5)]));\n  console.log(await adopt());\n  const c = new C();\n  const u = Date.now();\n  await c.m();\n  await c.n();\n  console.log(Date.now() - u >= 35);\n}\n"
+}

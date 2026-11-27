@@ -1,0 +1,5 @@
+{
+  "name": "bigint followups: comparisons with numbers and bigints",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = 2n ** 70n;\n  console.log(a > 1n, a < 1n, a >= a, a <= a - 1n, a == a, a != a + 1n);\n  console.log(a > 2 ** 69, a < 2 ** 71, 5n < 2 ** 70, -a < -(2 ** 69));\n  console.log(0n == 0, 0n === (0 as unknown as bigint), 1n == 1.0, 2n ** 53n == 2 ** 53, 2n ** 53n + 1n == 2 ** 53);\n  console.log(10n > 9.99, 10n >= 10, 10n <= 10.0001, 10n < -Infinity, 10n > -Infinity);\n}\n"
+}

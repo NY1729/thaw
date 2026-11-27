@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage dynamic callable aliases retain callback argument owners",
+  "expect": "matched",
+  "source": "function mutate(values: number[]): void { const exposed: any = values; exposed[0] = {x: 7}; } function main(): void { const values: number[] = []; const callable: any = mutate; callable(values); console.log(typeof values[0]); }"
+}

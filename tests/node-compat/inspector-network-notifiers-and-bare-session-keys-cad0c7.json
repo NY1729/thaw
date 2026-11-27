@@ -1,0 +1,5 @@
+{
+  "name": "inspector Network notifiers and bare Session keys",
+  "expect": "matched",
+  "source": "import * as ins from 'node:inspector'; function main(): void { const s: any = new ins.Session(); console.log(Object.keys(s).join(','), Object.keys((ins as any).Network).join(','), typeof (ins as any).NetworkResources.put); }"
+}

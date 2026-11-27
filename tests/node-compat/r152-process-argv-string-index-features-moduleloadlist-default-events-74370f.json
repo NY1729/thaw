@@ -1,0 +1,5 @@
+{
+  "name": "r152 process argv string index, features, moduleLoadList, default _events",
+  "expect": "matched",
+  "source": "function main(): void {\n  const p: any = process;\n  console.log(process.argv[\"0\"] === process.argv[0], typeof process.argv[\"1\"]);\n  console.log(p.features.typescript, Array.isArray(p.moduleLoadList), p.moduleLoadList.length > 0, typeof p.moduleLoadList[0]);\n  console.log(Array.isArray(p._events.newListener), Array.isArray(p._events.removeListener), p._events.newListener.length, typeof p._events.warning === \"function\" || typeof p._events.warning === \"undefined\");\n  const fnNames = [\"kill\", \"nextTick\", \"umask\", \"setuid\", \"getBuiltinModule\", \"binding\", \"assert\", \"ref\", \"unref\", \"threadCpuUsage\", \"setSourceMapsEnabled\", \"setUncaughtExceptionCaptureCallback\", \"initgroups\"];\n  console.log(fnNames.map((n) => n + \":\" + p[n].length).join(\" \"));\n  let called = 0;\n  process.on(\"newListener\", () => { called++; });\n  process.on(\"exit\", () => {});\n  console.log(called);\n}\n"
+}

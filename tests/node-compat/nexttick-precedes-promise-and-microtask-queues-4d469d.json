@@ -1,0 +1,5 @@
+{
+  "name": "nextTick precedes promise and microtask queues",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(order.join(',')); }"
+}

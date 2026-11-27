@@ -1,0 +1,5 @@
+{
+  "name": "tj11 module create require path basename",
+  "expect": "matched",
+  "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); console.log(require('node:path').basename('/a/b.txt')); }"
+}

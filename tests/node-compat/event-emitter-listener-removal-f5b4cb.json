@@ -1,0 +1,5 @@
+{
+  "name": "event emitter listener removal",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events'; function main(): void { const emitter = new EventEmitter(); let count: number = 0; const listener = (): void => { count += 1; }; emitter.on('tick', listener); emitter.emit('tick'); emitter.off('tick', listener); emitter.emit('tick'); console.log(count, emitter.listenerCount('tick')); }"
+}

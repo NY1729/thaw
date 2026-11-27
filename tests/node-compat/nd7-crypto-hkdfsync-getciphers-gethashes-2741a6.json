@@ -1,0 +1,5 @@
+{
+  "name": "nd7 crypto hkdfSync getCiphers getHashes",
+  "expect": "matched",
+  "source": "import * as crypto from \"node:crypto\";\nfunction main(): void {\n  const hex = (x: Uint8Array | ArrayBuffer): string => Array.from(new Uint8Array(x as any)).map((b) => b.toString(16).padStart(2, \"0\")).join(\"\");\n  console.log(hex(crypto.hkdfSync(\"sha256\", \"key\", \"salt\", \"info\", 16) as any));\n  console.log(hex(crypto.hkdfSync(\"sha512\", Buffer.from(\"k\"), \"\", \"\", 70) as any));\n  console.log(crypto.getCiphers().includes(\"aes-256-cbc\"), crypto.getCiphers().length > 50);\n  console.log(crypto.getHashes().includes(\"sha256\"), crypto.getHashes().includes(\"sha3-256\"), crypto.getHashes().length);\n}\n"
+}

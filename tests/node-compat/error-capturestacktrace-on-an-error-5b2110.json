@@ -1,0 +1,5 @@
+{
+  "name": "Error.captureStackTrace on an Error",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"a\");\n  Error.captureStackTrace(e);\n  console.log(typeof e.stack, e.stack!.split(\"\\n\")[0]);\n}\n"
+}

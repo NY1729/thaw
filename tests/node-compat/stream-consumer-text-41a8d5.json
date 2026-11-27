@@ -1,0 +1,5 @@
+{
+  "name": "stream consumer text",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream'; import { text } from 'node:stream/consumers'; async function main(): Promise<void> { console.log(await text(Readable.from(['hello', ' ', 'world']))); }"
+}

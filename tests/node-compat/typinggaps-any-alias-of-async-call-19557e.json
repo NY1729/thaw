@@ -1,0 +1,5 @@
+{
+  "name": "typinggaps any alias of async call",
+  "expect": "matched",
+  "source": "async function g(): Promise<number> { return 5; }\nasync function main(): Promise<void> {\n  const p: any = g();\n  console.log(await p);\n  const q: any = g();\n  q.then((v: number) => console.log(\"then\", v));\n  const r = await q;\n  console.log(r + 1);\n}\n"
+}

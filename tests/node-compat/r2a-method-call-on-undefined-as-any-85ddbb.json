@@ -1,0 +1,5 @@
+{
+  "name": "r2a method call on undefined as any",
+  "expect": "matched",
+  "source": "function main(): void { try { (undefined as any).foo(); } catch (e) { console.log((e as Error).message); } try { (null as any).bar(1); } catch (e) { console.log((e as Error).message); } }"
+}

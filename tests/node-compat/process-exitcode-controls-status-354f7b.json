@@ -1,0 +1,6 @@
+{
+  "name": "process exitCode controls status",
+  "expect": "matched",
+  "exitCode": 7,
+  "source": "function main(): void { process.exitCode = 7; }"
+}

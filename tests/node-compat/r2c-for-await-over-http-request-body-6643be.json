@@ -1,0 +1,5 @@
+{
+  "name": "r2c for await over http request body",
+  "expect": "matched",
+  "source": "import * as http from \"node:http\";\nconst srv = http.createServer(async (req, res) => {\n  const chunks: Buffer[] = [];\n  for await (const c of req) chunks.push(c as Buffer);\n  res.end(Buffer.concat(chunks));\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const r = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`, { method: \"POST\", body: \"payload\" });\n    console.log(await r.text());\n    const g = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(JSON.stringify(await g.text()));\n    srv.close();\n  });\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "native inherited accessors preserve receiver and descriptors",
+  "expect": "matched",
+  "source": "class Base { n=1;get value():number{return this.n;}set value(v:number){this.n=v;} }\nclass Derived extends Base { get twice():number{return this.n*2;} }\nfunction main():void {const x=new Derived();const y=new Derived();y.n=5;const a:any=x;const b:any=y;console.log(a.value,a.twice);a.value=3;console.log(x.n,a.twice);const proto:any=Object.getPrototypeOf(a);const getter:any=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(proto),\"value\").get;console.log(getter.call(b));console.log(Object.keys(a).join(\",\"),Object.prototype.hasOwnProperty.call(a,\"value\"));}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "stream module surface: helper arities, Duplex setDefaultEncoding/writableBuffer, Stream statics",
+  "expect": "matched",
+  "source": "import * as S from \"node:stream\";\nfunction main(): void {\n  console.log(S.addAbortSignal.length, S.isReadable.length, S.isErrored.length, S.getDefaultHighWaterMark.length, S.setDefaultHighWaterMark.length, S.destroy.length, S.duplexPair.length);\n  const d: any = new S.Duplex();\n  console.log(typeof d.setDefaultEncoding, Array.isArray(d.writableBuffer), d.setDefaultEncoding(\"utf8\") === d);\n  const t: any = new S.PassThrough();\n  console.log(typeof t.setDefaultEncoding, typeof t.writableBuffer);\n  console.log(typeof S.Stream, typeof S.Stream.Readable, typeof S.Stream.Writable, typeof S.Stream.pipeline);\n  const inst: any = new S.Stream();\n  console.log(typeof inst.pipe, typeof inst.on, typeof inst.emit, typeof inst.domain);\n}\n"
+}

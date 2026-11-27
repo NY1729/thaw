@@ -1,0 +1,5 @@
+{
+  "name": "win32 path semantics",
+  "expect": "matched",
+  "source": "import { basename, dirname, extname, join } from 'node:path/win32'; function main(): void { const value: string = join('C:\\\\tmp', 'a', '..', 'file.txt'); console.log(value, dirname(value), basename(value), extname(value)); }"
+}

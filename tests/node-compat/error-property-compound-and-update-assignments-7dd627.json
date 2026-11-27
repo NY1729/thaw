@@ -1,0 +1,5 @@
+{
+  "name": "error property compound and update assignments",
+  "expect": "matched",
+  "source": "function main(): void {\n  const y = new Error(\"y\") as any;\n  y.n = 5; y.n *= 2; y.n -= 1; y.n **= 2;\n  console.log(y.n);\n  y.t = \"a\"; y.t += 1;\n  console.log(y.t);\n  y.u ??= 3; y.u &&= 4;\n  console.log(y.u);\n  y.k = 1;\n  console.log(y.k++, y.k, ++y.k, y.k--, y.k);\n  const x = new Error(\"c\") as any;\n  x.a = 1; x.s = \"q\";\n  try { throw x; } catch (c: any) {\n    c.a += 1; c.s += \"z\"; c.m ??= 5; c.a ||= 9; c.q = 4; c.q++;\n    console.log(c.a, c.s, c.m, c.q, Object.keys(c));\n  }\n}\n"
+}

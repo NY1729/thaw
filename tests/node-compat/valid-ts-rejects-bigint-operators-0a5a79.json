@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: bigint operators",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(~5n, ~-1n, 1n < 2, 10n > 5, 3n == 3, 5n != 5, 2n > 1.5, 5n == 5.5);\n  console.log(!!0n, !!7n, 0n ? \"a\" : \"b\", 0n || 9, 1n && 2n);\n  console.log(2n ** 10n, 3n ** 20n, Number(5n) + 1);\n  let n = 3n;\n  if (n) console.log(\"truthy\");\n  n = 0n;\n  if (!n) console.log(\"falsy\");\n}"
+}

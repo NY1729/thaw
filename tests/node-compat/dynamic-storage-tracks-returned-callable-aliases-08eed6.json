@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage tracks returned callable aliases",
+  "expect": "matched",
+  "source": "function make(xs: {x: number}[]): () => {x: number}[] { return () => xs; } function main(): void { const xs: {x: number}[] = []; const read = make(xs); const exposed: any = read(); const original: any = new Function(\"return {x: 7}\")(); exposed[0] = original; console.log(xs[0] === original, read()[0] === original); }"
+}

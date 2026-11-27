@@ -1,0 +1,5 @@
+{
+  "name": "let/const straight-line TDZ ReferenceError",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { console.log(x); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  let x = 5;\n  console.log(x);\n  try { console.log(c + 1); } catch (e) { console.log((e as Error).message); }\n  const c = 2;\n  console.log(c);\n}"
+}

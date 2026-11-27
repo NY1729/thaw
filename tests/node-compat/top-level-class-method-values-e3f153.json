@@ -1,0 +1,5 @@
+{
+  "name": "top-level class method values",
+  "expect": "matched",
+  "source": "class C { n = 1; bump() { this.n++; return this.n; } id() { return 5; } }\nconst c = new C();\nconst i = c.id;\nconst h = c.bump;\nasync function main(): Promise<void> {\n  console.log(i());\n  try { console.log(h()); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(c.n, c.bump());\n}\n"
+}

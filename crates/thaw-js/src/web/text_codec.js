@@ -110,6 +110,8 @@
       this._pending = new __thawTextUint8Array();
       this._bomSeen = false;
       this._previousStreaming = false;
+      // Node keeps this state private: no own enumerable properties
+      for (const key of Object.keys(this)) Object.defineProperty(this, key, { enumerable: false });
     }
     decode(input = new __thawTextUint8Array(), options = {}) {
       const source = __thawTextDescribeSource(input);

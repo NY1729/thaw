@@ -1,0 +1,5 @@
+{
+  "name": "nd7 perf_hooks mark detail and PerformanceObserver export",
+  "expect": "matched",
+  "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  console.log(performance.mark(\"d\", { detail: { z: 1 } }).detail);\n  const o = new PerformanceObserver((list) => { console.log(\"obs\", list.getEntries().map((e) => e.name)); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"c\");\n  setTimeout(() => o.disconnect(), 20);\n}\n"
+}

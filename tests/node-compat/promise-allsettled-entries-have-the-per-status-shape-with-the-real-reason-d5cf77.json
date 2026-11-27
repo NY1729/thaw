@@ -1,0 +1,5 @@
+{
+  "name": "Promise.allSettled entries have the per-status shape with the real reason",
+  "expect": "matched",
+  "source": "async function f(n: number): Promise<string> { await Promise.resolve(); if (n % 2 === 0) { throw new TypeError('even ' + n); } return 'odd ' + n; }\nasync function main(): Promise<void> {\n  const rs = await Promise.allSettled([f(1), f(2), f(3), f(4)]);\n  console.log(rs.length, rs.filter((x: any) => x.status === 'fulfilled').length);\n  for (const x of rs) {\n    if (x.status === 'rejected') { console.log('rejected', String(x.reason.message)); } else { console.log('fulfilled', x.value); }\n  }\n  console.log(Object.keys(rs[0]).join(','), Object.keys(rs[1]).join(','));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "timers: each due timer gets a microtask checkpoint",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n    const events: string[] = [];\n    setTimeout(() => {\n        events.push(\"timer-1\");\n        Promise.resolve().then(() => {\n            events.push(\"promise\");\n        });\n    }, 0);\n    setTimeout(() => {\n        events.push(\"timer-2\");\n    }, 0);\n    await new Promise<void>((resolve) => setTimeout(resolve, 20));\n    console.log(events.join(\",\"));\n}\n"
+}

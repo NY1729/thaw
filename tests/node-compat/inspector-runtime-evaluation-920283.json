@@ -1,0 +1,5 @@
+{
+  "name": "inspector runtime evaluation",
+  "expect": "matched",
+  "source": "import { Session } from 'node:inspector'; function main(): void { const session = new Session(); session.connect(); session.post('Runtime.evaluate', { expression: '6 * 7', returnByValue: true }, (error, result): void => { console.log(error === null, result.result.value); session.disconnect(); }); }"
+}

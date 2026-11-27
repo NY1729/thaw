@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite get() without a row, all() and iterate() with early return",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE n (i INTEGER); INSERT INTO n VALUES (1), (2), (3), (4)');\n  const stmt = db.prepare('SELECT i FROM n WHERE i > ? ORDER BY i');\n  console.log(stmt.get(10) === undefined, stmt.all(2).length);\n  const seen: number[] = [];\n  for (const row of stmt.iterate(0) as any) { seen.push(row.i); if (seen.length === 2) break; }\n  console.log(seen.join(','));\n  const it: any = stmt.iterate(3);\n  console.log(JSON.stringify(it.next()), JSON.stringify(it.next()), JSON.stringify(it.return()));\n  db.close();\n}"
+}

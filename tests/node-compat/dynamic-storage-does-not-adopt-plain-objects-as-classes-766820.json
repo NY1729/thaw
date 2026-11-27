@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage does not adopt plain objects as classes",
+  "expect": "matched",
+  "source": "class C { x = 1; method(): number { return this.x; } } function main(): void { const xs: C[] = []; const a: any = xs; const plain: any = new Function(\"return {x: 7}\")(); a[0] = plain; console.log(xs[0] === plain, xs[0] instanceof C, typeof xs[0].method); const real = new C(); a[1] = real; console.log(xs[1] === real, xs[1] instanceof C, xs[1].method()); }"
+}

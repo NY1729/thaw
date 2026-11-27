@@ -1,0 +1,5 @@
+{
+  "name": "stack on a class instance without a slot",
+  "expect": "matched",
+  "source": "class M { x = 1; }\nclass P { name = \"Named\"; message = \"hello\"; }\nfunction main(): void {\n  const m = new M();\n  console.log(m.stack === undefined, typeof m.stack);\n  Error.captureStackTrace(m);\n  console.log(typeof m.stack, String(m.stack).split(\"\\n\")[0]);\n  const p = new P();\n  Error.captureStackTrace(p);\n  console.log(String(p.stack).split(\"\\n\")[0]);\n  const q = new M();\n  q.stack = \"custom\";\n  console.log(q.stack);\n}\n"
+}

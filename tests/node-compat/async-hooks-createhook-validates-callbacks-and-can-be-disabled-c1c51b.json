@@ -1,0 +1,5 @@
+{
+  "name": "async_hooks createHook validates callbacks and can be disabled",
+  "expect": "matched",
+  "source": "import { createHook, AsyncResource } from 'node:async_hooks'; function main(): void { try { createHook({ init: 1 } as any); } catch (error: any) { console.log(error.code, error.message); } let count = 0; const hook = createHook({ init(id: number, type: string) { if (type !== 'PROMISE') count++; } }); new AsyncResource('Before'); hook.enable(); new AsyncResource('During'); hook.disable(); new AsyncResource('After'); console.log(count, hook.enable() === hook, hook.disable() === hook); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "lim3 array subclass through annotated binding",
+  "expect": "matched",
+  "source": "class MyArr extends Array<number> { tag: string; constructor(n: number) { super(); this.tag = n as any; } } function show(a: MyArr): void { console.log(a); } function main(): void { const a = new MyArr(3); a.push(1); const b: MyArr = a; console.log(b === a, b.length, b[0]); b.push(7); console.log(a.length); show(a); }"
+}

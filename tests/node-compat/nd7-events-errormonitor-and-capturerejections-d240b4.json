@@ -1,0 +1,5 @@
+{
+  "name": "nd7 events errorMonitor and captureRejections",
+  "expect": "matched",
+  "source": "import { EventEmitter, errorMonitor } from \"node:events\";\nfunction main(): void {\n  const e = new EventEmitter();\n  e.on(errorMonitor, () => console.log(\"monitor\"));\n  e.on(\"error\", () => console.log(\"handler\"));\n  e.emit(\"error\", new Error(\"x\"));\n  const c = new EventEmitter({ captureRejections: true });\n  c.on(\"x\", async () => { throw new Error(\"async boom\"); });\n  c.on(\"error\", (er: Error) => console.log(\"captured\", er.message));\n  c.emit(\"x\");\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "lim4 collection subclass through plain base param",
+  "expect": "matched",
+  "source": "class M extends Map<string, number> { }\nclass S extends Set<number> { }\nclass A extends Array<number> { }\nfunction pm(m: Map<string, number>): void { console.log(m); }\nfunction ps(m: Set<number>): void { console.log(m); }\nfunction pa(m: number[]): void { console.log(m); }\nfunction main(): void {\n  const m = new M(); m.set(\"a\", 1);\n  const s = new S(); s.add(2);\n  const a = new A(); a.push(3);\n  pm(m); ps(s); pa(a);\n  pa([1, 2]);\n  pm(new Map([[\"z\", 9]]));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "nd8 readline/promises question after an earlier interface closed",
+  "expect": "matched",
+  "source": "import * as readline from \"node:readline\";\nimport { Readable } from \"node:stream\";\nasync function main(): Promise<void> {\n  const rl2 = readline.createInterface({ input: Readable.from([\"a\\nb\\n\"]) });\n  rl2.on(\"line\", (l: string) => console.log(\"line\", l));\n  await new Promise((r) => rl2.on(\"close\", r));\n  const rlp = await import(\"node:readline/promises\");\n  const rl3 = rlp.createInterface({ input: Readable.from([\"answer\\n\"]) });\n  console.log(await rl3.question(\"q? \"));\n  rl3.close();\n}\n"
+}

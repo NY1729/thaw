@@ -1,0 +1,5 @@
+{
+  "name": "Object.assign onto an Error",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log((Object.assign(new Error(\"c\"), { extra: 1 }) as any).extra);\n}\n"
+}

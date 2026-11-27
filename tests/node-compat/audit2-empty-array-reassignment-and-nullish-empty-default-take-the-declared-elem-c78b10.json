@@ -1,0 +1,5 @@
+{
+  "name": "audit2 empty array reassignment and nullish empty default take the declared element type",
+  "expect": "matched",
+  "source": "function main(): void {\n  let row: string[] = [];\n  const rows: string[][] = [];\n  row.push(\"a\"); rows.push(row); row = []; row.push(\"b\"); rows.push(row);\n  console.log(rows);\n  const g = new Map<string, [string, number][]>([[\"A\", [[\"B\", 1]]]]);\n  for (const [v, w] of g.get(\"A\") ?? []) console.log(v, w);\n  for (const [v, w] of g.get(\"Z\") ?? []) console.log(v, w);\n  console.log(\"done\");\n}"
+}

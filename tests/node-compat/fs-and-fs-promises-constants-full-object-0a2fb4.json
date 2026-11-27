@@ -1,0 +1,5 @@
+{
+  "name": "fs and fs/promises constants full object",
+  "expect": "matched",
+  "source": "import { constants } from 'node:fs';\nimport { constants as promiseConstants } from 'node:fs/promises';\nfunction main(): void {\n  const c: any = promiseConstants;\n  console.log('fs/promises constants', typeof c, Object.keys(c).length, Object.getPrototypeOf(c) === null);\n  console.log(Object.keys(c).map((k: string): string => k + '=' + c[k]).join(' '));\n  const f: any = constants;\n  console.log('fs constants', typeof f, Object.keys(f).length, Object.getPrototypeOf(f) === null, f.O_NONBLOCK, f.S_IRWXU, f.UV_DIRENT_BLOCK);\n}\n"
+}

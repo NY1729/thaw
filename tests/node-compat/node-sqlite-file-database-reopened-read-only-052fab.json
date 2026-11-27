@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite file database reopened read-only",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nimport * as fs from 'node:fs';\nimport * as os from 'node:os';\nimport * as path from 'node:path';\nfunction main(): void {\n  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlite-compat-'));\n  const file = path.join(dir, 'data.db');\n  const db = new DatabaseSync(file);\n  db.exec(\"CREATE TABLE k (v TEXT); INSERT INTO k VALUES ('one')\");\n  console.log(String(db.location()) === file, db.isOpen);\n  db.close();\n  const ro = new DatabaseSync(file, { readOnly: true });\n  console.log((ro.prepare('SELECT v FROM k').get() as any).v);\n  try { ro.exec(\"INSERT INTO k VALUES ('two')\"); } catch (e: any) { console.log(e.code, e.errcode, e.errstr); }\n  ro.close();\n  fs.rmSync(dir, { recursive: true, force: true });\n}"
+}

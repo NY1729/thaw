@@ -1,0 +1,5 @@
+{
+  "name": "ce1 Map Set WeakMap WeakSet without type arguments",
+  "expect": "matched",
+  "source": "function main(): void { const m = new Map(); m.set(\"a\", 1); m.set(\"b\", \"x\"); console.log(m.get(\"a\"), m.size, m); const s = new Set(); s.add(1); s.add(\"a\"); console.log(s.size, s.has(1), s.has(\"zz\"), s); const k = {}; const w = new WeakMap(); w.set(k, 1); console.log(w.get(k), w.has(k), w.has({})); const ws = new WeakSet(); ws.add(k); console.log(ws.has(k), ws.has({})); const typed: Map<string, number> = new Map(); typed.set(\"x\", 2); console.log(typed.get(\"x\"), typed); const tset: Set<number> = new Set(); tset.add(3); console.log([...tset]); }"
+}

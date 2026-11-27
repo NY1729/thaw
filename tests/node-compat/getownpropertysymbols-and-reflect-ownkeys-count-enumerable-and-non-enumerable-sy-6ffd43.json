@@ -1,0 +1,5 @@
+{
+  "name": "getOwnPropertySymbols and Reflect.ownKeys count enumerable and non-enumerable symbol keys",
+  "expect": "matched",
+  "source": "function main(): void {\n  const S = Symbol('s');\n  const T = Symbol('t');\n  const o: any = { a: 1, [S]: 2 };\n  Object.defineProperty(o, T, { value: 9, enumerable: false });\n  console.log(Object.getOwnPropertySymbols(o).length, Reflect.ownKeys(o).length, Object.keys(o).length);\n  console.log(Object.getOwnPropertySymbols(o).length, Object.getOwnPropertySymbols(o).length === 2);\n}"
+}

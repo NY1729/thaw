@@ -1,0 +1,5 @@
+{
+  "name": "typinggaps number of numeric union comparator",
+  "expect": "matched",
+  "source": "function main(): void {\n  const xs: (number | string)[] = [3, \"1\", 2];\n  xs.sort((a, b) => Number(a) - Number(b));\n  console.log(xs);\n  const ys: (number | undefined)[] = [3, 1, 2];\n  ys.sort((a, b) => a! - b!);\n  console.log(ys, Number(xs[0]) + 1);\n}\n"
+}

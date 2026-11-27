@@ -1,0 +1,5 @@
+{
+  "name": "handler can close the server constant it is initializing",
+  "expect": "matched",
+  "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    console.log('direct'); server.close();\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => { c.end(); });\n  });\n}\n"
+}

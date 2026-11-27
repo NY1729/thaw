@@ -1,0 +1,5 @@
+{
+  "name": "infer stream pipeline and Transform/Writable callback params",
+  "expect": "matched",
+  "source": "import { pipeline, Readable, Writable, Transform } from \"node:stream\";\nfunction main(): void {\n  const up = new Transform({ transform(c, _e, cb) { cb(null, c.toString().toUpperCase()); } });\n  const out: string[] = [];\n  pipeline(Readable.from([\"a\", \"b\", \"c\"]), up, new Writable({ write(c, _e, cb) { out.push(c.toString()); cb(); } }), (e) => console.log(\"pipeline\", e, out));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "new on any-held plain function declaration runs body",
+  "expect": "matched",
+  "source": "function plain(): void { console.log(\"plain body ran\"); } function main(): void { const p: any = plain; try { const o = new p(); console.log(\"c2c ok\", typeof o); } catch (e: any) { console.log(\"c2c threw\", e && e.name, e && e.message); } }"
+}

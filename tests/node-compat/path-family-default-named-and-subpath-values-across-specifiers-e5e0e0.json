@@ -1,0 +1,5 @@
+{
+  "name": "path family default, named and subpath values across specifiers",
+  "expect": "matched",
+  "source": "import path, { win32 } from 'node:path'; import posix from 'node:path/posix'; import w from 'path/win32'; function main(): void { console.log(JSON.stringify([win32 === w, posix === path.posix, path.win32 === w, w.win32 === win32, posix.join('/a', 'b', '..', 'c'), w.join('C:\\\\a', '..', 'b')])); }"
+}

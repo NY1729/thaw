@@ -1,0 +1,5 @@
+{
+  "name": "host collection iterator roots survive handle call chains",
+  "expect": "matched",
+  "source": "function main():void {const arr:JsValue=[1,2,3];const a:any=arr.values().map((v:any)=>v*2).drop(1).take(1);console.log(a.next().value,a.next().done);const box:any={m:new Map<string,number>(),s:new Set<number>([1,2])};const m:JsValue=box.m;m.set(\"a\",1);m.set(\"b\",2);const keys:any=m.keys().map((v:any)=>v+\"!\");console.log(keys.next().value,[...keys].join(\",\"));const set:JsValue=box.s;const entries:any=set.entries().flatMap((e:any)=>e);console.log([...entries].join(\",\"));}"
+}

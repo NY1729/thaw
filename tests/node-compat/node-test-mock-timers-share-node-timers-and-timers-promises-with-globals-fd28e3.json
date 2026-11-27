@@ -1,0 +1,5 @@
+{
+  "name": "node test mock timers share node:timers and timers/promises with globals",
+  "expect": "matched",
+  "source": "import { mock } from 'node:test'; import timers from 'node:timers'; import timersPromises from 'node:timers/promises'; function main(): void { mock.timers.enable({ apis: ['setTimeout', 'setImmediate', 'Date'], now: 1000 }); console.log(timers.setTimeout === globalThis.setTimeout, typeof timers.setImmediate, timers.clearTimeout === globalThis.clearTimeout); const p = timersPromises.setTimeout(100, 'val'); mock.timers.tick(100); p.then((v: string): void => { console.log('promises', v, Date.now()); mock.timers.reset(); }); console.log('still mocked', Date.now()); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "perf2 ASCII and non-ASCII string slicing, charCodeAt and ordering",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = \"hello world\";\n  const u = \"héllo 😀 wörld\";\n  for (const s of [a, u, \"\"]) {\n    console.log(s.length, s.charCodeAt(0), s.charCodeAt(4), s.charCodeAt(s.length - 1), s.charCodeAt(99), s.charCodeAt(-1));\n    console.log(s.slice(1, 4), s.slice(-3), s.slice(3, 1), s.substring(4, 1), s.substring(-2, 3), s.substr(-4, 2), s.substr(2));\n  }\n  console.log(\"a\" < \"b\", \"z\" < \"é\", \"😀\" < \"￿\", \"￿\" < \"😀\", \"abc\" < \"abd\", \"abc\" === \"abc\", \"ab\" < \"abc\", \"abc\" > \"ab\");\n  console.log([\"b\", \"a\", \"é\", \"😀\", \"￿\", \"B\", \"\"].sort().join(\"|\"));\n  let h = 0;\n  for (let i = 0; i < a.length; i++) h = (Math.imul(h, 31) + a.charCodeAt(i)) | 0;\n  console.log(h);\n  const m = new Map<string, number>();\n  for (const w of [\"item1\", \"item2\", \"item1\", \"x\" + 1, \"item\" + 2]) m.set(w.slice(0, 5), (m.get(w.slice(0, 5)) ?? 0) + 1);\n  console.log(Array.from(m.keys()).join(\",\"), Array.from(m.values()).join(\",\"));\n}"
+}

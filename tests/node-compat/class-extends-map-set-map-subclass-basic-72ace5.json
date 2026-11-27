@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: map subclass basic",
+  "expect": "matched",
+  "source": "class Counter extends Map<string, number> {\n  inc(k: string): void { this.set(k, (this.get(k) ?? 0) + 1); }\n}\nfunction main(): void {\n  const c = new Counter(); c.inc(\"a\"); c.inc(\"a\"); c.inc(\"b\");\n  console.log(c.get(\"a\"), c.size, c instanceof Map, c instanceof Counter);\n  console.log(c);\n}\n"
+}

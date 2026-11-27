@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage rest aliases keep all dynamic arguments",
+  "expect": "matched",
+  "source": "function mutate(...xs: number[][]): void { const exposed: any = xs; exposed[1][0] = {x: 1}; } function main(): void { const first: number[] = []; const second: number[] = []; mutate(first, second); console.log(typeof second[0], second[0].x); }"
+}

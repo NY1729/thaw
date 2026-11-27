@@ -1,0 +1,5 @@
+{
+  "name": "audit2 Math.max spread with extra arguments and sets",
+  "expect": "matched",
+  "source": "function main(): void { const a = [1, 2]; const s = new Set([1, 5]); console.log(Math.max(...a, 3), Math.min(9, ...a), Math.max(...s), Math.max(...[1, 5], 10)); }"
+}

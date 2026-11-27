@@ -1,0 +1,5 @@
+{
+  "name": "direct eval forms: expression literals",
+  "expect": "matched",
+  "source": "function main(): void { console.log(eval('1+2'), eval('[1,2,3].length * 2')); }"
+}

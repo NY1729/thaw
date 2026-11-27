@@ -1,0 +1,5 @@
+{
+  "name": "r2c crypto.subtle.digest resolves to an ArrayBuffer",
+  "expect": "matched",
+  "source": "async function run() {\n  const d = await crypto.subtle.digest(\"SHA-256\", new TextEncoder().encode(\"abc\"));\n  console.log(Buffer.from(d).toString(\"hex\"), d.byteLength);\n  const s = await crypto.subtle.digest({ name: \"SHA-1\" }, new Uint8Array([97, 98, 99]));\n  console.log(Buffer.from(s).toString(\"hex\"));\n}\nfunction main(): void { run(); }"
+}

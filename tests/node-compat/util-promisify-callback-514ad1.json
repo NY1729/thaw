@@ -1,0 +1,5 @@
+{
+  "name": "util promisify callback",
+  "expect": "matched",
+  "source": "import { promisify } from 'node:util'; function add(left: number, right: number, callback: (error: unknown, value: number) => void): void { callback(null, left + right); } async function main(): Promise<void> { const promised = promisify(add); console.log(await promised(20, 22)); }"
+}

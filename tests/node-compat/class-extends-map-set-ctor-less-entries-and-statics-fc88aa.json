@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: ctor-less entries and statics",
+  "expect": "matched",
+  "source": "class Counter extends Map<string, number> {\n  static made = 0;\n  static make(): Counter { const c = new Counter(); c.set(\"z\", 1); Counter.made++; return c; }\n  static count = 5;\n}\nclass Tags extends Set<string> { static of2(a: string, b: string): Tags { const t = new Tags(); t.add(a); t.add(b); return t; } }\nclass Wide extends Counter { static make2(): Wide { return new Wide([[\"q\", 2]]); } }\nfunction main(): void {\n  console.log(Counter.make().size, Counter.count, Tags.of2(\"a\", \"b\").size, Counter.made);\n  console.log(Wide.make2().size, Wide.count, Wide.make().size);\n  const g = Map.groupBy([1, 2, 3], (x: number) => x % 2);\n  console.log(g.size);\n  const e = new Counter([[\"k\", 1]]);\n  console.log(e.size, e instanceof Map);\n  const s = new Tags([\"a\", \"b\", \"a\"]);\n  console.log(s.size, [...s].join(\"\"));\n  const none = new Tags();\n  console.log(none.size, none);\n  const e2 = new Counter(undefined);\n  console.log(e2.size);\n}\n"
+}

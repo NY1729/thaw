@@ -1,0 +1,5 @@
+{
+  "name": "r2c EventEmitter max listeners warning and emitWarning type code on nextTick",
+  "expect": "matched",
+  "source": "import { EventEmitter } from \"node:events\";\nprocess.on(\"warning\", (w: any) => { if (w.name !== \"ExperimentalWarning\") console.log(\"warning:\", w.name, w.code, w.count, w.type); });\nfunction main(): void {\n  const e = new EventEmitter();\n  e.setMaxListeners(1);\n  e.on(\"x\", () => {}); e.on(\"x\", () => {}); e.on(\"x\", () => {});\n  process.emitWarning(\"dep\", \"DeprecationWarning\", \"DEP0XXX\");\n  process.emitWarning(\"plain\");\n  console.log(\"sync done\");\n}"
+}

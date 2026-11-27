@@ -1,0 +1,5 @@
+{
+  "name": "bare node:fs/promises namespace used as a value",
+  "expect": "matched",
+  "source": "import * as fsp from 'node:fs/promises';\nconst f: any = fsp;\nfunction main(): void {\n  console.log(typeof f.readFile, typeof f.constants, typeof f.default);\n}"
+}

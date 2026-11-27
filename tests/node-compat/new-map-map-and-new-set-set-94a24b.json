@@ -1,0 +1,5 @@
+{
+  "name": "new Map(map) and new Set(set)",
+  "expect": "matched",
+  "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>([[\"a\", 1], [\"b\", 2]]);\n  const st = new Set<number>([1, 2]);\n  const c = new Map(m); c.set(\"z\", 3);\n  console.log(c, m.size, c.size);\n  const d = new Set(st); d.add(7);\n  console.log(d, st.size);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "error name assignment is an enumerable own key",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new TypeError(\"t\") as any;\n  e.name = \"Custom\";\n  console.log(e.name, String(e), e.message, Object.keys(e));\n  e.message = \"m2\";\n  console.log(e.message, String(e), e.stack.split(\"\\n\")[0]);\n}\n"
+}

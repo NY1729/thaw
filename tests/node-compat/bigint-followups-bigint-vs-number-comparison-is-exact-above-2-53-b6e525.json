@@ -1,0 +1,5 @@
+{
+  "name": "bigint followups: bigint vs number comparison is exact above 2^53",
+  "expect": "matched",
+  "source": "function main(): void {\n  const big = 2n ** 60n + 1n;\n  const f = 2 ** 60;\n  console.log(big > f, big < f, big == f, big >= f, big <= f);\n  console.log(9007199254740993n > 9007199254740992, 9007199254740993n == 9007199254740992, 9007199254740993n < 9007199254740994);\n  const h = 2n ** 80n;\n  console.log(h > 1e24, h < 1.3e24, h == 2 ** 80, h > 2 ** 80, 2 ** 80 < h, 2 ** 80 == h, 1e24 < h);\n  console.log(1n < NaN, 1n > NaN, 1n == NaN, 1n < Infinity, -(2n**70n) > -Infinity);\n  const n = 9007199254740993;\n  console.log(9007199254740993n === BigInt(n), 5n == 5.5, 5n < 5.5);\n}\n"
+}

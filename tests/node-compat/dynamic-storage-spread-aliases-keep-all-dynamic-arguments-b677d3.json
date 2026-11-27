@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage spread aliases keep all dynamic arguments",
+  "expect": "matched",
+  "source": "function mutate(first: number[], second: number[]): void { const exposed: any = second; exposed[0] = {x: 1}; } function main(): void { const first: number[] = []; const second: number[] = []; mutate(...[first, second]); console.log(typeof second[0], second[0].x); }"
+}

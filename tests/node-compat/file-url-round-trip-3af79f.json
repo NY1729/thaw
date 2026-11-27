@@ -1,0 +1,5 @@
+{
+  "name": "file URL round trip",
+  "expect": "matched",
+  "source": "import { fileURLToPath, pathToFileURL } from 'node:url'; function main(): void { const url = pathToFileURL('/tmp/a b.txt'); console.log(url.protocol, url.pathname, fileURLToPath(url)); }"
+}

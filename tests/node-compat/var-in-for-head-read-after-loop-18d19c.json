@@ -1,0 +1,5 @@
+{
+  "name": "var in for head read after loop",
+  "expect": "matched",
+  "source": "function main(): void {\n  for (var i = 0; i < 3; i++) {}\n  console.log(i);\n}"
+}

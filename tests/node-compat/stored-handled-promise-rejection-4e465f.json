@@ -1,0 +1,5 @@
+{
+  "name": "stored handled promise rejection",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { let count: number = 0; process.on('unhandledRejection', () => { count += 1; }); const pending = Promise.reject(new Error('stored handled')); pending.catch(() => {}); await Promise.resolve(); await Promise.resolve(); console.log(count); }"
+}

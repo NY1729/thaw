@@ -1,0 +1,6 @@
+{
+  "name": "main thread stdin beside worker_threads import reads data and end",
+  "expect": "matched",
+  "stdin": "hi\nyo\n",
+  "source": "import { isMainThread } from 'node:worker_threads'; function main(): void { let text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (chunk: string): void => { text += chunk; }); process.stdin.on('end', (): void => { console.log(isMainThread, JSON.stringify(text)); }); }"
+}

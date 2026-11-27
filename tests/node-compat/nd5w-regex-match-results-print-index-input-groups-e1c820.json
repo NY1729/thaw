@@ -1,0 +1,5 @@
+{
+  "name": "nd5w regex match results print index input groups",
+  "expect": "matched",
+  "source": "function main(): void { console.log(\"a1\".match(/(\\d)(?:x)?(y)?/)); const m = /(\\d)/.exec(\"ab3\"); console.log(m); console.log(\"abc\".match(/x/), \"a1b22\".match(/\\d+/g)); }"
+}

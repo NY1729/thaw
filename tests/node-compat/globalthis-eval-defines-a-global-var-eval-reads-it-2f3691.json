@@ -1,0 +1,5 @@
+{
+  "name": "globalThis.eval defines a global var, eval reads it",
+  "expect": "matched",
+  "source": "function main(): void { (globalThis as any).eval('var gx = 41'); console.log(typeof (globalThis as any).gx, eval('gx + 1')); }"
+}

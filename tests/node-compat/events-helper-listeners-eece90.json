@@ -1,0 +1,5 @@
+{
+  "name": "events helper listeners",
+  "expect": "matched",
+  "source": "import { EventEmitter, getEventListeners, getMaxListeners, setMaxListeners } from 'node:events'; function main(): void { const emitter = new EventEmitter(); const listener = (): void => {}; emitter.on('ready', listener); setMaxListeners(20, emitter); console.log(getEventListeners(emitter, 'ready').length, getMaxListeners(emitter)); }"
+}

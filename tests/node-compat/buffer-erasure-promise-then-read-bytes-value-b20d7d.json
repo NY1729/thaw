@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure promise then read bytes value",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve(b).then((q) => q[0] + q[1]).then((s) => console.log(s));\n}\n"
+}

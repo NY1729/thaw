@@ -1,0 +1,5 @@
+{
+  "name": "buffer views v3 many views and offset writes",
+  "expect": "matched",
+  "source": "function main(): void {\n  const chunk = Buffer.alloc(100000);\n  let total = 0;\n  for (let i = 0; i < 100000; i++) { const w = chunk.subarray(i, i + 4 > 100000 ? 100000 : i + 4); w[0] = i & 255; total += w[0]; chunk[(i * 7) % 100000] = 1; }\n  console.log(total, chunk[99999], chunk[300]);\n  const big = Buffer.alloc(4 * 1024 * 1024);\n  const v = big.subarray(10);\n  for (let i = 0; i < 200000; i++) { v[i] = i & 255; }\n  console.log(big[10 + 4000], big[10]);\n}\n"
+}

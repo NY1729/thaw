@@ -1,0 +1,5 @@
+{
+  "name": "icu locale methods default locale and local time zone",
+  "expect": "matched",
+  "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(), d.toLocaleDateString(), d.toLocaleTimeString()); console.log((1234567.891).toLocaleString(), \"a\".localeCompare(\"B\")); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure for of grid write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const rows: Buffer[] = [Buffer.from(\"ab\"), Buffer.from(\"cd\")];\n  for (const row of rows) row[0] = 88;\n  console.log(rows[0].toString(), rows[1].toString());\n}\n"
+}

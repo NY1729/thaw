@@ -1,0 +1,5 @@
+{
+  "name": "tj2 constants named flags",
+  "expect": "matched",
+  "source": "import { F_OK, R_OK, O_RDONLY, O_RDWR } from 'node:constants';\nfunction main(): void {\n  console.log(F_OK, R_OK, O_RDONLY, O_RDWR > 0);\n}"
+}
