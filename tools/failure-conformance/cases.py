@@ -46,6 +46,7 @@ for cid, body in [
     ("rangeerror", 'throw new RangeError("bad range");'),
     ("subclass", 'throw new MyErr("sub");'),
     ("subclass-code", 'throw new CodeErr("with code");'),
+    ("subclass-through-any", 'const a: any = new CodeErr("via any"); const b: any = a; console.log(b.code, b.name, b instanceof CodeErr, b instanceof Error);'),
     ("string", 'throw "just a string";'),
     ("number", 'throw 42;'),
     ("bool", 'throw false;'),

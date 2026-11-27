@@ -564,7 +564,10 @@ fn lowers_fetch_and_json_parse_field_access() {
         HirStmt::Let(
             "name".into(),
             HirType::Str,
-            HirExpr::JsonAsString(Box::new(guarded_json_get("__thaw_json_receiver_0", "name"))),
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_to_string".into())),
+                vec![HirExpr::JsonAsString(Box::new(guarded_json_get("__thaw_json_receiver_0", "name")))],
+            ),
         )
     );
     assert_eq!(

@@ -984,7 +984,11 @@ impl<'a> FnLowerer<'a> {
             }
             Ok(match callee_name {
                 "Number" => HirExpr::JsonAsNumber(Box::new(value)),
-                "String" => HirExpr::JsonAsString(Box::new(value)),
+                // A framed Error held by an `any` renders as `Name: message`; any other string is unchanged.
+                "String" => HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_error_to_string".to_string())),
+                    vec![HirExpr::JsonAsString(Box::new(value))],
+                ),
                 _ => HirExpr::JsonAsBool(Box::new(value)),
             })
     }

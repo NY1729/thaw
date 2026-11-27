@@ -366,3 +366,45 @@ fn errrest_uncaught_throw_reports_inspected_value() {
         assert_eq!(code, Some(1), "{label}");
     }
 }
+
+#[test]
+fn errrest_error_subclass_record_through_any_keeps_identity_and_props() {
+    let source = r#"class CodeErr extends Error {
+  code: string;
+  constructor(m: string) { super(m); this.name = "CodeErr"; this.code = "E_CODE"; }
+}
+class Plain extends Error {}
+function show(tag: string, x: any): void {
+  console.log(tag, x.name, x.code, x instanceof Error, x instanceof CodeErr, String(x));
+}
+function main(): void {
+  const r = new CodeErr("hi");
+  const a: any = r;
+  console.log(a.name, a.message, a.code, a instanceof Error, a instanceof CodeErr, Object.keys(a).join(","));
+  const p: any = new Plain("p");
+  console.log(p.name, p instanceof Error, p instanceof Plain);
+  show("arg", r);
+  show("fresh", new CodeErr("n"));
+  const arr: any[] = [r];
+  console.log("arr", arr[0].name, arr[0].code, arr[0] instanceof CodeErr);
+  const grown: any[] = [];
+  grown.push(r);
+  console.log("push", grown[0].name, grown[0] instanceof CodeErr);
+  const o: any = { e: r };
+  console.log("obj", o.e.name, o.e instanceof CodeErr);
+  const m = new Map<string, any>();
+  m.set("k", r);
+  console.log("map", m.get("k").name, m.get("k") instanceof CodeErr);
+}"#;
+    // Real node 22 output.
+    assert_eq!(
+        compile_and_run(source, "errrest_error_subclass_record_through_any"),
+        "CodeErr hi E_CODE true true code,name\nError true true\n\
+         arg CodeErr E_CODE true true CodeErr: hi\n\
+         fresh CodeErr E_CODE true true CodeErr: n\n\
+         arr CodeErr E_CODE true\n\
+         push CodeErr true\n\
+         obj CodeErr true\n\
+         map CodeErr true\n"
+    );
+}

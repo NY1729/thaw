@@ -2446,6 +2446,38 @@ impl<'a> FnLowerer<'a> {
                     }
                     // An `any` holding a native class instance projected as a live
                     // host: ask the engine against the class's real counterpart.
+                    if value_type == HirType::Json
+                        && extends_error_family
+                        && !is_error_family_name(class.sym.as_ref())
+                        && !matches!(bin.left.as_ref(), Expr::Ident(left)
+                            if left.sym.starts_with("__thaw_instanceof_error_json_"))
+                    {
+                        // A user Error subclass crossing `any` is its native tagged Error: ask the tag
+                        // chain first, then the realm/static checks below on the same (bound) operand.
+                        let temp = format!("__thaw_instanceof_error_json_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(temp.clone(), HirType::Json);
+                        let native = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_error_instance".to_string())),
+                            vec![
+                                HirExpr::Var(temp.clone()),
+                                HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                            ],
+                        );
+                        let mut rest = bin.clone();
+                        *rest.left = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            temp.as_str().into(),
+                            bin.span,
+                        ));
+                        let rest = self.lower_expr(&Expr::Bin(rest))?;
+                        let body = HirExpr::Conditional(
+                            Box::new(native),
+                            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                            Box::new(rest),
+                            HirType::Bool,
+                        );
+                        return self.wrap_call_argument_bindings(body, &[(temp, HirType::Json, value)]);
+                    }
                     if value_type == HirType::Json {
                         let dynamic_constructor = self
                             .decorator_class_token(class.sym.as_ref())

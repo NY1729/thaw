@@ -901,6 +901,21 @@ fn host_key_json(key: &[u8]) -> CString {
 }
 
 fn host_get_property(lease: &HostLease, key: &[u8]) -> Value {
+    let value = host_get_property_raw(lease, key);
+    // The factory-built Error of a user subclass reports the plain `Error` name; the native Error it
+    // stands for knows its own.
+    if key == b"name" && matches!(&value, Value::String(name) if name == "Error") {
+        if let Some(error) = native_error_for_lease(lease) {
+            let name = unsafe { thaw_error_name(error) };
+            if !name.is_null() {
+                return Value::String(to_str(name));
+            }
+        }
+    }
+    value
+}
+
+fn host_get_property_raw(lease: &HostLease, key: &[u8]) -> Value {
     let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
         set_host_error("Host operations unavailable".into());
         return Value::Null;
@@ -8532,6 +8547,10 @@ unsafe extern "C" fn thaw_json_capture_stack_trace_at(
 #[no_mangle]
 pub extern "C" fn thaw_json_is_error_instance(value: *const Value, class: *const c_char) -> u8 {
     if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        // A lease standing for a native Error answers from that Error's ancestry (user subclasses).
+        if let Some(error) = native_error_for_lease(lease) {
+            return u8::from(unsafe { thaw_error_is_instance(error, class) });
+        }
         return u8::from(host_error_instance(lease, class));
     }
     let Some(error) = unsafe { value.as_ref() }.and_then(error_ref) else {
@@ -10758,7 +10777,20 @@ fn error_host_value_from_text(
     let value = host_value_from_borrowed_handle(handle);
     without_typed_decode_scope(|| (host_operations.release)(handle));
     match value {
-        Some(value @ Value::Host(_)) => Some(value),
+        Some(value @ Value::Host(_)) => {
+            // The factory builds a plain `Error`; a user subclass keeps the name its record carries.
+            if let Value::Host(lease) = &value {
+                let name = unsafe { thaw_error_name(canonical as *const c_char) };
+                if !name.is_null() {
+                    let name = to_str(name);
+                    if !matches!(host_get_property(lease, b"name"), Value::String(current) if current == name)
+                    {
+                        host_set_property(lease, b"name", &Value::String(name));
+                    }
+                }
+            }
+            Some(value)
+        }
         _ => {
             set_host_error("Error factory returned a nonobject".into());
             None
