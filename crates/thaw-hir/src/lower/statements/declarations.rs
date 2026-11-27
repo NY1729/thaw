@@ -772,6 +772,23 @@ impl<'a> FnLowerer<'a> {
                     )
                 )) { Some(HirType::Json) } else { annotated };
                 let annotated = annotated.or_else(|| implicit_any_initializer_type(var_decl.kind, init));
+                // A self-referencing untyped arrow (`const run = (i) => ... run(i + 1)`) has nothing to
+                // infer its own signature from: every parameter and the result are `any`.
+                let annotated = annotated.or_else(|| match init {
+                    Expr::Arrow(arrow)
+                        if implicit_any()
+                            && var_decl.kind == VarDeclKind::Const
+                            && !arrow.is_async
+                            && !arrow.is_generator
+                            && arrow.type_params.is_none()
+                            && arrow.return_type.is_none()
+                            && arrow.params.iter().all(|param| matches!(param, Pat::Ident(binding) if binding.type_ann.is_none()))
+                            && Self::initializer_closure_references(init, &name) =>
+                    {
+                        Some(HirType::Function(vec![HirType::Json; arrow.params.len()], Box::new(HirType::Json)))
+                    }
+                    _ => None,
+                });
                 let source_annotation = annotated.clone();
                 let mut source_hint = self.source_value_hint(init).and_then(|hint| self.infer_expr_type(&hint).ok());
                 if has_dynamic_storage(binding.id.span) || has_dynamic_storage(init.span()) {

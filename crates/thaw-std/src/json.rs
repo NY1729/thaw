@@ -1143,21 +1143,41 @@ impl<T> Drop for SharedValue<T> {
     fn drop(&mut self) {
         let key = self as *const Self as usize;
         native_links::forget(key);
+        // A removal hashes the key even from an empty table; most programs never fill these.
         let _ = PROTOTYPES.try_with(|table| {
-            let previous = { table.borrow_mut().remove(&key) };
+            let previous = {
+                let mut table = table.borrow_mut();
+                if table.is_empty() {
+                    None
+                } else {
+                    table.remove(&key)
+                }
+            };
             drop(previous);
         });
         let _ = ARRAY_HOLES.try_with(|holes| {
-            holes.borrow_mut().remove(&key);
+            let mut holes = holes.borrow_mut();
+            if !holes.is_empty() {
+                holes.remove(&key);
+            }
         });
         let _ = WRAPPER_BRANDS.try_with(|brands| {
-            brands.borrow_mut().remove(&key);
+            let mut brands = brands.borrow_mut();
+            if !brands.is_empty() {
+                brands.remove(&key);
+            }
         });
         let _ = GRAPH_PLAIN_OBJECTS.try_with(|objects| {
-            objects.borrow_mut().remove(&key);
+            let mut objects = objects.borrow_mut();
+            if !objects.is_empty() {
+                objects.remove(&key);
+            }
         });
         let _ = DETACHED_HANDLE_MARKERS.try_with(|markers| {
-            markers.borrow_mut().remove(&key);
+            let mut markers = markers.borrow_mut();
+            if !markers.is_empty() {
+                markers.remove(&key);
+            }
         });
         unsafe { thaw_object_clear_state(key as *const u8) };
     }
@@ -3770,6 +3790,46 @@ impl DestroyNode {
     }
 }
 
+/// True when no container below `root` has a second owner and none points back at `root`.
+/// Then the graph holds no cycle and no alias of its inner nodes: the Box drop frees exactly
+/// what only it owns (the whole tree, or nothing if `root` has an outside owner), so
+/// `release_isolated_json_cycles` has nothing to analyse. Host/N-API leases and prototype
+/// entries, whose release can re-enter, always take the full path.
+fn is_unshared_tree(root: &Value) -> bool {
+    if PROTOTYPES.with(|table| !table.borrow().is_empty()) {
+        return false;
+    }
+    let root_identity = object_identity_key(root);
+    let mut stack = vec![(root, true)];
+    while let Some((value, is_root)) = stack.pop() {
+        match value {
+            Value::Array(items) => {
+                let count = Rc::strong_count(items);
+                let back = !is_root && Some(Rc::as_ptr(items) as usize) == root_identity;
+                if (!is_root && count != 1) || back || items.napi_lease.borrow().is_some() {
+                    return false;
+                }
+                stack.extend(unsafe { &*items.get() }.iter().map(|child| (child, false)));
+            }
+            Value::Object(fields) => {
+                let count = Rc::strong_count(fields);
+                let back = !is_root && Some(Rc::as_ptr(fields) as usize) == root_identity;
+                if (!is_root && count != 1) || back || fields.napi_lease.borrow().is_some() {
+                    return false;
+                }
+                stack.extend(
+                    unsafe { &*fields.get() }
+                        .values()
+                        .map(|child| (child, false)),
+                );
+            }
+            Value::Host(_) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 // A graph result may contain native Rc cycles, including a HostLease inside
 // one of the cycle's fields. Dropping the Box alone cannot release them. Count
 // edges within the reachable component, then keep every node reachable from
@@ -3777,6 +3837,9 @@ impl DestroyNode {
 // The prototype side table owns real Value clones, so it participates as an
 // outgoing edge from its key's object rather than looking like an outside root.
 fn release_isolated_json_cycles(root: &Value) {
+    if is_unshared_tree(root) {
+        return;
+    }
     let root_identity = object_identity_key(root);
     let mut nodes = HashMap::<usize, DestroyNode>::new();
     let mut edges = HashMap::<usize, Vec<usize>>::new();
