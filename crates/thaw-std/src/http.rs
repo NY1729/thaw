@@ -2252,6 +2252,8 @@ fn run_server_callback(
         {
             headers.push(("Transfer-Encoding".into(), "chunked".into()));
         }
+        // `finish`/`close` listeners read `res.*` through the context pointer: run them while it is alive.
+        deliver_pending_response_events();
         CallbackOutcome::Ready(ResponseSpec {
             status: normalize_status(context.response.status_code),
             headers,
@@ -2270,6 +2272,7 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
     match run_server_callback(callback, method, target, &[], &[], std::ptr::null_mut()) {
         CallbackOutcome::Ready(spec) => spec,
         CallbackOutcome::Pending(context) => {
+            deliver_pending_response_events();
             let context = unsafe { Box::from_raw(context) };
             ResponseSpec {
                 status: normalize_status(context.response.status_code),
@@ -3405,6 +3408,8 @@ fn free_response_context(connection: &mut ConnectionState) {
             (*context).abandoned = true;
         }
         if unsafe { (*context).delivery_depth } == 0 {
+            // Queued `finish`/`close` listeners still read `res.*` through this context.
+            deliver_pending_response_events();
             unsafe { drop(Box::from_raw(context)) };
         } else {
             PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(context));
@@ -3423,6 +3428,7 @@ thread_local! {
 }
 
 fn drain_pending_context_frees() {
+    deliver_pending_response_events();
     let stale = PENDING_CONTEXT_FREE.with(|list| std::mem::take(&mut *list.borrow_mut()));
     for context in stale {
         if unsafe { (*context).delivery_depth } == 0 {
