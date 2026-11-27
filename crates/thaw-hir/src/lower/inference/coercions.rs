@@ -747,10 +747,19 @@ impl<'a> FnLowerer<'a> {
                 (params.clone(), ret.clone(), HirType::Function(params, ret))
             }
             Ok(callback @ HirType::CallableFunction(..)) => {
-                let HirType::CallableFunction(params, _, None, ret) = &callback else {
+                let HirType::CallableFunction(params, _, callback_rest, ret) = &callback else {
                     return Ok(None);
                 };
-                (params.clone(), ret.clone(), callback.clone())
+                let mut params = params.clone();
+                match callback_rest {
+                    None => {}
+                    // `(err, ...args)`: the physical ABI is the fixed prefix plus one rest array.
+                    Some(callback_rest) if callback_rest == rest && !params.is_empty() => {
+                        params.push(HirType::Array(callback_rest.clone()));
+                    }
+                    Some(_) => return Ok(None),
+                }
+                (params, ret.clone(), callback.clone())
             }
             _ => return Ok(None),
         };
@@ -770,6 +779,18 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(args_name.clone(), rest_array.clone());
         let mut arguments = Vec::with_capacity(params.len());
         for (index, ty) in params.iter().enumerate() {
+            // The callback's own trailing rest parameter (`(err, ...args)`) takes the remaining arguments.
+            if index + 1 == params.len() && *ty == rest_array {
+                arguments.push(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                    vec![
+                        HirExpr::Var(args_name.clone()),
+                        HirExpr::Lit(HirLit::F64(index as f64)),
+                        HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                    ],
+                ));
+                continue;
+            }
             let present = HirExpr::BinOp(
                 BinOp::Gt,
                 Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(args_name.clone())))),
