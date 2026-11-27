@@ -36,6 +36,11 @@ pub(crate) fn header_values_json(values: &[String], numeric: bool) -> *mut Value
     })
 }
 
+#[cfg(test)]
+pub(crate) fn undefined_json() -> *mut Value {
+    leak(napi_undefined_value())
+}
+
 pub(crate) fn string_array_json(items: &[String]) -> *mut Value {
     leak(Value::shared_array(
         items.iter().map(|text| text_value(text)).collect(),
@@ -131,6 +136,9 @@ pub(crate) unsafe fn header_values_of(value: *const Value) -> Vec<String> {
     let Some(value) = (unsafe { value.as_ref() }) else {
         return Vec::new();
     };
+    if super::is_json_undefined(value) {
+        return Vec::new();
+    }
     header_texts(value)
 }
 
@@ -142,6 +150,10 @@ pub(crate) unsafe fn header_entries_of(value: *const Value) -> Vec<(String, Vec<
     let Some(value) = (unsafe { value.as_ref() }) else {
         return Vec::new();
     };
+    // `writeHead(code)` / `writeHead(code, undefined)`: the absent headers arrive as the `undefined` sentinel object.
+    if super::is_json_undefined(value) || matches!(value, Value::Null) {
+        return Vec::new();
+    }
     match value {
         Value::Object(fields) => super::shared_object_ref(fields)
             .iter()

@@ -1736,6 +1736,10 @@ unsafe extern "C" fn response_set_header(
     }
     let name = string_from_ptr(name);
     let values = crate::http_glue::header_values_of(value);
+    if values.is_empty() {
+        // `setHeader(name, undefined)` is an error in Node (ERR_HTTP_INVALID_HEADER_VALUE); never write a bogus header.
+        return false;
+    }
     let lower = name.to_ascii_lowercase();
     context
         .numeric_headers
@@ -5674,5 +5678,29 @@ mod tests {
             };
             assert_eq!(SEEN.with(|seen| seen.borrow().clone()), expected);
         }
+    }
+
+    /// `writeHead(code)` reaches the native closure with `undefined` headers (a sentinel object): no headers at all.
+    #[test]
+    fn write_head_with_undefined_headers_adds_no_header() {
+        let mut context = RequestContext::new("GET", "/", &[], &[], std::ptr::null_mut());
+        let environment = (&context.res_write_head as *const NativeClosure).cast::<c_void>();
+        let message = CString::new("").unwrap();
+        for headers in [crate::http_glue::undefined_json(), std::ptr::null_mut()] {
+            assert!(unsafe { response_write_head(environment, 404.0, message.as_ptr(), headers) });
+            context.response.headers_sent = 0;
+        }
+        assert_eq!(context.response.status_code, 404.0);
+        assert!(
+            context.state.headers.is_empty(),
+            "{:?}",
+            context.state.headers
+        );
+        let set = (&context.set_header as *const NativeClosure).cast::<c_void>();
+        let name = CString::new("x").unwrap();
+        assert!(!unsafe {
+            response_set_header(set, name.as_ptr(), crate::http_glue::undefined_json())
+        });
+        assert!(context.state.headers.is_empty());
     }
 }
