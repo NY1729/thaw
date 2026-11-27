@@ -5436,6 +5436,11 @@
     "expect": "matched",
     "source": "import * as http from 'node:http';\nasync function main(): Promise<void> {\n  const out: string[] = [];\n  let done: () => void = () => {};\n  const closed = new Promise<void>((r) => { done = r; });\n  const srv = http.createServer((req, res) => {\n    const base = res.listenerCount('finish');\n    const a = () => { out.push('a'); };\n    const b = () => { out.push('b'); };\n    res.on('finish', a);\n    res.prependListener('finish', b);\n    res.once('close', () => { out.push('close'); done(); });\n    out.push('count:' + (res.listenerCount('finish') - base) + ':' + res.eventNames().join('|') + ':' + res.getMaxListeners());\n    res.removeListener('finish', a);\n    out.push('after-remove:' + (res.listenerCount('finish') - base) + ':' + res.emit('nope'));\n    res.end('x');\n  });\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const r = await fetch('http://127.0.0.1:' + (srv.address() as any).port + '/');\n  console.log(await r.text());\n  await closed;\n  console.log(out.join(','));\n  srv.close();\n}\n"
   },
+  {
+    "name": "r143 callback with fixed prefix and rest stored in a rest-typed slot",
+    "expect": "matched",
+    "source": "function call(fn: (...a: any[]) => any, x: any): any { return fn(x); }\nfunction wrap(fn: (...a: any[]) => any): any {\n  return function (...a: any[]) { return fn(...a); };\n}\nfunction succeed(fn: (...a: any[]) => any): any {\n  return wrap(function (err: any, ...args: any[]) { return fn(...args); });\n}\nfunction main(): void {\n  console.log(call(function (err: any, ...rest: any[]) { return err + ':' + rest.length; }, 5));\n  console.log(call((err: any, ...rest: any[]) => err + ':' + rest.length, 6));\n  const cb = succeed((x: number, y: number) => x + y);\n  console.log(cb(null, 3, 4));\n  const cb2 = wrap((e: any, a: any, ...r: any[]) => e + '|' + a + '|' + r.join(','));\n  console.log(cb2('e', 'a', 1, 2, 3));\n}\n"
+  },
     {
       "name": "r133 node:http and node:net in one program",
       "expect": "matched",
