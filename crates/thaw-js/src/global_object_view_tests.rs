@@ -159,3 +159,25 @@ fn a_configurable_property_defined_on_globalthis_is_removed_by_delete() {
         "false"
     );
 }
+
+#[test]
+fn a_top_level_let_shadows_a_builtin_without_replacing_the_global_property() {
+    // test262 language/global-code/decl-lex-configurable-global
+    assert_eq!(
+        script("let Array = 5; console.log(Array, typeof globalThis.Array, Object.getOwnPropertyDescriptor(globalThis, 'Array').configurable);"),
+        "5 function true"
+    );
+    // a plain top-level let is not a property of the global object
+    assert_eq!(
+        script("let foo = 1; console.log(globalThis.foo, 'foo' in globalThis);"),
+        "undefined false"
+    );
+}
+
+#[test]
+fn builtin_methods_have_no_construct() {
+    assert_eq!(
+        script("var r = []; for (var f of [Math.max, Array.prototype.map, Object.keys]) { try { new f(); r.push('ctor'); } catch (e) { r.push(e.constructor.name); } } console.log(r.join(), Reflect.construct(function () {}, [], Array) instanceof Array);"),
+        "TypeError,TypeError,TypeError true"
+    );
+}
