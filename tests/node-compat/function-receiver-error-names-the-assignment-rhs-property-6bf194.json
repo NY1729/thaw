@@ -1,0 +1,5 @@
+{
+  "name": "function receiver error names the assignment RHS property",
+  "expect": "matched",
+  "source": "function main(): void { const assign = function(this: {a:number,b:number}):void { this.a = this.b; }; try { assign(); } catch(e:any) { console.log(e.message); } try { assign.call(null as any); } catch(e:any) { console.log(e.message); } }"
+}

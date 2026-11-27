@@ -1,0 +1,5 @@
+{
+  "name": "moveMessagePortToContext delivers into a vm context",
+  "expect": "matched",
+  "source": "import { MessageChannel, moveMessagePortToContext } from 'node:worker_threads';\nimport { createContext, runInContext } from 'node:vm';\nasync function main(): Promise<void> {\n  const channel = new MessageChannel();\n  const port1: any = channel.port1;\n  const port2: any = channel.port2;\n  const ctx: any = { out: [] as string[], port: undefined as any };\n  createContext(ctx);\n  ctx.port = moveMessagePortToContext(port1, ctx);\n  runInContext(`port.onmessage = function (ev) { out.push([ev.data.constructor === Object, ev.data.list instanceof Array, Object.getPrototypeOf(ev.data) === Object.prototype, this === port, ev.target === port, ev.type, ev.ports.length, typeof MessagePort].join(',')); };`, ctx);\n  ctx.port.start();\n  port2.postMessage({ list: [1, 2] });\n  port2.postMessage({ list: [] });\n  for (let i = 0; i < 2000 && ctx.out.length < 2; i++) await new Promise<void>((resolve) => { setTimeout(resolve, 1); });\n  console.log(ctx.out.join('|'));\n  port2.close();\n  ctx.port.close();\n}"
+}

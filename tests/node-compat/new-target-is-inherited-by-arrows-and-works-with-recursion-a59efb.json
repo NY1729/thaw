@@ -1,0 +1,5 @@
+{
+  "name": "new.target is inherited by arrows and works with recursion",
+  "expect": "matched",
+  "source": "function G(n: number): number { const kind = () => (new.target === undefined ? 1 : 2); if (n > 0) { return kind() * 10 + n + G(n - 1); } return kind(); } function H(n: number): void { if (n > 0) { new H(n - 1); } console.log(n, new.target ? \"new\" : \"call\"); } function main(): void { console.log(G(2)); new G(2); H(1); new H(1); }"
+}

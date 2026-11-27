@@ -1,0 +1,5 @@
+{
+  "name": "inspector network domain lifecycle",
+  "expect": "matched",
+  "source": "import { Session } from 'node:inspector'; async function main(): Promise<void> { const session = new Session(); session.connect(); await new Promise<void>((resolve) => session.post('Network.enable', {}, (enableError): void => { session.post('Network.disable', {}, (disableError): void => { console.log(enableError === null, disableError === null); resolve(); }); })); session.disconnect(); }"
+}

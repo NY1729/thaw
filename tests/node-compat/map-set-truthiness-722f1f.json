@@ -1,0 +1,5 @@
+{
+  "name": "Map/Set truthiness",
+  "expect": "matched",
+  "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>(); const st = new Set<number>();\n  if (m) console.log(\"truthy map\");\n  if (st) console.log(\"truthy set\");\n  if (!m) console.log(\"bad\");\n  console.log(m ? \"y\" : \"n\", st ? 1 : 2, m && \"and\");\n  const arr: number[] = [];\n  if (arr) console.log(\"arr\");\n  console.log(!!m, !st, Boolean(m), m || \"or\");\n}\n"
+}

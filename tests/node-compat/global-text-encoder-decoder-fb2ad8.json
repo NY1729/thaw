@@ -1,0 +1,5 @@
+{
+  "name": "global text encoder decoder",
+  "expect": "matched",
+  "source": "function main(): void { const encoder = new TextEncoder(); const bytes = encoder.encode('雪'); const decoder = new TextDecoder(); console.log(bytes.length, bytes[0], decoder.decode(bytes)); }"
+}

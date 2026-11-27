@@ -1,0 +1,5 @@
+{
+  "name": "nd8 Buffer.from and Buffer.alloc argument validation",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { Buffer.from(5 as any); } catch (e: any) { console.log(e.code, e.name); }\n  try { Buffer.from({} as any); } catch (e: any) { console.log(e.code, e.name); }\n  try { Buffer.alloc(-1); } catch (e: any) { console.log(e.code, e.name, e.message); }\n  console.log(Buffer.alloc(2).length, Buffer.from(\"hi\").length);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "r2c Object call boxes a primitive and optional chain on live undefined",
+  "expect": "matched",
+  "source": "import { AsyncLocalStorage } from \"node:async_hooks\";\nconst als = new AsyncLocalStorage<{ id: number }>();\nfunction main(): void {\n  const a = Object(1); const b = Object(\"s\"); const o = { x: 1 };\n  console.log(typeof a, typeof b, Object(o) === o, typeof Object(null));\n  console.log(als.getStore()?.id, als.run({ id: 4 }, () => als.getStore()?.id));\n}"
+}

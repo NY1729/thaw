@@ -1,0 +1,5 @@
+{
+  "name": "stream pass through",
+  "expect": "matched",
+  "source": "import { PassThrough } from 'node:stream'; import { once } from 'node:events'; async function main(): Promise<void> { const values: string[] = []; const stream = new PassThrough(); stream.on('data', (chunk): void => { values.push(chunk.toString()); }); stream.end('hello'); await once(stream, 'end'); console.log(values.join('')); }"
+}

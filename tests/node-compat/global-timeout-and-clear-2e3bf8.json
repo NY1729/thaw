@@ -1,0 +1,5 @@
+{
+  "name": "global timeout and clear",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { const order: string[] = []; const cancelled = setTimeout(() => order.push('cancelled'), 0); clearTimeout(cancelled); await new Promise<void>((resolve) => setTimeout(() => { order.push('timeout'); resolve(); }, 1)); console.log(order.join(',')); }"
+}

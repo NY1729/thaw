@@ -1,0 +1,5 @@
+{
+  "name": "r8a typeof CommonJS globals is undefined in an ES module",
+  "expect": "matched",
+  "source": "export const x = 1;\nfunction main(): void { console.log(typeof require, typeof module, typeof exports, typeof Nope); }"
+}

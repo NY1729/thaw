@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure promise nested array write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve([b]).then((a) => { a[0][0] = 65; console.log(b.toString(), a[0].length); });\n}\n"
+}

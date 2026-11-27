@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure spread array write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const arr: Buffer[] = [b];\n  const copy = [...arr];\n  copy[0][0] = 65;\n  console.log(b.toString(), copy.length);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "class fields limits: class field function names",
+  "expect": "matched",
+  "source": "class K { f = () => 1; g!: () => number; constructor() { this.g = () => 2; } }\nfunction main(): void {\n  console.log(new K());\n}\n"
+}

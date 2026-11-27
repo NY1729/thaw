@@ -1,0 +1,5 @@
+{
+  "name": "http client request timeout",
+  "expect": "matched",
+  "source": "import { spawn } from 'node:child_process'; import { get } from 'node:http'; function main(): void { const child = spawn('node', ['-e', \"const s=require('http').createServer(()=>{});s.listen(0,'127.0.0.1',()=>console.log(s.address().port))\"]); let started: boolean = false; child.stdout.on('data', (value) => { if (started) return; started = true; const port: string = String(value).trim(); const request = get('http://127.0.0.1:' + port); request.on('error', () => {}); request.setTimeout(10, () => { console.log('timeout'); request.destroy(); child.kill(); }); }); }"
+}

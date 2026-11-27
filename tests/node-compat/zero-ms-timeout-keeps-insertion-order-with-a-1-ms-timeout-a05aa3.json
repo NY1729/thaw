@@ -1,0 +1,5 @@
+{
+  "name": "zero ms timeout keeps insertion order with a 1 ms timeout",
+  "expect": "matched",
+  "source": "function main(): void { setTimeout((): void => console.log('one'), 1); setTimeout((): void => console.log('zero'), 0); setTimeout((): void => console.log('one-b'), 1); }"
+}

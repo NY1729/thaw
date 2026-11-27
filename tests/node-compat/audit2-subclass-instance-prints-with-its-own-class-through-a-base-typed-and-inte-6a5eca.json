@@ -1,0 +1,5 @@
+{
+  "name": "audit2 subclass instance prints with its own class through a base-typed and interface-typed slot",
+  "expect": "matched",
+  "source": "interface Shape { area(): number; name: string }\nclass Animal { name: string; constructor(name: string) { this.name = name; } speak(): string { return this.name; } }\nclass Dog extends Animal { tricks: string[] = [\"sit\"]; speak(): string { return \"woof \" + this.name; } }\nclass Circle implements Shape { r: number; name = \"c\"; constructor(r: number) { this.r = r; } area(): number { return 3 * this.r; } }\nfunction main(): void {\n  const d = new Dog(\"Rex\");\n  const a: Animal = d;\n  const xs: Animal[] = [new Animal(\"Cat\"), d];\n  console.log(a, xs);\n  const s: Shape = new Circle(2);\n  const shapes: Shape[] = [new Circle(1)];\n  console.log(s, shapes, s.constructor.name, shapes[0].constructor.name);\n  const plain: Shape = { name: \"p\", area: () => 1 };\n  console.log(plain.name);\n}"
+}

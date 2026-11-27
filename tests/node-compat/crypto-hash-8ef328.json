@@ -1,0 +1,5 @@
+{
+  "name": "crypto hash",
+  "expect": "matched",
+  "source": "import { createHash } from 'node:crypto'; function main(): void { console.log(JSON.stringify(createHash('sha256').update('thaw').digest('hex'))); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "declgaps number bigint union conversion",
+  "expect": "matched",
+  "source": "function add(x: number | bigint): number { return Number(x) + 1; }\nfunction main(): void { const a: number | bigint = 5n; console.log(Number(a) + 3, add(5n), add(2)); }"
+}

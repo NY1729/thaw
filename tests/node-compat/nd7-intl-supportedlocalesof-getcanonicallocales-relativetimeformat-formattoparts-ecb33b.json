@@ -1,0 +1,5 @@
+{
+  "name": "nd7 Intl supportedLocalesOf getCanonicalLocales RelativeTimeFormat formatToParts",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(Intl.NumberFormat.supportedLocalesOf([\"en-US\", \"xx\", \"de\"]));\n  console.log(Intl.getCanonicalLocales(\"EN-us\"), Intl.getCanonicalLocales([\"en-US\", \"en-us\"]));\n  const rtf = new Intl.RelativeTimeFormat(\"en\", { numeric: \"auto\" });\n  console.log(rtf.format(-1, \"day\"), rtf.format(2, \"week\"));\n  console.log(rtf.formatToParts(-5, \"second\").map((p) => p.type + \":\" + p.value + \":\" + p.unit).join(\"|\"));\n  console.log(rtf.formatToParts(1, \"day\").map((p) => p.type + \":\" + p.value).join(\"|\"));\n}\n"
+}

@@ -5,7 +5,7 @@
 #   build_ok, build_ms, why (thaw-js blockers from `thaw inspect`),
 #   stdout_eq_node, run_ms, rss_kb, binary size.
 # Also records: thaw-js-scan eligibility over the bundle corpus, and `thaw node-compat` pass/fail
-# for tests/node-compat.json and tests/builtins-compat.json.
+# for tests/node-compat/ and tests/builtins-compat.json.
 #
 # Output: one long-format TSV (section, subject, engine, metric, value). Scratch lives under $SCRATCH.
 #
@@ -227,7 +227,7 @@ fi
 # node-compat manifests.
 if [ "$SKIP_NODE_COMPAT" = 0 ] && [ -z "$ONLY" ]; then
   cd "$REPO" || exit 1
-  for manifest in tests/node-compat.json tests/builtins-compat.json; do
+  for manifest in tests/node-compat tests/builtins-compat.json; do
     label=$(basename "$manifest" .json)
     for engine in "${ENGINES[@]}"; do
       local_env=()

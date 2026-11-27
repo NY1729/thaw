@@ -1,0 +1,5 @@
+{
+  "name": "audit inspect subclass tag",
+  "expect": "matched",
+  "source": "class DefMap extends Map<string, number> { get(k: string): number { return super.get(k) ?? 0; } } class SetThing extends Set<number> {} class Setx extends Set<number> {} class XMapper extends Map<string, number> {} class Plain extends Map<string, number> {} function main(): void { console.log(new DefMap([[\"a\", 1]]), new SetThing([1]), new Setx([2]), new XMapper(), new Plain([[\"k\", 3]])); }"
+}

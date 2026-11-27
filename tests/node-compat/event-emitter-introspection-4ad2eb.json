@@ -1,0 +1,5 @@
+{
+  "name": "event emitter introspection",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events'; function main(): void { const events = new EventEmitter(); const listener = (): void => {}; events.on('ready', listener); console.log(events.listenerCount('ready'), events.eventNames().join(',')); events.off('ready', listener); console.log(events.listenerCount('ready')); }"
+}

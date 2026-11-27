@@ -1,0 +1,5 @@
+{
+  "name": "r3a typeof undeclared and runtime globals",
+  "expect": "matched",
+  "source": "function main(): void { console.log(typeof window, typeof undeclaredName, typeof Buffer, typeof performance.now(), typeof clearImmediate); }"
+}

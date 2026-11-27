@@ -1,0 +1,5 @@
+{
+  "name": "console constructor output",
+  "expect": "matched",
+  "source": "import { Console } from 'node:console'; import { Writable } from 'node:stream'; function main(): void { let text: string = ''; const output = new Writable({ write(chunk, encoding, callback) { text += chunk.toString(); callback(); } }); const logger = new Console(output); logger.log('value', 42); console.log(JSON.stringify(text)); }"
+}

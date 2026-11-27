@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure map of map buffer",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const m = new Map<string, Map<number, Buffer>>();\n  const inner = new Map<number, Buffer>();\n  const b = Buffer.from(\"ab\");\n  inner.set(1, b);\n  m.set(\"x\", inner);\n  m.get(\"x\")!.get(1)![0] = 65;\n  console.log(b.toString(), m.get(\"x\")!.get(1)!.length);\n}\n"
+}

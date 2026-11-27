@@ -1,0 +1,5 @@
+{
+  "name": "nd5w rejectionHandled fires after the late handler runs",
+  "expect": "matched",
+  "source": "function main(): void { process.on(\"unhandledRejection\", (r: any) => { console.log(\"UR:\", r); }); process.on(\"rejectionHandled\", () => console.log(\"RH\")); const p = Promise.reject(\"late\"); setTimeout(() => p.catch(() => console.log(\"caught late\")), 5); setTimeout(() => {}, 20); }"
+}

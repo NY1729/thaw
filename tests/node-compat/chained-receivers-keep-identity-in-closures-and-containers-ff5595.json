@@ -1,0 +1,5 @@
+{
+  "name": "chained receivers keep identity in closures and containers",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events';\nimport { Readable, PassThrough } from 'node:stream';\nfunction main(): void {\n  const e: any = new EventEmitter();\n  const f = () => {};\n  const g = () => { const k: any = e.on('x', f).on('y', f); return k.listenerCount('x'); };\n  console.log(g());\n  const r: any = new Readable({ read() {} });\n  const r2: any = r.setEncoding('utf8').pause().resume();\n  console.log(r2 === r, r2.readableFlowing);\n  const p: any = new PassThrough();\n  const p2: any = p.setEncoding('utf8').setMaxListeners(20);\n  console.log(p2 === p, p2.getMaxListeners());\n  const arr: any[] = [e.on('p', f).on('q', f)];\n  const o: any = { held: e.on('m', f).on('n', f) };\n  console.log(arr[0] === e, arr[0].listenerCount('q'), o.held === e, o.held.listenerCount('n'));\n}\n"
+}

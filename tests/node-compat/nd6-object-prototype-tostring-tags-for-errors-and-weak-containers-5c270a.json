@@ -1,0 +1,5 @@
+{
+  "name": "nd6 Object.prototype.toString tags for errors and weak containers",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(Object.prototype.toString.call(new Error(\"x\")), Object.prototype.toString.call(new TypeError()), Object.prototype.toString.call(\"s\"));\n  console.log(Object.prototype.toString.call(new WeakRef({ a: 1 })), Object.prototype.toString.call(new FinalizationRegistry(() => {})));\n}\n"
+}

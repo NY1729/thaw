@@ -1,0 +1,6 @@
+{
+  "name": "uncaught error with cause exits 1",
+  "expect": "matched",
+  "exitCode": 1,
+  "source": "function main(): void { throw new TypeError(\"tt\", { cause: new Error(\"root\") }); }"
+}

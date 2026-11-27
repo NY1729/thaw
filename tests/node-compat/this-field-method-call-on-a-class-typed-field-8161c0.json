@@ -1,0 +1,5 @@
+{
+  "name": "this field method call on a class-typed field",
+  "expect": "matched",
+  "source": "class Foo { x = 1; dbl() { return this.x * 2; } }\nclass Bar { c: Foo = new Foo(); run() { return this.c.dbl(); } }\nfunction main(): void {\n  console.log(new Bar().run());\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "captureStackTrace fills a declared stack slot",
+  "expect": "matched",
+  "source": "class M { x = 1; stack?: string; }\nclass N { name = \"Custom\"; message = \"note\"; stack: string = \"\"; }\nfunction main(): void {\n  const m = new M();\n  console.log(m.stack);\n  Error.captureStackTrace(m);\n  console.log(typeof m.stack, (m.stack as string).split(\"\\n\")[0]);\n  const n = new N();\n  Error.captureStackTrace(n);\n  console.log(n.stack.split(\"\\n\")[0]);\n}\n"
+}

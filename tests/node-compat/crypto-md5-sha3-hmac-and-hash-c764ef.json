@@ -1,0 +1,5 @@
+{
+  "name": "crypto md5 sha3 hmac and hash",
+  "expect": "matched",
+  "source": "import * as crypto from \"node:crypto\";\nimport { createHash } from \"node:crypto\";\nfunction main(): void {\n  console.log(createHash(\"md5\").update(\"a\").digest(\"hex\"));\n  console.log(crypto.createHash(\"sha3-256\").update(\"x\").digest(\"hex\"));\n  console.log(crypto.createHash(\"sha3-512\").update(\"abc\").digest(\"base64\"));\n  console.log(crypto.createHmac(\"md5\", Buffer.from(\"k\")).update(\"a\").update(\"b\").digest(\"base64\"));\n  console.log(crypto.createHmac(\"sha3-256\", \"key\").update(\"hello\").digest(\"hex\"));\n  console.log(crypto.hash(\"sha1\", \"abc\"));\n  console.log(crypto.hash(\"sha3-224\", \"abc\", \"base64\"));\n  console.log(typeof crypto.webcrypto.subtle, typeof crypto.subtle);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "rethrown caught Error keeps identity",
+  "expect": "matched",
+  "source": "function main(): void {\n    const err = new Error(\"boom\");\n    const invoke: any = (cb: any): any => cb();\n    try {\n        try {\n            invoke(() => { throw err; });\n        } catch (e: any) {\n            throw e;\n        }\n    } catch (outer: any) {\n        console.log(outer === err, outer.message);\n    }\n}\n"
+}

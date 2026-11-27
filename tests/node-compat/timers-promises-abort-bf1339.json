@@ -1,0 +1,5 @@
+{
+  "name": "timers promises abort",
+  "expect": "matched",
+  "source": "import { setTimeout } from 'node:timers/promises'; async function main(): Promise<void> { const controller = new AbortController(); controller.abort(); try { await setTimeout(100, 'late', { signal: controller.signal }); } catch (error) { console.log(error.name); } }"
+}

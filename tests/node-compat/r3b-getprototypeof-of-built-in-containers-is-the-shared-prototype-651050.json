@@ -1,0 +1,5 @@
+{
+  "name": "r3b getPrototypeOf of built-in containers is the shared prototype",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(Reflect.getPrototypeOf([]) === Array.prototype, Object.getPrototypeOf({}) === Object.prototype);\n  console.log(Object.getPrototypeOf(new Map()) === Map.prototype, Object.getPrototypeOf(new Set()) === Set.prototype);\n}"
+}

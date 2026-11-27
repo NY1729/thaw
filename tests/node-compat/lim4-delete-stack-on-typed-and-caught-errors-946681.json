@@ -1,0 +1,5 @@
+{
+  "name": "lim4 delete stack on typed and caught errors",
+  "expect": "matched",
+  "source": "function main(): void {\n  const f = new Error(\"m\");\n  delete (f as any).stack;\n  console.log(f.stack, typeof f.stack);\n  try { throw new Error(\"z\"); } catch (e: any) {\n    e.stack = \"s\";\n    console.log(e.stack);\n    delete e.stack;\n    console.log(e.stack, typeof e.stack);\n  }\n  const g = new TypeError(\"t\");\n  console.log(typeof g.stack);\n}\n"
+}

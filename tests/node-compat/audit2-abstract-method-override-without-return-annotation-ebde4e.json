@@ -1,0 +1,5 @@
+{
+  "name": "audit2 abstract method override without return annotation",
+  "expect": "matched",
+  "source": "abstract class Base { abstract area(): number; d() { return this.area(); } }\nclass Rect extends Base { w: number; constructor(w: number) { super(); this.w = w; } area() { return this.w * 2; } }\nclass Sq extends Base { area(): number { return 4; } }\nfunction main(): void { console.log(new Rect(2).d(), new Sq().d()); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "audit2 D console.log symbol keys",
+  "expect": "matched",
+  "source": "function main(): void {\n  const k = Symbol(\"k\");\n  const o: any = { a: 2 };\n  o[k] = 1;\n  console.log(o);\n  const p = { a: 2, [k]: 1 };\n  console.log(p);\n}"
+}

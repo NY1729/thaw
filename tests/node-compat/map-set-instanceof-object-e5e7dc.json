@@ -1,0 +1,5 @@
+{
+  "name": "Map/Set instanceof Object",
+  "expect": "matched",
+  "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>([[\"a\", 1]]); const st = new Set<number>([1]);\n  console.log(m instanceof Object, st instanceof Object, [1] instanceof Object);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "audit2 unhandledRejection handler with a Promise parameter",
+  "expect": "matched",
+  "source": "function main(): void { process.on(\"unhandledRejection\", (r: unknown, p: Promise<unknown>) => { console.log(\"UR\", r instanceof Error ? r.message : r, p instanceof Promise); }); Promise.reject(new Error(\"one\")); Promise.reject(\"two\"); const p = Promise.reject(new Error(\"handled later\")); setTimeout(() => p.catch(() => console.log(\"late catch\")), 5); }"
+}

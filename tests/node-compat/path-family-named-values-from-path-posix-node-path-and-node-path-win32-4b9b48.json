@@ -1,0 +1,5 @@
+{
+  "name": "path family named values from path/posix, node:path and node:path/win32",
+  "expect": "matched",
+  "source": "import { posix as a } from 'path/posix'; import { posix as b, win32 as c } from 'node:path'; import { win32 as d } from 'node:path/win32'; function main(): void { console.log(JSON.stringify([a === b, c === d, a.sep === b.sep, c.sep, d.join('x', 'y'), a.basename('/q/r.txt')])); }"
+}

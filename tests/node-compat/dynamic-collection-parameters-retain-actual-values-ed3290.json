@@ -1,0 +1,5 @@
+{
+  "name": "dynamic collection parameters retain actual values",
+  "expect": "matched",
+  "source": "class Store {calls=0;use(m:Map<string,number>,s:Set<number>):number {this.calls+=1;m.set(\"ok\",1);s.add(2);return this.calls;}}\nfunction main():void {const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;\nconst wrong=new Map<string,string>();const wrongSet=new Set<string>();const d:any=wrong;const e:any=wrongSet;\ntry {a.use(d,c);console.log(\"accepted wrong map\");}catch(error:any){console.log(error instanceof TypeError);}\ntry {a.use(b,e);console.log(\"accepted wrong set\");}catch(error:any){console.log(error instanceof TypeError);}\nconst host:any=new Function(\"return new Map()\")();try{a.use(host,c);console.log(\"accepted host\");}catch(error:any){console.log(error instanceof TypeError);}\nconst fake:any={\"__thaw_js_handle_id__\":1};try{a.use(fake,c);console.log(\"accepted fake\");}catch(error:any){console.log(error instanceof TypeError);}\nconsole.log(store.calls,m.size,s.size);console.log(a.use(b,c),m.get(\"ok\"),s.has(2));}"
+}

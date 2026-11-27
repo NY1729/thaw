@@ -1,0 +1,5 @@
+{
+  "name": "error constructor options accept any cause value",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"m\", { cause: \"why\" });\n  console.log(e.cause, \"cause\" in e, Object.getOwnPropertyNames(e));\n  const n = new Error(\"m\", { cause: 42 }) as any;\n  console.log(n.cause, typeof n.cause);\n  const o = { code: 5 };\n  const p = new Error(\"m\", { cause: o }) as any;\n  console.log(p.cause, p.cause.code, Object.keys(p));\n  const arr = new Error(\"m\", { cause: [1, 2] }) as any;\n  console.log(arr.cause);\n  const opts: any = { cause: \"dyn\" };\n  const d = new TypeError(\"m\", opts) as any;\n  console.log(d.cause, d instanceof TypeError);\n  const noCause = new Error(\"m\", {}) as any;\n  console.log(noCause.cause, \"cause\" in noCause, Object.getOwnPropertyNames(noCause));\n  const none = new Error(\"m\") as any;\n  console.log(none.cause);\n  const nested = new Error(\"m\", { cause: new Error(\"in\") }) as any;\n  console.log(nested.cause.message, nested.cause instanceof Error);\n  const callForm = Error(\"m\", { cause: { k: 1 } }) as any;\n  console.log(callForm.cause);\n}\n"
+}

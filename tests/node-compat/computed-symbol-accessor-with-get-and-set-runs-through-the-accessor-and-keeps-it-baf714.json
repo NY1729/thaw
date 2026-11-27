@@ -1,0 +1,5 @@
+{
+  "name": "computed symbol accessor with get and set runs through the accessor and keeps its counters",
+  "expect": "matched",
+  "source": "function main(): void {\n  const S = Symbol('s');\n  let reads = 0;\n  let writes = 0;\n  let stored = 0;\n  const o: any = Object.defineProperties({}, { [S]: { get: () => { reads++; return stored; }, set: (v: number) => { writes++; stored = v; }, enumerable: true, configurable: true } });\n  o[S] = 9;\n  console.log(o[S], reads, writes, stored);\n}"
+}

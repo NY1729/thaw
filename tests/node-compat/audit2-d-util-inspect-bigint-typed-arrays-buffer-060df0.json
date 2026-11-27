@@ -1,0 +1,5 @@
+{
+  "name": "audit2 D util.inspect bigint typed arrays buffer",
+  "expect": "matched",
+  "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.inspect({ a: 1n }), util.inspect([1n, -2n]), util.inspect(5n), util.inspect(-0));\n  console.log(util.inspect(new Uint8Array(3)), util.inspect(new Float64Array(2)), util.inspect(new Uint16Array([1, 2])), util.inspect(new Int8Array(0)));\n  console.log(util.inspect(Buffer.from(\"ab\")), util.inspect({ b: new Uint8Array(2) }));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: any let reassign",
+  "expect": "matched",
+  "source": "function main(): void {\n  let a: any = 5; a = \"s\"; console.log(a);\n  let b: any = \"s\"; b = true; console.log(b);\n  let c: any = null; c = 4; console.log(c);\n  let d: any = \"x\"; d = 8; console.log(d);\n  let n: any = null, z: any = 0, e: any = \"\", f: any = \"x\";\n  n ??= 5; z ||= 6; e &&= 7; f &&= 8;\n  console.log(n, z, e, f);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure tosorted receiver",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"cab\");\n  Promise.resolve(b).then((q) => { const s = q.toSorted(); console.log(s.join(\",\"), b.join(\",\")); });\n}\n"
+}

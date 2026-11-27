@@ -1,0 +1,5 @@
+{
+  "name": "g034 generators class iterator",
+  "expect": "matched",
+  "source": "class C {\n  *items() { yield 1; yield 2; }\n  [Symbol.iterator]() { return this.items(); }\n  wrap() { return this.items(); }\n}\nclass D { *[Symbol.iterator]() { yield \"x\"; yield \"y\"; } }\nfunction main(): void {\n  console.log([...new C()], Array.from(new C()), [...new C().wrap()]);\n  console.log([...new D()]);\n  for (const v of new C()) console.log(v + 1);\n}"
+}

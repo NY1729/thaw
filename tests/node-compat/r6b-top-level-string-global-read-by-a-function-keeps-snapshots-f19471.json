@@ -1,0 +1,5 @@
+{
+  "name": "r6b top-level string global read by a function keeps snapshots",
+  "expect": "matched",
+  "source": "function main(): void {\n  let g = \"\";\n  const seen: string[] = [];\n  function peek(): string { return g; }\n  for (let i = 0; i < 4; i++) { g += \"x\"; seen.push(peek()); }\n  console.log(seen.join(\",\"), g);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "object create this method on typed view",
+  "expect": "matched",
+  "source": "function main(): void {\n  const proto = { greet() { return \"hi \" + this.name; }, name: \"base\" };\n  const o = Object.create(proto) as { name: string; greet(): string };\n  console.log(o.greet(), JSON.stringify(o));\n  o.name = \"own\";\n  console.log(o.greet(), JSON.stringify(o));\n}"
+}

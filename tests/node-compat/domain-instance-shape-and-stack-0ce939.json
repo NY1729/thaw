@@ -1,0 +1,5 @@
+{
+  "name": "domain instance shape and _stack",
+  "expect": "matched",
+  "source": "import * as d from 'node:domain'; function main(): void { const o: any = new d.Domain(); console.log(Object.keys(o).join(','), typeof o.domain, o.domain, Object.getOwnPropertyDescriptor(o, 'domain')!.enumerable, Array.isArray((d as any)._stack)); }"
+}

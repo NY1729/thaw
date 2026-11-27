@@ -1,0 +1,5 @@
+{
+  "name": "commonjs program runs nextTick before promises",
+  "expect": "matched",
+  "source": "function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); queueMicrotask((): void => console.log('microtask')); }"
+}

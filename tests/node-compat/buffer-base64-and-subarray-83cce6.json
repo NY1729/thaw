@@ -1,0 +1,5 @@
+{
+  "name": "buffer base64 and subarray",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; function main(): void { const value = Buffer.from('hello'); console.log(value.toString('base64'), value.subarray(1, 4).toString()); }"
+}

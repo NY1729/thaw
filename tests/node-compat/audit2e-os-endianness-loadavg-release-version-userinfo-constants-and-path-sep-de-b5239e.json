@@ -1,0 +1,5 @@
+{
+  "name": "audit2e os endianness loadavg release version userInfo constants and path sep delimiter posix win32",
+  "expect": "matched",
+  "source": "import { endianness, loadavg, release, version, networkInterfaces, userInfo, machine, constants, devNull } from \"node:os\"; import * as os from \"node:os\"; import { sep, delimiter, posix, win32, join } from \"node:path\"; function main(): void { console.log(endianness(), loadavg().length, typeof release(), typeof version(), typeof networkInterfaces(), typeof userInfo().username, typeof machine(), devNull); console.log(constants.signals.SIGINT, constants.errno.ENOENT, os.constants.signals.SIGTERM, Object.keys(userInfo()).sort()); console.log(sep, delimiter, posix.join(\"a\", \"b\"), win32.sep, win32.join(\"C:\\\\a\", \"..\", \"b\"), join(\"a\", \"b\")); }"
+}

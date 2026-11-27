@@ -1,0 +1,5 @@
+{
+  "name": "g034 generators resume value",
+  "expect": "matched",
+  "source": "function* g() { const x: number = yield 1; console.log(\"got\", x); try { yield 2; } finally { console.log(\"cleanup\"); } return 3; }\nfunction* acc() { let total = 0; while (total < 10) { const n: number = yield total; total += n; } return total; }\nfunction main(): void {\n  const it = g();\n  console.log(it.next(), it.next(5), it.return(7), it.next());\n  const a = acc();\n  a.next();\n  console.log(a.next(4).value, a.next(3).value, a.next(5));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "instanceof a generic user class",
+  "expect": "matched",
+  "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const l = new Child();\n  console.log(l instanceof Base, l instanceof Child);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "nd6 loose equality of any array against primitives",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a: any[] = [[], [0], 0, \"\", \"0\", [1, 2], {}];\n  console.log(a[0] == a[2], a[1] == a[2], a[0] == a[3], a[1] == a[4], a[5] == \"1,2\", a[6] == \"[object Object]\", a[0] == a[1]);\n  const n: any[] = [null, 0, undefined];\n  console.log(n[0] == n[1], n[0] == n[2]);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "console.log prints function names like Node",
+  "expect": "matched",
+  "source": "function f(a: number): number { return a; }\nasync function af(): Promise<number> { return 1; }\nfunction* g(): Generator<number> { yield 1; }\nconst arrow = (x: number): number => x;\nconst anon: (x: number) => number = (x: number): number => x;\nclass K { m(): number { return 1; } }\nfunction dflt(cb: (x: number) => number = f): void { console.log(cb); }\nfunction main(): void {\n  console.log(f);\n  console.log(af);\n  console.log(g);\n  console.log(arrow);\n  console.log(anon);\n  console.log([f, af]);\n  console.log({ f, af, arrow });\n  const o: { h: (x: number) => number } = { h(x: number): number { return x; } };\n  console.log(o);\n  console.log(o.h);\n  console.log(new K().m);\n  dflt();\n  const opt: ((x: number) => number) | undefined = f;\n  console.log(opt);\n  console.log(\"x\", f);\n  console.log((): number => 1);\n  console.log([(): number => 1]);\n}\n"
+}

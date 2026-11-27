@@ -1,0 +1,5 @@
+{
+  "name": "icu Number toLocaleString digits options",
+  "expect": "matched",
+  "source": "function main(): void { const n = 1234.5678; console.log(n.toLocaleString(\"en-US\", { maximumFractionDigits: 1 }), n.toLocaleString(\"en-US\", { minimumFractionDigits: 6 }), n.toLocaleString(\"en-US\", { maximumFractionDigits: 0 }), n.toLocaleString(\"en-US\", { useGrouping: false }), (5).toLocaleString(\"en-US\", { minimumIntegerDigits: 3 }), n.toLocaleString(\"en-US\", { maximumSignificantDigits: 3 }), (0.000123456).toLocaleString(\"en-US\", { maximumSignificantDigits: 2 }), (2.5).toLocaleString(\"en-US\", { maximumFractionDigits: 0 }), (1.005).toLocaleString(\"en-US\", { maximumFractionDigits: 2 })); }"
+}

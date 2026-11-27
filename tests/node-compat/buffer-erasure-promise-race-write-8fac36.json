@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure promise race write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.race([Promise.resolve(b)]).then((q) => { q[0] = 65; console.log(b.toString()); });\n}\n"
+}

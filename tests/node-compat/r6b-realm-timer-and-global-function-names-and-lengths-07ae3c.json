@@ -1,0 +1,5 @@
+{
+  "name": "r6b realm timer and global function names and lengths",
+  "expect": "matched",
+  "source": "function main(): void {\n  const g: any = globalThis;\n  console.log([\"queueMicrotask\", \"structuredClone\", \"atob\", \"btoa\", \"setTimeout\", \"setInterval\", \"setImmediate\", \"clearTimeout\", \"clearInterval\", \"clearImmediate\"].map((k) => k + \":\" + g[k].name + \"/\" + g[k].length).join(\" \"));\n  console.log(process.emitWarning.length, queueMicrotask.name);\n}\n"
+}

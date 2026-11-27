@@ -1,0 +1,5 @@
+{
+  "name": "resourceLimits limit not reached leaves the worker alone",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); let sum = 0; for (let i = 0; i < 1000; i++) { const a = new Array(1000).fill(i); sum += a.length; } parentPort.postMessage('fine ' + sum);`, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });\n  const result: string = await new Promise<string>((resolve) => { worker.on('message', (v: any) => { resolve('message ' + v); }); worker.on('error', (e: any) => { resolve('error ' + e.code); }); });\n  console.log(result);\n}"
+}

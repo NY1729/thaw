@@ -1,0 +1,5 @@
+{
+  "name": "module create require builtin",
+  "expect": "matched",
+  "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); const path = require('node:path'); console.log(path.basename('/tmp/example/value.txt')); }"
+}

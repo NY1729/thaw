@@ -1,0 +1,5 @@
+{
+  "name": "filesystem missing file error code",
+  "expect": "matched",
+  "source": "import { readFileSync } from 'node:fs'; function main(): void { try { readFileSync('/tmp/thaw-definitely-missing-file', 'utf8'); } catch (error) { console.log(error.name, error.code); } }"
+}

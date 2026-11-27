@@ -1,0 +1,5 @@
+{
+  "name": "buffer concatenation",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.concat([Buffer.from('a'), Buffer.from('b')]).toString()); }"
+}

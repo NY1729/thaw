@@ -1,0 +1,5 @@
+{
+  "name": "audit2 Object.fromEntries of mapped pairs and Record over an enum key",
+  "expect": "matched",
+  "source": "const StateV = { Idle: \"idle\", Running: \"running\", Done: \"done\" } as const;\ntype State = \"idle\" | \"running\" | \"done\";\nconst next: Record<State, State[]> = { idle: [\"running\"], running: [\"done\"], done: [] };\nconst labels: { [K in State]: string } = { idle: \"i\", running: \"r\", done: \"d\" };\ninterface U { id: number; name: string }\nfunction main(): void {\n  const users: U[] = [{ id: 1, name: \"a\" }, { id: 2, name: \"b\" }];\n  console.log(Object.fromEntries(users.map((u) => [u.id, u.name])), Object.fromEntries(users.map((u) => [u.name, u.id])));\n  const s: State = StateV.Running;\n  console.log(next[StateV.Idle], s, labels[StateV.Done], labels[s]);\n}"
+}

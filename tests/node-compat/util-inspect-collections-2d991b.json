@@ -1,0 +1,5 @@
+{
+  "name": "util inspect collections",
+  "expect": "matched",
+  "source": "import { inspect } from 'node:util'; function main(): void { const map = new Map<string, number>([['a', 1]]); const set = new Set<number>([2, 3]); console.log(inspect(map), inspect(set)); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "async local storage scope",
+  "expect": "matched",
+  "source": "import { AsyncLocalStorage } from 'node:async_hooks'; function main(): void { const storage = new AsyncLocalStorage(); storage.run('scope', (): void => { console.log(String(storage.getStore())); }); console.log(String(storage.getStore())); }"
+}

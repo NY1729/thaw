@@ -1,0 +1,5 @@
+{
+  "name": "caught Error keeps identity through a callback invoked via any",
+  "expect": "matched",
+  "source": "function main(): void {\n    const err = new Error(\"x\");\n    const invoke: any = (cb: any): any => cb();\n    try {\n        invoke(() => { throw err; });\n    } catch (e: any) {\n        console.log(e === err, e.message, e.name);\n    }\n}\n"
+}

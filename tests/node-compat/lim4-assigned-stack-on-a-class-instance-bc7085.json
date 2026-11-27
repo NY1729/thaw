@@ -1,0 +1,5 @@
+{
+  "name": "lim4 assigned stack on a class instance",
+  "expect": "matched",
+  "source": "class Q { v: number = 1; }\nfunction main(): void {\n  const q = new Q();\n  (q as any).stack = \"x\";\n  console.log(JSON.stringify(q));\n  console.log(q);\n  const p = new Q();\n  Error.captureStackTrace(p);\n  console.log(JSON.stringify(p), Object.keys(p));\n}\n"
+}

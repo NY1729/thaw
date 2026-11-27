@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure generic identity write",
+  "expect": "matched",
+  "source": "function id<T>(x: T): T { return x; }\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const y = id(b);\n  y[0] = 65;\n  console.log(b.toString(), y[1]);\n}\n"
+}

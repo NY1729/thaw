@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure await in loop write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  (async () => { for (let i = 0; i < 2; i++) { const q = await Promise.resolve(b); q[i] = 65 + i; } console.log(b.toString()); })();\n}\n"
+}

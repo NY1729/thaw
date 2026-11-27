@@ -1,0 +1,5 @@
+{
+  "name": "any receivers: optional chain short-circuits whole chain",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const o: any = { list: [1] };\n  o?.list.push(2);\n  o.list?.push(\"z\");\n  const n: any = null;\n  console.log(JSON.stringify(o.list), n?.list.push(1));\n}\n"
+}

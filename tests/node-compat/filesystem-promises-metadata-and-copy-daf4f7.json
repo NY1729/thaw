@@ -1,0 +1,5 @@
+{
+  "name": "filesystem promises metadata and copy",
+  "expect": "matched",
+  "source": "import { copyFile, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const a = '/tmp/thaw-fsp-a'; const b = '/tmp/thaw-fsp-b'; const c = '/tmp/thaw-fsp-c'; await rm(a, { force: true }); await rm(b, { force: true }); await rm(c, { force: true }); await writeFile(a, 'abc'); await copyFile(a, b); await rename(b, c); const info = await stat(c); console.log(info.isFile(), info.size, await readFile(c, 'utf8')); await rm(a); await rm(c); }"
+}

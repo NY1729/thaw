@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: class constructor name",
+  "expect": "matched",
+  "source": "class Animal { speak(): string { return \"...\"; } }\nclass Dog extends Animal { speak(): string { return \"woof\"; } }\nclass Puppy extends Dog {}\nfunction describe(a: Animal): string { return a.constructor.name + \":\" + a.speak(); }\nfunction main(): void {\n  const d = new Dog();\n  console.log(d.constructor.name, new Animal().constructor.name, new Puppy().constructor.name);\n  console.log(describe(new Dog()), describe(new Puppy()), describe(new Animal()));\n  console.log(d.constructor === Dog, d.constructor === Animal, d.constructor !== Dog);\n  const list: Animal[] = [new Animal(), new Dog()];\n  for (const a of list) console.log(a.constructor.name, a.constructor === Dog);\n}"
+}

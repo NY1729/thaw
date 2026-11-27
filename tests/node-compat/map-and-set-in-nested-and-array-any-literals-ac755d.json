@@ -1,0 +1,5 @@
+{
+  "name": "Map and Set in nested and array any literals",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const o: any = { n: { m: new Map<string, number>() }, list: [new Set<number>()] };\n  o.n.m.set(\"a\", 1);\n  o.list[0].add(2);\n  console.log(o.n.m.get(\"a\"), o.list[0].has(2), o.list[0].size);\n  const seen: any[] = [];\n  const w: any = { m: new Map<string, number>() };\n  w.m.set(\"a\", 1); w.m.set(\"b\", 2);\n  w.m.forEach((v: any, k: any) => { seen.push(k + v); });\n  console.log(seen.join(\",\"), [...w.m].length);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "r2d Set built from a string iterates its characters",
+  "expect": "matched",
+  "source": "function main(): void {\n  const s = new Set(\"mississippi\");\n  console.log(s.size, [...s].join(\"\"));\n}\n"
+}

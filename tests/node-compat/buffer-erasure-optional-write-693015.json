@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure optional write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const ob: Buffer | undefined = b;\n  ob![0] = 65;\n  console.log(b.toString());\n}\n"
+}

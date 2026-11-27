@@ -1,0 +1,5 @@
+{
+  "name": "worker natural exit keeps process.exitCode",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`process.exitCode = 3;`, { eval: true });\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  console.log('exit ' + code);\n}"
+}
