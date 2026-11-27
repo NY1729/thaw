@@ -3403,7 +3403,12 @@ impl<'a> FnLowerer<'a> {
                     self.unwrap_required_optional_member(obj, obj_ty, "computed property", self.receiver_requires_narrowing(&member.obj))?;
                 match obj_ty {
                     HirType::Array(element) => {
-                        let index = self.lower_expr(&computed.expr)?;
+                        let mut index = self.lower_expr(&computed.expr)?;
+                        // An untyped (`any`) key such as a closure parameter: ToNumber it.
+                        // ponytail: a non-numeric key (`a['length']`) reads `undefined` here.
+                        if self.infer_expr_type(&index)? == HirType::Json {
+                            index = self.coerce_primitive_to_number(index)?;
+                        }
                         self.expect_type(&HirType::F64, &index, "index expression")?;
                         // ponytail: object/array slots and conservatively sparse parameters
                         // keep their declared index ABI; fully tagged T[] reads need wider callers.
