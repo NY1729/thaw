@@ -52,9 +52,6 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
     *cache.entry(name.to_string()).or_insert_with(|| {
         let base = builtin_module_source_base(name)?;
         let (extra, data) = (surface_extras::extra(name), surface_data::data(name));
-        if extra.is_none() && data.is_none() {
-            return Some(base);
-        }
         let mut text = format!("{base}\n");
         if let Some(extra) = extra {
             text.push_str(extra);
@@ -65,6 +62,8 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
                 ";(function(d){{var e=module.exports;function m(t,s){{for(var k in s){{var v=s[k];if(v&&typeof v==='object'&&!Array.isArray(v)){{if(!t[k]||typeof t[k]!=='object')t[k]={{}};m(t[k],v)}}else t[k]=v}}}}m(e,d)}})({data});\n"
             ));
         }
+        // Node's builtin namespaces list no `__esModule`; keep it readable but not enumerable.
+        text.push_str(";(function(e){if(e&&(typeof e==='object'||typeof e==='function')&&Object.prototype.propertyIsEnumerable.call(e,'__esModule'))Object.defineProperty(e,'__esModule',{value:true,writable:true,configurable:true,enumerable:false});})(module.exports);\n");
         Some(Box::leak(text.into_boxed_str()))
     })
 }
