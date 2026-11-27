@@ -9,7 +9,7 @@ var querystring = require('node:querystring');
 function describe(value) {
   if (value == null) return ' Received ' + value;
   if (typeof value === 'function') return ' Received function ' + value.name;
-  if (typeof value === 'object') return value.constructor && value.constructor.name ? ' Received an instance of ' + value.constructor.name : ' Received ' + require('node:util').inspect(value, { depth: -1 });
+  if (typeof value === 'object') return value.constructor && value.constructor.name ? ' Received an instance of ' + value.constructor.name : ' Received [Object: null prototype] {}'; // ponytail: not util.inspect(value, { depth: -1 }): requiring node:util would pull it into every url bundle
   var text = typeof value === 'string' ? "'" + value + "'" : typeof value === 'bigint' ? String(value) + 'n' : Object.is(value, -0) ? '-0' : String(value);
   if (text.length > 28) text = text.slice(0, 25) + '...';
   return ' Received type ' + typeof value + ' (' + text + ')';
