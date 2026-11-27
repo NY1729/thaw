@@ -351,7 +351,6 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: `e.cause` of a caught native error reads back as a thaw-js handle marker string (typeof string, no stack); the cause needs to stay a native/live Error with its frames"]
 fn stack_fidelity_rethrow() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
@@ -450,5 +449,23 @@ function main(): void {
     assert_eq!(
         compile_and_run(source, "stack_fidelity_callbacks_native"),
         "at cb|at <anon>|at Array.map|at main\nat cb|at <anon>|at Array.forEach|at main\nat cb|at <anon>|at Array.sort|at main\n"
+    );
+}
+
+// Node 22: a caught native error used as `cause` stays an Error object with its own frames.
+#[test]
+fn stack_fidelity_cause_shape() {
+    let source = r#"function thrower(): void { throw new Error("x"); }
+function wrap(): void { try { thrower(); } catch (e) { throw new Error("w", { cause: e }); } }
+function main(): void {
+  try { wrap(); } catch (e: any) {
+    console.log(typeof e.cause, e.cause instanceof Error, e.cause.name, e.cause.message);
+    console.log(String(e.cause.stack).split("\n").slice(0, 4).map((l: string) => l.trim().split(" (")[0]).join("|"));
+  }
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "stack_fidelity_cause_shape"),
+        "object true Error x\nError: x|at thrower|at wrap|at main\n"
     );
 }
