@@ -1,0 +1,28 @@
+// Class values exported by node builtins are constructible, also through any.
+process.noDeprecation = true;
+import * as assert from 'node:assert';
+import * as net from 'node:net';
+import * as url from 'node:url';
+const t = (n, f) => { try { const r = f(); console.log(n, 'ok', typeof r); } catch (e) { console.log(n, 'THROW', e && e.code, e && e.message); } };
+const A = assert.Assert;
+t('Assert', () => new assert.Assert());
+t('Assert-any', () => new A({ strict: false }));
+t('Assert-bad-diff', () => new A({ diff: 'bad' }));
+const a = new A();
+t('Assert.strictEqual', () => a.strictEqual(1, 1));
+t('Assert.deepEqual-strict', () => a.deepEqual(1, '1'));
+t('Assert.deepEqual-loose', () => new A({ strict: false }).deepEqual(1, '1'));
+t('Assert-instanceof', () => String(a instanceof A));
+const tr = new assert.CallTracker();
+const f = tr.calls((x) => x + 1, 2);
+f(1);
+t('verify', () => tr.verify());
+t('getCalls', () => JSON.stringify(tr.getCalls(f).map((c) => c.arguments)));
+f(2);
+t('verify2', () => tr.verify());
+t('calls-range', () => tr.calls(() => {}, -1));
+t('Stream', () => new net.Stream());
+t('Stream-eq', () => String(net.Stream === net.Socket));
+const u = new url.Url();
+t('Url', () => JSON.stringify(u));
+t('parse-instanceof', () => url.parse('http://a.b/c?d=1').pathname);
