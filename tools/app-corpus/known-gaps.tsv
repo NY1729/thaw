@@ -8,18 +8,15 @@ cli-parseargs.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.map()` requires a 
 cli-readline-file.mjs	BUILD-FAIL	error: unsupported on thaw-js: unknown variable `__thaw_namespace_1000001`
 config-loader.mjs	BUILD-FAIL	error: unsupported on thaw-js: computed object assignment key must be a string literal
 dates-intl.mjs	DIFF	stdout line 5: node=Thu 08:05 thaw=Thu, 08:05
-domain-model.mjs	BUILD-FAIL	error: unsupported on thaw-js: unsupported member call target at source bytes 24547..24577
 fs-ops.mjs	RUN-FAIL	TypeError: Invalid JavaScript method receiver
 fsm-emitter.mjs	DIFF	stdout line 3: node=paid --ship--> shipped thaw=finished!
-idle-game-sim.mjs	BUILD-FAIL	error: unsupported on thaw-js: unsupported property access `.g` on a value of type Null
 log-pipeline.mjs	BUILD-FAIL	error: unsupported on thaw-js: class `__thawmod0_LineSplit` extends the external JavaScript class `node:stream::Transform`, which AOT classes cannot subclass yet (supported builtin bases: Map, Set, Ar
-mini-test-runner.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.push()` value is not safe for every array union member: value has type Object([("name", Json), ("fn", Json)]), expected F64
 server-rest-json.mjs	BUILD-FAIL	error: unsupported on thaw-js: destructuring requires a fixed-shape object or tuple, got JsValue
 server-static.mjs	DIFF	stdout line 6: node=closed thaw=GET / 200 text/html; charset=utf-8 "<p>index</p>"
 task-runner.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot infer Promise type from resolve argument: unknown variable `code`
 text-templating.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.map()` requires a homogeneous array, got Json
-timers-scheduler.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.push()` value is not safe for every array union member: value has type Str, expected F64
+timers-scheduler.mjs	DIFF	stdout line 3: node=AbortError ABORT_ERR thaw=[ 'micro', 'tick', 'immediate' ] imm
 ts-inventory.ts	BUILD-FAIL	error: unsupported on thaw-js: unsupported type annotation TsTypeQuery(TsTypeQuery { span: 30222..30237, expr_name: TsEntityName(Ident(Ident { span: 30229..30237, ctxt: #0, sym: "Category", optional: 
-url-router.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.push()` value is not safe for every array union member: value has type Object([("method", Json), ("re", Object([("source", Str), ("flags", Str), ("lastIndex", F64)])),
+url-router.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot access `.groups` because union member Nullable(Array(Optional(Str))) is not an object
 worker-eval-channel.mjs	DIFF	stdout line 1: node=[ { echo: 2 }, { echo: 4 }, { echo: 6 }, { echo: 8 } ] 10 0 thaw=[] 0 undefined
 worker-fanout.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot infer the return type of function `__thawmod0_isPrime`; add an explicit return annotation at bytes 24807..24938

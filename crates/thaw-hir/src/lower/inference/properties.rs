@@ -202,14 +202,20 @@ impl<'a> FnLowerer<'a> {
             if matches!(element, HirType::Undefined | HirType::Null) {
                 continue;
             }
-            let HirType::Object(fields) = element else {
-                return Err(format!(
-                    "cannot access `.{property}` because union member {element:?} is not an object"
-                ));
-            };
-            let field = match Self::optional_fixed_object_property_read_type(fields, property)? {
-                Some(field) => { has_property = true; field }
-                None => HirType::Undefined,
+            // A `boolean` member is the `false` of an `a && b` chain: reading a property off it is
+            // `undefined` (it stays in a truthy-narrowed union because falsiness is not tracked).
+            let field = if *element == HirType::Bool {
+                HirType::Undefined
+            } else {
+                let HirType::Object(fields) = element else {
+                    return Err(format!(
+                        "cannot access `.{property}` because union member {element:?} is not an object"
+                    ));
+                };
+                match Self::optional_fixed_object_property_read_type(fields, property)? {
+                    Some(field) => { has_property = true; field }
+                    None => HirType::Undefined,
+                }
             };
             if !field_types.contains(&field) {
                 field_types.push(field);
@@ -263,15 +269,16 @@ impl<'a> FnLowerer<'a> {
                     index,
                     elements.to_vec(),
                 );
-            let HirType::Object(fields) = element else {
-                unreachable!("union property was validated above")
+            let fields = match element {
+                HirType::Object(fields) => Some(fields),
+                _ => None, // `boolean`, validated above
             };
-            let (field, field_type) = match Self::optional_fixed_object_property_read_type(fields, property)? {
-                Some(field_type) => (
+            let (field, field_type) = match fields.map(|fields| Ok::<_, String>((fields, Self::optional_fixed_object_property_read_type(fields, property)?))).transpose()? {
+                Some((fields, Some(field_type))) => (
                     self.lower_fixed_object_property_read(union_value, fields, property)?,
                     field_type,
                 ),
-                None => (HirExpr::Lit(HirLit::Undefined), HirType::Undefined),
+                _ => (HirExpr::Lit(HirLit::Undefined), HirType::Undefined),
             };
             let returns = if field_types.len() == 1 {
                 vec![HirStmt::Return(Some(field))]
