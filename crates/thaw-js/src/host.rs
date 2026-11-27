@@ -3130,14 +3130,8 @@ impl WireOut {
                 crate::builtins::json_quote(s, &mut q);
                 format!("{{\"v\":{q}}}")
             }
-            Value::BigInt(_) if !self.plain => {
-                format!("{{\"bi\":\"{}\"}}", it.to_str(&v))
-            }
-            Value::BigInt(_) => {
-                return Err(HostError::Thrown(
-                    "TypeError: Do not know how to serialize a BigInt".into(),
-                ))
-            }
+            // A BigInt result crosses as its decimal (`{"bi"}`), plain mode included.
+            Value::BigInt(_) => format!("{{\"bi\":\"{}\"}}", it.to_str(&v)),
             Value::Object(o) => {
                 if self.plain && v.is_callable() && !self.live_functions {
                     return Ok("{\"u\":1}".into());
