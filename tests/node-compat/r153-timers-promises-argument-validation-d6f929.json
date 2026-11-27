@@ -1,0 +1,5 @@
+{
+  "name": "r153 timers/promises argument validation",
+  "expect": "matched",
+  "source": "import * as tp from 'node:timers/promises';\nfunction t(f: () => any): Promise<void> {\n  return Promise.resolve().then(() => { const r: any = f(); return r && typeof r.next === 'function' ? r.next() : r; }).then(() => { console.log('ok'); }, (e: any) => { console.log(e.name, e.code, e.message); });\n}\nasync function main(): Promise<void> {\n  const m: any = tp;\n  await t(() => m.setTimeout('x'));\n  await t(() => m.setTimeout(null, 1));\n  await t(() => m.setTimeout(1, 1, 5));\n  await t(() => m.setTimeout(1, 1, null));\n  await t(() => m.setTimeout(1, 1, { signal: 5 }));\n  await t(() => m.setTimeout(1, 1, { ref: 'a' }));\n  await t(() => m.setImmediate(1, 5));\n  await t(() => m.setImmediate(1, { signal: {} }));\n  await t(() => m.setImmediate(1, { ref: 1 }));\n  await t(() => m.setInterval('x'));\n  await t(() => m.setInterval(1, 1, 5));\n  await t(() => m.setInterval(1, 1, { signal: 5 }));\n  await t(() => m.scheduler.wait('x'));\n  await t(() => m.scheduler.wait(1, 5));\n  await t(() => m.scheduler.yield());\n}\n"
+}
