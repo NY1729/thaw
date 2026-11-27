@@ -59,12 +59,13 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20return String.fromCodePoint.apply(null, output);\n\
              \x20\x20}).join('.');\n\
              }\n\
+             function Url() { this.protocol = null; this.slashes = null; this.auth = null; this.host = null; this.port = null; this.hostname = null; this.hash = null; this.search = null; this.query = null; this.pathname = null; this.path = null; this.href = null; }\n\
              function parse(input, parseQuery) {\n\
              \x20\x20if (typeof input !== 'string') throw argError('url', 'of type string', input);\n\
              \x20\x20var source = input;\n\
              \x20\x20var absolute = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(source);\n\
              \x20\x20var url = new globalThis.URL(source, 'http://thaw.invalid');\n\
-             \x20\x20return { protocol: absolute ? url.protocol : null, slashes: absolute && source.indexOf('//') >= 0, auth: url.username || url.password ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : null, host: absolute ? url.host : null, port: absolute && url.port ? url.port : null, hostname: absolute ? url.hostname : null, hash: url.hash || null, search: url.search || null, query: parseQuery ? queryObject(url.search) : url.search ? url.search.slice(1) : null, pathname: url.pathname, path: url.pathname + url.search, href: source };\n\
+             \x20\x20return Object.assign(new Url(), { protocol: absolute ? url.protocol : null, slashes: absolute && source.indexOf('//') >= 0, auth: url.username || url.password ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : null, host: absolute ? url.host : null, port: absolute && url.port ? url.port : null, hostname: absolute ? url.hostname : null, hash: url.hash || null, search: url.search || null, query: parseQuery ? queryObject(url.search) : url.search ? url.search.slice(1) : null, pathname: url.pathname, path: url.pathname + url.search, href: source });\n\
              }\n\
              function format(input) {\n\
              \x20\x20if (input instanceof globalThis.URL) return input.href;\n\
@@ -86,7 +87,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function resolve(from, to) { if (typeof from !== 'string') throw argError('url', 'of type string', from); if (typeof to !== 'string') throw argError('to', 'of type string', to); var resolved = new globalThis.URL(String(to), new globalThis.URL(String(from), 'resolve://')); return resolved.protocol === 'resolve:' ? resolved.pathname + resolved.search + resolved.hash : resolved.href; }\n\
              function domainToASCII(domain) { try { return new globalThis.URL('ws://' + domain).hostname; } catch (_) { return ''; } }\n\
              function domainToUnicode(domain) { var ascii = domainToASCII(domain); return punycodeToUnicode(ascii); }\n\
-             module.exports = { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, resolve: resolve, domainToASCII: domainToASCII, domainToUnicode: domainToUnicode, parse: parse, format: format, pathToFileURL: pathToFileURL, fileURLToPath: fileURLToPath, urlToHttpOptions: urlToHttpOptions };\n\
+             module.exports = { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, Url: Url, resolve: resolve, domainToASCII: domainToASCII, domainToUnicode: domainToUnicode, parse: parse, format: format, pathToFileURL: pathToFileURL, fileURLToPath: fileURLToPath, urlToHttpOptions: urlToHttpOptions };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
