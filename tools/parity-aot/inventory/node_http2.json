@@ -1,0 +1,2945 @@
+{
+ "module": "node:http2",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "Http2ServerRequest",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 4,
+   "static": [
+    {
+     "name": "Duplex",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "EventEmitter",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "EventEmitterAsyncResource",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "PassThrough",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Readable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "ReadableState",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 3
+    },
+    {
+     "name": "Stream",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Transform",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Writable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "addAbortListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "addAbortSignal",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "captureRejectionSymbol",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "captureRejections",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "compose",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "defaultMaxListeners",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "destroy",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "duplexPair",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "errorMonitor",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "finished",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "from",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "fromWeb",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getDefaultHighWaterMark",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getEventListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "init",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isDestroyed",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isDisturbed",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isErrored",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isReadable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isWritable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "kMaxEventTargetListeners",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "kMaxEventTargetListenersWarned",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "listenerCount",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "pipeline",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "promises",
+     "from": "Stream",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "setDefaultHighWaterMark",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "toWeb",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "usingDomains",
+     "from": "EventEmitter",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "wrap",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    }
+   ],
+   "proto": [
+    {
+     "name": "aborted",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "addListener",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "authority",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "closed",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "complete",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "compose",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "connection",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "destroy",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "destroyed",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "drop",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "emit",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "errored",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "eventNames",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "every",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "filter",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "find",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "flatMap",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "forEach",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "headers",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "httpVersion",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "httpVersionMajor",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "httpVersionMinor",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "isPaused",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "iterator",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "listenerCount",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "listeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "map",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "method",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "off",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "pause",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "pipe",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependOnceListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "push",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "rawHeaders",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "rawListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "rawTrailers",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "read",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "readable",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "readableAborted",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableBuffer",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableDidRead",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableEncoding",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableEnded",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableFlowing",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "readableHighWaterMark",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableLength",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableObjectMode",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "reduce",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "removeAllListeners",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeListener",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resume",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "scheme",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "setEncoding",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setTimeout",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "some",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "stream",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "take",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "toArray",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "trailers",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "unpipe",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "unshift",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "url",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "wrap",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "Http2ServerResponse",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 2,
+   "static": [
+    {
+     "name": "Duplex",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "EventEmitter",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "EventEmitterAsyncResource",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "PassThrough",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Readable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Stream",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Transform",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Writable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "addAbortListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "addAbortSignal",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "captureRejectionSymbol",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "captureRejections",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "compose",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "defaultMaxListeners",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "destroy",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "duplexPair",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "errorMonitor",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "finished",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "getDefaultHighWaterMark",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getEventListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "init",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isDestroyed",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isDisturbed",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isErrored",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isReadable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isWritable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "kMaxEventTargetListeners",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "kMaxEventTargetListenersWarned",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "listenerCount",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "pipeline",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "promises",
+     "from": "Stream",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "setDefaultHighWaterMark",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "usingDomains",
+     "from": "EventEmitter",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    }
+   ],
+   "proto": [
+    {
+     "name": "addListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "addTrailers",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "appendHeader",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "connection",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "cork",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "createPushResponse",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "destroy",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "emit",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "end",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "eventNames",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "finished",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "flushHeaders",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getHeader",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getHeaderNames",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getHeaders",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "hasHeader",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "headersSent",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "listenerCount",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "listeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "off",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "pipe",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependOnceListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "rawListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeAllListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeHeader",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "sendDate",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "setHeader",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setTimeout",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setTrailer",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "statusCode",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "statusMessage",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "stream",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "uncork",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "writableCorked",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableEnded",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableFinished",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableHighWaterMark",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableLength",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "write",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "writeContinue",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "writeEarlyHints",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "writeHead",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "connect",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "constants",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "DEFAULT_SETTINGS_ENABLE_CONNECT_PROTOCOL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DEFAULT_SETTINGS_ENABLE_PUSH",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DEFAULT_SETTINGS_HEADER_TABLE_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DEFAULT_SETTINGS_MAX_FRAME_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCEPT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCEPT_CHARSET",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCEPT_ENCODING",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCEPT_LANGUAGE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCEPT_RANGES",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCESS_CONTROL_ALLOW_CREDENTIALS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCESS_CONTROL_ALLOW_HEADERS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCESS_CONTROL_ALLOW_METHODS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCESS_CONTROL_ALLOW_ORIGIN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCESS_CONTROL_EXPOSE_HEADERS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCESS_CONTROL_MAX_AGE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCESS_CONTROL_REQUEST_HEADERS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ACCESS_CONTROL_REQUEST_METHOD",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_AGE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ALLOW",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ALT_SVC",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_AUTHORITY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_AUTHORIZATION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CACHE_CONTROL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONNECTION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_DISPOSITION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_ENCODING",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_LANGUAGE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_LENGTH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_LOCATION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_MD5",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_RANGE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_SECURITY_POLICY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_CONTENT_TYPE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_COOKIE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_DATE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_DNT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_EARLY_DATA",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ETAG",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_EXPECT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_EXPECT_CT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_EXPIRES",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_FORWARDED",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_FROM",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_HOST",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_HTTP2_SETTINGS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_IF_MATCH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_IF_MODIFIED_SINCE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_IF_NONE_MATCH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_IF_RANGE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_IF_UNMODIFIED_SINCE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_KEEP_ALIVE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_LAST_MODIFIED",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_LINK",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_LOCATION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_MAX_FORWARDS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_METHOD",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_ORIGIN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_PATH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_PREFER",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_PRIORITY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_PROTOCOL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_PROXY_AUTHENTICATE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_PROXY_AUTHORIZATION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_PROXY_CONNECTION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_PURPOSE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_RANGE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_REFERER",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_REFRESH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_RETRY_AFTER",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_SCHEME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_SERVER",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_SET_COOKIE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_STATUS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_STRICT_TRANSPORT_SECURITY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_TE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_TIMING_ALLOW_ORIGIN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_TK",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_TRAILER",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_TRANSFER_ENCODING",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_UPGRADE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_UPGRADE_INSECURE_REQUESTS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_USER_AGENT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_VARY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_VIA",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_WARNING",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_WWW_AUTHENTICATE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_X_CONTENT_TYPE_OPTIONS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_X_FORWARDED_FOR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_X_FRAME_OPTIONS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_HEADER_X_XSS_PROTECTION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_ACL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_BASELINE_CONTROL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_BIND",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_CHECKIN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_CHECKOUT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_CONNECT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_COPY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_DELETE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_GET",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_HEAD",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_LABEL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_LINK",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_LOCK",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_MERGE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_MKACTIVITY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_MKCALENDAR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_MKCOL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_MKREDIRECTREF",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_MKWORKSPACE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_MOVE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_OPTIONS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_ORDERPATCH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_PATCH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_POST",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_PRI",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_PROPFIND",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_PROPPATCH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_PUT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_REBIND",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_REPORT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_SEARCH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_TRACE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_UNBIND",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_UNCHECKOUT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_UNLINK",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_UNLOCK",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_UPDATE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_UPDATEREDIRECTREF",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2_METHOD_VERSION_CONTROL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_ACCEPTED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_ALREADY_REPORTED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_BAD_GATEWAY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_BAD_REQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_BANDWIDTH_LIMIT_EXCEEDED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_CONFLICT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_CONTINUE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_CREATED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_EARLY_HINTS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_EXPECTATION_FAILED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_FAILED_DEPENDENCY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_FORBIDDEN",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_FOUND",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_GATEWAY_TIMEOUT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_GONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_IM_USED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_INSUFFICIENT_STORAGE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_INTERNAL_SERVER_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_LENGTH_REQUIRED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_LOCKED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_LOOP_DETECTED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_METHOD_NOT_ALLOWED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_MISDIRECTED_REQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_MOVED_PERMANENTLY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_MULTIPLE_CHOICES",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_MULTI_STATUS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_NON_AUTHORITATIVE_INFORMATION",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_NOT_ACCEPTABLE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_NOT_EXTENDED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_NOT_FOUND",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_NOT_IMPLEMENTED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_NOT_MODIFIED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_NO_CONTENT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_PARTIAL_CONTENT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_PAYLOAD_TOO_LARGE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_PAYMENT_REQUIRED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_PERMANENT_REDIRECT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_PRECONDITION_FAILED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_PRECONDITION_REQUIRED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_PROCESSING",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_PROXY_AUTHENTICATION_REQUIRED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_RANGE_NOT_SATISFIABLE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_REQUEST_TIMEOUT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_RESET_CONTENT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_SEE_OTHER",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_SERVICE_UNAVAILABLE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_SWITCHING_PROTOCOLS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_TEAPOT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_TEMPORARY_REDIRECT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_TOO_EARLY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_TOO_MANY_REQUESTS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_UNAUTHORIZED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_UNAVAILABLE_FOR_LEGAL_REASONS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_UNPROCESSABLE_ENTITY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_UPGRADE_REQUIRED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_URI_TOO_LONG",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_USE_PROXY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP_STATUS_VARIANT_ALSO_NEGOTIATES",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MAX_INITIAL_WINDOW_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MAX_MAX_FRAME_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MIN_MAX_FRAME_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_CANCEL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_COMPRESSION_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_CONNECT_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_DEFAULT_WEIGHT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_ENHANCE_YOUR_CALM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_ERR_DEFERRED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_ERR_FRAME_SIZE_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_ERR_INVALID_ARGUMENT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_ERR_NOMEM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_ERR_STREAM_CLOSED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_FLAG_ACK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_FLAG_END_HEADERS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_FLAG_END_STREAM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_FLAG_NONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_FLAG_PADDED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_FLAG_PRIORITY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_FLOW_CONTROL_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_FRAME_SIZE_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_HCAT_HEADERS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_HCAT_PUSH_RESPONSE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_HCAT_REQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_HCAT_RESPONSE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_HTTP_1_1_REQUIRED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_INADEQUATE_SECURITY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_INTERNAL_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_NO_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_NV_FLAG_NONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_NV_FLAG_NO_INDEX",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_PROTOCOL_ERROR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_REFUSED_STREAM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SESSION_CLIENT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SESSION_SERVER",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SETTINGS_ENABLE_PUSH",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SETTINGS_HEADER_TABLE_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SETTINGS_MAX_FRAME_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_SETTINGS_TIMEOUT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_STREAM_CLOSED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_STREAM_STATE_CLOSED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_STREAM_STATE_HALF_CLOSED_LOCAL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_STREAM_STATE_HALF_CLOSED_REMOTE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_STREAM_STATE_IDLE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_STREAM_STATE_OPEN",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_STREAM_STATE_RESERVED_LOCAL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NGHTTP2_STREAM_STATE_RESERVED_REMOTE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PADDING_STRATEGY_ALIGNED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PADDING_STRATEGY_CALLBACK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PADDING_STRATEGY_MAX",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PADDING_STRATEGY_NONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "STREAM_OPTION_EMPTY_PAYLOAD",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "STREAM_OPTION_GET_TRAILERS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "createSecureServer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "createServer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getDefaultSettings",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getPackedSettings",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getUnpackedSettings",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "performServerHandshake",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "sensitiveHeaders",
+   "typeof": "symbol",
+   "kind": "value",
+   "arity": null
+  }
+ ]
+}

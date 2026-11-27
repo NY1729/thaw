@@ -1,0 +1,1718 @@
+{
+ "module": "node:tls",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "CLIENT_RENEG_LIMIT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "CLIENT_RENEG_WINDOW",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DEFAULT_CIPHERS",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DEFAULT_ECDH_CURVE",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DEFAULT_MAX_VERSION",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DEFAULT_MIN_VERSION",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SecureContext",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "Server",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 2,
+   "static": [
+    {
+     "name": "EventEmitter",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "EventEmitterAsyncResource",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "addAbortListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "captureRejectionSymbol",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "captureRejections",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "defaultMaxListeners",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "errorMonitor",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "getEventListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "init",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "kMaxEventTargetListeners",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "kMaxEventTargetListenersWarned",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "listenerCount",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "usingDomains",
+     "from": "EventEmitter",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    }
+   ],
+   "proto": [
+    {
+     "name": "addContext",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "addListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "address",
+     "from": "Server",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "close",
+     "from": "Server",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "emit",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "eventNames",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getConnections",
+     "from": "Server",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getTicketKeys",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "listen",
+     "from": "Server",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "listenerCount",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "listeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "listening",
+     "from": "Server",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "off",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependOnceListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "rawListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "ref",
+     "from": "Server",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "removeAllListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setOptions",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setSecureContext",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setTicketKeys",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "unref",
+     "from": "Server",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "ALPNCallback",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "allowHalfOpen",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ca",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "cert",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ciphers",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "clientCertEngine",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "crl",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "dhparam",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "domain",
+     "typeof": "null",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ecdhCurve",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "highWaterMark",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "honorCipherOrder",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "keepAlive",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "keepAliveInitialDelay",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "key",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "maxVersion",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "minVersion",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "noDelay",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "passphrase",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "pauseOnConnect",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "pfx",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "privateKeyEngine",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "privateKeyIdentifier",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "rejectUnauthorized",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "requestCert",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "secureOptions",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "secureProtocol",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "sessionIdContext",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "sigalgs",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "TLSSocket",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 2,
+   "static": [
+    {
+     "name": "Duplex",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "EventEmitter",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "EventEmitterAsyncResource",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "PassThrough",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Readable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "ReadableState",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 3
+    },
+    {
+     "name": "Stream",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Transform",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "Writable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "addAbortListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "addAbortSignal",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "captureRejectionSymbol",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "captureRejections",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "compose",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "defaultMaxListeners",
+     "from": "EventEmitter",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "destroy",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "duplexPair",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "errorMonitor",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "finished",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "from",
+     "from": "Duplex",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "fromWeb",
+     "from": "Duplex",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getDefaultHighWaterMark",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getEventListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "init",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isDestroyed",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isDisturbed",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isErrored",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isReadable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isWritable",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "kMaxEventTargetListeners",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "kMaxEventTargetListenersWarned",
+     "from": "EventEmitter",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "listenerCount",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "pipeline",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "promises",
+     "from": "Stream",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "setDefaultHighWaterMark",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "toWeb",
+     "from": "Duplex",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "usingDomains",
+     "from": "EventEmitter",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "wrap",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    }
+   ],
+   "proto": [
+    {
+     "name": "addListener",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "address",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "bufferSize",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "bytesRead",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "bytesWritten",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "closed",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "compose",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "connect",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "cork",
+     "from": "Duplex",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "destroy",
+     "from": "Duplex",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "destroySoon",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "destroyed",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "disableRenegotiation",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "drop",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "emit",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "enableTrace",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "end",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "errored",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "eventNames",
+     "from": "Stream",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "every",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "exportKeyingMaterial",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "filter",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "find",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "flatMap",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "forEach",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getCertificate",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getCipher",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getEphemeralKeyInfo",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getFinished",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getPeerCertificate",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getPeerFinished",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getPeerX509Certificate",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getProtocol",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getSession",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getSharedSigalgs",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getTLSTicket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getX509Certificate",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isPaused",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSessionReused",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "iterator",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "listenerCount",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "listeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "localAddress",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "localFamily",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "localPort",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "map",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "off",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "pause",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "pending",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "pipe",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependOnceListener",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "push",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "rawListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "read",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "readable",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "readableAborted",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableBuffer",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableDidRead",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableEncoding",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableEnded",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableFlowing",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "readableHighWaterMark",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableLength",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readableObjectMode",
+     "from": "Readable",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "readyState",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "reduce",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "ref",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "remoteAddress",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "remoteFamily",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "remotePort",
+     "from": "Socket",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "removeAllListeners",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeListener",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "renegotiate",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resetAndDestroy",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "resume",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "setDefaultEncoding",
+     "from": "Duplex",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setEncoding",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setKeepAlive",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setKeyCert",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setMaxListeners",
+     "from": "EventEmitter",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setMaxSendFragment",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setNoDelay",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setServername",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setSession",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "setTimeout",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "some",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "take",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "toArray",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "uncork",
+     "from": "Duplex",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "unpipe",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "unref",
+     "from": "Socket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "unshift",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "wrap",
+     "from": "Readable",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "writable",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "writableBuffer",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableCorked",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableEnded",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableFinished",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableHighWaterMark",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableLength",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableNeedDrain",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "writableObjectMode",
+     "from": "Duplex",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "write",
+     "from": "Duplex",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "allowHalfOpen",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "alpnProtocol",
+     "typeof": "null",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "authorizationError",
+     "typeof": "null",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "authorized",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "connecting",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "domain",
+     "typeof": "null",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "encrypted",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "secureConnecting",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "server",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "servername",
+     "typeof": "null",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ssl",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "checkServerIdentity",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "connect",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "convertALPNProtocols",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "createSecureContext",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "createSecurePair",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "createServer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getCACertificates",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getCiphers",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "rootCertificates",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "setDefaultCACertificates",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

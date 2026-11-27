@@ -1,0 +1,495 @@
+{
+ "module": "node:async_hooks",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "AsyncLocalStorage",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "AsyncResource",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [
+    {
+     "name": "bind",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    }
+   ],
+   "proto": [
+    {
+     "name": "asyncId",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "bind",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "emitDestroy",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "runInAsyncScope",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "triggerAsyncId",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "asyncWrapProviders",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "BLOBREADER",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CHECKPRIMEREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CIPHERREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DERIVEBITSREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DIRHANDLE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DNSCHANNEL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ELDHISTOGRAM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "FILEHANDLE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "FILEHANDLECLOSEREQ",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "FSEVENTWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "FSREQCALLBACK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "FSREQPROMISE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GETADDRINFOREQWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GETNAMEINFOREQWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HASHREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HEAPSNAPSHOT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2PING",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2SESSION",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2SETTINGS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTP2STREAM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTPCLIENTREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HTTPINCOMINGMESSAGE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "JSSTREAM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "JSUDPWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "KEYEXPORTREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "KEYGENREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "KEYPAIRGENREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MESSAGEPORT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PBKDF2REQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PIPECONNECTWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PIPESERVERWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PIPEWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PROCESSWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PROMISE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "QUERYWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "QUIC_ENDPOINT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "QUIC_LOGSTREAM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "QUIC_PACKET",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "QUIC_SESSION",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "QUIC_STREAM",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "QUIC_UDP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "RANDOMBYTESREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "RANDOMPRIMEREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SCRYPTREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SHUTDOWNWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SIGINTWATCHDOG",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SIGNALWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SIGNREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "STATWATCHER",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "STREAMPIPE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TCPCONNECTWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TCPSERVERWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TCPWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TLSWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TTYWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UDPSENDWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UDPWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "VERIFYREQUEST",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "WORKER",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "WORKERCPUPROFILE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "WORKERCPUUSAGE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "WORKERHEAPSNAPSHOT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "WORKERHEAPSTATISTICS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "WRITEWRAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ZLIB",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "createHook",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "executionAsyncId",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "executionAsyncResource",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "triggerAsyncId",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

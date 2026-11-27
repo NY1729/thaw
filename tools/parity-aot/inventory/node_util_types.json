@@ -1,0 +1,320 @@
+{
+ "module": "node:util/types",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "isAnyArrayBuffer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isArgumentsObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isArrayBuffer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isArrayBufferView",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "isAsyncFunction",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isBigInt64Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isBigIntObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isBigUint64Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isBooleanObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isBoxedPrimitive",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isCryptoKey",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "isDataView",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isDate",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isExternal",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isFloat16Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isFloat32Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isFloat64Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isGeneratorFunction",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isGeneratorObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isInt16Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isInt32Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isInt8Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isKeyObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "isMap",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isMapIterator",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isModuleNamespaceObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isNativeError",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isNumberObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isPromise",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isProxy",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isRegExp",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isSet",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isSetIterator",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isSharedArrayBuffer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isStringObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isSymbolObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isTypedArray",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isUint16Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isUint32Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isUint8Array",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isUint8ClampedArray",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isWeakMap",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "isWeakSet",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  }
+ ]
+}

@@ -1,0 +1,64 @@
+{
+ "module": "node:punycode",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "decode",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "encode",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "toASCII",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "toUnicode",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "ucs2",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "decode",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "encode",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ]
+  },
+  {
+   "name": "version",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  }
+ ]
+}

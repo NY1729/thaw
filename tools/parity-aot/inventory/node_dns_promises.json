@@ -1,0 +1,431 @@
+{
+ "module": "node:dns/promises",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "ADDRGETNETWORKPARAMS",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "BADFAMILY",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "BADFLAGS",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "BADHINTS",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "BADNAME",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "BADQUERY",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "BADRESP",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "BADSTR",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "CANCELLED",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "CONNREFUSED",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DESTRUCTION",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EOF",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "FILE",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "FORMERR",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "LOADIPHLPAPI",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "NODATA",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "NOMEM",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "NONAME",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "NOTFOUND",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "NOTIMP",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "NOTINITIALIZED",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "REFUSED",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "Resolver",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "cancel",
+     "from": "ResolverBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getServers",
+     "from": "ResolverBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "resolve",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolve4",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolve6",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveAny",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveCaa",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveCname",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveMx",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveNaptr",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveNs",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolvePtr",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveSoa",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveSrv",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveTlsa",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolveTxt",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "reverse",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setLocalAddress",
+     "from": "ResolverBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setServers",
+     "from": "ResolverBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "ok",
+   "instance": []
+  },
+  {
+   "name": "SERVFAIL",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "TIMEOUT",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "getDefaultResultOrder",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getServers",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "lookup",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "lookupService",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "resolve",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolve4",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolve6",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveAny",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveCaa",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveCname",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveMx",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveNaptr",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveNs",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolvePtr",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveSoa",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveSrv",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveTlsa",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolveTxt",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "reverse",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "setDefaultResultOrder",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setServers",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

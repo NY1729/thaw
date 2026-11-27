@@ -1,0 +1,12 @@
+{
+  "_doc": "Instance recipes. ts: statement(s) in a probe body that bind `o` with the type thaw infers (the typed API path, e.g. a createServer callback parameter); `$` is replaced by the probe expression. js: Node-only expression for an instance, used by inv.js to list instance own properties. Classes not listed here use `new C(args)` (args from CTOR_ARGS in gen_probes.py).",
+  "node:http.IncomingMessage": {"ts": "M.createServer((o, _r) => { $; });", "js": "new M.IncomingMessage(new (require('net').Socket)())"},
+  "node:http.ServerResponse": {"ts": "M.createServer((_q, o) => { $; });", "js": "new M.ServerResponse(new M.IncomingMessage(new (require('net').Socket)()))"},
+  "node:http.Server": {"ts": "const o = M.createServer(); $;", "js": "M.createServer()"},
+  "node:http.ClientRequest": {"ts": "const o = M.request('http://127.0.0.1:1/'); o.on('error', () => {}); $; o.destroy();", "js": "M.request('http://127.0.0.1:1/')"},
+  "node:http.Agent": {"ts": "const o = new M.Agent(); $;", "js": "new M.Agent()"},
+  "node:https.Server": {"ts": "const o = M.createServer({}); $;", "js": "M.createServer({})"},
+  "node:https.Agent": {"ts": "const o = new M.Agent(); $;", "js": "new M.Agent()"},
+  "node:https.IncomingMessage": {"ts": "M.createServer({}, (o, _r) => { $; });", "js": null},
+  "node:https.ServerResponse": {"ts": "M.createServer({}, (_q, o) => { $; });", "js": null}
+}

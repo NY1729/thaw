@@ -1,0 +1,21 @@
+{
+ "module": "node:trace_events",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "createTracing",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getEnabledCategories",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  }
+ ]
+}

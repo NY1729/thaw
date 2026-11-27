@@ -65,6 +65,24 @@ class HarnessError(Exception):
     pass
 
 
+# Optional build+run cache (PARITY_AOT_CACHE=<dir>): key = sha256(thaw binary id, program text, cwd kind, PA_TMP name);
+# value = build verdict + diagnostic, and for a good build the run status/stdout/rc. A hit skips both build and run.
+CACHE_DIR = os.environ.get("PARITY_AOT_CACHE", "")
+_THAW_ID = {}
+
+
+def thaw_id(thaw):
+    if thaw not in _THAW_ID:
+        import hashlib
+        path = thaw if os.path.exists(thaw) else shutil.which(thaw)
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 22), b""):
+                h.update(chunk)
+        _THAW_ID[thaw] = h.hexdigest()
+    return _THAW_ID[thaw]
+
+
 def safe(name):
     return name.replace(".", "_")
 
@@ -190,6 +208,7 @@ class Program:
         os.makedirs(self.env["PA_TMP"], exist_ok=True)
         if prog.get("imports"):
             self.cwd = self.env["PA_TMP"]   # same cwd as the Node side, see the module docstring
+        self.keys, self.cached_run = {}, {}
         self.builds = 0
         self.reruns = 0
         self.n = 0
@@ -205,6 +224,18 @@ class Program:
         self.n += 1
         stem = f"g{self.n}"
         texts = render_program(self.prog, [self.line_of[n] for n in names], node=False).split("\n")
+        if CACHE_DIR:
+            import hashlib
+            key = hashlib.sha256("\0".join([thaw_id(self.cfg.thaw), self.prog["name"], "\n".join(texts)]).encode()).hexdigest()
+            self.keys[stem] = key
+            hit = os.path.join(CACHE_DIR, key + ".json")
+            if os.path.exists(hit):
+                with open(hit, encoding="utf-8") as fh:
+                    c = json.load(fh)
+                if not c["ok"] or c["run"]:
+                    if c["ok"]:
+                        self.cached_run[stem] = c["run"]
+                    return c["ok"], c["diag"].replace("@STEM@", stem), stem, texts
         src = os.path.join(self.work, stem + ".ts")
         with open(src, "w", encoding="utf-8") as fh:
             fh.write("\n".join(texts))
@@ -216,6 +247,10 @@ class Program:
             ok = p.returncode == 0 and os.path.exists(os.path.join(self.work, stem))
         except subprocess.TimeoutExpired:
             diag, ok = "error: build timed out", False
+        if CACHE_DIR and "timed out" not in diag:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(os.path.join(CACHE_DIR, self.keys[stem] + ".json"), "w", encoding="utf-8") as fh:
+                json.dump({"ok": ok, "diag": diag.replace(stem + ".ts", "@STEM@.ts"), "run": None}, fh)
         return ok, diag, stem, texts
 
     def sites_from_diag(self, diag, stem, texts, names):
@@ -278,6 +313,11 @@ class Program:
         """(status, blocks, rc): status OK, CRASH or HANG; blocks is the parsed output (may be partial)."""
         binary = os.path.join(self.work, stem)
         out_path = os.path.join(self.work, stem + ".out")
+        if self.cached_run.get(stem):
+            status, rc, data = self.cached_run[stem]["status"], self.cached_run[stem]["rc"], self.cached_run[stem]["out"].encode("latin-1")
+            with open(out_path, "wb") as fh:
+                fh.write(data)
+            return status, pdiff.load_blocks(out_path), rc
         try:
             p = subprocess.run([binary], cwd=self.cwd, env=self.env, capture_output=True, timeout=RUN_TIMEOUT,
                                preexec_fn=limit_as)
@@ -286,6 +326,9 @@ class Program:
             status, rc, data = "HANG", None, e.stdout or b""
         with open(out_path, "wb") as fh:
             fh.write(data)
+        if CACHE_DIR and stem in self.keys:
+            with open(os.path.join(CACHE_DIR, self.keys[stem] + ".json"), "w", encoding="utf-8") as fh:
+                json.dump({"ok": True, "diag": "", "run": {"status": status, "rc": rc, "out": data.decode("latin-1")}}, fh)
         return status, pdiff.load_blocks(out_path), rc
 
 

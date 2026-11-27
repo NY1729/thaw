@@ -1,0 +1,614 @@
+{
+ "module": "node:fs/promises",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "access",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "appendFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "chmod",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "chown",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "constants",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "COPYFILE_EXCL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "COPYFILE_FICLONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "COPYFILE_FICLONE_FORCE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "F_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_APPEND",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_CREAT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_DIRECT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_DIRECTORY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_DSYNC",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_EXCL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_NOATIME",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_NOCTTY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_NOFOLLOW",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_NONBLOCK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_RDONLY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_RDWR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_SYNC",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_TRUNC",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_WRONLY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "R_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFBLK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFCHR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFDIR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFIFO",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFLNK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFMT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFREG",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFSOCK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRGRP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IROTH",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRUSR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRWXG",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRWXO",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRWXU",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IWGRP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IWOTH",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IWUSR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IXGRP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IXOTH",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IXUSR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_BLOCK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_CHAR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_DIR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_FIFO",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_FILE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_LINK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_SOCKET",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_UNKNOWN",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_COPYFILE_EXCL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_COPYFILE_FICLONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_COPYFILE_FICLONE_FORCE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_O_FILEMAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_SYMLINK_DIR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_SYMLINK_JUNCTION",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "W_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "X_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "copyFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "cp",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "glob",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": [
+    {
+     "name": "next",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "return",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "throw",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ]
+  },
+  {
+   "name": "lchmod",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "lchown",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "link",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "lstat",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "lutimes",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "mkdir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "mkdtemp",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "open",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "opendir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "readdir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "readlink",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "realpath",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "rename",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "rm",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "rmdir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "stat",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "statfs",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "symlink",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "truncate",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "unlink",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "utimes",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  },
+  {
+   "name": "watch",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": [
+    {
+     "name": "next",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "return",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "throw",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ]
+  },
+  {
+   "name": "writeFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": []
+  }
+ ]
+}

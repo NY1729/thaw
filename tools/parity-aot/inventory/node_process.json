@@ -1,0 +1,3904 @@
+{
+ "module": "node:process",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "_debugEnd",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "_debugProcess",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "_events",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "newListener",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "0",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "1",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "2",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 2
+      }
+     ]
+    },
+    {
+     "name": "removeListener",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "0",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "1",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "2",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 2
+      }
+     ]
+    },
+    {
+     "name": "warning",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ]
+  },
+  {
+   "name": "_eventsCount",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "_exiting",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "_fatalException",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "_getActiveHandles",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "_getActiveRequests",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "_kill",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "_linkedBinding",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_maxListeners",
+   "typeof": "undefined",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "_preload_modules",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": []
+  },
+  {
+   "name": "_rawDebug",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_startProfilerIdleNotifier",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "_stopProfilerIdleNotifier",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "_tickCallback",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "abort",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "allowedNodeEnvironmentFlags",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "arch",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "argv",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "0",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "1",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "2",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "argv0",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "assert",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "availableMemory",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "binding",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "chdir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "config",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "target_defaults",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "cflags",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "configurations",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "default_configuration",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "defines",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "include_dirs",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "libraries",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      }
+     ]
+    },
+    {
+     "name": "variables",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "asan",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "clang",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "control_flow_guard",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "coverage",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "dcheck_always_on",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "debug_nghttp2",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "debug_node",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "enable_lto",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "enable_pgo_generate",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "enable_pgo_use",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "error_on_warn",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "force_dynamic_crt",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "host_arch",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "icu_data_in",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "icu_default_data",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "icu_endianness",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "icu_gyp_path",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "icu_locales",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "icu_path",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "icu_small",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "icu_ver_major",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "libdir",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "llvm_version",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "napi_build_version",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_builtin_shareable_builtins",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "node_byteorder",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_cctest_sources",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "node_debug_lib",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_enable_d8",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_enable_v8_vtunejit",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_enable_v8windbg",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_fipsinstall",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_install_corepack",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_install_npm",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_library_files",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "node_module_version",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_no_browser_globals",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_prefix",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_release_urlbase",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_ada",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_brotli",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_cares",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_http_parser",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_libuv",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_nghttp2",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_nghttp3",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_ngtcp2",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_openssl",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_simdjson",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_simdutf",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_sqlite",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_uvwasi",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_zlib",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_shared_zstd",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_tag",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_target_type",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_use_amaro",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_use_bundled_v8",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_use_node_code_cache",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_use_node_snapshot",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_use_openssl",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_use_sqlite",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_use_v8_platform",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_with_ltcg",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_without_node_options",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "node_write_snapshot_as_array_literals",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "openssl_is_fips",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "openssl_quic",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ossfuzz",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "shlib_suffix",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "single_executable_application",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "suppress_all_error_on_warn",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "target_arch",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ubsan",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "use_ccache_win",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "use_prefix_to_find_headers",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_31bit_smis_on_64bit_arch",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_extensible_ro_snapshot",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_external_code_space",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_gdbjit",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_hugepage",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_i18n_support",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_inspector",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_javascript_promise_hooks",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_lite_mode",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_maglev",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_object_print",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_pointer_compression",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_pointer_compression_shared_cage",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_sandbox",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_shared_ro_heap",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_short_builtin_calls",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_wasm_simd256_revec",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_enable_webassembly",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_optimized_debug",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_promise_internal_field_count",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_random_seed",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_trace_maps",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "v8_use_siphash",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "want_separate_host_toolset",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "constrainedMemory",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "cpuUsage",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "cwd",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "debugPort",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "dlopen",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "domain",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "emitWarning",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "env",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "AI_AGENT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ANDROID_HOME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "BUN_INSTALL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDECODE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_BRIDGE_SESSION_ID",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_CHILD_NOTES_DIR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_CHILD_SESSION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_ENTRYPOINT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_EXECPATH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_MESSAGING_SOCKET",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_MESSAGING_TOKEN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_SESSION_ATTENDED",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_CODE_SESSION_ID",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_EFFORT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "CLAUDE_PID",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "COLORTERM",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "COREPACK_ENABLE_AUTO_PIN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DBUS_SESSION_BUS_ADDRESS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DEBUGINFOD_IMA_CERT_PATH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DEBUGINFOD_URLS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DESKTOP_SESSION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "DISPLAY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "EDITOR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GBM_BACKEND",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GDMSESSION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GDM_LANG",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GHOSTTY_BIN_DIR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GHOSTTY_RESOURCES_DIR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GHOSTTY_SHELL_FEATURES",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GIT_EDITOR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GPG_TTY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "GTK_IM_MODULE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HISTCONTROL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HISTSIZE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HL_INITIAL_WORKSPACE_TOKEN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HOME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HOSTNAME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HYPRCURSOR_SIZE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HYPRCURSOR_THEME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HYPRLAND_CMD",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "HYPRLAND_INSTANCE_SIGNATURE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "JAVA_HOME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "LANG",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "LD_LIBRARY_PATH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "LESS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "LESSOPEN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "LIBVA_DRIVER_NAME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "LOGNAME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "LSCOLORS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "LS_COLORS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MAIL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MANAGERPID",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MANAGERPIDFDID",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MEMORY_PRESSURE_WATCH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MEMORY_PRESSURE_WRITE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MOZ_ENABLE_WAYLAND",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "MOZ_GMP_PATH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NVCC_CCBIN",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NoDefaultCurrentDirectoryInExePath",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "OBERVA_DB_PASSWORD",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "OBERVA_DB_URL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "OBERVA_DEV_DB_PASSWORD",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "OBERVA_DEV_DB_URL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "OBERVA_R2_BUCKET_BACKUP",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "OBERVA_R2_BUCKET_MEDIA",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "OBERVA_R2_ENDPOINT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "OLDPWD",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PAGER",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PATH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "PWD",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "QT_IM_MODULE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SDKMAN_BROKER_API",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SDKMAN_CANDIDATES_API",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SDKMAN_CANDIDATES_DIR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SDKMAN_DIR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SDKMAN_PLATFORM",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SERVICE_ROLE_KEY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SHELL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SHLVL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "STARSHIP_SESSION_KEY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "STARSHIP_SHELL",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "STEAM_FRAME_FORCE_CLOSE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "SYSTEMD_EXEC_PID",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TERM",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TERMINFO",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TERM_PROGRAM",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "TERM_PROGRAM_VERSION",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "USER",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "USERNAME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UWSM_FINALIZE_VARNAMES",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UWSM_WAIT_VARNAMES",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "WAYLAND_DISPLAY",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "WLR_NO_HARDWARE_CURSORS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XCURSOR_SIZE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XCURSOR_THEME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_BACKEND",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_CACHE_HOME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_CONFIG_DIRS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_CONFIG_HOME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_CURRENT_DESKTOP",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_DATA_DIRS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_DATA_HOME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_MENU_PREFIX",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_RUNTIME_DIR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_SEAT",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_SESSION_CLASS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_SESSION_DESKTOP",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_SESSION_EXTRA_DEVICE_ACCESS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_SESSION_ID",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_SESSION_TYPE",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_STATE_HOME",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XDG_VTNR",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "XMODIFIERS",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ZSH",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "execArgv",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": []
+  },
+  {
+   "name": "execPath",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "execve",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "exit",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "exitCode",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "features",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "cached_builtins",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "debug",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "inspector",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ipv6",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "openssl_is_boringssl",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "require_module",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "tls",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "tls_alpn",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "tls_ocsp",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "tls_sni",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "typescript",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "uv",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "finalization",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "getActiveResourcesInfo",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "getBuiltinModule",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getegid",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "geteuid",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "getgid",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "getgroups",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "getuid",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "hasUncaughtExceptionCaptureCallback",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "hrtime",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [
+    {
+     "name": "bigint",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "initgroups",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "kill",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "loadEnvFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "mainModule",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "children",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": []
+    },
+    {
+     "name": "exports",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": []
+    },
+    {
+     "name": "filename",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "id",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "loaded",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "path",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "paths",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "0",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "1",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "2",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "3",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "4",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "5",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "6",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "7",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "8",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "memoryUsage",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [
+    {
+     "name": "rss",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "moduleLoadList",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "0",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "1",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "10",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "100",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "101",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "102",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "103",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "104",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "105",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "106",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "107",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "108",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "109",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "11",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "110",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "111",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "112",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "113",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "114",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "115",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "116",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "117",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "118",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "119",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "12",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "120",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "121",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "122",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "123",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "124",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "125",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "126",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "127",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "128",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "129",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "13",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "130",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "131",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "132",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "133",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "134",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "135",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "136",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "137",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "138",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "139",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "14",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "140",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "141",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "142",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "143",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "144",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "145",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "146",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "147",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "148",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "149",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "15",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "150",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "151",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "152",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "153",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "154",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "155",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "156",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "157",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "158",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "159",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "16",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "160",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "161",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "162",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "163",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "164",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "165",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "166",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "167",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "168",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "169",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "17",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "170",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "171",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "172",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "173",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "174",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "175",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "176",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "177",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "178",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "179",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "18",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "180",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "181",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "182",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "183",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "184",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "185",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "186",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "187",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "188",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "189",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "19",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "190",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "191",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "192",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "193",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "194",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "195",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "196",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "197",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "198",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "199",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "2",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "20",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "200",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "201",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "202",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "203",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "204",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "205",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "206",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "207",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "208",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "209",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "21",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "210",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "211",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "212",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "213",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "214",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "215",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "216",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "217",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "218",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "219",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "22",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "220",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "221",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "222",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "223",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "224",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "225",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "226",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "227",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "228",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "229",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "23",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "230",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "231",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "232",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "233",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "234",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "235",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "236",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "237",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "238",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "239",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "24",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "240",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "241",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "242",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "243",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "244",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "245",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "246",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "247",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "248",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "249",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "25",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "26",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "27",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "28",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "29",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "3",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "30",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "31",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "32",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "33",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "34",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "35",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "36",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "37",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "38",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "39",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "4",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "40",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "41",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "42",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "43",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "44",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "45",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "46",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "47",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "48",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "49",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "5",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "50",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "51",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "52",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "53",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "54",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "55",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "56",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "57",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "58",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "59",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "6",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "60",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "61",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "62",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "63",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "64",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "65",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "66",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "67",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "68",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "69",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "7",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "70",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "71",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "72",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "73",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "74",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "75",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "76",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "77",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "78",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "79",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "8",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "80",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "81",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "82",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "83",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "84",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "85",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "86",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "87",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "88",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "89",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "9",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "90",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "91",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "92",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "93",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "94",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "95",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "96",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "97",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "98",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "99",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "nextTick",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "openStdin",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "pid",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "platform",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ppid",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "reallyExit",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "ref",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "release",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "headersUrl",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "lts",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "sourceUrl",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "report",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "resourceUsage",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setSourceMapsEnabled",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setUncaughtExceptionCaptureCallback",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setegid",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "seteuid",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setgid",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setgroups",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setuid",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "sourceMapsEnabled",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "stderr",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "stdin",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "stdout",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "threadCpuUsage",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "title",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "umask",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "unref",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "uptime",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "version",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "versions",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "acorn",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ada",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "amaro",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ares",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "brotli",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "cjs_module_lexer",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "cldr",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "icu",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "llhttp",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "modules",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "napi",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "nbytes",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ncrypto",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "nghttp2",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "node",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "openssl",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "simdjson",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "simdutf",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "sqlite",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "tz",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "undici",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "unicode",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "uv",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "uvwasi",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "v8",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "zlib",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "zstd",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  }
+ ]
+}

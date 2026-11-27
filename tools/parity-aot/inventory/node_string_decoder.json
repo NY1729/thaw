@@ -1,0 +1,60 @@
+{
+ "module": "node:string_decoder",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "StringDecoder",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [],
+   "proto": [
+    {
+     "name": "end",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "lastChar",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "lastNeed",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "lastTotal",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "text",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "write",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "encoding",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,515 @@
+{
+ "module": "node:path/posix",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "_makeLong",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "basename",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "delimiter",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "dirname",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "extname",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "format",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "isAbsolute",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "join",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "matchesGlob",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "normalize",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "parse",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "posix",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "basename",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "delimiter",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "dirname",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "extname",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "format",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isAbsolute",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "join",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "matchesGlob",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "normalize",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "parse",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "posix",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": []
+    },
+    {
+     "name": "relative",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolve",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "sep",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "toNamespacedPath",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "win32",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "basename",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 2
+      },
+      {
+       "name": "delimiter",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "dirname",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "extname",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "format",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "isAbsolute",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "join",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 0
+      },
+      {
+       "name": "matchesGlob",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 2
+      },
+      {
+       "name": "normalize",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "parse",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "posix",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "relative",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 2
+      },
+      {
+       "name": "resolve",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 0
+      },
+      {
+       "name": "sep",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "toNamespacedPath",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "win32",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "relative",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "resolve",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "sep",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "toNamespacedPath",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "win32",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "basename",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "delimiter",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "dirname",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "extname",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "format",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isAbsolute",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "join",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "matchesGlob",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "normalize",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "parse",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "posix",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "basename",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 2
+      },
+      {
+       "name": "delimiter",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "dirname",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "extname",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "format",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "isAbsolute",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "join",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 0
+      },
+      {
+       "name": "matchesGlob",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 2
+      },
+      {
+       "name": "normalize",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "parse",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "posix",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "relative",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 2
+      },
+      {
+       "name": "resolve",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 0
+      },
+      {
+       "name": "sep",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "toNamespacedPath",
+       "typeof": "function",
+       "kind": "function",
+       "arity": 1
+      },
+      {
+       "name": "win32",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      }
+     ]
+    },
+    {
+     "name": "relative",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "resolve",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "sep",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "toNamespacedPath",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "win32",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": []
+    }
+   ]
+  }
+ ]
+}
