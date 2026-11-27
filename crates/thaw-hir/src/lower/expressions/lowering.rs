@@ -4633,6 +4633,13 @@ impl<'a> FnLowerer<'a> {
                 {
                     consequent = self.coerce_to_declared(&alternate_type, consequent)?;
                     alternate_type
+                } else if matches!(consequent_type, HirType::JsValue | HirType::Json)
+                    || matches!(alternate_type, HirType::JsValue | HirType::Json)
+                {
+                    // A live dynamic value (`any` call result) joined with a union: both arms become `any`.
+                    consequent = self.coerce_to_declared(&HirType::Json, consequent)?;
+                    alternate = self.coerce_to_declared(&HirType::Json, alternate)?;
+                    HirType::Json
                 } else {
                     return Err(format!(
                         "conditional expression branches have incompatible types {consequent_type:?} and {alternate_type:?}"

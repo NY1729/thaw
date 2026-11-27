@@ -6157,3 +6157,58 @@ fn tagged_template_with_fixed_parameters_keeps_the_declared_count() {
     assert!(body.contains("Let(\"__thaw_template_arg_"), "{body}");
     assert!(body.contains("Var(\"__thaw_template_arg_"), "{body}");
 }
+
+#[test]
+fn truthy_narrowed_nullable_regex_match_member_reads_groups() {
+    let program = lower(
+        r#"function f(re: RegExp, s: string, ok: boolean): string {
+            const m = ok && re.exec(s);
+            if (m) { const g = m.groups; return g ? "g" : "none"; }
+            return "none";
+        }
+        function main(): void { console.log(f(/(?<id>\d+)/, "ab12", true)); }"#,
+    );
+    let f = program.functions.iter().find(|f| f.name == "f").unwrap();
+    assert!(format!("{:?}", f.body).contains("__thaw_regex_exec_groups"));
+}
+
+#[test]
+fn self_recursive_untyped_arrow_is_any_typed_in_implicit_any_programs() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { const run = (i) => (i < 3 ? run(i + 1) + 1 : 0); console.log(run(0)); }",
+    )
+    .expect("parse error");
+    crate::set_implicit_any(true);
+    let result = lower_module(&module);
+    crate::set_implicit_any(false);
+    result.expect("recursive untyped arrow lowers");
+}
+
+#[test]
+fn any_typed_index_into_a_typed_array_is_converted_to_a_number() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { const a = [10, 20]; const at = (i) => a[i]; console.log(at(1)); }",
+    )
+    .expect("parse error");
+    crate::set_implicit_any(true);
+    let result = lower_module(&module);
+    crate::set_implicit_any(false);
+    result.expect("any index lowers");
+}
+
+#[test]
+fn conditional_joining_a_live_any_call_with_a_record_union_becomes_any() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const mw = [(x) => x + 1];
+            const fin = (n) => (n > 0 ? { status: 200, body: 1 } : { status: 404, body: null });
+            const run = (i) => (i < mw.length ? mw[i](i) : fin(i));
+            console.log(run(0));
+        }"#,
+    )
+    .expect("parse error");
+    crate::set_implicit_any(true);
+    let result = lower_module(&module);
+    crate::set_implicit_any(false);
+    result.expect("conditional lowers");
+}

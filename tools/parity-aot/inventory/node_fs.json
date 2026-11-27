@@ -1,0 +1,1451 @@
+{
+ "module": "node:fs",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "Dir",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 3,
+   "static": [],
+   "proto": [
+    {
+     "name": "close",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "closeSync",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "entries",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "path",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "processReadResult",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "read",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "readSync",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "readSyncRecursive",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "Dirent",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 3,
+   "static": [],
+   "proto": [
+    {
+     "name": "isBlockDevice",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isCharacterDevice",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isDirectory",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isFIFO",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isFile",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSocket",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSymbolicLink",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "parentPath",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "path",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "F_OK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "FileReadStream",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "FileWriteStream",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "R_OK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ReadStream",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "Stats",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 14,
+   "static": [],
+   "proto": [
+    {
+     "name": "atime",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "birthtime",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "ctime",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "isBlockDevice",
+     "from": "StatsBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isCharacterDevice",
+     "from": "StatsBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isDirectory",
+     "from": "StatsBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isFIFO",
+     "from": "StatsBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isFile",
+     "from": "StatsBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSocket",
+     "from": "StatsBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSymbolicLink",
+     "from": "StatsBase",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "mtime",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "atimeMs",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "birthtimeMs",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "blksize",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "blocks",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ctimeMs",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "dev",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "gid",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "ino",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "mode",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "mtimeMs",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "nlink",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "rdev",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "size",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "uid",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "W_OK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "WriteStream",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "X_OK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "_toUnixTimestamp",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "access",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "accessSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "appendFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "appendFileSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "chmod",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "chmodSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "chown",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "chownSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "close",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "closeSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "constants",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "COPYFILE_EXCL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "COPYFILE_FICLONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "COPYFILE_FICLONE_FORCE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "F_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_APPEND",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_CREAT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_DIRECT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_DIRECTORY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_DSYNC",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_EXCL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_NOATIME",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_NOCTTY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_NOFOLLOW",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_NONBLOCK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_RDONLY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_RDWR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_SYNC",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_TRUNC",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "O_WRONLY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "R_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFBLK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFCHR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFDIR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFIFO",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFLNK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFMT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFREG",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IFSOCK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRGRP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IROTH",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRUSR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRWXG",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRWXO",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IRWXU",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IWGRP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IWOTH",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IWUSR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IXGRP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IXOTH",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "S_IXUSR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_BLOCK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_CHAR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_DIR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_FIFO",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_FILE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_LINK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_SOCKET",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_DIRENT_UNKNOWN",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_COPYFILE_EXCL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_COPYFILE_FICLONE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_COPYFILE_FICLONE_FORCE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_O_FILEMAP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_SYMLINK_DIR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "UV_FS_SYMLINK_JUNCTION",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "W_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "X_OK",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "copyFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "copyFileSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "cp",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "cpSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "createReadStream",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "createWriteStream",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "exists",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "existsSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fchmod",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fchmodSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fchown",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fchownSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fdatasync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fdatasyncSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fstat",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fstatSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fsync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fsyncSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "ftruncate",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "ftruncateSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "futimes",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "futimesSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "glob",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "globSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "lchmod",
+   "typeof": "undefined",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "lchmodSync",
+   "typeof": "undefined",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "lchown",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "lchownSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "link",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "linkSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "lstat",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "lstatSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "lutimes",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "lutimesSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "mkdir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "mkdirSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "mkdtemp",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "mkdtempSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "open",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "openAsBlob",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "openSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "opendir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "opendirSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "promises",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "read",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 6,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readFileSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 5,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readdir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readdirSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readlink",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readlinkSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readv",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "readvSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "realpath",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [
+    {
+     "name": "native",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "realpathSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [
+    {
+     "name": "native",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "rename",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "renameSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "rm",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "rmSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "rmdir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "rmdirSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "stat",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "statSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "statfs",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "statfsSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "symlink",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "symlinkSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "truncate",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "truncateSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "unlink",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "unlinkSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "unwatchFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "utimes",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "utimesSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "watch",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "watchFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "write",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 6,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "writeFile",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "writeFileSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "writeSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 5,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "writev",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "writevSync",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

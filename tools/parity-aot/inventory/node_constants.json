@@ -1,0 +1,1350 @@
+{
+ "module": "node:constants",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "COPYFILE_EXCL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "COPYFILE_FICLONE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "COPYFILE_FICLONE_FORCE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DH_CHECK_P_NOT_PRIME",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DH_CHECK_P_NOT_SAFE_PRIME",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DH_NOT_SUITABLE_GENERATOR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "DH_UNABLE_TO_CHECK_GENERATOR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "E2BIG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EACCES",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EADDRINUSE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EADDRNOTAVAIL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EAFNOSUPPORT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EAGAIN",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EALREADY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EBADF",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EBADMSG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EBUSY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ECANCELED",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ECHILD",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ECONNABORTED",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ECONNREFUSED",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ECONNRESET",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EDEADLK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EDESTADDRREQ",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EDOM",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EDQUOT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EEXIST",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EFAULT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EFBIG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EHOSTUNREACH",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EIDRM",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EILSEQ",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EINPROGRESS",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EINTR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EINVAL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EIO",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EISCONN",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EISDIR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ELOOP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EMFILE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EMLINK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EMSGSIZE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EMULTIHOP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENAMETOOLONG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENETDOWN",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENETRESET",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENETUNREACH",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENFILE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOBUFS",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENODATA",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENODEV",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOENT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOEXEC",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOLCK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOLINK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOMEM",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOMSG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOPROTOOPT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOSPC",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOSR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOSTR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOSYS",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOTCONN",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOTDIR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOTEMPTY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOTSOCK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOTSUP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENOTTY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ENXIO",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EOPNOTSUPP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EOVERFLOW",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EPERM",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EPIPE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EPROTO",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EPROTONOSUPPORT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EPROTOTYPE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ERANGE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EROFS",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ESPIPE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ESRCH",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ESTALE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ETIME",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ETIMEDOUT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "ETXTBSY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EWOULDBLOCK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "EXDEV",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "F_OK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "OPENSSL_VERSION_NUMBER",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_APPEND",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_CREAT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_DIRECT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_DIRECTORY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_DSYNC",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_EXCL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_NOATIME",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_NOCTTY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_NOFOLLOW",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_NONBLOCK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_RDONLY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_RDWR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_SYNC",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_TRUNC",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "O_WRONLY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "POINT_CONVERSION_COMPRESSED",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "POINT_CONVERSION_HYBRID",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "POINT_CONVERSION_UNCOMPRESSED",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "PRIORITY_ABOVE_NORMAL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "PRIORITY_BELOW_NORMAL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "PRIORITY_HIGH",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "PRIORITY_HIGHEST",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "PRIORITY_LOW",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "PRIORITY_NORMAL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RSA_NO_PADDING",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RSA_PKCS1_OAEP_PADDING",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RSA_PKCS1_PADDING",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RSA_PKCS1_PSS_PADDING",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RSA_PSS_SALTLEN_AUTO",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RSA_PSS_SALTLEN_DIGEST",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RSA_PSS_SALTLEN_MAX_SIGN",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RSA_X931_PADDING",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RTLD_DEEPBIND",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RTLD_GLOBAL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RTLD_LAZY",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RTLD_LOCAL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "RTLD_NOW",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "R_OK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGABRT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGALRM",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGBUS",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGCHLD",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGCONT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGFPE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGHUP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGILL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGINT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGIO",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGIOT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGKILL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGPIPE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGPOLL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGPROF",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGPWR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGQUIT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGSEGV",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGSTKFLT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGSTOP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGSYS",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGTERM",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGTRAP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGTSTP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGTTIN",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGTTOU",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGURG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGUSR1",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGUSR2",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGVTALRM",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGWINCH",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGXCPU",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SIGXFSZ",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_ALL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_ALLOW_NO_DHE_KEX",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_CIPHER_SERVER_PREFERENCE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_CISCO_ANYCONNECT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_COOKIE_EXCHANGE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_CRYPTOPRO_TLSEXT_BUG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_LEGACY_SERVER_CONNECT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_COMPRESSION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_ENCRYPT_THEN_MAC",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_QUERY_MTU",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_RENEGOTIATION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_SSLv2",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_SSLv3",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_TICKET",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_TLSv1",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_TLSv1_1",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_TLSv1_2",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_NO_TLSv1_3",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_PRIORITIZE_CHACHA",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "SSL_OP_TLS_ROLLBACK_BUG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IFBLK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IFCHR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IFDIR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IFIFO",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IFLNK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IFMT",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IFREG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IFSOCK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IRGRP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IROTH",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IRUSR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IRWXG",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IRWXO",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IRWXU",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IWGRP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IWOTH",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IWUSR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IXGRP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IXOTH",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "S_IXUSR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "TLS1_1_VERSION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "TLS1_2_VERSION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "TLS1_3_VERSION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "TLS1_VERSION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_DIRENT_BLOCK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_DIRENT_CHAR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_DIRENT_DIR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_DIRENT_FIFO",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_DIRENT_FILE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_DIRENT_LINK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_DIRENT_SOCKET",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_DIRENT_UNKNOWN",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_FS_COPYFILE_EXCL",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_FS_COPYFILE_FICLONE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_FS_COPYFILE_FICLONE_FORCE",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_FS_O_FILEMAP",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_FS_SYMLINK_DIR",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "UV_FS_SYMLINK_JUNCTION",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "W_OK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "X_OK",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "defaultCipherList",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "defaultCoreCipherList",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  }
+ ]
+}

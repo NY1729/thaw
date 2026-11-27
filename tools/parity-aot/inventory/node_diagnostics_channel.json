@@ -1,0 +1,99 @@
+{
+ "module": "node:diagnostics_channel",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "Channel",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [],
+   "proto": [
+    {
+     "name": "bindStore",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "hasSubscribers",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "publish",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "runStores",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "subscribe",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "unbindStore",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "unsubscribe",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "ok",
+   "instance": []
+  },
+  {
+   "name": "channel",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "hasSubscribers",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "subscribe",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "tracingChannel",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "unsubscribe",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

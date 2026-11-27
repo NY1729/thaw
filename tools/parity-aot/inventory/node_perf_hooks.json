@@ -1,0 +1,646 @@
+{
+ "module": "node:perf_hooks",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "Performance",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "addEventListener",
+     "from": "EventTarget",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "clearMarks",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "clearMeasures",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "clearResourceTimings",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "dispatchEvent",
+     "from": "EventTarget",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "eventLoopUtilization",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getEntries",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getEntriesByName",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getEntriesByType",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "mark",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "markResourceTiming",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 7
+    },
+    {
+     "name": "measure",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "nodeTiming",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    },
+    {
+     "name": "now",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "onresourcetimingbufferfull",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "removeEventListener",
+     "from": "EventTarget",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setResourceTimingBufferSize",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "timeOrigin",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "timerify",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "toJSON",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "PerformanceEntry",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "duration",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "entryType",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "startTime",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "toJSON",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "PerformanceMark",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [],
+   "proto": [
+    {
+     "name": "detail",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "duration",
+     "from": "PerformanceEntry",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "entryType",
+     "from": "PerformanceEntry",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "startTime",
+     "from": "PerformanceEntry",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "toJSON",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "PerformanceMeasure",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "detail",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "duration",
+     "from": "PerformanceEntry",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "entryType",
+     "from": "PerformanceEntry",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "startTime",
+     "from": "PerformanceEntry",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "toJSON",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "PerformanceObserver",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [
+    {
+     "name": "supportedEntryTypes",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    }
+   ],
+   "proto": [
+    {
+     "name": "disconnect",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "observe",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "takeRecords",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "PerformanceObserverEntryList",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "getEntries",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getEntriesByName",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getEntriesByType",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "PerformanceResourceTiming",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "connectEnd",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "connectStart",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "decodedBodySize",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "deliveryType",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "domainLookupEnd",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "domainLookupStart",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "duration",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "encodedBodySize",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "entryType",
+     "from": "PerformanceEntry",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "fetchStart",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "initiatorType",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "nextHopProtocol",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "redirectEnd",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "redirectStart",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "requestStart",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "responseEnd",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "responseStart",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "responseStatus",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "secureConnectionStart",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "startTime",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "toJSON",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "transferSize",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "workerStart",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "constants",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "NODE_PERFORMANCE_ENTRY_TYPE_DNS",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_ENTRY_TYPE_GC",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_ENTRY_TYPE_HTTP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_ENTRY_TYPE_HTTP2",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_ENTRY_TYPE_NET",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_FLAGS_ALL_AVAILABLE_GARBAGE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_FLAGS_ALL_EXTERNAL_MEMORY",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_FLAGS_CONSTRUCT_RETAINED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_FLAGS_FORCED",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_FLAGS_NO",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_FLAGS_SCHEDULE_IDLE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_FLAGS_SYNCHRONOUS_PHANTOM_PROCESSING",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_INCREMENTAL",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_MAJOR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_MINOR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_GC_WEAKCB",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_MILESTONE_BOOTSTRAP_COMPLETE",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_MILESTONE_ENVIRONMENT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_MILESTONE_LOOP_EXIT",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_MILESTONE_LOOP_START",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_MILESTONE_NODE_START",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_MILESTONE_TIME_ORIGIN",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_MILESTONE_TIME_ORIGIN_TIMESTAMP",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "NODE_PERFORMANCE_MILESTONE_V8_START",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "createHistogram",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "monitorEventLoopDelay",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "performance",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": []
+  }
+ ]
+}

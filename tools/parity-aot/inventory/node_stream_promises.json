@@ -1,0 +1,22 @@
+{
+ "module": "node:stream/promises",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "finished",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "pipeline",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  }
+ ]
+}
