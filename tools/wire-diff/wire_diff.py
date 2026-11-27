@@ -134,7 +134,8 @@ def run_server(cmd, env, scenes):
         try: socket.create_connection(("127.0.0.1", port), timeout=0.3).close(); break
         except OSError: time.sleep(0.1)
     def one(s):
-        return s["id"], exchange(port, client_bytes(s["method"], f"/s{s['id']}", s["conn"], s["reqbody"], s["reqhdr"]))
+        data = s["raw"].encode("latin-1") if "raw" in s else client_bytes(s["method"], f"/s{s['id']}", s["conn"], s["reqbody"], s["reqhdr"])
+        return s["id"], exchange(port, data)
     res = {}
     try:
         with cf.ThreadPoolExecutor(12) as ex:
@@ -227,6 +228,25 @@ def signature(a, b):
         sig.append("body")
     return sig
 
+def classify(scenes, node, thaw, failed):
+    rows = []
+    for s in scenes:
+        i = s["id"]
+        if i in failed: rows.append((s, "BUILD-FAIL", failed[i], [])); continue
+        nr, tr = node.get(i, (None, "")), thaw.get(i, (None, ""))
+        if not nr[0] and not tr[0]:
+            rows.append((s, "SAME" if nr[1] == tr[1] else "HANG", "thaw " + tr[1] + ", node " + nr[1], [])); continue
+        if not nr[0] or not tr[0]:
+            # one side answered with nothing: a connection left open is a hang, a close is a diff
+            who = "node" if not nr[0] else "thaw"
+            if not tr[0] and tr[1] == "open": rows.append((s, "HANG", "thaw gave no bytes and kept the connection open", [])); continue
+            rows.append((s, "DIFF", "", [f"{who} sent nothing ({(nr if who == 'node' else tr)[1]})"], [f"{who}-no-response"])); continue
+        x, y = norm(nr[0]), norm(tr[0])
+        if x == y and nr[1] == tr[1]: rows.append((s, "SAME", "", []))
+        elif x == y: rows.append((s, "DIFF", "", [f"connection state: node={nr[1]} thaw={tr[1]}"], ["connection-state"]))
+        else: rows.append((s, "DIFF", "", line_diff(x, y), signature(x, y)))
+    return rows
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenes", type=int, default=300); ap.add_argument("--seed", type=int, default=1)
@@ -256,21 +276,10 @@ def main():
             thaw.update(run_server([binp], os.environ, sub))
         enc = lambda r: {str(k): [v[0].hex() if v[0] is not None else None, v[1]] for k, v in r.items()}
         json.dump({"node": enc(node), "thaw": enc(thaw), "failed": {str(k): v for k, v in failed.items()}}, open(cfile, "w"))
-    rows = []
-    for s in scenes:
-        i = s["id"]
-        if i in failed: rows.append((s, "BUILD-FAIL", failed[i], [])); continue
-        nr, tr = node.get(i, (None, "")), thaw.get(i, (None, ""))
-        if not nr[0] or not tr[0]:
-            cls = "HANG" if (not tr[0]) else "NODE-NO-RESPONSE"
-            rows.append((s, cls, tr[1] if not tr[0] else nr[1], [])); continue
-        x, y = norm(nr[0]), norm(tr[0])
-        if x == y and nr[1] == tr[1]: rows.append((s, "SAME", "", []))
-        elif x == y: rows.append((s, "DIFF", "", [f"connection state: node={nr[1]} thaw={tr[1]}"], ["connection-state"]))
-        else: rows.append((s, "DIFF", "", line_diff(x, y), signature(x, y)))
+    rows = classify(scenes, node, thaw, failed)
     report(a, rows, tid)
 
-def report(a, rows, tid):
+def report(a, rows, tid, dims=("status", "hstyle", "bstyle", "method", "conn", "reqbody", "reqhdr"), base_file="baseline.json"):
     cnt = collections.Counter(r[1] for r in rows)
     out = [f"# wire-diff report (scenes={a.scenes} seed={a.seed} thaw-id={tid})", ""]
     out.append("counts: " + ", ".join(f"{k}={cnt[k]}" for k in ("SAME", "DIFF", "BUILD-FAIL", "HANG", "NODE-NO-RESPONSE")))
@@ -279,7 +288,6 @@ def report(a, rows, tid):
         if r[1] == "DIFF": groups["; ".join(r[4])].append(r)
         elif r[1] != "SAME": groups[r[1] + ": " + (r[2].splitlines()[0][:100] if r[2] else "")].append(r)
     out.append("\n## DIFF groups by cause signature (largest first)\n")
-    dims = ["status", "hstyle", "bstyle", "method", "conn", "reqbody", "reqhdr"]
     for sig, rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         out.append(f"### [{len(rs)}] {sig}")
         for d in dims:
@@ -295,7 +303,7 @@ def report(a, rows, tid):
     rp = os.path.join(WORK, f"report-{a.label}-{a.scenes}-{a.seed}.md")
     open(rp, "w").write("\n".join(out)); print("\n".join(out[:3])); print("report:", rp)
     base = {"scenes": a.scenes, "seed": a.seed, "same": cnt["SAME"], "diff": cnt["DIFF"], "build_fail": cnt["BUILD-FAIL"], "hang": cnt["HANG"]}
-    bf = os.path.join(HERE, "baseline.json")
+    bf = os.path.join(HERE, base_file)
     if a.write_baseline: json.dump(base, open(bf, "w"), indent=1); print("baseline written")
     elif os.path.exists(bf):
         b = json.load(open(bf))
