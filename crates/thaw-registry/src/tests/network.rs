@@ -1517,7 +1517,7 @@ fn http_server_deferred_end_after_write_under_connection_close_delivers_the_fina
                     Err(_) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    Err(error) => panic!("failed to connect for {path}: {error}"),
+                    Err(error) => panic!("JS server on port {port} never accepted a connection for {path} within 30s (startup too slow or port taken): {error}"),
                 }
             };
             stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -1603,7 +1603,7 @@ fn http_server_releases_completed_connection_close_responses() {
                     Err(_) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    Err(error) => panic!("failed to connect for {path}: {error}"),
+                    Err(error) => panic!("JS server on port {port} never accepted a connection for {path} within 30s (startup too slow or port taken): {error}"),
                 }
             };
             stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -3331,7 +3331,7 @@ fn net_accepted_socket_keeps_write_half_only_when_requested() {
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => break stream,
                 Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-                Err(error) => panic!("TCP connect timed out: {error}"),
+                Err(error) => panic!("JS server on port {port} never accepted a connection within 30s (startup too slow or port taken): {error}"),
             }
         };
         stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -3441,7 +3441,7 @@ fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => break stream,
                 Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-                Err(error) => panic!("TCP connect timed out: {error}"),
+                Err(error) => panic!("JS server on port {port} never accepted a connection within 30s (startup too slow or port taken): {error}"),
             }
         };
         stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();

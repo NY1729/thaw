@@ -1524,7 +1524,7 @@ fn http2_secure_server_accepts_an_alpn_h2_peer() {
                     None
                 }
             })
-            .expect("HTTP/2 secure server did not start");
+            .expect("HTTP/2 secure server never accepted a connection within ~30s (startup too slow or port taken)");
         let connection = ClientConnection::new(
             client_config,
             ServerName::try_from("127.0.0.1".to_string()).unwrap(),

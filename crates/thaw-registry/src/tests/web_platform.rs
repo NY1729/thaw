@@ -662,7 +662,7 @@ fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
                             None
                         }
                     })
-                    .expect("TLS server did not start");
+                    .expect("TLS server never accepted a connection within ~30s (startup too slow or port taken)");
                 let connection = ClientConnection::new(
                     Arc::clone(&config),
                     ServerName::try_from("localhost".to_string()).unwrap(),
