@@ -369,6 +369,8 @@ pub struct ObjData {
     watched: Cell<bool>,
     /// Bit 0 `name`, bit 1 `length`: a closure's synthesized own key that was `delete`d (no real `Prop` to remove).
     fn_gone: Cell<u8>,
+    /// a builtin method / namespace function (the table says it has no `prototype`): no [[Construct]]
+    pub(crate) no_ctor: Cell<bool>,
 }
 
 impl ObjData {
@@ -755,6 +757,7 @@ enum Resolved<'s> {
     Declared(&'s Scope),
 }
 
+#[derive(Clone)]
 struct Binding {
     value: Value,
     mutable: bool,
@@ -987,6 +990,16 @@ pub(crate) struct GlobalProp {
 /// when it is not an own property: lexical bindings, and `__thaw_*` internals, which scope lookup and
 /// property reads still resolve. A name in `NODE_GLOBAL_FLAGS` takes Node's flags (its writable bit is
 /// the binding's mutability once it was redefined); the rest follow the binding's origin.
+/// The binding `globalThis` shows for `name`: a lexical global hides nothing of the object record it shadowed.
+fn global_view<'a>(vars: &'a Vars, name: &str, b: &'a Binding) -> &'a Binding {
+    if b.origin == Origin::Lexical {
+        if let Some(s) = vars.shadowed(name) {
+            return s;
+        }
+    }
+    b
+}
+
 fn global_view_flags(name: &str, b: &Binding) -> Option<(bool, bool, bool)> {
     if hidden_global_name(name) || b.origin == Origin::Lexical {
         return None;
@@ -1008,7 +1021,7 @@ fn global_view_flags(name: &str, b: &Binding) -> Option<(bool, bool, bool)> {
 /// `__thaw_*` names are thaw-js internals: scope lookup and property reads still resolve them, but the
 /// `globalThis` object view (`in`, keys, own names, descriptors) never shows them.
 pub(crate) fn hidden_global_name(name: &str) -> bool {
-    name.starts_with("__thaw_")
+    name.starts_with("__thaw_") || name.starts_with(SHADOW_PREFIX)
 }
 
 /// A resolved assignment / update / read-modify-write target.
@@ -1067,10 +1080,18 @@ struct Vars {
     index: Option<FxMap<Rc<str>, usize>>,
 }
 
+const SHADOW_PREFIX: &str = "@@shadow:";
+
 /// Scopes with at least this many variables get a hash index.
 const VARS_INDEX_MIN: usize = 16;
 
 impl Vars {
+    /// Global scope only: the builtin / var binding a top-level `let`/`const`/`class` of the same name replaced,
+    /// kept under a hidden `@@shadow:` key. `globalThis` keeps showing it (the declarative record shadows the
+    /// object record, it does not overwrite it).
+    fn shadowed(&self, name: &str) -> Option<&Binding> {
+        self.get(&format!("{SHADOW_PREFIX}{name}"))
+    }
     fn position(&self, key: &str) -> Option<usize> {
         match &self.index {
             Some(map) => map.get(key).copied(),
@@ -1338,6 +1359,15 @@ impl Scope {
         };
         let mut vars = self.vars.borrow_mut();
         if maybe_present {
+            if origin == Origin::Lexical && self.parent.is_none() {
+                if let Some(old) = vars
+                    .get(&name)
+                    .filter(|b| b.origin != Origin::Lexical)
+                    .cloned()
+                {
+                    vars.insert(format!("{SHADOW_PREFIX}{name}").into(), old);
+                }
+            }
             vars.insert(name, binding);
         } else {
             vars.push_new(name, binding);
@@ -1488,8 +1518,8 @@ impl Value {
         }
     }
     /// Whether `new` accepts this value: the same test `construct_with` applies.
-    fn is_constructor(&self) -> bool {
-        matches!(self, Value::Object(o) if match &*o.kind.borrow() {
+    pub(crate) fn is_constructor(&self) -> bool {
+        matches!(self, Value::Object(o) if !o.no_ctor.get() && match &*o.kind.borrow() {
             Kind::Closure { def, .. } => !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype,
             Kind::Native(_) => true,
             Kind::Proxy(p) => p.callable,
@@ -1526,6 +1556,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         reg_idx: Cell::new(gc_registry::NONE),
         watched: Cell::new(false),
         fn_gone: Cell::new(0),
+        no_ctor: Cell::new(false),
     });
     gc_registry::register_obj(&obj);
     account(&obj);
@@ -2156,6 +2187,7 @@ impl Interp {
                     configurable: p.configurable,
                 });
         };
+        let b = global_view(&vars, name, b);
         let (enumerable, writable, configurable) = global_view_flags(name, b)?;
         let accessor = node_accessor(name, b).and_then(|_| {
             self.global_accessors
@@ -2236,12 +2268,13 @@ impl Interp {
     /// The names `globalThis` shows as own properties, in binding order; `enumerable_only` keeps the
     /// ones `Object.keys` lists.
     pub(crate) fn global_view_names(&self, enumerable_only: bool) -> Vec<Rc<str>> {
-        self.global
-            .vars
-            .borrow()
-            .list
+        let vars = self.global.vars.borrow();
+        vars.list
             .iter()
-            .filter(|(k, b)| global_view_flags(k, b).is_some_and(|(e, _, _)| e || !enumerable_only))
+            .filter(|(k, b)| {
+                let v = global_view(&vars, k, b);
+                global_view_flags(k, v).is_some_and(|(e, _, _)| e || !enumerable_only)
+            })
             .map(|(k, _)| k.clone())
             .collect()
     }
@@ -3200,8 +3233,23 @@ impl Interp {
                                 return self.get(&Value::Object(sb), key);
                             }
                         }
-                        if let Some(v) = self.lookup(&self.global.clone(), key) {
+                        // a top-level `let` is no property of the global object: it shows what it shadowed, if anything
+                        let (lexical, shadowed) = {
+                            let vars = self.global.vars.borrow();
+                            match vars.get(key) {
+                                Some(b) if b.origin == Origin::Lexical => {
+                                    (true, vars.shadowed(key).map(|s| s.value.clone()))
+                                }
+                                _ => (false, None),
+                            }
+                        };
+                        if let Some(v) = shadowed {
                             return Ok(v);
+                        }
+                        if !lexical {
+                            if let Some(v) = self.lookup(&self.global.clone(), key) {
+                                return Ok(v);
+                            }
                         }
                     }
                     Fast::Proxy => {
@@ -3774,7 +3822,7 @@ impl Interp {
         let is_native = !is_hostcb && matches!(&*fo.kind.borrow(), Kind::Native(_));
         let is_class =
             matches!(&*fo.kind.borrow(), Kind::Closure { def, .. } if def.class.is_some());
-        if !is_closure && !is_native && !is_hostcb {
+        if !is_closure && !is_native && !is_hostcb || fo.no_ctor.get() {
             return self.throw_error("TypeError", "value is not a constructor");
         }
         let proto = match self.get(new_target, "prototype")? {

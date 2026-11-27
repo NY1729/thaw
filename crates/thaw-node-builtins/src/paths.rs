@@ -228,6 +228,76 @@ function winRelative(from, to) {
   return toPath.slice(toStart, toEnd);
 }
 var win32 = { resolve: winResolve, join: winJoin, dirname: winDirname, basename: winBasename, extname: winExtname, normalize: winNormalize, relative: winRelative, isAbsolute: winIsAbsolute, parse: winParse, format: function(value) { return formatPath(formatArg(value), '\\'); }, toNamespacedPath: toNamespacedPath, sep: '\\', delimiter: ';' };
+// path.matchesGlob: minimatch semantics as Node configures them (no negation/comments, `\` is a separator, dotfiles
+// only match an explicit `.`), for `*`, `**`, `?`, `[...]`, `{a,b}` and the `@ ? + * !` extglobs.
+function braceExpand(pattern) {
+  var depth = 0, start = -1;
+  for (var i = 0; i < pattern.length; i++) {
+    var c = pattern.charAt(i);
+    if (c === '{') { if (depth++ === 0) start = i; }
+    else if (c === '}' && depth > 0 && --depth === 0) {
+      var body = pattern.slice(start + 1, i), parts = [], level = 0, last = 0;
+      for (var j = 0; j < body.length; j++) {
+        var d = body.charAt(j);
+        if (d === '{') level++; else if (d === '}') level--; else if (d === ',' && level === 0) { parts.push(body.slice(last, j)); last = j + 1; }
+      }
+      parts.push(body.slice(last));
+      var range = /^(-?\d+)\.\.(-?\d+)$/.exec(body);
+      if (parts.length === 1 && range) { parts = []; var a = +range[1], b = +range[2], step = a <= b ? 1 : -1; for (var n = a; step > 0 ? n <= b : n >= b; n += step) parts.push(String(n)); }
+      if (parts.length === 1) continue;
+      var head = pattern.slice(0, start), tail = pattern.slice(i + 1), out = [];
+      parts.forEach(function(part) { braceExpand(head + part + tail).forEach(function(item) { out.push(item); }); });
+      return out;
+    }
+  }
+  return [pattern];
+}
+function globTranslate(text) {
+  var out = '', k = 0;
+  while (k < text.length) {
+    var c = text.charAt(k), next = text.charAt(k + 1);
+    if ('@?+*!'.indexOf(c) >= 0 && next === '(') {
+      var depth = 1, end = k + 2;
+      while (end < text.length && depth > 0) { if (text.charAt(end) === '(') depth++; else if (text.charAt(end) === ')') depth--; end++; }
+      var inner = text.slice(k + 2, end - 1), alts = [], cur = '', level = 0;
+      for (var m = 0; m < inner.length; m++) { var d = inner.charAt(m); if (d === '(') level++; else if (d === ')') level--; if (d === '|' && level === 0) { alts.push(cur); cur = ''; } else cur += d; }
+      alts.push(cur);
+      var body = alts.map(globTranslate).join('|');
+      out += c === '@' ? '(?:' + body + ')' : c === '?' ? '(?:' + body + ')?' : c === '+' ? '(?:' + body + ')+' : c === '*' ? '(?:' + body + ')*' : '(?:(?!(?:' + body + ')$)[^/]*?)';
+      k = end; continue;
+    }
+    if (c === '*') { out += '[^/]*?'; k++; continue; }
+    if (c === '?') { out += '[^/]'; k++; continue; }
+    if (c === '[') {
+      var close = text.indexOf(']', k + 2);
+      if (close > 0) { var cls = text.slice(k + 1, close); if (cls.charAt(0) === '!') cls = '^' + cls.slice(1); out += '[' + cls.replace(/\\/g, '\\\\') + ']'; k = close + 1; continue; }
+    }
+    out += c.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&'); k++;
+  }
+  return out;
+}
+function segmentRegExp(seg) {
+  var wild = seg.charAt(0) === '*' || seg.charAt(0) === '?' || seg.charAt(0) === '[' || /^[@?+*!]\(/.test(seg);
+  return new RegExp('^' + (wild ? '(?!\\.)' : '') + globTranslate(seg) + '$');
+}
+function globMatch(segs, ps, i, j) {
+  if (i === ps.length) return j === segs.length;
+  if (ps[i] === '**') {
+    for (var k = i === ps.length - 1 ? j + 1 : j; k <= segs.length; k++) { if (globMatch(segs, ps, i + 1, k)) return true; if (k < segs.length && segs[k].charAt(0) === '.') return false; }
+    return false;
+  }
+  return j < segs.length && segmentRegExp(ps[i]).test(segs[j]) && globMatch(segs, ps, i + 1, j + 1);
+}
+function makeMatchesGlob(windows) {
+  return function matchesGlob(path, pattern) {
+    pathArg(path, 'path'); pathArg(pattern, 'pattern');
+    var segs = (windows ? path.replace(/\\/g, '/') : path).split('/'), expanded = braceExpand(pattern.replace(/\\/g, '/'));
+    for (var n = 0; n < expanded.length; n++) { if (globMatch(segs, expanded[n].split('/'), 0, 0)) return true; }
+    return false;
+  };
+}
+posix.matchesGlob = makeMatchesGlob(false); win32.matchesGlob = makeMatchesGlob(true);
+posix._makeLong = toNamespacedPath; win32._makeLong = toNamespacedPath;
 posix.posix = posix; posix.win32 = win32; win32.posix = posix; win32.win32 = win32;
 module.exports = posix;
 "#,

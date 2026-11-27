@@ -5973,11 +5973,11 @@ fn existing_native_spread_staging_mode_false_is_unchanged() {
         assert_eq!(bindings[0].1, number_fn);
         assert_eq!(bindings[0].2, HirExpr::Lambda(Vec::new(), vec![HirParam {
             name: "n".into(), ty: HirType::F64,
-        }], HirType::F64, Box::new(HirExpr::Var("n".into()))));
+        }], HirType::F64, Box::new(HirExpr::EvalThen(Box::new(HirExpr::Lit(HirLit::Str(format!("{}\u{1}0\u{1}0\u{1}\u{1}\u{1}", crate::USER_FN_MARK)))), Box::new(HirExpr::Var("n".into()))))));
         assert_eq!(bindings[1].1, string_fn);
         assert_eq!(bindings[1].2, HirExpr::Lambda(Vec::new(), vec![HirParam {
             name: "s".into(), ty: HirType::Str,
-        }], HirType::Str, Box::new(HirExpr::Var("s".into()))));
+        }], HirType::Str, Box::new(HirExpr::EvalThen(Box::new(HirExpr::Lit(HirLit::Str(format!("{}\u{1}0\u{1}0\u{1}\u{1}\u{1}", crate::USER_FN_MARK)))), Box::new(HirExpr::Var("s".into()))))));
         assert_eq!(values[0], HirExpr::Var(bindings[0].0.clone()));
         assert_eq!(values[1], HirExpr::Var(bindings[1].0.clone()));
         assert_error_argument_staging_fresh_vars(lowerer, &values, &bindings);
@@ -6261,4 +6261,18 @@ fn escaping_record_binding_becomes_an_any_reference_in_js_programs() {
     let program = program.expect("lowers");
     let main = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
     assert!(main.contains("Let(\"ctx\", Json"), "{main}");
+}
+
+#[test]
+fn exec_on_an_any_regexp_keeps_groups_index_and_input_on_a_prototype_record() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { const a = []; a.push({ re: /(?<id>\\d+)/ }); const m = a[0].re.exec('ab12'); console.log(m.groups.id, m.index); }",
+    )
+    .expect("parse error");
+    crate::set_implicit_any(true);
+    let program = lower_module(&module);
+    crate::set_implicit_any(false);
+    let program = program.expect("lowers");
+    let main = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert!(main.contains("__thaw_json_set_prototype"), "{main}");
 }

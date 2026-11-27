@@ -2,10 +2,6 @@
  "note": "expected non-MATCH cases; may only shrink. Regenerate: run.sh --write-baseline after a fix.",
  "gaps": [
   {
-   "id": "uncaught.subclass-code",
-   "kind": "DIFF"
-  },
-  {
    "id": "uncaught.symbol",
    "kind": "DIFF"
   },
@@ -78,35 +74,7 @@
    "kind": "DIFF"
   },
   {
-   "id": "handlers.ue-handler-throws",
-   "kind": "DIFF"
-  },
-  {
-   "id": "handlers.ur-handler",
-   "kind": "DIFF"
-  },
-  {
-   "id": "handlers.ur-handler-undefined",
-   "kind": "BUILD-FAIL"
-  },
-  {
    "id": "handlers.ur-handler-throws",
-   "kind": "DIFF"
-  },
-  {
-   "id": "handlers.ur-only-ue-handler",
-   "kind": "DIFF"
-  },
-  {
-   "id": "handlers.ur-only-ue-handler-string",
-   "kind": "DIFF"
-  },
-  {
-   "id": "handlers.ur-warning-mode",
-   "kind": "DIFF"
-  },
-  {
-   "id": "handlers.exit-code-then-throw",
    "kind": "DIFF"
   },
   {
@@ -126,15 +94,7 @@
    "kind": "DIFF"
   },
   {
-   "id": "handlers.beforeexit-not-on-uncaught",
-   "kind": "DIFF"
-  },
-  {
    "id": "handlers.beforeexit-throws",
-   "kind": "DIFF"
-  },
-  {
-   "id": "stdio.big-stdout-exit",
    "kind": "DIFF"
   },
   {
@@ -143,10 +103,6 @@
   },
   {
    "id": "stdio.big-one-write",
-   "kind": "DIFF"
-  },
-  {
-   "id": "stdio.big-then-throw",
    "kind": "DIFF"
   },
   {
@@ -180,10 +136,6 @@
   {
    "id": "stdio.epipe-write",
    "kind": "RUN-FAIL"
-  },
-  {
-   "id": "stdio.epipe-error-listener",
-   "kind": "DIFF"
   },
   {
    "id": "stdio.epipe-async",
@@ -286,14 +238,6 @@
    "kind": "BUILD-FAIL"
   },
   {
-   "id": "syserr.fs-invalid-path-nul",
-   "kind": "DIFF"
-  },
-  {
-   "id": "syserr.fs-invalid-encoding",
-   "kind": "DIFF"
-  },
-  {
    "id": "syserr.fs-invalid-flag",
    "kind": "DIFF"
   },
@@ -302,23 +246,11 @@
    "kind": "DIFF"
   },
   {
-   "id": "syserr.fs-uncaught-enoent",
-   "kind": "DIFF"
-  },
-  {
-   "id": "syserr.fs-uncaught-eisdir",
-   "kind": "DIFF"
-  },
-  {
    "id": "syserr.fs-uncaught-promises",
    "kind": "DIFF"
   },
   {
    "id": "syserr.fs-uncaught-stream",
-   "kind": "DIFF"
-  },
-  {
-   "id": "syserr.json-uncaught",
    "kind": "DIFF"
   },
   {
@@ -438,10 +370,6 @@
    "kind": "DIFF"
   },
   {
-   "id": "messages.new-map-bad-entry",
-   "kind": "DIFF"
-  },
-  {
    "id": "messages.promise-all-number",
    "kind": "BUILD-FAIL"
   },
@@ -474,19 +402,7 @@
    "kind": "DIFF"
   },
   {
-   "id": "messages.frozen-assign",
-   "kind": "BUILD-FAIL"
-  },
-  {
-   "id": "messages.frozen-add",
-   "kind": "BUILD-FAIL"
-  },
-  {
    "id": "messages.frozen-delete",
-   "kind": "BUILD-FAIL"
-  },
-  {
-   "id": "messages.getter-only-assign",
    "kind": "BUILD-FAIL"
   },
   {
@@ -518,14 +434,6 @@
    "kind": "BUILD-FAIL"
   },
   {
-   "id": "messages.array-length-float",
-   "kind": "BUILD-FAIL"
-  },
-  {
-   "id": "messages.array-reduce-empty",
-   "kind": "BUILD-FAIL"
-  },
-  {
    "id": "messages.array-from-bad",
    "kind": "BUILD-FAIL"
   },
@@ -538,27 +446,11 @@
    "kind": "BUILD-FAIL"
   },
   {
-   "id": "messages.arraybuffer-negative",
-   "kind": "BUILD-FAIL"
-  },
-  {
    "id": "messages.typedarray-bad-offset",
    "kind": "BUILD-FAIL"
   },
   {
-   "id": "messages.typedarray-bad-length",
-   "kind": "BUILD-FAIL"
-  },
-  {
    "id": "messages.dataview-oob",
-   "kind": "BUILD-FAIL"
-  },
-  {
-   "id": "messages.string-repeat-neg",
-   "kind": "BUILD-FAIL"
-  },
-  {
-   "id": "messages.string-repeat-inf",
    "kind": "BUILD-FAIL"
   },
   {
@@ -606,14 +498,6 @@
    "kind": "DIFF"
   },
   {
-   "id": "messages.eval-ref",
-   "kind": "BUILD-FAIL"
-  },
-  {
-   "id": "messages.eval-syntax",
-   "kind": "BUILD-FAIL"
-  },
-  {
    "id": "messages.tdz",
    "kind": "BUILD-FAIL"
   },
@@ -650,10 +534,6 @@
    "kind": "DIFF"
   },
   {
-   "id": "messages.require-missing",
-   "kind": "BUILD-FAIL"
-  },
-  {
    "id": "messages.process-hrtime-bad",
    "kind": "DIFF"
   },
@@ -675,10 +555,6 @@
   },
   {
    "id": "messages.process-exit-str-bad",
-   "kind": "DIFF"
-  },
-  {
-   "id": "limits.recursion-uncaught",
    "kind": "DIFF"
   },
   {
@@ -990,18 +866,6 @@
    "kind": "DIFF"
   },
   {
-   "id": "idioms.main-finally",
-   "kind": "DIFF"
-  },
-  {
-   "id": "idioms.main-await-reject",
-   "kind": "DIFF"
-  },
-  {
-   "id": "idioms.await-in-loop-throw",
-   "kind": "DIFF"
-  },
-  {
    "id": "idioms.promise-race",
    "kind": "BUILD-FAIL"
   },
@@ -1018,27 +882,11 @@
    "kind": "DIFF"
   },
   {
-   "id": "idioms.unhandled-in-thenable-chain",
-   "kind": "DIFF"
-  },
-  {
-   "id": "idioms.catch-rethrow",
-   "kind": "DIFF"
-  },
-  {
-   "id": "idioms.finally-throws",
-   "kind": "DIFF"
-  },
-  {
    "id": "idioms.http-listen-eaddrinuse",
    "kind": "BUILD-FAIL"
   },
   {
    "id": "idioms.http-listen-noerr-listener",
-   "kind": "BUILD-FAIL"
-  },
-  {
-   "id": "idioms.http-request-refused",
    "kind": "BUILD-FAIL"
   },
   {

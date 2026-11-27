@@ -515,6 +515,8 @@ pub struct HirCompiler<'ctx> {
     /// Symbol of the lambda compiled last, and the source names given to lambda symbols (`const f = () => ..`).
     last_lambda_symbol: Option<String>,
     lambda_frame_names: HashMap<String, String>,
+    /// The builtin whose frame Node shows under a function (`Array.map` for a `.map` callback), by symbol.
+    frame_vias: HashMap<String, String>,
     /// NUL-terminated string constants already emitted, so each distinct text exists once.
     /// Whole-program builds route synthetic errors through one shared setter function.
     share_error_setter: bool,
@@ -564,6 +566,8 @@ pub struct HirCompiler<'ctx> {
     /// formatting, a `Dictionary` literal, an N-API call).
     compiling_js_dynamic_arguments: bool,
     validating_native_argument: bool,
+    /// Trailing arguments of the native callback being registered that Node lets a caller omit (see `optional_native_args`).
+    optional_native_args: Vec<bool>,
     /// Set by `__thaw_json_as_bytes` for the next array decode (see `compile_json_to_native_array`).
     json_array_as_bytes: bool,
     /// Fresh native scalar handles and projection ledgers owned by active typed
@@ -878,6 +882,7 @@ impl<'ctx> HirCompiler<'ctx> {
             stack_locs: HashMap::new(),
             last_lambda_symbol: None,
             lambda_frame_names: HashMap::new(),
+            frame_vias: HashMap::new(),
             share_error_setter: false,
             interned_strings: std::cell::RefCell::new(HashMap::new()),
             uses_napi: false,
@@ -898,6 +903,7 @@ impl<'ctx> HirCompiler<'ctx> {
             stack_guard: false,
             compiling_js_dynamic_arguments: false,
             validating_native_argument: false,
+            optional_native_args: Vec::new(),
             json_array_as_bytes: false,
             fresh_event_key_argument_scopes: Vec::new(),
             live_native_projection: None,

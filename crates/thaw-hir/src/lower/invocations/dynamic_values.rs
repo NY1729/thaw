@@ -472,6 +472,18 @@ impl<'a> FnLowerer<'a> {
         args: &[swc_ecma_ast::ExprOrSpread],
         expected: Option<&HirType>,
     ) -> Result<HirExpr, String> {
+        self.lower_dynamic_value_method_call_named(receiver_expr, property, None, args, expected)
+    }
+
+    /// `name_expr` is a run-time string key (`o[key](..)`); `property` then only labels errors.
+    fn lower_dynamic_value_method_call_named(
+        &mut self,
+        receiver_expr: &Expr,
+        property: &str,
+        name_expr: Option<HirExpr>,
+        args: &[swc_ecma_ast::ExprOrSpread],
+        expected: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
         let spread_arguments = args.iter().any(|argument| argument.spread.is_some());
         let intrinsic = match (property, expected) {
             ("toString", _) => "__thaw_call_selected_dynamic_method",
@@ -623,7 +635,7 @@ impl<'a> FnLowerer<'a> {
         };
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(intrinsic.to_string())),
-            vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string())), array],
+            vec![receiver, name_expr.unwrap_or_else(|| HirExpr::Lit(HirLit::Str(property.to_string()))), array],
         );
         let call = if property == "toString" {
             HirExpr::JsonAsString(Box::new(call))

@@ -310,6 +310,21 @@ impl<'a> FnLowerer<'a> {
         value: &HirExpr,
         fields: &[(Symbol, HirType)],
     ) -> Result<Option<HirExpr>, String> {
+        let Some(text) = self.error_owner_props_text(value, fields)? else {
+            return Ok(None);
+        };
+        Ok(Some(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_register_owner_props".into())),
+            vec![value.clone(), text],
+        )))
+    }
+
+    /// The JSON text of a thrown Error-family record's own props (see `error_owner_props_call`).
+    fn error_owner_props_text(
+        &mut self,
+        value: &HirExpr,
+        fields: &[(Symbol, HirType)],
+    ) -> Result<Option<HirExpr>, String> {
         let Some(default_name) = Self::error_family_default_name(fields) else {
             return Ok(None);
         };
@@ -343,11 +358,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::JsonObjectLit(with_name, HirType::Json)),
             HirType::Json,
         );
-        let text = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![object]);
-        Ok(Some(HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_error_register_owner_props".into())),
-            vec![value.clone(), text],
-        )))
+        Ok(Some(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![object])))
     }
 
     /// Build the tagged, owned provenance tuple for a source throw or
@@ -573,7 +584,12 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![left, right]);
                 // Framed like a thrown Error (`\u{1}Name\u{1}message`) so reporters print it as one.
                 let framed = concat(HirExpr::Lit(HirLit::Str("\u{1}".into())), field("name"));
-                Ok(concat(concat(framed, HirExpr::Lit(HirLit::Str("\u{1}".into()))), field("message")))
+                let text = concat(concat(framed, HirExpr::Lit(HirLit::Str("\u{1}".into()))), field("message"));
+                // Own props ride in the frame's `\u{5}` bag so the uncaught report prints them like Node.
+                match self.error_owner_props_text(&value, fields)? {
+                    Some(props) => Ok(concat(text, concat(HirExpr::Lit(HirLit::Str("\u{5}".into())), props))),
+                    None => Ok(text),
+                }
             }
             // Plain (non-Error) aggregates print like console.log, from the
             // materialized Json copy made at throw time.
@@ -2924,18 +2940,26 @@ impl<'a> FnLowerer<'a> {
                         let flag = format!("__thaw_loop_returned_{}", self.next_binding);
                         self.next_binding += 1;
                         saved_scope.insert(flag.clone(), HirType::Bool);
+                        self.scope.insert(flag.clone(), HirType::Bool);
                         escape.push(HirStmt::Let(
                             flag.clone(),
                             HirType::Bool,
                             HirExpr::Lit(HirLit::Bool(false)),
                         ));
-                        let ret_type = self.ret_type.clone();
+                        let mut ret_type = self.ret_type.clone();
+                        // A closure whose result type is still being inferred (`Dynamic`) leaves a dynamic
+                        // loop through an `any` slot; every value returned from the loop is `any`.
+                        if ret_type == HirType::Dynamic && !self.async_return {
+                            ret_type = HirType::Json;
+                            self.coerce_loop_returns_to_json(&mut statements)?;
+                        }
                         let slot = if ret_type == HirType::Void {
                             None
                         } else {
                             let slot = format!("__thaw_loop_return_{}", self.next_binding);
                             self.next_binding += 1;
                             saved_scope.insert(slot.clone(), ret_type.clone());
+                            self.scope.insert(slot.clone(), ret_type.clone());
                             escape.push(HirStmt::Let(
                                 slot.clone(),
                                 ret_type.clone(),
@@ -3590,6 +3614,31 @@ fn statements_contain_return(stmts: &[HirStmt]) -> bool {
 }
 
 /// Rewrite statement-level `return [v]` into "record, flag, leave the lambda".
+impl<'a> FnLowerer<'a> {
+    /// Converts the operand of every `return` in `stmts` (nested control flow included) to `any`.
+    fn coerce_loop_returns_to_json(&mut self, stmts: &mut [HirStmt]) -> Result<(), String> {
+        for stmt in stmts.iter_mut() {
+            match stmt {
+                HirStmt::Return(Some(value)) => {
+                    let taken = std::mem::replace(value, HirExpr::Lit(HirLit::Null));
+                    *value = self.coerce_to_declared(&HirType::Json, taken)?;
+                }
+                HirStmt::If(_, then_body, else_body) => {
+                    self.coerce_loop_returns_to_json(then_body)?;
+                    self.coerce_loop_returns_to_json(else_body)?;
+                }
+                HirStmt::While(_, body) | HirStmt::Finally(body, _) => self.coerce_loop_returns_to_json(body)?,
+                HirStmt::Try(body, _, catch_body, _) => {
+                    self.coerce_loop_returns_to_json(body)?;
+                    self.coerce_loop_returns_to_json(catch_body)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 fn redirect_returns(stmts: &mut Vec<HirStmt>, flag: &str, slot: Option<&str>) {
     let mut rewritten = Vec::with_capacity(stmts.len());
     for stmt in std::mem::take(stmts) {

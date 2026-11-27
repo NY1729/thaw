@@ -187,6 +187,9 @@ fn class_names_referenced_as_values(
 thread_local! {
     /// Definition sites recorded while lowering, moved into `HirProgram::fn_locs` at the end.
     static FN_LOCS: RefCell<HashMap<Symbol, SourceLoc>> = RefCell::new(HashMap::new());
+    /// Function literals passed straight to a builtin that calls them (`[].map(x => ..)`), by start
+    /// position: the builtin's name, which Node shows as a frame (`at Array.map`) under the callback.
+    static CALLBACK_VIA: RefCell<HashMap<swc_common::BytePos, String>> = RefCell::new(HashMap::new());
 }
 
 /// Notes that the function lowered as `name` starts at `span` (ignored for synthetic spans).
@@ -219,6 +222,7 @@ fn lower_module_once(module: &Module) -> Result<HirProgram, String> {
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
     PROGRAM_DELETES_STACK.with(|flag| flag.set(module_deletes_stack(module)));
     FN_LOCS.with(|locs| locs.borrow_mut().clear());
+    CALLBACK_VIA.with(|via| via.borrow_mut().clear());
     let mut normalized = normalize_module_for_lowering(module)?;
     delay_top_level_closures(&mut normalized);
     let mut program = lower_normalized_module(&normalized)?;
@@ -363,7 +367,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = annotate_untyped_default_parameters(&normalized);
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = if crate::lower::implicit_any() {
-        annotate_escaping_record_bindings(&hoist_top_level_const_arrows(&normalized))
+        annotate_escaping_record_bindings(&hoist_top_level_const_arrows(&widen_empty_object_fields(&normalized)))
     } else {
         normalized
     };
@@ -1113,6 +1117,24 @@ fn normalize_interface_merges(module: &Module) -> Result<Module, String> {
 /// before the first default-valued or rest parameter. TypeScript `?` markers
 /// are erased by SWC's pattern, so optional parameters still count.
 fn source_parameter_count(params: &[swc_ecma_ast::Param]) -> usize {
+    // Builtin declarations whose real signature is `(...rest)` report Node's
+    // arity through a rest parameter named `__length_N`; the call lowering
+    // still sees an ordinary rest parameter.
+    // A typed signature carries it in its last parameter's name (`callback__length_3`).
+    let marked = match params.last().map(|parameter| &parameter.pat) {
+        Some(swc_ecma_ast::Pat::Rest(rest)) => match rest.arg.as_ref() {
+            swc_ecma_ast::Pat::Ident(ident) => Some(ident.id.sym.as_ref()),
+            _ => None,
+        },
+        Some(swc_ecma_ast::Pat::Ident(ident)) => Some(ident.id.sym.as_ref()),
+        _ => None,
+    };
+    if let Some(count) = marked
+        .and_then(|name| name.rsplit_once("__length_"))
+        .and_then(|(_, count)| count.parse().ok())
+    {
+        return count;
+    }
     params
         .iter()
         .take_while(|parameter| {

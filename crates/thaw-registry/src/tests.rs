@@ -1506,7 +1506,7 @@ fn builtin_sources_parse_for_the_defined_method_names() {
 #[test]
 fn node_path_bundle_text_is_pinned() {
     // the node:path bundle must stay byte-identical when its source moves to thaw-node-builtins; the only
-    // intended change since is dropping module.exports.default/__esModule (Node's path has neither): 52641 -> 52551 bytes
+    // intended changes since: dropping module.exports.default/__esModule (Node's path has neither): 52641 -> 52551 bytes; path.matchesGlob/_makeLong (r152): -> 56476 bytes
     let bundle = builtin_bundle_with("node:path", &[]).unwrap();
     let hex: String = Sha256::digest(bundle.as_bytes())
         .iter()
@@ -1514,7 +1514,7 @@ fn node_path_bundle_text_is_pinned() {
         .collect();
     assert_eq!(
         hex,
-        "02c836a37668275d3415443998c62ac3e06c185637c7877d53dab4696994d631",
+        "f85fe009d7cb187ede693fcafe624a78266c695fafab038bfb34123881e5fdcb",
         "node:path bundle sha256 ({} bytes)",
         bundle.len()
     );
@@ -1533,7 +1533,7 @@ fn builtin_bundle_sha256(specifier: &str) -> String {
 fn node_util_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:util"),
-        "7c125f36a6b5e32350789d6fe5e730794bf973c12a7e6daad5661d38da0b794e",
+        "80cd2f7480b27da45a9fbf477a6dc442bccc057d4296def886e637940c762d60",
         "node:util bundle sha256"
     );
 }
@@ -1542,7 +1542,7 @@ fn node_util_bundle_text_is_pinned() {
 fn node_events_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:events"),
-        "6dc25ce573a53b3fb8b18f4d2c09702a87560fadc1f35b43644be796b71f89cc",
+        "dc90a5ecc6c00dbb5b7d753059c3ff8630b613650f361d0ee512d264453c8ca9",
         "node:events bundle sha256"
     );
 }
@@ -1552,7 +1552,7 @@ fn node_url_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:url"),
         // node:url bundles node:path: the hash moved from ed14c972... when #958 dropped path's .default/__esModule
-        "0479c07de8bfbb9f6dd75ee82e26d9240be8ca9c03c0fb9ff6ebbaf7e2ae4fcd",
+        "4ae9f201cabc6fb30318f504ad170c3ee9ce323b5d4c6ce5f06906739dc856c1",
         "node:url bundle sha256"
     );
 }

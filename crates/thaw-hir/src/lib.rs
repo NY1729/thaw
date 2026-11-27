@@ -30,6 +30,10 @@ pub use lower::platform_globals;
 
 /// Bit pattern of the quiet NaN a class field that was never assigned reads as through a
 /// structural live view (`{ n: number }` over an instance); observed reads turn it into `undefined`.
+/// Prefix of the string marker `mark_user_function` puts at the start of a source-written
+/// function's body (followed by `\u{1}line\u{1}col\u{1}via\u{1}name\u{1}file`, the via/name empty when anonymous).
+pub const USER_FN_MARK: &str = "\u{1}thaw_user_fn";
+
 pub const UNSET_NUMBER_BITS: u64 = 0x7FF8_0000_0000_5E7D;
 
 pub use lower::{

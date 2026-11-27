@@ -484,13 +484,13 @@ impl Interp {
         });
         self.set_native(&r, "construct", |it, _, args| {
             let target = arg(args, 0);
-            if !target.is_callable() {
+            if !target.is_constructor() {
                 return it
                     .throw_error("TypeError", "Reflect.construct target is not a constructor");
             }
             let list = list_from(it, &arg(args, 1))?;
             let nt = args.get(2).cloned().unwrap_or_else(|| target.clone());
-            if !nt.is_callable() {
+            if !nt.is_constructor() {
                 return it.throw_error(
                     "TypeError",
                     "Reflect.construct newTarget is not a constructor",

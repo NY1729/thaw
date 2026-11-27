@@ -2283,7 +2283,7 @@ impl<'a> FnLowerer<'a> {
             HirType::Str => Ok(HirExpr::JsonAsString(Box::new(value))),
             HirType::Bool => Ok(HirExpr::JsonAsBool(Box::new(value))),
             HirType::Json => Ok(value),
-            HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_) => {
+            HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_) | HirType::Function(..) | HirType::CallableFunction(..) => {
                 Ok(HirExpr::JsonAsNative(Box::new(value), element.clone()))
             }
             other => Err(format!(
@@ -3404,6 +3404,14 @@ impl<'a> FnLowerer<'a> {
                 match obj_ty {
                     HirType::Array(element) => {
                         let mut index = self.lower_expr(&computed.expr)?;
+                        // A canonical numeric string literal (`argv["0"]`) names the same element.
+                        if let HirExpr::Lit(HirLit::Str(text)) = &index {
+                            if let Ok(position) = text.parse::<u32>() {
+                                if position.to_string() == *text {
+                                    index = HirExpr::Lit(HirLit::F64(f64::from(position)));
+                                }
+                            }
+                        }
                         // An untyped (`any`) key such as a closure parameter: ToNumber it.
                         // ponytail: a non-numeric key (`a['length']`) reads `undefined` here.
                         if self.infer_expr_type(&index)? == HirType::Json {
@@ -3438,7 +3446,11 @@ impl<'a> FnLowerer<'a> {
                         let index = self.lower_expr(&computed.expr)?;
                         self.expect_type(&HirType::F64, &index, "index expression")?;
                         let HirExpr::Lit(HirLit::F64(position)) = index else {
-                            return Err("tuple index must be a numeric literal".into());
+                            // A computed index reads the elements as one dynamic array.
+                            // ponytail: the tuple is converted to Json per read (O(n) each); a hot loop
+                            // over a mixed literal should be declared `any[]`.
+                            let json = self.coerce_to_declared(&HirType::Json, obj)?;
+                            return Ok(HirExpr::JsonIndex(Box::new(json), Box::new(index)));
                         };
                         let position = position as usize;
                         let element = elements
