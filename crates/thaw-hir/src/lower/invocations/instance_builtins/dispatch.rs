@@ -298,7 +298,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `receiver.name(..args)` on an `any` value as a live dynamic call.
-    fn lower_json_dynamic_method_call(
+    pub(in crate::lower) fn lower_json_dynamic_method_call(
         &mut self,
         member: &MemberExpr,
         name: &str,
@@ -1091,6 +1091,7 @@ fn buffer_method_mutates(name: &str) -> Option<bool> {
     match name {
         "fill" | "set" | "copy" | "reverse" | "sort" | "copyWithin" | "swap16" | "swap32" | "swap64" => Some(true),
         _ if name.starts_with("write") => Some(true),
-        _ => None,
+        // `DataView.prototype.get*` / `set*` on a `DataView` held in `any`.
+        _ => FnLowerer::dataview_accessor(name).map(|(_, _, write)| write),
     }
 }
