@@ -5415,6 +5415,11 @@
     "name": "r129 http ServerResponse EventEmitter members",
     "expect": "matched",
     "source": "import * as http from 'node:http';\nasync function main(): Promise<void> {\n  const out: string[] = [];\n  let done: () => void = () => {};\n  const closed = new Promise<void>((r) => { done = r; });\n  const srv = http.createServer((req, res) => {\n    const base = res.listenerCount('finish');\n    const a = () => { out.push('a'); };\n    const b = () => { out.push('b'); };\n    res.on('finish', a);\n    res.prependListener('finish', b);\n    res.once('close', () => { out.push('close'); done(); });\n    out.push('count:' + (res.listenerCount('finish') - base) + ':' + res.eventNames().join('|') + ':' + res.getMaxListeners());\n    res.removeListener('finish', a);\n    out.push('after-remove:' + (res.listenerCount('finish') - base) + ':' + res.emit('nope'));\n    res.end('x');\n  });\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const r = await fetch('http://127.0.0.1:' + (srv.address() as any).port + '/');\n  console.log(await r.text());\n  await closed;\n  console.log(out.join(','));\n  srv.close();\n}\n"
+  },
+  {
+    "name": "dynamic member calls on any keep this and callbacks in any restore as functions",
+    "expect": "matched",
+    "source": "import http from 'http';\nfunction mk(): any { return function (...a: any[]) { return a.length; }; }\nfunction main(): void {\n  const d: any = { n: 7, fn: (x: number) => x * 2, g: function (x: number) { return x + 1; } };\n  const keys = Object.keys(d);\n  console.log(d[keys[1]](4), d[keys[2]](4));\n  const name = keys[1];\n  console.log(d[name](3), typeof d.g, d.g.name);\n  const run = (cb: any) => cb(10);\n  console.log(run(d.g));\n  const s = http.createServer(mk());\n  s.listen(0, function () { console.log(typeof this.address().port); s.close(); });\n}\n"
   }
 ]
 }

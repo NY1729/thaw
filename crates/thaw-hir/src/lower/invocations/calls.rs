@@ -542,6 +542,14 @@ impl<'a> FnLowerer<'a> {
 
     /// `fns[i](args)` on an array of callables: the element is read once into a binding and called
     /// like any local closure.
+    /// The type of a computed member key that can name a method (`o[key](..)`); `None` for literals and symbols.
+    fn computed_key_type(&mut self, key: &Expr) -> Option<HirType> {
+        if matches!(key, Expr::Lit(_) | Expr::Tpl(_)) || self.builtin_symbol_member_name(key).is_some() {
+            return None;
+        }
+        self.lower_expr(key).and_then(|k| self.infer_expr_type(&k)).ok()
+    }
+
     fn lower_array_element_call(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
         let Callee::Expr(callee) = &call.callee else { return Ok(None) };
         let Expr::Member(member) = callee.as_ref() else { return Ok(None) };
@@ -556,7 +564,10 @@ impl<'a> FnLowerer<'a> {
         let owner_value = self.lower_expr(&member.obj)?;
         let element = match self.infer_expr_type(&owner_value) {
             Ok(HirType::Array(element)) => *element,
+            // `o[key](..)` on an `any` object with a string key is a method call (keeps `this`).
+            Ok(HirType::Json) if self.computed_key_type(&computed.expr) == Some(HirType::Str) => return Ok(None),
             Ok(HirType::Json) => HirType::Json,
+            Ok(HirType::Dictionary(element)) => *element,
             _ => return Ok(None),
         };
         if !matches!(
@@ -968,24 +979,16 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         };
         let mut operand = member.obj.as_ref();
-        let mut asserted = false;
         loop {
             match operand {
                 Expr::Paren(paren) => operand = paren.expr.as_ref(),
-                Expr::TsNonNull(assertion) => {
-                    asserted = true;
-                    operand = assertion.expr.as_ref();
-                }
-                Expr::TsAs(assertion) => {
-                    asserted = true;
-                    operand = assertion.expr.as_ref();
-                }
+                Expr::TsNonNull(assertion) => operand = assertion.expr.as_ref(),
+                Expr::TsAs(assertion) => operand = assertion.expr.as_ref(),
                 _ => break,
             }
         }
-        if !asserted {
-            return Ok(None);
-        }
+        // Reached only after every receiver-specific path declined, so a non-assertion
+        // receiver is bound to a temp and called like an identifier receiver.
         let raw = self.lower_member_receiver(operand)?;
         // `_inner` keeps `Bytes` in a `Nullable`/`Optional` payload; the plain form erases it.
         let raw_type = self.infer_expr_type_inner(&raw)?;
@@ -3297,6 +3300,30 @@ impl<'a> FnLowerer<'a> {
                     return self.lower_dynamic_value_method_call(
                         &member.obj,
                         prop.sym.as_ref(),
+                        &call.args,
+                        expected_return_hint.as_ref(),
+                    );
+                }
+            }
+        }
+
+        // `o[key](..)` with a run-time string key on a dynamic receiver: dispatch by name, keeping `this`.
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let MemberProp::Computed(computed) = &member.prop {
+                // A `Json` key is only taken for a non-identifier receiver (`this[k]()`); `arr[i]()` stays an element call.
+                let named = self.json_receiver_candidate(&member.obj)
+                    && match self.computed_key_type(&computed.expr) {
+                        Some(HirType::Str) => true,
+                        Some(HirType::Json) => !matches!(member.obj.as_ref(), Expr::Ident(_)),
+                        _ => false,
+                    };
+                if named {
+                    let key = self.lower_expr(&computed.expr)?;
+                    let key = self.coerce_to_declared(&HirType::Str, key)?;
+                    return self.lower_dynamic_value_method_call_named(
+                        &member.obj,
+                        "<computed>",
+                        Some(key),
                         &call.args,
                         expected_return_hint.as_ref(),
                     );
