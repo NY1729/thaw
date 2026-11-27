@@ -4,8 +4,8 @@
   "skipped": 5
  },
  "buffer": {
-  "match": 43,
-  "output-diff": 7,
+  "match": 48,
+  "output-diff": 2,
   "skipped": 130
  },
  "child_process": {
@@ -22,8 +22,8 @@
   "match": 224
  },
  "crypto": {
-  "match": 152,
-  "output-diff": 18,
+  "match": 164,
+  "output-diff": 6,
   "skipped": 401
  },
  "diagnostics_channel": {
@@ -112,8 +112,7 @@
   "match": 4
  },
  "util": {
-  "match": 131,
-  "output-diff": 21,
+  "match": 152,
   "skipped": 6
  },
  "util_types": {
@@ -132,7 +131,7 @@
   "skipped": 60
  },
  "zlib": {
-  "match": 393,
-  "output-diff": 33
+  "match": 424,
+  "output-diff": 2
  }
 }
