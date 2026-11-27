@@ -22,6 +22,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20this.encoding = normalizeEncoding(encoding); this._pending = globalThis.Buffer.alloc(0); this.lastNeed = 0; this.lastTotal = 0; this.lastChar = globalThis.Buffer.alloc(4);\n\
              }\n\
              StringDecoder.prototype.write = function(value) {\n\
+             \x20\x20if (typeof value === 'string') return value;\n\
+             \x20\x20if (!ArrayBuffer.isView(value)) { var received = value === null || value === undefined ? value : typeof value === 'function' ? 'function ' + value.name : typeof value === 'object' ? 'an instance of ' + ((value.constructor && value.constructor.name) || 'Object') : 'type ' + typeof value + ' (' + String(value) + (typeof value === 'bigint' ? 'n' : '') + ')'; var invalid = new TypeError('The \"buf\" argument must be an instance of Buffer, TypedArray, or DataView. Received ' + received); invalid.code = 'ERR_INVALID_ARG_TYPE'; throw invalid; }\n\
              \x20\x20var input = globalThis.Buffer.from(value); var combined = this._pending.length ? globalThis.Buffer.concat([this._pending, input]) : input; var complete = combined.length;\n\
              \x20\x20if (this.encoding === 'utf8' || this.encoding === 'utf') complete = utf8CompleteLength(combined);\n\
              \x20\x20else if (this.encoding === 'utf16le' || this.encoding === 'ucs2') { complete -= complete % 2; if (complete >= 2) { var unit = combined[complete - 2] | combined[complete - 1] << 8; if (unit >= 55296 && unit <= 56319) complete -= 2; } }\n\

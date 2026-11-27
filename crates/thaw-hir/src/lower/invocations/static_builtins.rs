@@ -3072,6 +3072,9 @@ impl<'a> FnLowerer<'a> {
                                 Some(argument) => argument.clone(),
                                 None => HirExpr::Lit(HirLit::Str("utf8".to_string())),
                             };
+                            if let Some(rejected) = self.buffer_byte_length_rejected(&text)? {
+                                return self.wrap_call_argument_bindings(rejected, &bindings);
+                            }
                             // A buffer / typed array / ArrayBuffer measures its own bytes.
                             let text_type = self.infer_expr_type(&text)?;
                             if matches!(&text_type, HirType::Array(element) if **element == HirType::F64) {

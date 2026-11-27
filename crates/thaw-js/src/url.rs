@@ -258,7 +258,7 @@ const URL_PRELUDE: &str = r#"
     else if (typeof init === 'object' || typeof init === 'function') {
       if (typeof init[Symbol.iterator] === 'function' || Array.isArray(init)) {
         for (var pair of init) {
-          var p = Array.from(pair);
+          var p = pair !== null && typeof pair === 'object' && typeof pair[Symbol.iterator] === 'function' ? Array.from(pair) : [];
           if (p.length !== 2) { var e = new TypeError('Each query pair must be an iterable [name, value] tuple'); e.code = 'ERR_INVALID_TUPLE'; throw e; }
           list.push([String(p[0]), String(p[1])]);
         }

@@ -28,11 +28,12 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20return decodeURIComponent(url.pathname);\n\
              }\n\
              function urlToHttpOptions(input) {\n\
-             \x20\x20if (input === null || typeof input !== 'object') throw argError('url', 'of type object', input);\n\
-             \x20\x20var url = input instanceof globalThis.URL ? input : new globalThis.URL(input);\n\
-             \x20\x20var options = { protocol: url.protocol, hostname: url.hostname, hash: url.hash, search: url.search, pathname: url.pathname, path: url.pathname + url.search, href: url.href };\n\
+             \x20\x20if (input === null || (typeof input !== 'object' && typeof input !== 'function')) throw argError('url', 'of type object', input);\n\
+             \x20\x20var url = input, hostname = url.hostname, options = {};\n\
+             \x20\x20if (!(input instanceof globalThis.URL)) Object.keys(input).forEach(function(key) { options[key] = input[key]; });\n\
+             \x20\x20options.protocol = url.protocol; options.hostname = hostname && hostname[0] === '[' ? hostname.slice(1, -1) : hostname; options.hash = url.hash; options.search = url.search; options.pathname = url.pathname; options.path = (url.pathname || '') + (url.search || ''); options.href = url.href;\n\
              \x20\x20if (url.port !== '') options.port = Number(url.port);\n\
-             \x20\x20if (url.username !== '' || url.password !== '') options.auth = decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password);\n\
+             \x20\x20if (url.username || url.password) options.auth = decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password);\n\
              \x20\x20return options;\n\
              }\n\
              function queryObject(search) {\n\
@@ -69,6 +70,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function format(input) {\n\
              \x20\x20if (input instanceof globalThis.URL) return input.href;\n\
              \x20\x20if (typeof input === 'string') return input;\n\
+             \x20\x20if (input === null || typeof input !== 'object') throw argError('urlObject', 'one of type object or string', input);\n\
              \x20\x20var protocol = input.protocol || '';\n\
              \x20\x20if (protocol && protocol.charAt(protocol.length - 1) !== ':') protocol += ':';\n\
              \x20\x20var authority = input.host || input.hostname || '';\n\

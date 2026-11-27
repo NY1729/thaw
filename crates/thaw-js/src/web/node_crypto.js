@@ -10,7 +10,7 @@ function received(value) {
   if (typeof value === 'function') return 'Received function ' + value.name;
   if (typeof value === 'object') return 'Received an instance of ' + ((value.constructor && value.constructor.name) || 'Object');
   if (typeof value === 'string') return "Received type string ('" + value + "')";
-  return 'Received type ' + typeof value + ' (' + String(value) + ')';
+  return 'Received type ' + typeof value + ' (' + String(value) + (typeof value === 'bigint' ? 'n' : '') + ')';
 }
 function argTypeError(name, expected, value) {
   return cryptoError(TypeError, 'ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
@@ -47,6 +47,9 @@ class Hash {
   constructor(algorithm) { requireArg(typeof algorithm === 'string', 'algorithm', TYPE_NAME, algorithm); this.algorithm = normalizeDigestAlgorithm(algorithm); this._chunks = []; this._digested = false; }
   update(data, encoding) {
     if (this._digested) throw hashFinalized();
+    requireArg(typeof data === 'string' || isView(data), 'data', TYPE_INPUT, data);
+    // Node ignores an encoding that is not a known encoding name and reads the text as utf8.
+    if (typeof data === 'string' && !(typeof encoding === 'string' && Buffer.isEncoding(encoding))) encoding = undefined;
     this._chunks.push(Buffer.from(data, encoding)); return this;
   }
   digest(encoding) {
@@ -83,13 +86,14 @@ class Hmac extends Hash {
   }
 }
 function outOfRange(name, value) {
-  var e = new RangeError('The value of "' + name + '" is out of range. Received ' + value);
+  var e = new RangeError('The value of "' + name + '" is out of range. It must be >= 0 && <= 2147483647. Received ' + value);
   e.code = 'ERR_OUT_OF_RANGE';
   return e;
 }
 function randomBytesSync(size) {
-  size = Number(size);
-  if (!Number.isInteger(size) || size < 0 || size > 0x7fffffff) throw outOfRange('size', size);
+  requireArg(typeof size === 'number', 'size', 'of type number', size);
+  if (!(size >= 0 && size <= 0x7fffffff)) throw outOfRange('size', size);
+  size = Math.trunc(size);
   return Buffer.from(__thaw_crypto_random_hex(size), 'hex');
 }
 function randomFillSync(buffer, offset, size) {
@@ -110,7 +114,7 @@ function randomFill(buffer, offset, size, callback) {
 function randomBytes(size, callback) {
   var value = randomBytesSync(size);
   if (callback === undefined) return value;
-  if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+  requireArg(typeof callback === 'function', 'callback', TYPE_CALLBACK, callback);
   queueMicrotask(function () { callback(null, value); });
 }
 function randomInt(min, max, callback) {
@@ -129,7 +133,10 @@ function randomInt(min, max, callback) {
   if (callback === undefined) return value;
   queueMicrotask(function () { callback(null, value); });
 }
-function randomUUID() {
+function randomUUID(options) {
+  if (options !== undefined) {
+    requireArg(options !== null && typeof options === 'object' && !Array.isArray(options), 'options', 'of type object', options);
+  }
   var bytes = randomBytesSync(16); bytes[6] = bytes[6] & 0x0f | 0x40; bytes[8] = bytes[8] & 0x3f | 0x80;
   var hex = bytes.toString('hex');
   return hex.substring(0, 8) + '-' + hex.substring(8, 12) + '-' + hex.substring(12, 16) + '-' + hex.substring(16, 20) + '-' + hex.substring(20);

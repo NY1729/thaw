@@ -134,6 +134,30 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// `Buffer.byteLength(value)` with a statically known value the runtime cannot measure
+    /// (`null`, `undefined`, a number, a boolean): Node throws `ERR_INVALID_ARG_TYPE`. Passing
+    /// such a value on made the runtime read a null pointer as text (a segfault for `null`).
+    /// `None` for a type the runtime handles.
+    pub(in crate::lower) fn buffer_byte_length_rejected(&mut self, text: &HirExpr) -> Result<Option<HirExpr>, String> {
+        const MESSAGE: &str = "The \"string\" argument must be of type string or an instance of Buffer or ArrayBuffer. Received ";
+        let (received, detail) = match self.infer_expr_type(text)? {
+            HirType::Null => ("null", None),
+            HirType::Undefined => ("undefined", None),
+            HirType::F64 | HirType::I64 => ("type number (", Some(self.coerce_primitive_to_string(text.clone())?)),
+            HirType::Bool => ("type boolean (", Some(self.coerce_primitive_to_string(text.clone())?)),
+            _ => return Ok(None),
+        };
+        let wrapped = detail.map(|d| HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+            vec![d, HirExpr::Lit(HirLit::Str(")".into()))],
+        ));
+        let stmt = Self::node_error_throw("TypeError", "ERR_INVALID_ARG_TYPE", &format!("{MESSAGE}{received}"), wrapped);
+        Ok(Some(HirExpr::EvalThen(
+            Box::new(text.clone()),
+            Box::new(self.block_as_expr(HirExpr::Block(vec![stmt]), HirType::F64)),
+        )))
+    }
+
     /// An encoding argument as the C string the runtime decodes. Passing a non-string value
     /// through unchanged made the runtime read an arbitrary pointer as text (a crash for a
     /// `null`/`URL`/`Uint8Array` encoding). `undefined` is `utf8`; `to_text` (the

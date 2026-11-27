@@ -1,0 +1,121 @@
+on0 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received an instance of Array
+off0 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received an instance of Array
+setMax0 TypeError ERR_INVALID_ARG_TYPE The "setMaxListeners" argument must be of type number. Received an instance of Array
+getPriority0 TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received an instance of Array
+randomBytes0 TypeError ERR_INVALID_ARG_TYPE The "size" argument must be of type number. Received an instance of Array
+randomUUID0 TypeError ERR_INVALID_ARG_TYPE The "options" argument must be of type object. Received an instance of Array
+update0 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Array
+updateEnc0 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac0 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Array
+styleText0 TypeError ERR_INVALID_ARG_TYPE The "text" argument must be of type string. Received an instance of Array
+httpOpts0 ok undefined
+format0 ok 
+sdWrite0 TypeError ERR_INVALID_ARG_TYPE The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received an instance of Array
+on1 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received an instance of Date
+off1 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received an instance of Date
+setMax1 TypeError ERR_INVALID_ARG_TYPE The "setMaxListeners" argument must be of type number. Received an instance of Date
+getPriority1 TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received an instance of Date
+randomBytes1 TypeError ERR_INVALID_ARG_TYPE The "size" argument must be of type number. Received an instance of Date
+randomUUID1 ok 36
+update1 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Date
+updateEnc1 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac1 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Date
+styleText1 TypeError ERR_INVALID_ARG_TYPE The "text" argument must be of type string. Received an instance of Date
+httpOpts1 ok undefined
+format1 ok 
+sdWrite1 TypeError ERR_INVALID_ARG_TYPE The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received an instance of Date
+on2 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received an instance of Object
+off2 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received an instance of Object
+setMax2 TypeError ERR_INVALID_ARG_TYPE The "setMaxListeners" argument must be of type number. Received an instance of Object
+getPriority2 TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received an instance of Object
+randomBytes2 TypeError ERR_INVALID_ARG_TYPE The "size" argument must be of type number. Received an instance of Object
+randomUUID2 ok 36
+update2 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Object
+updateEnc2 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac2 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Object
+styleText2 TypeError ERR_INVALID_ARG_TYPE The "text" argument must be of type string. Received an instance of Object
+httpOpts2 ok undefined
+format2 ok 
+sdWrite2 TypeError ERR_INVALID_ARG_TYPE The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received an instance of Object
+on3 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received type number (5)
+off3 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received type number (5)
+setMax3 ok 5
+getPriority3 ok number
+randomBytes3 ok 5
+randomUUID3 TypeError ERR_INVALID_ARG_TYPE The "options" argument must be of type object. Received type number (5)
+update3 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type number (5)
+updateEnc3 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac3 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type number (5)
+styleText3 TypeError ERR_INVALID_ARG_TYPE The "text" argument must be of type string. Received type number (5)
+httpOpts3 TypeError ERR_INVALID_ARG_TYPE The "url" argument must be of type object. Received type number (5)
+format3 TypeError ERR_INVALID_ARG_TYPE The "urlObject" argument must be one of type object or string. Received type number (5)
+sdWrite3 TypeError ERR_INVALID_ARG_TYPE The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received type number (5)
+on4 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received type string ('s')
+off4 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received type string ('s')
+setMax4 TypeError ERR_INVALID_ARG_TYPE The "setMaxListeners" argument must be of type number. Received type string ('s')
+getPriority4 TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received type string ('s')
+randomBytes4 TypeError ERR_INVALID_ARG_TYPE The "size" argument must be of type number. Received type string ('s')
+randomUUID4 TypeError ERR_INVALID_ARG_TYPE The "options" argument must be of type object. Received type string ('s')
+update4 ok 03c7c0ace395d80182db07ae2c30f034
+updateEnc4 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac4 ok a754f4059b0a4c0a4abf6568ea186538b7f2dc236ba3cdfd92492e37f066fe8d
+styleText4 ok s
+httpOpts4 TypeError ERR_INVALID_ARG_TYPE The "url" argument must be of type object. Received type string ('s')
+format4 ok s
+sdWrite4 ok s
+on5 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received null
+off5 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received null
+setMax5 TypeError ERR_INVALID_ARG_TYPE The "setMaxListeners" argument must be of type number. Received null
+getPriority5 TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received null
+randomBytes5 TypeError ERR_INVALID_ARG_TYPE The "size" argument must be of type number. Received null
+randomUUID5 TypeError ERR_INVALID_ARG_TYPE The "options" argument must be of type object. Received null
+update5 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received null
+updateEnc5 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac5 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received null
+styleText5 TypeError ERR_INVALID_ARG_TYPE The "text" argument must be of type string. Received null
+httpOpts5 TypeError ERR_INVALID_ARG_TYPE The "url" argument must be of type object. Received null
+format5 TypeError ERR_INVALID_ARG_TYPE The "urlObject" argument must be one of type object or string. Received null
+sdWrite5 TypeError ERR_INVALID_ARG_TYPE The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received null
+on6 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received undefined
+off6 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received undefined
+setMax6 TypeError ERR_INVALID_ARG_TYPE The "setMaxListeners" argument must be of type number. Received undefined
+getPriority6 ok number
+randomBytes6 TypeError ERR_INVALID_ARG_TYPE The "size" argument must be of type number. Received undefined
+randomUUID6 ok 36
+update6 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received undefined
+updateEnc6 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac6 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received undefined
+styleText6 TypeError ERR_INVALID_ARG_TYPE The "text" argument must be of type string. Received undefined
+httpOpts6 TypeError ERR_INVALID_ARG_TYPE The "url" argument must be of type object. Received undefined
+format6 TypeError ERR_INVALID_ARG_TYPE The "urlObject" argument must be one of type object or string. Received undefined
+sdWrite6 TypeError ERR_INVALID_ARG_TYPE The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received undefined
+on7 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received type bigint (5n)
+off7 TypeError ERR_INVALID_ARG_TYPE The "listener" argument must be of type function. Received type bigint (5n)
+setMax7 TypeError ERR_INVALID_ARG_TYPE The "setMaxListeners" argument must be of type number. Received type bigint (5n)
+getPriority7 TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received type bigint (5n)
+randomBytes7 TypeError ERR_INVALID_ARG_TYPE The "size" argument must be of type number. Received type bigint (5n)
+randomUUID7 TypeError ERR_INVALID_ARG_TYPE The "options" argument must be of type object. Received type bigint (5n)
+update7 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type bigint (5n)
+updateEnc7 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac7 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received type bigint (5n)
+styleText7 TypeError ERR_INVALID_ARG_TYPE The "text" argument must be of type string. Received type bigint (5n)
+httpOpts7 TypeError ERR_INVALID_ARG_TYPE The "url" argument must be of type object. Received type bigint (5n)
+format7 TypeError ERR_INVALID_ARG_TYPE The "urlObject" argument must be one of type object or string. Received type bigint (5n)
+sdWrite7 TypeError ERR_INVALID_ARG_TYPE The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received type bigint (5n)
+on8 ok 1
+off8 ok 0
+setMax8 TypeError ERR_INVALID_ARG_TYPE The "setMaxListeners" argument must be of type number. Received function 
+getPriority8 TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received function 
+randomBytes8 TypeError ERR_INVALID_ARG_TYPE The "size" argument must be of type number. Received function 
+randomUUID8 TypeError ERR_INVALID_ARG_TYPE The "options" argument must be of type object. Received function 
+update8 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received function 
+updateEnc8 ok 9dd4e461268c8034f5c8564e155c67a6
+hmac8 TypeError ERR_INVALID_ARG_TYPE The "data" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received function 
+styleText8 TypeError ERR_INVALID_ARG_TYPE The "text" argument must be of type string. Received function 
+httpOpts8 ok undefined
+format8 TypeError ERR_INVALID_ARG_TYPE The "urlObject" argument must be one of type object or string. Received function 
+sdWrite8 TypeError ERR_INVALID_ARG_TYPE The "buf" argument must be an instance of Buffer, TypedArray, or DataView. Received function 
+sml-neg RangeError ERR_OUT_OF_RANGE The value of "setMaxListeners" is out of range. It must be >= 0. Received -1
+rb-neg RangeError ERR_OUT_OF_RANGE The value of "size" is out of range. It must be >= 0 && <= 2147483647. Received -1
+byteLength-null TypeError ERR_INVALID_ARG_TYPE The "string" argument must be of type string or an instance of Buffer or ArrayBuffer. Received null
+byteLength-undefined TypeError ERR_INVALID_ARG_TYPE The "string" argument must be of type string or an instance of Buffer or ArrayBuffer. Received undefined

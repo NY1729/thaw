@@ -120,6 +120,24 @@ fn node_invalid_argument_types_throw_like_node() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Wrong-typed arguments to events, os, crypto, url, util, string_decoder and Buffer.byteLength throw Node's
+/// ERR_INVALID_ARG_TYPE / ERR_OUT_OF_RANGE (code and message). The expected text is Node 22 running
+/// tests/input_validation_modules/main.ts.
+#[test]
+fn node_module_argument_types_throw_like_node() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-node_module_argument_types-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, include_str!("input_validation_modules/main.ts")).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).current_dir(&dir).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), include_str!("input_validation_modules/expected.txt"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Awaited FileHandle methods inside nested async arrows (try/catch/finally, rethrow, union returns,
 /// `(await x).m()` receivers) settle, reject and segfault-free like Node 22 (tests/fsp_filehandle_async/main.ts).
 #[test]
