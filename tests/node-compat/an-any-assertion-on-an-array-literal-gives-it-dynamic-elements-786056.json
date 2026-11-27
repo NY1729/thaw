@@ -1,0 +1,5 @@
+{
+  "name": "an any assertion on an array literal gives it dynamic elements",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const h: any = { items: [1, 2] as any[] };\n  h.items.push(\"x\");\n  h.items.push({ a: 1 });\n  h.items[0] = \"z\";\n  console.log(h.items.length, JSON.stringify(h.items));\n  const a = [1, 2] as any;\n  a.push(\"s\");\n  const b = [1, 2] as any[];\n  b.unshift(null);\n  console.log(JSON.stringify(a), JSON.stringify(b));\n  const o = { list: [1] } as any;\n  (o as any).list.push(\"w\");\n  console.log(JSON.stringify(o));\n  const m = [[1, 2], [3]] as any[];\n  m[0].push(\"q\");\n  m.push(\"w\");\n  console.log(JSON.stringify(m));\n}\n"
+}

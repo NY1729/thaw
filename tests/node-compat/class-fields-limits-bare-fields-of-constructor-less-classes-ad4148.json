@@ -1,0 +1,5 @@
+{
+  "name": "class fields limits: bare fields of constructor-less classes",
+  "expect": "matched",
+  "source": "class A { x: number; s: string; }\nclass B { y: number[]; }\nclass C { v: number; w: string; }\nfunction main(): void {\n  const a = new A();\n  console.log(\"hi\", 1 + 2);\n  console.log(a.x === undefined);\n  const b = new B();\n  b.y = [1];\n  console.log(b.y.length);\n  const c = new C();\n  c.v = 2; c.w = \"k\";\n  console.log(c, c.v + 1);\n}\n"
+}

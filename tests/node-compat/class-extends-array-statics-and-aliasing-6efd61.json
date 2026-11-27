@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: statics and aliasing",
+  "expect": "matched",
+  "source": "class Vec extends Array<number> {\n  static zero(n: number): Vec { const v = new Vec(); for (let i = 0; i < n; i++) v.push(0); return v; }\n  static count = 3;\n  add(o: Vec): Vec { const r = new Vec(); for (let i = 0; i < this.length; i++) r.push(this[i] + o[i]); return r; }\n  get first(): number { return this[0]; }\n  self(): this { return this; }\n}\nfunction mk(): Vec { const v = new Vec(); v.push(5); return v; }\nfunction main(): void {\n  const a = Vec.zero(2); a[0] = 1; a[1] = 2;\n  const b = a.add(a);\n  console.log(b, b.first, Vec.count, a.self().length);\n  console.log(new Vec().push(9));\n  console.log(mk().length, mk()[0]);\n  const list: Vec[] = [a, b];\n  console.log(list.length, list[1].length, list.map((v) => v.length));\n  const arr: number[] = a;\n  arr.push(99);\n  console.log(a.length, a);\n  const o = { v: a };\n  console.log(o.v.length);\n  const j = structuredClone(a);\n  console.log(j instanceof Vec, j);\n  const empty = new Vec();\n  console.log(empty, empty.length);\n}\n"
+}

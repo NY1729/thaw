@@ -1,0 +1,5 @@
+{
+  "name": "round9 object literal with null and undefined fields",
+  "expect": "matched",
+  "source": "function main(): void { console.log({ n: null, u: undefined }); }"
+}

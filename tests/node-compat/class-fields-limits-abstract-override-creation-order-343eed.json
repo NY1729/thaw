@@ -1,0 +1,5 @@
+{
+  "name": "class fields limits: abstract override creation order",
+  "expect": "matched",
+  "source": "abstract class Base { abstract a: number; abstract b: string; c: number = 1; show(): number { return this.c + this.a; } }\nclass Impl extends Base { b: string = \"x\"; a: number = 2; d: number = 3; }\nabstract class B2 { abstract p: number; abstract q: number; constructor() { } m(): number { return this.q; } }\nclass I2 extends B2 { q: number = 5; p: number = 6; }\nclass I3 extends I2 { r: number = 7; }\nfunction main(): void {\n  const i = new Impl();\n  console.log(i, i.show(), i.a, i.b);\n  const j = new I2();\n  console.log(j, j.m(), j.p);\n  console.log(JSON.stringify(j), Object.keys(j));\n  const k = new I3();\n  console.log(k, Object.entries(k));\n  for (const key in i) console.log(key);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "icu Date toLocaleString dateStyle timeStyle and timeZoneName",
+  "expect": "matched",
+  "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(\"en-US\", { dateStyle: \"medium\", timeStyle: \"short\", timeZone: \"UTC\" })); console.log(d.toLocaleString(\"en-US\", { dateStyle: \"full\", timeZone: \"UTC\" })); console.log(d.toLocaleString(\"de-DE\", { dateStyle: \"long\", timeStyle: \"medium\", timeZone: \"UTC\" })); console.log(d.toLocaleString(\"en-US\", { timeStyle: \"long\", timeZone: \"UTC\" })); console.log(d.toLocaleTimeString(\"en-US\", { timeZone: \"America/New_York\", timeZoneName: \"short\" })); console.log(d.toLocaleString(\"en-US\", { timeZone: \"Asia/Tokyo\", timeZoneName: \"long\" })); }"
+}

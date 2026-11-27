@@ -1,0 +1,5 @@
+{
+  "name": "util type predicates",
+  "expect": "matched",
+  "source": "import { isDate, isMap, isRegExp, isSet } from 'node:util/types'; function main(): void { console.log(isDate(new Date(0)), isRegExp(/x/), isMap(new Map<string, number>()), isSet(new Set<number>())); }"
+}

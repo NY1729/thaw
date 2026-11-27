@@ -1,0 +1,5 @@
+{
+  "name": "early return from loops of async functions without suspension points",
+  "expect": "matched",
+  "source": "async function f(n: number): Promise<number> {\n  for (let i = 0; i < n; i++) {\n    if (i === 2) return i * 10;\n  }\n  return -1;\n}\nasync function w(n: number): Promise<number> {\n  let i = 0;\n  while (i < n) {\n    i++;\n    if (i === 3) return i;\n    await Promise.resolve();\n  }\n  return -1;\n}\nasync function d(n: number): Promise<string> {\n  let i = 0;\n  do {\n    i++;\n    if (i > 1) return 'do' + i;\n  } while (i < n);\n  return 'none';\n}\nasync function main(): Promise<void> {\n  console.log(await f(5), await f(1));\n  console.log(await w(5), await w(2));\n  console.log(await d(5), await d(1));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "tagged template objects are per-site, frozen and carry raw",
+  "expect": "matched",
+  "source": "function tag(s: TemplateStringsArray, ...v: number[]): TemplateStringsArray { return s; }\nconst f = (): TemplateStringsArray => tag`a${1}b\\n`;\nasync function main(): Promise<void> {\n  console.log(f() === f(), tag`a${1}b` === tag`a${1}b`);\n  console.log(Object.isFrozen(f()), f().raw[1], f()[1].length, f().raw[1].length, f().length);\n  console.log(Array.isArray(f().raw), Object.isFrozen(f().raw));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage dynamic rest callable owners",
+  "expect": "matched",
+  "source": "function mutate(...xs:number[][]):void{const exposed:any=xs;exposed[1][0]={x:7};} function main():void{const a:number[]=[];const b:number[]=[];const fn:any=mutate;fn(a,b);console.log(typeof b[0],b[0].x);}"
+}

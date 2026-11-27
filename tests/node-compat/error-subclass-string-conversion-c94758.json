@@ -1,0 +1,5 @@
+{
+  "name": "error subclass string conversion",
+  "expect": "matched",
+  "source": "class MyErr extends Error { constructor(m: string) { super(m); this.name = 'MyErr'; } } class Sub extends MyErr {} class E2 extends Error {} function main(): void { const m = new MyErr('oops'); console.log(String(m), `${m}`, 'x: ' + m, m.toString()); console.log(String(new Sub('q')), `${new E2('z')}`); try { throw new MyErr('mm'); } catch (e: any) { console.log(String(e), `${e}`, 'c: ' + e); } }"
+}

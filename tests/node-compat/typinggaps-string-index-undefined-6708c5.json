@@ -1,0 +1,5 @@
+{
+  "name": "typinggaps string index undefined",
+  "expect": "matched",
+  "source": "function main(): void {\n  const s = \"abc\";\n  console.log(s[1]);\n  console.log(s[10]);\n  console.log(s[10] === undefined, s[0] !== undefined, s[-1], s[1.5]);\n  const i = 2;\n  console.log(s[i] ?? \"dflt\", s[i + 5] ?? \"dflt\");\n  let n = 0;\n  for (let k = 0; k < s.length; k++) { if (s[k] === \"b\") n++; }\n  console.log(n, s[0] + s[2]);\n}\n"
+}

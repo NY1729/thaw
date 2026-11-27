@@ -1,0 +1,5 @@
+{
+  "name": "crypto random fill identity",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; import { randomFillSync } from 'node:crypto'; function main(): void { const value = Buffer.alloc(8); console.log(randomFillSync(value) === value); }"
+}

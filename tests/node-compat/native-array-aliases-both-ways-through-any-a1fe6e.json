@@ -1,0 +1,5 @@
+{
+  "name": "native array aliases both ways through any",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const arr: number[] = [1, 2];\n  const a: any = arr;\n  a.push(3);\n  console.log(arr.length, arr.join(\",\"));\n  arr.push(4);\n  console.log(a.length, a[3]);\n  a[0] = 9;\n  console.log(arr[0]);\n  console.log(a.map((x: number) => x * 2).join(\",\"));\n  console.log(Array.isArray(a), JSON.stringify(a));\n}\n"
+}

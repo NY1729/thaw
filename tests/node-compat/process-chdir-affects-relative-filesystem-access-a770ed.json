@@ -1,0 +1,5 @@
+{
+  "name": "process chdir affects relative filesystem access",
+  "expect": "matched",
+  "source": "import process from 'node:process'; import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { join } from 'node:path'; function main(): void { const original = process.cwd(); const directory: string = String(mkdtempSync(join(tmpdir(), 'thaw-chdir-'))); process.chdir(directory); writeFileSync('value.txt', 'ok'); console.log(process.cwd() === directory, readFileSync(join(directory, 'value.txt'), 'utf8')); process.chdir(original); rmSync(directory, { recursive: true }); }"
+}

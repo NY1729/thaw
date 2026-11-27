@@ -1,0 +1,5 @@
+{
+  "name": "buffer list through hash update loop",
+  "expect": "matched",
+  "source": "import { createHash } from \"node:crypto\";\nfunction main(): void {\n  const h = createHash(\"sha1\");\n  const parts = [Buffer.from(\"a\"), Buffer.from(\"b\")];\n  for (const p of parts) h.update(p);\n  console.log(h.digest(\"hex\"));\n}\n"
+}

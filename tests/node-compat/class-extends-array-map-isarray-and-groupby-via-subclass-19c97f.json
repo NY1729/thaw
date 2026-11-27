@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array/Map: isArray and groupBy via subclass",
+  "expect": "matched",
+  "source": "class Counter extends Array<number> {\n  static made = 0;\n  static mk(): Counter { Counter.made++; return new Counter(); }\n}\nclass Sub extends Counter { }\nclass M2 extends Map<number, number[]> { }\nclass M3 extends M2 { static k = 3; }\nfunction main(): void {\n  console.log(Array.isArray(new Counter()), Counter.isArray([1]), Counter.isArray(new Counter()));\n  console.log(Sub.made, Sub.mk() instanceof Counter, Sub.mk() instanceof Sub);\n  const mg = M2.groupBy([1, 2, 3], (x: number) => x % 2);\n  console.log(mg.size, mg, M3.groupBy([1, 2, 3, 4], (x: number) => x % 3), M3.k, mg instanceof M2);\n  const f = Sub.from([1, 2, 3]);\n  console.log(f, f instanceof Sub, Sub.of(7, 8) instanceof Sub);\n}\n"
+}

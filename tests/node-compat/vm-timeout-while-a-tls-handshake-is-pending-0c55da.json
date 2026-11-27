@@ -1,0 +1,5 @@
+{
+  "name": "vm timeout while a tls handshake is pending",
+  "expect": "matched",
+  "source": "import net from 'node:net'; import tls from 'node:tls'; import { runInNewContext } from 'node:vm'; function main(): void { const server = net.createServer((_socket: any) => {}); server.listen(0, '127.0.0.1', () => { const port = (server.address() as any).port; const client = tls.connect({ host: '127.0.0.1', port, rejectUnauthorized: false }); client.on('error', () => {}); let ticks = 0; const timer = setInterval(() => { ticks++; }, 5); try { runInNewContext('while (true) {}', {}, { timeout: 30 }); } catch (error: any) { console.log(error.code); } setTimeout(() => { console.log('timer ran during pending handshake', ticks > 0); console.log('handshake still pending', client.authorized === false); clearInterval(timer); client.destroy(); server.close(); }, 60); }); }"
+}

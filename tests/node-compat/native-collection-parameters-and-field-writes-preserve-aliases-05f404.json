@@ -1,0 +1,5 @@
+{
+  "name": "native collection parameters and field writes preserve aliases",
+  "expect": "matched",
+  "source": "class Store {\n map:Map<string,number>=new Map<string,number>(); set:Set<number>=new Set<number>();\n replace(m:Map<string,number>,s:Set<number>):Map<string,number> { this.map=m;this.set=s;m.set(\"inside\",7);s.add(3);return m; }\n}\nasync function main():Promise<void>{\n const store=new Store();const a:any=store;const m=new Map<string,number>();const s=new Set<number>();const b:any=m;const c:any=s;\n const result:any=a.replace(b,c); console.log(store.map===m,store.set===s,result===b,a.map===b,a.set===c,m.get(\"inside\"),s.has(3));\n const other=new Map<string,number>();const d:any=other;a.map=d;a.set=c;console.log(store.map===other,store.set===s);\n Object.defineProperty(a,\"map\",{value:b});console.log(store.map===m,a.map===b);\n for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}a.map.set(\"kept\",9);console.log(m.get(\"kept\"));\n}"
+}

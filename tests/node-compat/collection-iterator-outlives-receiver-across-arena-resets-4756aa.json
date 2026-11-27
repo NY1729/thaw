@@ -1,0 +1,5 @@
+{
+  "name": "collection iterator outlives receiver across arena resets",
+  "expect": "matched",
+  "source": "function make():any { const m=new Map<string,number>(); m.set(\"kept\",42); const a:any=m; return a.entries(); }\nasync function main():Promise<void> { const it:any=make(); for(let i=0;i<40;i++){ await new Promise<void>((resolve)=>setTimeout(resolve,1)); } console.log(JSON.stringify(it.next().value),it.next().done); }"
+}

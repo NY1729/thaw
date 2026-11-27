@@ -1,0 +1,5 @@
+{
+  "name": "web writable stream",
+  "expect": "matched",
+  "source": "import { WritableStream } from 'node:stream/web'; async function main(): Promise<void> { const values: string[] = []; const stream = new WritableStream({ write(chunk) { values.push(String(chunk)); }, close() { values.push('closed'); } }); const writer = stream.getWriter(); await writer.write('hello'); await writer.close(); console.log(values.join(',')); }"
+}

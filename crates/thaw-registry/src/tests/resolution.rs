@@ -4083,7 +4083,7 @@ fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
     assert!(crypto.contains("function scryptSync("));
 
     let fs = resolve_builtin("node:fs").unwrap().dts_source;
-    assert!(fs.contains("readdirSync(path: string | JsValue): string[]"));
+    assert!(fs.contains("readdirSync(path__length_2: string | JsValue): string[]"));
     assert!(fs.contains("rmSync(path: string | JsValue, options?: any)"));
 
     let fs_promises = resolve_builtin("node:fs/promises").unwrap().dts_source;

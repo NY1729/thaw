@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: map subclass override super",
+  "expect": "matched",
+  "source": "class LoggedMap extends Map<string, number> {\n  log: string[] = [];\n  set(k: string, v: number): this { this.log.push(\"set:\" + k); return super.set(k, v * 2); }\n  get(k: string): number | undefined { this.log.push(\"get:\" + k); return super.get(k); }\n}\nfunction main(): void {\n  const m = new LoggedMap(); m.set(\"y\", 5);\n  console.log(m.get(\"y\"), m.size, m.log.join(\",\"));\n}\n"
+}

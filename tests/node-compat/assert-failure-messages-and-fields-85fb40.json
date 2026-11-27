@@ -1,0 +1,5 @@
+{
+  "name": "assert failure messages and fields",
+  "expect": "matched",
+  "source": "import * as assert from 'node:assert'; function t(n: string, f: () => void): void {   try { f(); console.log(n, 'no throw'); } catch (e: any) { console.log(n, e.name, e.code, e.operator, JSON.stringify(e.actual), JSON.stringify(e.expected), e.generatedMessage, JSON.stringify(e.message)); } } function main(): void {   t('se', () => assert.strictEqual(1, 2));   t('sestr', () => assert.strictEqual('a', 'b'));     t('ne', () => assert.notStrictEqual(1, 1));   t('eq', () => assert.equal(1, 2));   t('dse', () => assert.deepStrictEqual({ a: 1 }, { a: 2 }));      t('okmsg', () => assert.ok(0, 'm'));   t('fail', () => assert.fail());   t('fail2', () => assert.fail('x'));   t('throws', () => assert.throws(() => {}));   t('throws2', () => assert.throws(() => { throw new Error('a'); }, /b/));   t('dnt', () => assert.doesNotThrow(() => { throw new Error('a'); })); }"
+}

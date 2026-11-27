@@ -1,0 +1,5 @@
+{
+  "name": "nd8 fs/promises readFile with an encoding through a namespace import",
+  "expect": "matched",
+  "source": "import * as fsp from \"node:fs/promises\";\nimport * as os from \"node:os\";\nasync function main(): Promise<void> {\n  const p = os.tmpdir() + \"/thaw-nd8-readfile.txt\";\n  await fsp.writeFile(p, \"abc\");\n  console.log(await fsp.readFile(p, \"utf8\"));\n  console.log((await fsp.readFile(p)).length);\n  await fsp.rm(p);\n}\n"
+}

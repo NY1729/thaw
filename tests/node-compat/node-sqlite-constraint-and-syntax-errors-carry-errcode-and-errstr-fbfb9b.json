@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite constraint and syntax errors carry errcode and errstr",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE u (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE)');\n  db.exec(\"INSERT INTO u (email) VALUES ('a@x')\");\n  try { db.exec(\"INSERT INTO u (email) VALUES ('a@x')\"); } catch (e: any) { console.log(e.code, e.errcode, e.errstr, e.message); }\n  try { db.exec('INSERT INTO u (email) VALUES (NULL)'); } catch (e: any) { console.log(e.code, e.errcode, e.errstr, e.message); }\n  try { db.prepare('SELEC 1'); } catch (e: any) { console.log(e.code, e.errcode, e.errstr, e.message); }\n  db.close();\n}"
+}

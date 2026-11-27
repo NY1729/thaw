@@ -1,0 +1,5 @@
+{
+  "name": "zlib codes map both directions and is frozen",
+  "expect": "matched",
+  "source": "import * as zlib from 'node:zlib';\nfunction main(): void {\n  const codes: any = (zlib as any).codes;\n  console.log('codes', typeof codes, Object.keys(codes).length, Object.isFrozen(codes));\n  console.log(Object.keys(codes).map((k: string): string => k + '=' + codes[k]).join(' '));\n  console.log(codes.Z_OK, codes[0], codes[-6], codes.Z_VERSION_ERROR, codes[-3]);\n}\n"
+}

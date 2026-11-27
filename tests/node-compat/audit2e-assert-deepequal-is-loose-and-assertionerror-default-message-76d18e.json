@@ -1,0 +1,5 @@
+{
+  "name": "audit2e assert deepEqual is loose and AssertionError default message",
+  "expect": "matched",
+  "source": "import * as assert from \"node:assert\"; function main(): void { assert.deepEqual({ a: 1 }, { a: \"1\" }); assert.deepEqual([1, 2], [\"1\", 2]); assert.deepEqual(NaN, NaN); console.log(\"loose-ok\"); try { assert.deepEqual([1, 2], [1, 2, 3]); } catch (e: any) { console.log(e.operator, e.message); } try { assert.notDeepEqual({ a: 1 }, { a: \"1\" }); } catch (e: any) { console.log(e.operator); } try { assert.deepStrictEqual({ a: 1 }, { a: \"1\" }); } catch (e: any) { console.log(\"strict-throws\"); } console.log(new assert.AssertionError({ actual: 1, expected: 2, operator: \"strictEqual\" }).message); console.log(typeof assert.strict); }"
+}

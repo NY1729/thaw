@@ -1,0 +1,5 @@
+{
+  "name": "nd6 regex string conversion and canonical flags",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(String(/a\\nb/g), `${/a/g}`);\n  console.log(new RegExp(\"a\", \"yg\").flags, /a/gimsuyd.flags, new RegExp(\"a\").flags);\n}\n"
+}

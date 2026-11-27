@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: arrow field inference",
+  "expect": "matched",
+  "source": "class Counter {\n  count = 0;\n  label = \"c\";\n  inc = () => { this.count++; };\n  add = (by: number) => { this.count += by; };\n  show = () => this.label + this.count;\n  double = (x: number) => { return x * 2; };\n}\nfunction main(): void {\n  const c = new Counter();\n  c.inc(); c.add(5);\n  const f = c.show;\n  console.log(f(), c.double(4));\n}"
+}

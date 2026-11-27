@@ -1,0 +1,5 @@
+{
+  "name": "nd5a http response writeHead",
+  "expect": "matched",
+  "source": "import http from \"node:http\";\nfunction main(): void {\n  const s = http.createServer((req, res) => {\n    res.writeHead(201, { \"Content-Type\": \"text/plain\", \"X-N\": 5 });\n    res.end(\"hi\");\n  });\n  s.listen(0, () => {\n    const port = (s.address() as any).port;\n    http.get({ port }, (res) => {\n      let d = \"\";\n      res.on(\"data\", (c) => (d += c));\n      res.on(\"end\", () => {\n        console.log(res.statusCode, res.headers[\"content-type\"], res.headers[\"x-n\"], d);\n        s.close();\n      });\n    });\n  });\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: map subclass own field",
+  "expect": "matched",
+  "source": "class Cache extends Map<string, number> {\n  hits: number = 0;\n  lookup(k: string): number {\n    const v = this.get(k);\n    if (v === undefined) { return -1; }\n    this.hits++;\n    return v;\n  }\n}\nfunction main(): void {\n  const c = new Cache();\n  c.set(\"a\", 1);\n  console.log(c.lookup(\"a\"), c.lookup(\"b\"), c.hits, c.size);\n}\n"
+}

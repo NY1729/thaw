@@ -1,0 +1,5 @@
+{
+  "name": "string methods on caught error properties",
+  "expect": "matched",
+  "source": "class MyErr extends Error { constructor(m: string) { super(m); this.name = \"MyErr\"; } }\nfunction main(): void {\n  try { throw new Error(\"boom\"); } catch (e: any) {\n    console.log(e.message.toUpperCase(), e.stack.split(\"\\n\")[0], e.message.includes(\"oo\"), e.message.slice(1), e.message.indexOf(\"o\"));\n    console.log(e.name.startsWith(\"Er\"), e.message.replace(\"b\", \"B\"), e.message.trim().length, e.message.split(\"o\"));\n  }\n  try { throw new MyErr(\"boom\"); } catch (e: any) {\n    console.log(e.message.toUpperCase(), e.stack.split(\"\\n\")[0], e.name.startsWith(\"My\"), e.message.slice(1), e.message.indexOf(\"o\"));\n  }\n  const c = new Error(\"outer\", { cause: new Error(\"inner\") });\n  console.log((c.cause as Error).message.toUpperCase(), (c.cause as Error).stack!.split(\"\\n\")[0]);\n}\n"
+}

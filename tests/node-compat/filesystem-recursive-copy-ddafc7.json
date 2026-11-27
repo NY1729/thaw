@@ -1,0 +1,5 @@
+{
+  "name": "filesystem recursive copy",
+  "expect": "matched",
+  "source": "import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const source = '/tmp/thaw-cp-source'; const target = '/tmp/thaw-cp-target'; await rm(source, { recursive: true, force: true }); await rm(target, { recursive: true, force: true }); await mkdir(source); await writeFile(source + '/value.txt', 'copied'); await cp(source, target, { recursive: true }); console.log(await readFile(target + '/value.txt', 'utf8')); await rm(source, { recursive: true }); await rm(target, { recursive: true }); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "uncaught exception monitor precedes handler",
+  "expect": "matched",
+  "source": "function main(): void { const order: string[] = []; process.on('uncaughtExceptionMonitor', () => order.push('monitor')); process.on('uncaughtException', () => { order.push('handler'); console.log(order.join(',')); }); queueMicrotask(() => { throw new Error('boom'); }); }"
+}

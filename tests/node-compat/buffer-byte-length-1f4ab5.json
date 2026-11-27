@@ -1,0 +1,5 @@
+{
+  "name": "buffer byte length",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; function main(): void { console.log(Buffer.byteLength('雪')); }"
+}

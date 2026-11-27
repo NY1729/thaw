@@ -1,0 +1,5 @@
+{
+  "name": "audit2 generic class with a generic method named map returning the class",
+  "expect": "matched",
+  "source": "class Stack<T> {\n  private items: T[] = [];\n  push(x: T): this { this.items.push(x); return this; }\n  map<U>(f: (x: T) => U): Stack<U> { const s = new Stack<U>(); this.items.forEach((i) => s.push(f(i))); return s; }\n  toArray(): T[] { return [...this.items]; }\n}\nclass Box<T> {\n  v: T;\n  constructor(v: T) { this.v = v; }\n  map<U>(f: (x: T) => U): Box<U> { return new Box<U>(f(this.v)); }\n}\nfunction main(): void {\n  const st = new Stack<number>().push(1).push(2);\n  console.log(st.map((x) => x * 2).toArray(), st.map((x) => \"n\" + x).toArray());\n  const b = new Box<number>(2);\n  console.log(b.map((x) => x * 2).v, b.map((x) => \"s\" + x).v);\n}"
+}

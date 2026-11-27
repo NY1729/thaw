@@ -1,0 +1,5 @@
+{
+  "name": "generator as any param and array slot",
+  "expect": "matched",
+  "source": "function* gen() { const x = yield 1; console.log(\"got\", x); yield x * 2; }\nfunction use(g: any): any { g.next(); return g.next(21).value; }\nfunction main(): void {\n  console.log(use(gen()));\n  const arr: any[] = [gen()];\n  console.log([...arr[0]].length);\n}"
+}

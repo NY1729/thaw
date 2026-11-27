@@ -1,0 +1,5 @@
+{
+  "name": "r4a BigInt mixed with number throws TypeError",
+  "expect": "matched",
+  "source": "function main(): void { try { console.log((1n as any) + 1); } catch (e: any) { console.log(e.name + \": \" + e.message); } try { console.log(1n + (1 as any)); } catch (e: any) { console.log(e.name + \": \" + e.message); } }"
+}

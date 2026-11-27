@@ -1,0 +1,5 @@
+{
+  "name": "unhandled rejection before next timer turn",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { let message: string = 'none'; process.once('unhandledRejection', (reason) => { message = reason.message; }); const pending = Promise.reject(new Error('turn boom')); await new Promise<void>((resolve) => setTimeout(resolve, 1)); console.log(message, typeof pending); }"
+}

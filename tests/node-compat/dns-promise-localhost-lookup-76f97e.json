@@ -1,0 +1,5 @@
+{
+  "name": "dns promise localhost lookup",
+  "expect": "matched",
+  "source": "import { lookup } from 'node:dns/promises'; async function main(): Promise<void> { const result = await lookup('localhost'); console.log(typeof result.address === 'string', result.family === 4 || result.family === 6); }"
+}

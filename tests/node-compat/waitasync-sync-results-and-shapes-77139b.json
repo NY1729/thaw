@@ -1,0 +1,5 @@
+{
+  "name": "waitAsync sync results and shapes",
+  "expect": "matched",
+  "source": "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  const r1: any = Atomics.waitAsync(ia, 0, 1);\n  console.log(r1.async, r1.value, Object.keys(r1).join(','));\n  const r2: any = Atomics.waitAsync(ia, 0, 0, 0);\n  console.log(r2.async, r2.value);\n  const r3: any = Atomics.waitAsync(ia, 0, 0, -5);\n  console.log(r3.async, r3.value);\n  console.log(Atomics.waitAsync.length, Atomics.waitAsync.name);\n  try { Atomics.waitAsync(new Int32Array(4), 0, 0, 0); } catch (e: any) { console.log('nonshared', e.constructor.name); }\n  try { Atomics.waitAsync(new Int16Array(new SharedArrayBuffer(8)), 0, 0, 0); } catch (e: any) { console.log('int16', e.constructor.name); }\n  try { Atomics.waitAsync(ia, 2, 0, 0); } catch (e: any) { console.log('range', e.constructor.name); }\n  const p: any = Atomics.waitAsync(ia, 0, 0, 10);\n  console.log(p.async, typeof p.value.then);\n}"
+}

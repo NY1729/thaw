@@ -1,0 +1,5 @@
+{
+  "name": "r2b map(parseInt) passes the index as radix",
+  "expect": "matched",
+  "source": "function main(): void { console.log(['1', '2', '3'].map(parseInt), ['1.5', '2'].map(parseFloat), Number.parseFloat('1.5')); }"
+}

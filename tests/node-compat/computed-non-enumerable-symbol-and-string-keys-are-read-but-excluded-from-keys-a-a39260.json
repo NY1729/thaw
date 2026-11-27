@@ -1,0 +1,5 @@
+{
+  "name": "computed non-enumerable symbol and string keys are read but excluded from keys, assign, spread and JSON",
+  "expect": "matched",
+  "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7, enumerable: false, writable: true, configurable: true }, ['a' + 'b']: { value: 8, enumerable: false, writable: true, configurable: true } });\n  console.log(o[S], o.ab, Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n  const c: any = Object.assign({}, o);\n  console.log(c[S], c.ab, Object.getOwnPropertySymbols(c).length, Object.keys(c).join());\n  const sp: any = { ...o };\n  console.log(sp[S], sp.ab, Object.getOwnPropertySymbols(sp).length, Object.keys(sp).join());\n  console.log(JSON.stringify(o));\n}"
+}

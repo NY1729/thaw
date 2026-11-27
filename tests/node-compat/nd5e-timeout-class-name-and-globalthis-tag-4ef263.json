@@ -1,0 +1,5 @@
+{
+  "name": "nd5e Timeout class name and globalThis tag",
+  "expect": "matched",
+  "source": "function main(): void {\n  const t = setTimeout(() => console.log(\"a\"), 1, \"x\");\n  console.log(typeof t, t.constructor.name, Object.prototype.toString.call(globalThis));\n}\n"
+}

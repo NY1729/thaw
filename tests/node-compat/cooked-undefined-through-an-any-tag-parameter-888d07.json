@@ -1,0 +1,5 @@
+{
+  "name": "cooked undefined through an any tag parameter",
+  "expect": "matched",
+  "source": "function tag(s: any, ...v: any[]): string {\n  return typeof s[0] + \"|\" + String(s[0] === undefined) + \"|\" + String(s[1]) + \"|\" + s.length + \"|\" + Array.isArray(s) + \"|\" + JSON.stringify(s);\n}\nasync function main(): Promise<void> {\n  console.log(tag`\\unicode ${1} ok`);\n}\n"
+}

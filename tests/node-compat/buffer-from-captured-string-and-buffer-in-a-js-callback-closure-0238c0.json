@@ -1,0 +1,5 @@
+{
+  "name": "buffer from captured string and buffer in a js callback closure",
+  "expect": "matched",
+  "source": "import { Readable } from \"node:stream\";\nfunction main(): void {\n  const b = Buffer.from(\"xyz\");\n  const t = \"hello\";\n  const r = Readable.from([Buffer.from(\"ab\")]);\n  r.on(\"data\", (c: Buffer) => { console.log(c.length); });\n  r.on(\"end\", () => {\n    const copy = Buffer.from(b);\n    console.log(copy.length, copy.toString());\n    console.log(Buffer.from(t).length, Buffer.from(t, \"base64\").length, Buffer.concat([b, b]).toString());\n    console.log(Buffer.concat([b]).length);\n  });\n}\n"
+}

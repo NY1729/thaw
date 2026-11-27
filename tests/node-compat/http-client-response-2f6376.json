@@ -1,0 +1,5 @@
+{
+  "name": "http client response",
+  "expect": "matched",
+  "source": "import { spawn } from 'node:child_process'; import { get } from 'node:http'; function main(): void { const child = spawn('node', ['-e', \"const s=require('http').createServer((_q,r)=>r.end('ok'));s.listen(0,'127.0.0.1',()=>console.log(s.address().port))\"]); let started: boolean = false; child.stdout.on('data', (chunk) => { if (started) return; started = true; const port: string = String(chunk).trim(); get('http://127.0.0.1:' + port, (response) => { let body: string = ''; response.on('data', (part) => { body += String(part); }); response.on('end', () => { console.log(response.statusCode, body); child.kill(); }); }); }); }"
+}

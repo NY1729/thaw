@@ -1,0 +1,5 @@
+{
+  "name": "handler reads the server constant it is initializing after main returned",
+  "expect": "matched",
+  "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => { console.log('cb2', typeof server); });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => { c.end(); setTimeout(() => server.close(), 30); });\n  });\n}\n"
+}

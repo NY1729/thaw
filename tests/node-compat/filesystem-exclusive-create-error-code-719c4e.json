@@ -1,0 +1,5 @@
+{
+  "name": "filesystem exclusive create error code",
+  "expect": "matched",
+  "source": "import { rmSync, writeFileSync } from 'node:fs'; function main(): void { const path = '/tmp/thaw-exclusive-error'; rmSync(path, { force: true }); writeFileSync(path, 'first'); try { writeFileSync(path, 'second', { flag: 'wx' }); } catch (error) { console.log(error.name, error.code); } rmSync(path); }"
+}

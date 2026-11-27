@@ -1,0 +1,5 @@
+{
+  "name": "async local storage survives Promise.all, race, allSettled and any continuations",
+  "expect": "matched",
+  "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function main(): Promise<void> {\n  await als.run('C', async (): Promise<void> => {\n    await Promise.all([sleep(1), sleep(2)]);\n    rec('after-all');\n    await Promise.race([sleep(1), sleep(3)]);\n    rec('after-race');\n    await Promise.allSettled([sleep(1)]);\n    rec('after-allSettled');\n    await Promise.any([sleep(1)]);\n    rec('after-any');\n  });\n  rec('outside');\n}\n"
+}

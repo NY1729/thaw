@@ -321,7 +321,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 target/release/thaw compat tests/typescript-compat.json
 target/release/thaw node-compat tests/typescript-runtime-compat.json
-target/release/thaw node-compat tests/node-compat.json
+target/release/thaw node-compat tests/node-compat   # one case per tests/node-compat/<slug>.json
 target/release/thaw node-compat tests/builtins-compat.json  # ECMAScript built-ins (needs Node >= 22)
 ```
 

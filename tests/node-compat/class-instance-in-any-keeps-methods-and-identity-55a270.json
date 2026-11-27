@@ -1,0 +1,5 @@
+{
+  "name": "class instance in any keeps methods and identity",
+  "expect": "matched",
+  "source": "class C {\n  n = 1;\n  tag = \"x\";\n  bump(): number { this.n += 1; return this.n; }\n  plus(a: number, b: number): number { return a + b + this.n; }\n}\nasync function main(): Promise<void> {\n  const c = new C();\n  const a: any = c;\n  console.log(a.n);\n  console.log(a.bump(), a.bump());\n  console.log(c.n, a.n, a.plus(1, 2));\n  a.n = 10;\n  console.log(c.n, c.bump());\n  console.log(JSON.stringify(a));\n  console.log(a);\n  console.log(Object.keys(a));\n  console.log(a instanceof C, a === a);\n}\n"
+}

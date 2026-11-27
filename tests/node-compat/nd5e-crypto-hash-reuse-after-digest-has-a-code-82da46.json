@@ -1,0 +1,5 @@
+{
+  "name": "nd5e crypto hash reuse after digest has a code",
+  "expect": "matched",
+  "source": "import c from \"node:crypto\";\nfunction main(): void {\n  try { const h = c.createHash(\"md5\"); h.digest(); h.update(\"x\"); } catch (e: any) { console.log(e.code, e.message); }\n}\n"
+}

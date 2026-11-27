@@ -1,0 +1,5 @@
+{
+  "name": "nd3 self-referential object type alias with optional field",
+  "expect": "matched",
+  "source": "type Tree = { v: number; l?: Tree; r?: Tree }; function ins(t: Tree | undefined, v: number): Tree { if (!t) return { v }; if (v < t.v) t.l = ins(t.l, v); else t.r = ins(t.r, v); return t; } function* walk(t?: Tree): Generator<number> { if (!t) return; yield* walk(t.l); yield t.v; yield* walk(t.r); } function main(): void { let t: Tree | undefined; for (const v of [5, 2, 8, 1]) t = ins(t, v); console.log([...walk(t)], t); }"
+}

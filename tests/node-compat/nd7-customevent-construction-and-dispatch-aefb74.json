@@ -1,0 +1,5 @@
+{
+  "name": "nd7 CustomEvent construction and dispatch",
+  "expect": "matched",
+  "source": "function main(): void {\n  const ce = new CustomEvent(\"c\", { detail: { z: 1 } });\n  console.log(ce.type, ce.detail, ce instanceof Event);\n  const t = new EventTarget();\n  t.addEventListener(\"c\", (ev: any) => console.log(\"got\", ev.detail));\n  t.dispatchEvent(ce);\n}\n"
+}

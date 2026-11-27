@@ -1,0 +1,5 @@
+{
+  "name": "audit2e util isDeepStrictEqual styleText getSystemErrorName types",
+  "expect": "matched",
+  "source": "import * as util from \"node:util\"; import { types, isDeepStrictEqual, styleText, getSystemErrorName } from \"node:util\"; function main(): void { console.log(util.types.isRegExp(/a/), util.types.isDate(new Date()), util.types.isMap(new Map<string, number>()), util.types.isSet(new Set<number>())); console.log(types.isTypedArray(new Uint8Array(1)), types.isUint8Array(Buffer.alloc(1))); console.log(isDeepStrictEqual({ a: [1, 2] }, { a: [1, 2] }), isDeepStrictEqual([1], [\"1\"]), isDeepStrictEqual(NaN, NaN), isDeepStrictEqual(0, -0), isDeepStrictEqual(new Map([[1, 2]]), new Map([[1, 2]]))); console.log(styleText(\"red\", \"x\") === \"x\", getSystemErrorName(-2), util.isArray([])); }"
+}

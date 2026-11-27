@@ -1,0 +1,5 @@
+{
+  "name": "class fields limits: JSON.stringify omits function values",
+  "expect": "matched",
+  "source": "class H { f!: () => number; g!: () => number; arr: number[] = []; o: { k: number } = { k: 1 }; fill(): void { this.f = () => 7; } }\nfunction main(): void {\n  const h = new H(); h.fill();\n  console.log(JSON.stringify(h));\n  console.log(JSON.stringify({ f: () => 1, n: 1 }));\n  console.log(JSON.stringify({ a: [() => 1, () => 2], n: 1 }));\n  console.log(JSON.stringify([function () {}, () => 1]));\n  console.log(JSON.stringify({ a: [() => 1, 2], n: 1 }));\n  console.log(JSON.stringify([function () {}, 1]));\n  console.log(JSON.stringify({ f: h.f }));\n}\n"
+}

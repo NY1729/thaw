@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: ctor length semantics",
+  "expect": "matched",
+  "source": "class Grid extends Array<number> {}\nclass Names extends Array<string> {}\nclass Sized extends Array<number> {\n  constructor(n: number) { super(n); }\n}\nfunction main(): void {\n  const g = new Grid(3);\n  console.log(g.length, g);\n  const g2 = new Grid(1, 2);\n  console.log(g2.length, g2);\n  const g3 = new Grid(7, 8, 9);\n  console.log(g3);\n  const n = new Names(\"a\");\n  console.log(n.length, n);\n  const z = new Grid();\n  console.log(z.length);\n  const s = new Sized(4);\n  console.log(s.length, s);\n  s.fill(2);\n  console.log(s.join(\"\"));\n}\n"
+}

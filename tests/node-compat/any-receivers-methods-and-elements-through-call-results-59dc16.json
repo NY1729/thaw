@@ -1,0 +1,5 @@
+{
+  "name": "any receivers: methods and elements through call results",
+  "expect": "matched",
+  "source": "function mk(): any { return { n: 0, inc() { this.n++; return this.n; }, name: \"abc\" }; }\nasync function main(): Promise<void> {\n  console.log(mk().inc(), mk().name.toUpperCase(), mk().name.length);\n  const o = mk();\n  o.inc(); o.inc();\n  console.log(o.n, o.name.slice(1));\n}\n"
+}

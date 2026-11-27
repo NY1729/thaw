@@ -1,0 +1,5 @@
+{
+  "name": "r2d Promise.race and Promise.any accept non-Promise elements",
+  "expect": "matched",
+  "source": "function main(): void {\n  Promise.race([Promise.resolve(1), 2]).then((v) => console.log(v));\n  Promise.any([Promise.reject(new Error(\"x\")), 5]).then((v) => console.log(v));\n}\n"
+}

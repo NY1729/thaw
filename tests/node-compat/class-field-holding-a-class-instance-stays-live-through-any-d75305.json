@@ -1,0 +1,5 @@
+{
+  "name": "class field holding a class instance stays live through any",
+  "expect": "matched",
+  "source": "class Inner { v = 1; inc(): number { this.v++; return this.v; } }\nclass Outer { inner: Inner = new Inner(); name = \"o\"; }\nasync function main(): Promise<void> {\n  const o = new Outer();\n  const a: any = o;\n  console.log(a.inner.v, typeof a.inner.inc);\n  console.log(a.inner.inc(), o.inner.v);\n}\n"
+}

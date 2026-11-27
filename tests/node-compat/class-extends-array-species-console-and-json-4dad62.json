@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: species console and json",
+  "expect": "matched",
+  "source": "class Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nclass Tagged extends Array<string> { tag = \"t\"; }\nfunction main(): void {\n  const s = new Stack(); s.push(1, 2);\n  const t = new Tagged(); t.push(\"x\");\n  console.log({ s, t });\n  console.log([s, t]);\n  const o = { list: s, n: 1 };\n  console.log(o);\n  console.log(JSON.stringify(o), JSON.stringify(t));\n  const e = new Tagged();\n  console.log(e);\n  console.log(s.filter((x) => x > 1), s.map((x) => x + 1), s.slice(0, 1));\n  console.log(s.concat([3]), s.concat(s));\n  const arr: (number[] | null) = s;\n  console.log(arr?.length);\n  console.log(s.flat(), s.flatMap((x) => [x, x]));\n  console.log(s.splice(0, 1));\n  console.log(Stack.from([4, 5]));\n  console.log(Stack.of(6, 7));\n}\n"
+}

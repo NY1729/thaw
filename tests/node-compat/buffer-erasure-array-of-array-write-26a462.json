@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure array of array write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const bb: Buffer[][] = [[b]];\n  bb[0][0][0] = 65;\n  console.log(b.toString(), bb[0][0].length);\n}\n"
+}

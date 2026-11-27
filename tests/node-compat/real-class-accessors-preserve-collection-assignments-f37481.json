@@ -1,0 +1,5 @@
+{
+  "name": "real class accessors preserve collection assignments",
+  "expect": "matched",
+  "source": "class Holder {map:Map<string,number>=new Map<string,number>();calls=0;get current():Map<string,number>{this.calls+=1;return this.map;}set current(v:Map<string,number>){this.calls+=1;this.map=v;}}\nfunction main():void {const token:any=Holder;const h=new Holder();const a:any=h;const m=new Map<string,number>();const b:any=m;console.log(h.calls);a.current=b;console.log(a.current===b,h.map===m,h.calls);a.current.set(\"x\",3);console.log(m.get(\"x\"),h.calls);}"
+}

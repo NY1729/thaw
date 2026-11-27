@@ -1,0 +1,5 @@
+{
+  "name": "callback mutating its any element parameter",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const arr: any[] = [{ n: 1 }, { n: 2 }];\n  arr.forEach((x: any) => { x.n = 5; });\n  console.log(JSON.stringify(arr));\n  arr.map((x: any) => { x.n++; return x; });\n  console.log(JSON.stringify(arr));\n  for (const x of arr) x.n = 9;\n  console.log(JSON.stringify(arr));\n}\n"
+}

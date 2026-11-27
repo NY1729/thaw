@@ -1,0 +1,5 @@
+{
+  "name": "static builtin results assigned to any keep their typed inputs",
+  "expect": "matched",
+  "source": "function main(): void {\n    const a: any = Object.fromEntries([[\"a\", 1], [\"b\", 2]]);\n    console.log(JSON.stringify(a));\n    const g: any = Object.groupBy([1, 2, 3, 4], (n: number) => (n % 2 === 0 ? \"even\" : \"odd\"));\n    console.log(JSON.stringify(g));\n    const m: any = Map.groupBy([1, 2, 3, 4], (n: number) => (n % 2 === 0 ? \"even\" : \"odd\"));\n    console.log(m.size, JSON.stringify(m.get(\"even\")));\n}\n"
+}
