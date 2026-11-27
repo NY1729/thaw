@@ -1061,6 +1061,12 @@ fn lower_fn_decl(
         &mut body,
     )?;
     lowerer.prepend_referenced_promise_snapshots(&params, &mut body);
+    if func.is_generator && !func.is_async {
+        if let Some(HirStmt::Return(Some(producer))) = body.last_mut() {
+            let producer_expr = std::mem::replace(producer, HirExpr::Lit(HirLit::Undefined));
+            *producer = mark_lambda(producer_expr, &name, &format!("{name}.next"), func.span);
+        }
+    }
     let ret = if func.is_generator && hir_type_contains_dynamic(&declared_ret) {
         lowerer.ret_type
     } else if declared_ret == HirType::Dynamic {

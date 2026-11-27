@@ -398,6 +398,10 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::OverloadedFunction(_, physical) => {
                 self.compile_json_value_to_native(json, physical)
             }
+            // A callback held in an `any` value: rebuilt as a native closure over its JS handle.
+            HirType::Function(..) | HirType::CallableFunction(..) => {
+                self.compile_json_value_to_native(json, ty)
+            }
             HirType::F64 | HirType::I64 | HirType::BigInt | HirType::Str | HirType::Bool => {
                 self.compile_json_value_to_native(json, ty)
             }

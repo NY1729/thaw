@@ -1297,6 +1297,18 @@ fn bytes_wrapper(value: &Value) -> Option<Value> {
     )))
 }
 
+/// What `JSON.stringify` sees for a `Bytes` value: an `ArrayBuffer` / `DataView` has no own
+/// enumerable properties (`{}`), every other kind is the Buffer wrapper.
+fn bytes_stringify_form(value: &Value) -> Option<Value> {
+    // On the thaw-js wire the bytes must arrive (as the Buffer wrapper), not `{}`.
+    if !DATE_WIRE.with(Cell::get)
+        && matches!(value, Value::Bytes(bytes) if matches!(bytes.kind(), 1 | 2))
+    {
+        return Some(Value::shared_object(indexmap::IndexMap::new()));
+    }
+    bytes_wrapper(value)
+}
+
 fn bytes_to_json_text(bytes: &BytesRef, out: &mut Vec<u8>) {
     let data = bytes.bytes();
     let list = |out: &mut Vec<u8>| {
@@ -3145,7 +3157,7 @@ fn ordered_object_fields_shared(fields: &SharedObject) -> Vec<(&Vec<u8>, &Value)
 // `JSON.stringify(...)` call, precisely because it's reached *only*
 // from there -- see its own doc comment.
 fn ordered_json(value: &Value) -> Value {
-    if let Some(wrapper) = bytes_wrapper(value) {
+    if let Some(wrapper) = bytes_stringify_form(value) {
         return ordered_json(&wrapper);
     }
     let Some(_ancestor) = stringify_ancestor(value) else {
@@ -3293,7 +3305,7 @@ fn ordered_json(value: &Value) -> Value {
 /// before they ever reach here -- see `top_level_undefined_string`'s
 /// own doc comment.
 fn ordered_json_omitting_undefined(value: &Value) -> Value {
-    if let Some(wrapper) = bytes_wrapper(value) {
+    if let Some(wrapper) = bytes_stringify_form(value) {
         return ordered_json_omitting_undefined(&wrapper);
     }
     if non_finite_number(value).is_some() {
@@ -6741,6 +6753,9 @@ unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
     if raw.first() == Some(&1) && !is_error_frame_text(raw) {
         return value;
     }
+    // A thrown record's display text (`\u{1}Name\u{1}message\u{5}{props}`) carries its own props in the
+    // legacy bag; the inspector reads the framed form.
+    let value = legacy_props_text_to_tagged(raw).unwrap_or(value);
     // A Json copy of an Error prints the live Error it refers to.
     let value = error_ref_bytes(unsafe { CStr::from_ptr(value) }.to_bytes()).unwrap_or(value);
     let merged = unsafe { thaw_error_with_props(value) };
@@ -6781,6 +6796,23 @@ unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
         )),
         None => unsafe { thaw_error_to_string(value) },
     }
+}
+
+/// `\u{1}Name\u{1}message\u{5}{json}` (no other markers) as the framed wire form with the bag kept as suffix.
+fn legacy_props_text_to_tagged(raw: &[u8]) -> Option<*const c_char> {
+    if thaw_arena::error_wire::parse_tagged(raw).is_some() {
+        return None;
+    }
+    let bag = raw.iter().position(|byte| *byte == 5)?;
+    let (head, bag) = raw.split_at(bag);
+    let split = head.get(1..)?.iter().position(|byte| *byte == 1)? + 1;
+    let (name, message) = (&head[1..split], &head[split + 1..]);
+    if message.iter().any(|byte| matches!(byte, 2..=4)) {
+        return None;
+    }
+    let mut wire = thaw_arena::error_wire::encode_tagged(name, message, None)?;
+    wire.extend_from_slice(bag);
+    Some(thaw_arena::owned_string(wire) as *const c_char)
 }
 
 /// Whether `bytes` could be a framed Error string (`\u{1}Name\u{1}message`). A user string

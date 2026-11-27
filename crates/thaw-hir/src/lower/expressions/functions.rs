@@ -46,6 +46,7 @@ impl<'a> FnLowerer<'a> {
             expression.ident.as_ref().map(|ident| ident.sym.as_ref()),
             expression.function.span,
         );
+        let closure = mark_user_function(closure, expression.ident.as_ref().map(|ident| ident.sym.as_ref()).or(name.as_deref()), expression.function.span, expression.function.is_async, expression.function.is_generator);
         Ok(name_function_value(closure, name, expression.function.is_async, expression.function.is_generator))
     }
 
@@ -432,6 +433,7 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_arrow(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
         let lowered = self.lower_arrow_unnamed(arrow)?;
+        let lowered = mark_user_function(lowered, None, arrow.span, arrow.is_async, arrow.is_generator);
         Ok(name_function_value(lowered, function_expression_name(None, arrow.span), arrow.is_async, arrow.is_generator))
     }
 
@@ -1113,6 +1115,7 @@ impl<'a> FnLowerer<'a> {
         if split_named_function(&lowered).is_some() {
             return Ok(lowered);
         }
+        let lowered = mark_user_function(lowered, None, arrow.span, arrow.is_async, arrow.is_generator);
         Ok(name_function_value(lowered, function_expression_name(None, arrow.span), arrow.is_async, arrow.is_generator))
     }
 
@@ -2155,6 +2158,46 @@ fn name_function_value(closure: HirExpr, name: Option<String>, is_async: bool, i
         Box::new(HirExpr::Var("__thaw_named_function".into())),
         vec![closure, HirExpr::Lit(HirLit::Str(format!("{kind}{}", name.unwrap_or_default())))],
     )
+}
+
+/// Tags the lambda of a function the program text wrote (not one the compiler synthesises) so
+/// codegen gives it a frame in `Error.stack`: a leading `USER_FN_MARK` string statement (fields: see `thaw_hir::USER_FN_MARK`),
+/// or `EvalThen` for an expression body. Async and generator bodies are left alone.
+fn mark_user_function(closure: HirExpr, name: Option<&str>, span: swc_common::Span, is_async: bool, is_generator: bool) -> HirExpr {
+    if is_async || is_generator {
+        return closure;
+    }
+    let via = CALLBACK_VIA.with(|via| via.borrow().get(&span.lo).cloned()).unwrap_or_default();
+    // `@name`: the frame is named after the builtin that calls the function (a timer callback).
+    match via.strip_prefix('@') {
+        Some(frame) => mark_lambda(closure, name.filter(|name| !name.is_empty()).unwrap_or(frame), "", span),
+        None => mark_lambda(closure, name.unwrap_or_default(), &via, span),
+    }
+}
+
+/// `mark_user_function` for a lambda that is known to be source-written: the producer closure of a
+/// generator (`via` is `gen.next`, the frame Node shows under it).
+fn mark_lambda(mut closure: HirExpr, name: &str, via: &str, span: swc_common::Span) -> HirExpr {
+    fn lambda(expr: &mut HirExpr) -> Option<&mut HirExpr> {
+        match expr {
+            HirExpr::RecursiveClosure(_, _, inner) | HirExpr::TypedClosure(_, inner) | HirExpr::NonArrowFunction(inner) => lambda(inner),
+            HirExpr::Lambda(..) => Some(expr),
+            _ => None,
+        }
+    }
+    if let Some(HirExpr::Lambda(_, _, _, body)) = lambda(&mut closure) {
+        let (file, line, col) = thaw_parser::span_location(span).unwrap_or_default();
+        let file = file.strip_suffix(" (in-memory module source)").unwrap_or(&file);
+        let mark = HirExpr::Lit(HirLit::Str(format!("{}\u{1}{line}\u{1}{col}\u{1}{via}\u{1}{name}\u{1}{file}", crate::USER_FN_MARK)));
+        match body.as_mut() {
+            HirExpr::Block(statements) => statements.insert(0, HirStmt::Expr(mark)),
+            other => {
+                let inner = std::mem::replace(other, HirExpr::Lit(HirLit::Undefined));
+                *other = HirExpr::EvalThen(Box::new(mark), Box::new(inner));
+            }
+        }
+    }
+    closure
 }
 
 /// The closure inside a `__thaw_named_function` wrapper, and its label.

@@ -542,6 +542,14 @@ impl<'a> FnLowerer<'a> {
 
     /// `fns[i](args)` on an array of callables: the element is read once into a binding and called
     /// like any local closure.
+    /// The type of a computed member key that can name a method (`o[key](..)`); `None` for literals and symbols.
+    fn computed_key_type(&mut self, key: &Expr) -> Option<HirType> {
+        if matches!(key, Expr::Lit(_) | Expr::Tpl(_)) || self.builtin_symbol_member_name(key).is_some() {
+            return None;
+        }
+        self.lower_expr(key).and_then(|k| self.infer_expr_type(&k)).ok()
+    }
+
     fn lower_array_element_call(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
         let Callee::Expr(callee) = &call.callee else { return Ok(None) };
         let Expr::Member(member) = callee.as_ref() else { return Ok(None) };
@@ -556,7 +564,10 @@ impl<'a> FnLowerer<'a> {
         let owner_value = self.lower_expr(&member.obj)?;
         let element = match self.infer_expr_type(&owner_value) {
             Ok(HirType::Array(element)) => *element,
+            // `o[key](..)` on an `any` object with a string key is a method call (keeps `this`).
+            Ok(HirType::Json) if self.computed_key_type(&computed.expr) == Some(HirType::Str) => return Ok(None),
             Ok(HirType::Json) => HirType::Json,
+            Ok(HirType::Dictionary(element)) => *element,
             _ => return Ok(None),
         };
         if !matches!(
@@ -603,6 +614,12 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
+        }
+        // Listener callbacks run with `this` = the emitter/server (`srv.listen(0, function () { this.address() })`,
+        // `emitter.on(e, function () { this.x })`): a `function` expression argument has its `this` bound to the
+        // receiver, an arrow keeps the lexical one.
+        if let Some(bound) = bind_listener_receiver(call) {
+            return self.lower_call_unread(&bound);
         }
         if let Some(has_own) = self.lower_prototype_has_own_symbol_call(call)? {
             return Ok(has_own);
@@ -968,24 +985,16 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         };
         let mut operand = member.obj.as_ref();
-        let mut asserted = false;
         loop {
             match operand {
                 Expr::Paren(paren) => operand = paren.expr.as_ref(),
-                Expr::TsNonNull(assertion) => {
-                    asserted = true;
-                    operand = assertion.expr.as_ref();
-                }
-                Expr::TsAs(assertion) => {
-                    asserted = true;
-                    operand = assertion.expr.as_ref();
-                }
+                Expr::TsNonNull(assertion) => operand = assertion.expr.as_ref(),
+                Expr::TsAs(assertion) => operand = assertion.expr.as_ref(),
                 _ => break,
             }
         }
-        if !asserted {
-            return Ok(None);
-        }
+        // Reached only after every receiver-specific path declined, so a non-assertion
+        // receiver is bound to a temp and called like an identifier receiver.
         let raw = self.lower_member_receiver(operand)?;
         // `_inner` keeps `Bytes` in a `Nullable`/`Optional` payload; the plain form erases it.
         let raw_type = self.infer_expr_type_inner(&raw)?;
@@ -3294,9 +3303,39 @@ impl<'a> FnLowerer<'a> {
                 if self.json_receiver_candidate(&member.obj)
                     && !Self::is_native_instance_builtin(prop.sym.as_ref())
                 {
+                    // A `DataView` held in `any` runs its accessors natively on the view.
+                    if Self::dataview_accessor(prop.sym.as_ref()).is_some() {
+                        if let Ok(lowered) = self.lower_json_dynamic_method_call(member, prop.sym.as_ref(), call) {
+                            return Ok(lowered);
+                        }
+                    }
                     return self.lower_dynamic_value_method_call(
                         &member.obj,
                         prop.sym.as_ref(),
+                        &call.args,
+                        expected_return_hint.as_ref(),
+                    );
+                }
+            }
+        }
+
+        // `o[key](..)` with a run-time string key on a dynamic receiver: dispatch by name, keeping `this`.
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let MemberProp::Computed(computed) = &member.prop {
+                // A `Json` key is only taken for a non-identifier receiver (`this[k]()`); `arr[i]()` stays an element call.
+                let named = self.json_receiver_candidate(&member.obj)
+                    && match self.computed_key_type(&computed.expr) {
+                        Some(HirType::Str) => true,
+                        Some(HirType::Json) => !matches!(member.obj.as_ref(), Expr::Ident(_)),
+                        _ => false,
+                    };
+                if named {
+                    let key = self.lower_expr(&computed.expr)?;
+                    let key = self.coerce_to_declared(&HirType::Str, key)?;
+                    return self.lower_dynamic_value_method_call_named(
+                        &member.obj,
+                        "<computed>",
+                        Some(key),
                         &call.args,
                         expected_return_hint.as_ref(),
                     );
@@ -3352,6 +3391,9 @@ impl<'a> FnLowerer<'a> {
         ) && !self.scope.contains_key(&callee_name)
             && !self.signatures.contains_key(&callee_name)
         {
+            if matches!(callee_name.as_str(), "setTimeout" | "setInterval" | "setImmediate") {
+                note_timer_callback(&callee_name, &call.args);
+            }
             let binding = format!("__thaw_global_timer_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(binding.clone(), HirType::JsValue);
@@ -6407,4 +6449,75 @@ impl<'a> FnLowerer<'a> {
         *rewritten.args[0].expr = Expr::Arrow(wrapper);
         self.lower_call_unread(&rewritten).map(Some)
     }
+}
+
+/// `recv.on(.., function () { this })`: the call with the callback's `this` replaced by `recv` (a plain
+/// identifier/`this` path, so evaluating it again is side-effect free). `None` when nothing applies.
+fn bind_listener_receiver(call: &CallExpr) -> Option<CallExpr> {
+    use swc_ecma_visit::{VisitMut, VisitMutWith, VisitWith};
+    let Callee::Expr(callee) = &call.callee else { return None };
+    let Expr::Member(member) = callee.as_ref() else { return None };
+    let MemberProp::Ident(method) = &member.prop else { return None };
+    if !matches!(
+        method.sym.as_ref(),
+        "on" | "once" | "addListener" | "prependListener" | "prependOnceListener" | "listen"
+    ) {
+        return None;
+    }
+    fn plain_path(expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(_) => true,
+            Expr::Member(member) => matches!(member.prop, MemberProp::Ident(_)) && plain_path(&member.obj),
+            _ => false,
+        }
+    }
+    if !plain_path(&member.obj) {
+        return None;
+    }
+    struct UsesThis(bool);
+    impl swc_ecma_visit::Visit for UsesThis {
+        fn visit_this_expr(&mut self, _: &swc_ecma_ast::ThisExpr) {
+            self.0 = true;
+        }
+        fn visit_function(&mut self, _: &swc_ecma_ast::Function) {}
+        fn visit_class(&mut self, _: &swc_ecma_ast::Class) {}
+    }
+    struct Replace(Box<Expr>);
+    impl VisitMut for Replace {
+        fn visit_mut_expr(&mut self, expr: &mut Expr) {
+            if matches!(expr, Expr::This(_)) {
+                *expr = (*self.0).clone();
+            } else {
+                expr.visit_mut_children_with(self);
+            }
+        }
+        fn visit_mut_function(&mut self, _: &mut swc_ecma_ast::Function) {}
+        fn visit_mut_class(&mut self, _: &mut swc_ecma_ast::Class) {}
+    }
+    let mut routed = call.clone();
+    let mut changed = false;
+    let mut bind = |function: &mut swc_ecma_ast::FnExpr| {
+        let Some(body) = function.function.body.as_mut() else { return };
+        let mut finder = UsesThis(false);
+        body.visit_with(&mut finder);
+        if finder.0 {
+            body.visit_mut_with(&mut Replace(member.obj.clone()));
+            changed = true;
+        }
+    };
+    for argument in &mut routed.args {
+        match argument.expr.as_mut() {
+            Expr::Fn(function) => bind(function),
+            // `common.mustCall(function () { this })`: a forwarding wrapper keeps the callback's `this`.
+            Expr::Call(wrapper) => {
+                for inner in &mut wrapper.args {
+                    if let Expr::Fn(function) = inner.expr.as_mut() {
+                        bind(function);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    changed.then_some(routed)
 }
