@@ -914,13 +914,14 @@ pub(crate) fn crypto_asymmetric_sign_pss_hex(
     digest_algorithm: &str,
     pem: &str,
     data: &[u8],
+    salt_length: Option<i32>,
 ) -> Result<Vec<u8>, String> {
     digest_size_matches(digest_algorithm)?;
     let ParsedKey::RsaPrivate(key) = parse_key(pem).ok_or("invalid or unsupported private key")?
     else {
         return Err("RSA-PSS requires an RSA private key".to_string());
     };
-    sign_rsa_pss(&key, digest_algorithm, data)
+    sign_rsa_pss(&key, digest_algorithm, data, salt_length)
 }
 
 /// Mirrors `crypto_asymmetric_sign_hex`: verifies `signature` against
@@ -972,6 +973,7 @@ pub(crate) fn crypto_asymmetric_verify_pss(
     pem: &str,
     data: &[u8],
     signature: &[u8],
+    salt_length: Option<i32>,
 ) -> Result<bool, String> {
     digest_size_matches(digest_algorithm)?;
     let key = match parse_key(pem).ok_or("invalid or unsupported public/private key")? {
@@ -979,7 +981,7 @@ pub(crate) fn crypto_asymmetric_verify_pss(
         ParsedKey::RsaPublic(key) => *key,
         _ => return Err("RSA-PSS requires an RSA key".to_string()),
     };
-    verify_rsa_pss(&key, digest_algorithm, data, signature)
+    verify_rsa_pss(&key, digest_algorithm, data, signature, salt_length)
 }
 
 macro_rules! rsa_pkcs1v15_sign_for {
@@ -1062,40 +1064,96 @@ fn verify_rsa_pkcs1v15(
     }
 }
 
-macro_rules! rsa_pss_sign_for {
-    ($key:expr, $digest:ty, $data:expr) => {{
-        let signing_key = rsa::pss::SigningKey::<$digest>::new($key.clone());
-        let signature: rsa::pss::Signature = signing_key.sign($data);
-        Ok(signature.to_vec())
-    }};
+/// A buffering `DynDigest` over the in-house `digest_bytes`, so RSA-PSS (EMSA-PSS and MGF1) works for every digest
+/// Node accepts (SHA-1/2/3, MD5, RIPEMD-160), not only those the `rsa` crate has typed digests for.
+#[derive(Clone)]
+struct BufferedDigest {
+    algorithm: String,
+    buffer: Vec<u8>,
+    size: usize,
+}
+
+impl BufferedDigest {
+    fn new(algorithm: &str) -> Option<Self> {
+        let size = super::digest::digest_bytes(algorithm, b"")?.len();
+        Some(Self {
+            algorithm: algorithm.to_string(),
+            buffer: Vec::new(),
+            size,
+        })
+    }
+}
+
+impl sha2::digest::DynDigest for BufferedDigest {
+    fn update(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    fn finalize_into(self, out: &mut [u8]) -> Result<(), sha2::digest::InvalidBufferSize> {
+        let mut this = self;
+        this.finalize_into_reset(out)
+    }
+
+    fn finalize_into_reset(
+        &mut self,
+        out: &mut [u8],
+    ) -> Result<(), sha2::digest::InvalidBufferSize> {
+        if out.len() != self.size {
+            return Err(sha2::digest::InvalidBufferSize);
+        }
+        let hashed = super::digest::digest_bytes(&self.algorithm, &self.buffer)
+            .ok_or(sha2::digest::InvalidBufferSize)?;
+        out.copy_from_slice(&hashed);
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.buffer.clear();
+    }
+
+    fn output_size(&self) -> usize {
+        self.size
+    }
+
+    fn box_clone(&self) -> Box<dyn sha2::digest::DynDigest> {
+        Box::new(self.clone())
+    }
+}
+
+/// Node's `saltLength`: `-1` = digest length, `-2` = maximum (sign default) / auto-detect (verify default).
+fn pss_scheme(digest_algorithm: &str, salt_len: usize) -> Result<rsa::Pss, String> {
+    let digest = BufferedDigest::new(digest_algorithm)
+        .ok_or_else(|| format!("unsupported digest algorithm: {digest_algorithm}"))?;
+    Ok(rsa::Pss {
+        blinded: false,
+        digest: Box::new(digest),
+        salt_len,
+    })
+}
+
+fn pss_max_salt(key_bits: usize, hash_len: usize) -> usize {
+    ((key_bits - 1).div_ceil(8)).saturating_sub(hash_len + 2)
 }
 
 fn sign_rsa_pss(
     key: &RsaPrivateKey,
     digest_algorithm: &str,
     data: &[u8],
+    salt_length: Option<i32>,
 ) -> Result<Vec<u8>, String> {
-    match digest_algorithm {
-        "md5" => rsa_pss_sign_for!(key, md5::Md5, data),
-        "sha1" => rsa_pss_sign_for!(key, sha1::Sha1, data),
-        "sha224" => rsa_pss_sign_for!(key, sha2::Sha224, data),
-        "sha256" => rsa_pss_sign_for!(key, sha2::Sha256, data),
-        "sha384" => rsa_pss_sign_for!(key, sha2::Sha384, data),
-        "sha512" => rsa_pss_sign_for!(key, sha2::Sha512, data),
-        other => Err(format!(
-            "RSA-PSS does not support the digest algorithm {other}"
-        )),
-    }
-}
-
-macro_rules! rsa_pss_verify_for {
-    ($key:expr, $digest:ty, $data:expr, $signature:expr) => {{
-        let Ok(signature) = rsa::pss::Signature::try_from($signature) else {
-            return Ok(false);
-        };
-        let verifying_key = rsa::pss::VerifyingKey::<$digest>::new($key.clone());
-        Ok(verifying_key.verify($data, &signature).is_ok())
-    }};
+    use rsa::traits::PublicKeyParts;
+    let hashed = super::digest::digest_bytes(digest_algorithm, data)
+        .ok_or_else(|| format!("unsupported digest algorithm: {digest_algorithm}"))?;
+    let salt_len = match salt_length {
+        None | Some(-2) => pss_max_salt(key.n().bits(), hashed.len()),
+        Some(-1) => hashed.len(),
+        Some(n) if n >= 0 => n as usize,
+        Some(_) => return Err("invalid RSA-PSS salt length".to_string()),
+    };
+    let scheme = pss_scheme(digest_algorithm, salt_len)?;
+    key.sign_with_rng(&mut rsa::rand_core::OsRng, scheme, &hashed)
+        .map_err(|error| error.to_string())
 }
 
 fn verify_rsa_pss(
@@ -1103,17 +1161,27 @@ fn verify_rsa_pss(
     digest_algorithm: &str,
     data: &[u8],
     signature: &[u8],
+    salt_length: Option<i32>,
 ) -> Result<bool, String> {
-    match digest_algorithm {
-        "md5" => rsa_pss_verify_for!(key, md5::Md5, data, signature),
-        "sha1" => rsa_pss_verify_for!(key, sha1::Sha1, data, signature),
-        "sha224" => rsa_pss_verify_for!(key, sha2::Sha224, data, signature),
-        "sha256" => rsa_pss_verify_for!(key, sha2::Sha256, data, signature),
-        "sha384" => rsa_pss_verify_for!(key, sha2::Sha384, data, signature),
-        "sha512" => rsa_pss_verify_for!(key, sha2::Sha512, data, signature),
-        other => Err(format!(
-            "RSA-PSS does not support the digest algorithm {other}"
-        )),
+    use rsa::traits::PublicKeyParts;
+    let hashed = super::digest::digest_bytes(digest_algorithm, data)
+        .ok_or_else(|| format!("unsupported digest algorithm: {digest_algorithm}"))?;
+    let try_salt = |salt_len: usize| -> Result<bool, String> {
+        let scheme = pss_scheme(digest_algorithm, salt_len)?;
+        Ok(key.verify(scheme, &hashed, signature).is_ok())
+    };
+    match salt_length {
+        None | Some(-2) => {
+            for salt_len in (0..=pss_max_salt(key.n().bits(), hashed.len())).rev() {
+                if try_salt(salt_len)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Some(-1) => try_salt(hashed.len()),
+        Some(n) if n >= 0 => try_salt(n as usize),
+        Some(_) => Ok(false),
     }
 }
 
