@@ -314,7 +314,8 @@ class Cipheriv {
   }
 }
 function createCipheriv(algorithm, key, iv, options) { return new Cipheriv(algorithm, key, iv, false, options); }
-function createDecipheriv(algorithm, key, iv, options) { return new Cipheriv(algorithm, key, iv, true, options); }
+class Decipheriv extends Cipheriv { constructor(algorithm, key, iv, options) { super(algorithm, key, iv, true, options); } }
+function createDecipheriv(algorithm, key, iv, options) { return new Decipheriv(algorithm, key, iv, options); }
 // timingSafeEqual: Node's messages and codes (the check is a plain XOR loop, as in retired-engine).
 function timingSafeBytes(value, name) {
   // thaw-js's DataView is not an ArrayBuffer view (ArrayBuffer.isView is false for it), so test it explicitly.
@@ -329,7 +330,7 @@ function timingSafeEqual(left, right) {
   for (var i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
   return difference === 0;
 }
-Object.assign(cryptoModule, { createCipheriv: createCipheriv, createDecipheriv: createDecipheriv, Cipheriv: Cipheriv, timingSafeEqual: timingSafeEqual });
+Object.assign(cryptoModule, { createCipheriv: createCipheriv, createDecipheriv: createDecipheriv, Cipheriv: Cipheriv, Decipheriv: Decipheriv, timingSafeEqual: timingSafeEqual });
 // Asymmetric keys and signatures (natives in node_crypto/asym.rs).
 // Sign/Verify side of node:crypto (lifted from buffer_crypto.js, with the same natives).
 // Digest names are checked by the natives: sha1/sha256/sha384/sha512 only (RSA), ECDSA uses its curve's digest.
@@ -886,7 +887,102 @@ Object.defineProperty(KeyObject.prototype, 'symmetricKeySize', { get: function (
 Object.assign(cryptoModule, { checkPrime: checkPrime, checkPrimeSync: checkPrimeSync, generatePrime: generatePrime, generatePrimeSync: generatePrimeSync,
   DiffieHellman: DiffieHellman, DiffieHellmanGroup: DiffieHellmanGroup, createDiffieHellman: createDiffieHellman, createDiffieHellmanGroup: createDiffieHellmanGroup,
   getDiffieHellman: createDiffieHellmanGroup, getCipherInfo: getCipherInfo, generateKeySync: generateKeySync, generateKey: generateKey });
-Object.assign(cryptoModule, { KeyObject: KeyObject, Certificate: Certificate, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
+
+// crypto.X509Certificate: DER walk over the certificate (subject/issuer/validity/SAN/CA/fingerprints, verify via createVerify).
+// ponytail: keyUsage lists extended key usage OIDs, infoAccess/issuerCertificate/toLegacyObject are not implemented.
+var DN_NAMES = { '2.5.4.3': 'CN', '2.5.4.4': 'SN', '2.5.4.5': 'serialNumber', '2.5.4.6': 'C', '2.5.4.7': 'L', '2.5.4.8': 'ST', '2.5.4.9': 'street', '2.5.4.10': 'O', '2.5.4.11': 'OU', '2.5.4.12': 'title', '2.5.4.42': 'GN', '1.2.840.113549.1.9.1': 'emailAddress', '0.9.2342.19200300.100.1.25': 'DC', '0.9.2342.19200300.100.1.1': 'UID' };
+var X509_SIG_HASH = { '1.2.840.113549.1.1.4': 'md5', '1.2.840.113549.1.1.5': 'sha1', '1.2.840.113549.1.1.14': 'sha224', '1.2.840.113549.1.1.11': 'sha256', '1.2.840.113549.1.1.12': 'sha384', '1.2.840.113549.1.1.13': 'sha512', '1.2.840.10045.4.1': 'sha1', '1.2.840.10045.4.3.1': 'sha224', '1.2.840.10045.4.3.2': 'sha256', '1.2.840.10045.4.3.3': 'sha384', '1.2.840.10045.4.3.4': 'sha512' };
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function derOid(buf, tlv) {
+  var bytes = buf.subarray(tlv.body, tlv.end), parts = [Math.floor(bytes[0] / 40), bytes[0] % 40], n = 0;
+  for (var i = 1; i < bytes.length; i++) { n = n * 128 + (bytes[i] & 0x7f); if (!(bytes[i] & 0x80)) { parts.push(n); n = 0; } }
+  return parts.join('.');
+}
+function derChildren(buf, tlv) { var out = [], at = tlv.body; while (at < tlv.end) { var c = derRead(buf, at); out.push(c); at = c.end; } return out; }
+function derTime(buf, tlv) {
+  var t = buf.subarray(tlv.body, tlv.end).toString('latin1'), y, rest;
+  if (tlv.tag === 0x17) { y = Number(t.slice(0, 2)); y += y >= 50 ? 1900 : 2000; rest = t.slice(2); } else { y = Number(t.slice(0, 4)); rest = t.slice(4); }
+  return new Date(Date.UTC(y, Number(rest.slice(0, 2)) - 1, Number(rest.slice(2, 4)), Number(rest.slice(4, 6)), Number(rest.slice(6, 8)), Number(rest.slice(8, 10))));
+}
+function x509Name(buf, tlv) {
+  var lines = [];
+  for (var rdn of derChildren(buf, tlv)) for (var atv of derChildren(buf, rdn)) {
+    var kids = derChildren(buf, atv), oid = derOid(buf, kids[0]), raw = buf.subarray(kids[1].body, kids[1].end);
+    lines.push((DN_NAMES[oid] || oid) + '=' + (kids[1].tag === 0x1e ? raw.swap16 ? Buffer.from(raw).swap16().toString('utf16le') : raw.toString('latin1') : kids[1].tag === 0x0c ? raw.toString('utf8') : raw.toString('latin1')));
+  }
+  return lines.join('\n');
+}
+function x509Parse(der) {
+  var cert = derRead(der, 0), parts = derChildren(der, cert), tbs = parts[0], f = derChildren(der, tbs), i = 0;
+  if (f[0].tag === 0xa0) i++;
+  var out = { tbs: der.subarray(tbs.start, tbs.end), serial: der.subarray(f[i].body, f[i].end), sigOid: derOid(der, derChildren(der, parts[1])[0]), sig: der.subarray(parts[2].body + 1, parts[2].end), issuer: x509Name(der, f[i + 2]), subject: x509Name(der, f[i + 4]), spki: der.subarray(f[i + 5].start, f[i + 5].end), san: undefined, ca: false, eku: undefined };
+  var validity = derChildren(der, f[i + 3]); out.notBefore = derTime(der, validity[0]); out.notAfter = derTime(der, validity[1]);
+  var ext = f.find(function (t) { return t.tag === 0xa3; });
+  if (ext) for (var e of derChildren(der, derChildren(der, ext)[0])) {
+    var ek = derChildren(der, e), oid = derOid(der, ek[0]), val = ek[ek.length - 1], inner = derRead(der, val.body);
+    if (oid === '2.5.29.17') {
+      var names = [];
+      for (var g of derChildren(der, inner)) { var gv = der.subarray(g.body, g.end); if (g.tag === 0x82) names.push('DNS:' + gv.toString('latin1')); else if (g.tag === 0x81) names.push('email:' + gv.toString('latin1')); else if (g.tag === 0x86) names.push('URI:' + gv.toString('latin1')); else if (g.tag === 0x87) names.push('IP Address:' + (gv.length === 4 ? Array.from(gv).join('.') : gv.toString('hex').match(/.{4}/g).map(function (h) { return h.replace(/^0+(?=.)/, ''); }).join(':').toUpperCase())); }
+      out.san = names.join(', ');
+    } else if (oid === '2.5.29.19') { var bc = derChildren(der, inner); out.ca = bc.length > 0 && bc[0].tag === 0x01 && der[bc[0].body] !== 0; }
+    else if (oid === '2.5.29.37') out.eku = derChildren(der, inner).map(function (o) { return derOid(der, o); });
+  }
+  return out;
+}
+function x509Date(d) { function p(n) { return String(n).padStart(2, '0'); } return MONTHS[d.getUTCMonth()] + ' ' + String(d.getUTCDate()).padStart(2, ' ') + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()) + ' ' + d.getUTCFullYear() + ' GMT'; }
+function x509Fingerprint(der, alg) { return cryptoModule.createHash(alg).update(der).digest('hex').toUpperCase().match(/../g).join(':'); }
+function x509HostMatch(pattern, host) {
+  pattern = pattern.toLowerCase(); host = host.toLowerCase();
+  if (pattern.indexOf('*.') === 0) { var dot = host.indexOf('.'); return dot > 0 && host.slice(dot + 1) === pattern.slice(2); }
+  return pattern === host;
+}
+class X509Certificate {
+  constructor(buffer) {
+    requireArg(typeof buffer === 'string' || isView(buffer) || buffer instanceof ArrayBuffer, 'buffer', 'of type string or an instance of Buffer, TypedArray, or DataView', buffer);
+    var raw = typeof buffer === 'string' ? Buffer.from(buffer) : Buffer.from(buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength));
+    var text = raw.toString('latin1'), m = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/.exec(text), der = m ? Buffer.from(m[1].replace(/\s+/g, ''), 'base64') : raw;
+    var parsed;
+    try { parsed = x509Parse(der); } catch (_) { throw cryptoError(Error, 'ERR_OSSL_PEM_NO_START_LINE', 'error:0480006C:PEM routines::no start line'); }
+    Object.defineProperties(this, { _der: { value: der }, _x: { value: parsed } });
+  }
+  get subject() { return this._x.subject; }
+  get issuer() { return this._x.issuer; }
+  get subjectAltName() { return this._x.san; }
+  get infoAccess() { return undefined; }
+  get issuerCertificate() { return undefined; }
+  get validFrom() { return x509Date(this._x.notBefore); }
+  get validTo() { return x509Date(this._x.notAfter); }
+  get validFromDate() { return this._x.notBefore; }
+  get validToDate() { return this._x.notAfter; }
+  get fingerprint() { return x509Fingerprint(this._der, 'sha1'); }
+  get fingerprint256() { return x509Fingerprint(this._der, 'sha256'); }
+  get fingerprint512() { return x509Fingerprint(this._der, 'sha512'); }
+  get keyUsage() { return this._x.eku; }
+  get serialNumber() { var h = this._x.serial.toString('hex').toUpperCase().replace(/^(00)+(?=.)/, ''); return h; }
+  get raw() { return Buffer.from(this._der); }
+  get publicKey() { return createPublicKey(spkiPem(this._x.spki)); }
+  get ca() { return this._x.ca; }
+  toString() { var b64 = this._der.toString('base64').replace(/(.{64})/g, '$1\n').replace(/\n$/, ''); return '-----BEGIN CERTIFICATE-----\n' + b64 + '\n-----END CERTIFICATE-----\n'; }
+  toJSON() { return this.toString(); }
+  checkHost(name) {
+    requireArg(typeof name === 'string', 'name', 'of type string', name);
+    var x = this._x, dns = x.san ? x.san.split(', ').filter(function (e) { return e.indexOf('DNS:') === 0; }).map(function (e) { return e.slice(4); }) : [];
+    if (!dns.length) { var cn = /(?:^|\n)CN=([^\n]*)/.exec(x.subject); if (cn) dns = [cn[1]]; }
+    for (var d of dns) if (x509HostMatch(d, name)) return d.indexOf('*.') === 0 ? name : d;
+    return undefined;
+  }
+  checkEmail(email) { requireArg(typeof email === 'string', 'email', 'of type string', email); var x = this._x, list = x.san ? x.san.split(', ').filter(function (e) { return e.indexOf('email:') === 0; }).map(function (e) { return e.slice(6); }) : []; if (!list.length) { var m = /(?:^|\n)emailAddress=([^\n]*)/.exec(x.subject); if (m) list = [m[1]]; } return list.indexOf(email) >= 0 ? email : undefined; }
+  checkIP(ip) { requireArg(typeof ip === 'string', 'ip', 'of type string', ip); var x = this._x; return x.san && x.san.split(', ').indexOf('IP Address:' + ip) >= 0 ? ip : undefined; }
+  checkIssued(other) { if (!(other instanceof X509Certificate)) throw argTypeError('otherCert', 'an instance of X509Certificate', other); return this._x.issuer === other._x.subject; }
+  checkPrivateKey(key) { var pub = key instanceof KeyObject ? createPublicKey(key) : createPublicKey(key); return pub.export({ type: 'spki', format: 'der' }).equals(this._x.spki); }
+  verify(key) {
+    if (!(key instanceof KeyObject)) throw argTypeError('publicKey', 'an instance of KeyObject', key);
+    var alg = X509_SIG_HASH[this._x.sigOid]; if (!alg) return false;
+    try { return new Verify(alg).update(this._x.tbs).verify(key, this._x.sig); } catch (_) { return false; }
+  }
+}
+function spkiPem(spki) { return '-----BEGIN PUBLIC KEY-----\n' + spki.toString('base64').replace(/(.{64})/g, '$1\n').replace(/\n$/, '') + '\n-----END PUBLIC KEY-----\n'; }
+Object.assign(cryptoModule, { KeyObject: KeyObject, X509Certificate: X509Certificate, Certificate: Certificate, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
   Sign: Sign, Verify: Verify, createSign: createSign, createVerify: createVerify, sign: sign, verify: verify,
   publicEncrypt: publicEncrypt, privateDecrypt: privateDecrypt, privateEncrypt: privateEncrypt, publicDecrypt: publicDecrypt,
   generateKeyPairSync: generateKeyPairSync, generateKeyPair: generateKeyPair, diffieHellman: diffieHellman, ECDH: ECDH, createECDH: createECDH,
