@@ -615,6 +615,12 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        // Listener callbacks run with `this` = the emitter/server (`srv.listen(0, function () { this.address() })`,
+        // `emitter.on(e, function () { this.x })`): a `function` expression argument has its `this` bound to the
+        // receiver, an arrow keeps the lexical one.
+        if let Some(bound) = bind_listener_receiver(call) {
+            return self.lower_call_unread(&bound);
+        }
         if let Some(has_own) = self.lower_prototype_has_own_symbol_call(call)? {
             return Ok(has_own);
         }
@@ -6434,4 +6440,62 @@ impl<'a> FnLowerer<'a> {
         *rewritten.args[0].expr = Expr::Arrow(wrapper);
         self.lower_call_unread(&rewritten).map(Some)
     }
+}
+
+/// `recv.on(.., function () { this })`: the call with the callback's `this` replaced by `recv` (a plain
+/// identifier/`this` path, so evaluating it again is side-effect free). `None` when nothing applies.
+fn bind_listener_receiver(call: &CallExpr) -> Option<CallExpr> {
+    use swc_ecma_visit::{VisitMut, VisitMutWith, VisitWith};
+    let Callee::Expr(callee) = &call.callee else { return None };
+    let Expr::Member(member) = callee.as_ref() else { return None };
+    let MemberProp::Ident(method) = &member.prop else { return None };
+    if !matches!(
+        method.sym.as_ref(),
+        "on" | "once" | "addListener" | "prependListener" | "prependOnceListener" | "listen"
+    ) {
+        return None;
+    }
+    fn plain_path(expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(_) => true,
+            Expr::Member(member) => matches!(member.prop, MemberProp::Ident(_)) && plain_path(&member.obj),
+            _ => false,
+        }
+    }
+    if !plain_path(&member.obj) {
+        return None;
+    }
+    struct UsesThis(bool);
+    impl swc_ecma_visit::Visit for UsesThis {
+        fn visit_this_expr(&mut self, _: &swc_ecma_ast::ThisExpr) {
+            self.0 = true;
+        }
+        fn visit_function(&mut self, _: &swc_ecma_ast::Function) {}
+        fn visit_class(&mut self, _: &swc_ecma_ast::Class) {}
+    }
+    struct Replace(Box<Expr>);
+    impl VisitMut for Replace {
+        fn visit_mut_expr(&mut self, expr: &mut Expr) {
+            if matches!(expr, Expr::This(_)) {
+                *expr = (*self.0).clone();
+            } else {
+                expr.visit_mut_children_with(self);
+            }
+        }
+        fn visit_mut_function(&mut self, _: &mut swc_ecma_ast::Function) {}
+        fn visit_mut_class(&mut self, _: &mut swc_ecma_ast::Class) {}
+    }
+    let mut routed = call.clone();
+    let mut changed = false;
+    for argument in &mut routed.args {
+        let Expr::Fn(function) = argument.expr.as_mut() else { continue };
+        let Some(body) = function.function.body.as_mut() else { continue };
+        let mut finder = UsesThis(false);
+        body.visit_with(&mut finder);
+        if finder.0 {
+            body.visit_mut_with(&mut Replace(member.obj.clone()));
+            changed = true;
+        }
+    }
+    changed.then_some(routed)
 }
