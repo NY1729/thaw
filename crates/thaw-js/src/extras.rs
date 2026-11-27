@@ -189,12 +189,15 @@ pub(crate) const EXTRAS: &str = r#"
     return c !== c ? undefined : c;
   });
   function b64error(msg) { return typeof DOMException === 'function' ? new DOMException(msg, 'InvalidCharacterError') : new Error(msg); }
+  function missingArg(name) { var e = new TypeError('The "' + name + '" argument must be specified'); e.code = 'ERR_MISSING_ARGS'; return e; }
   btoa = function (s) {
+    if (arguments.length === 0) throw missingArg('input');
     var out = __thaw_btoa(String(s));
     if (out === undefined) throw b64error('Invalid character');
     return out;
   };
   atob = function (s) {
+    if (arguments.length === 0) throw missingArg('input');
     var out = __thaw_atob(String(s));
     if (out === undefined) throw b64error('The string to be decoded is not correctly encoded.');
     return out;
