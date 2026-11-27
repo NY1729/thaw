@@ -4361,10 +4361,21 @@ fn write_graph_token(
         // An ArrayBuffer / DataView / Uint8Array carries its kind in the wrapper's `type` (the graph
         // `b` node then adds `"k"`); the bytes are a copy, thaw-js has its own store.
         if let Value::Bytes(bytes) = value {
-            if let Some(kind) = [None, Some("ArrayBuffer"), Some("DataView"), Some("Uint8Array")][usize::from(bytes.kind().min(3))] {
+            if let Some(kind) = [
+                None,
+                Some("ArrayBuffer"),
+                Some("DataView"),
+                Some("Uint8Array"),
+            ][usize::from(bytes.kind().min(3))]
+            {
                 let mut fields = wrapper.as_object().unwrap().clone();
                 fields.insert(b"type".to_vec(), Value::String(kind.into()));
-                return write_graph_token(&brand_internal_value(Value::shared_object(fields)), out, ids, nodes);
+                return write_graph_token(
+                    &brand_internal_value(Value::shared_object(fields)),
+                    out,
+                    ids,
+                    nodes,
+                );
             }
         }
         return write_graph_token(&wrapper, out, ids, nodes);
@@ -4565,7 +4576,8 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
                     .and_then(Value::as_str)
                     .filter(|kind| matches!(*kind, "ArrayBuffer" | "DataView" | "Uint8Array"));
                 if is_branded_wrapper(&node)
-                    && (bytes_kind.is_some() || thaw_json_is_buffer_shape(&node as *const Value) == 1)
+                    && (bytes_kind.is_some()
+                        || thaw_json_is_buffer_shape(&node as *const Value) == 1)
                 {
                     if let Some(Value::Array(data)) = fields_ref.get(b"data".as_slice()) {
                         let data = shared_array_ref(data);
@@ -4578,7 +4590,8 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
                                 write_json_value(byte, &mut out, None, 0);
                             }
                             match bytes_kind {
-                                Some(kind) => out.extend_from_slice(format!("],\"k\":\"{kind}\"}}").as_bytes()),
+                                Some(kind) => out
+                                    .extend_from_slice(format!("],\"k\":\"{kind}\"}}").as_bytes()),
                                 None => out.extend_from_slice(b"]}"),
                             }
                             index += 1;
