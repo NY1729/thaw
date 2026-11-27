@@ -6350,7 +6350,11 @@ pub(crate) fn native_servers_live() -> bool {
 /// callback ran. Looked up like `drain_native`; 0 without thaw-std. Any thread may call it (process-wide state).
 fn poll_native_servers() -> u8 {
     #[cfg(test)]
-    let test_poll = if TEST_HOOKS_APPLY.with(Cell::get) { *TEST_SERVER_POLL.lock().unwrap() } else { None };
+    let test_poll = if TEST_HOOKS_APPLY.with(Cell::get) {
+        *TEST_SERVER_POLL.lock().unwrap()
+    } else {
+        None
+    };
     #[cfg(test)]
     let r = match test_poll {
         Some(poll) => poll(),
