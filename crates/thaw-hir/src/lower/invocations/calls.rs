@@ -3256,6 +3256,15 @@ impl<'a> FnLowerer<'a> {
                                 &method_ret,
                             )?;
                         }
+                        // Node's `listen` returns the server (`createServer(..).listen(0, cb)` is the server);
+                        // the native entry point returns text.
+                        if requested_property == "listen"
+                            && matches!(&object_ty, HirType::Object(fields)
+                                if fields.iter().any(|(name, _)| name == "__thaw_listenWithCallback"))
+                        {
+                            call_expr =
+                                HirExpr::EvalThen(Box::new(call_expr), Box::new(HirExpr::Var(receiver_name.clone())));
+                        }
                         return self.wrap_call_argument_bindings(call_expr, &bindings);
                     }
                 }
