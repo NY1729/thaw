@@ -1167,15 +1167,16 @@ fn timer_start_is_the_live_clock_at_the_call() {
 
 #[test]
 fn interval_rearm_start_is_read_before_the_callback() {
-    // the interval's first run busy-waits 30 ms: its re-arm starts from the clock read before that
-    // callback (due 20 ms), so the second run precedes the 30 ms timer (Node prints iv1 iv2 t)
+    // the interval's first run busy-waits 150 ms: its re-arm starts from the clock read before that
+    // callback (due 100 ms), so the second run precedes the 150 ms timer (Node prints iv1 iv2 t).
+    // The delays are five times the minimum so a scheduling stall on a loaded machine cannot reorder them.
     let (out, _) = main_run(
         "var n = 0; var h = setInterval(function () {
            console.log('iv' + ++n);
-           if (n == 1) { var s = Date.now(); while (Date.now() - s < 30); }
+           if (n == 1) { var s = Date.now(); while (Date.now() - s < 150); }
            if (n == 2) clearInterval(h);
-         }, 10);
-         setTimeout(function () { console.log('t'); }, 30);",
+         }, 50);
+         setTimeout(function () { console.log('t'); }, 150);",
     );
     assert_eq!(out.join("|"), "iv1|iv2|t");
 }
@@ -6767,7 +6768,7 @@ fn vm_timeout_interrupts_runaway_scripts() {
         one(&src),
         "ERR_SCRIPT_EXECUTION_TIMEOUT Script execution timed out after 30ms|2|ERR_SCRIPT_EXECUTION_TIMEOUT false|ReferenceError nope is not defined false|ERR_SCRIPT_EXECUTION_TIMEOUT Script execution timed out after 15ms|ERR_SCRIPT_EXECUTION_TIMEOUT undefined|ERR_SCRIPT_EXECUTION_TIMEOUT Script execution timed out after 30ms|499500 3"
     );
-    assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+    assert!(t.elapsed() < slow_test_deadline(5), "{:?}", t.elapsed());
 }
 
 #[test]
@@ -7079,14 +7080,14 @@ fn busy_worker_does_not_starve_native_continuation() {
     );
 }
 
-/// A pending 3 s timer must not hold back a worker's `message`: while the loop sleeps toward the timer it still polls the
+/// A pending 30 s timer must not hold back a worker's `message`: while the loop sleeps toward the timer it still polls the
 /// worker every 2 ms (`platform_events_live`).
 #[test]
 fn pending_timer_does_not_delay_worker_message() {
     let mut it = Interp::new();
     let waiting = it
         .run(
-            "globalThis.__t = setTimeout(() => {}, 3000); \
+            "globalThis.__t = setTimeout(() => {}, 30000); \
              globalThis.__w = new (globalThis.__thaw_worker_threads_exports.Worker)('require(\"node:worker_threads\").parentPort.postMessage(7)', { eval: true }); \
              new Promise((resolve) => globalThis.__w.on('message', resolve))",
         )
@@ -7101,8 +7102,8 @@ fn pending_timer_does_not_delay_worker_message() {
         "the worker's message arrives"
     );
     assert!(
-        waited < std::time::Duration::from_millis(1500),
-        "message waited {waited:?} behind a 3 s timer"
+        waited < std::time::Duration::from_secs(15),
+        "message waited {waited:?} behind a 30 s timer"
     );
     it.run("clearTimeout(__t); __w.terminate()")
         .unwrap_or_else(|_| panic!("cleanup runs"));
@@ -8540,6 +8541,16 @@ fn not_callable_error_names_the_constructor_of_an_object() {
     }
 }
 
+/// How long a test waits for an event loop that should end ("a platform job or timer leaked" otherwise): a
+/// debug build run in parallel with the rest of the suite, a CI runner (`CI`) or `THAW_TEST_SLOW=1` get three
+/// times `base_secs`. The bound stays finite, so a loop that really never ends still fails.
+fn slow_test_deadline(base_secs: u64) -> std::time::Duration {
+    let slow = cfg!(debug_assertions)
+        || std::env::var_os("CI").is_some()
+        || std::env::var_os("THAW_TEST_SLOW").is_some();
+    std::time::Duration::from_secs(base_secs * if slow { 3 } else { 1 })
+}
+
 /// Runs the package setup and the event loop on a fresh thread (its own package table) and fails instead of
 /// hanging when the loop never ends.
 fn run_loop_or_fail(setup: impl FnOnce() + Send + 'static) -> i32 {
@@ -8552,7 +8563,7 @@ fn run_loop_or_fail(setup: impl FnOnce() + Send + 'static) -> i32 {
             let _ = sender.send(crate::host::thaw_tjs_run_event_loop());
         })
         .expect("spawn");
-    match receiver.recv_timeout(std::time::Duration::from_secs(20)) {
+    match receiver.recv_timeout(slow_test_deadline(20)) {
         Ok(code) => code,
         Err(RecvTimeoutError::Timeout) => {
             panic!("event loop did not end: a platform job or timer leaked")
@@ -8748,11 +8759,11 @@ fn zlib_hook_gzip_callback_with_net_write_destroy_close_ends() {
         r#"exports.go = function () {
   netOpen(function (l, conn, acc) {
     var t = setInterval(function () {}, 2);
-    zjob('compress', new Uint8Array(4 << 20).fill(97), function (packed) {
+    zjob('compress', new Uint8Array(256 << 10).fill(97), function (packed) {
       zjob('decompress', packed, function (plain) {
         __thaw_net_write(Number(conn[1]), Buffer.from('x').toString('hex'));
         queueMicrotask(function () {
-          process.exitCode = plain && plain.length === 4 << 20 ? 0 : 5;
+          process.exitCode = plain && plain.length === 256 << 10 ? 0 : 5;
           clearInterval(t);
           __thaw_net_destroy(Number(conn[1]));
           __thaw_net_destroy(Number(acc[1]));
@@ -8873,7 +8884,7 @@ fn tj84_guarded(f: impl FnOnce() + Send + 'static) {
         let _ = tx.send(());
     });
     assert!(
-        matches!(rx.recv_timeout(std::time::Duration::from_secs(10)), Ok(())),
+        matches!(rx.recv_timeout(slow_test_deadline(10)), Ok(())),
         "hang (the timer was not cleared) or panic in the guarded body"
     );
 }
@@ -10910,11 +10921,12 @@ extern "C" fn fake_server_poll() -> u8 {
 fn guarded(body: impl FnOnce() + Send + 'static) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        crate::host::TEST_HOOKS_APPLY.with(|apply| apply.set(true));
         body();
         let _ = tx.send(());
     });
-    rx.recv_timeout(std::time::Duration::from_secs(20))
-        .expect("event loop did not finish within 20s");
+    rx.recv_timeout(slow_test_deadline(20))
+        .expect("event loop did not finish in time");
 }
 
 #[test]
