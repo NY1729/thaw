@@ -1,0 +1,59 @@
+{
+ "module": "node:timers/promises",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "scheduler",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": []
+  },
+  {
+   "name": "setImmediate",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setInterval",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": [
+    {
+     "name": "next",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "return",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "throw",
+     "from": "?",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ]
+  },
+  {
+   "name": "setTimeout",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

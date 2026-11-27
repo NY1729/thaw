@@ -1,0 +1,976 @@
+{
+ "module": "node:os",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "EOL",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "arch",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "availableParallelism",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "constants",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "UV_UDP_REUSEADDR",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "dlopen",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "RTLD_DEEPBIND",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "RTLD_GLOBAL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "RTLD_LAZY",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "RTLD_LOCAL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "RTLD_NOW",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      }
+     ]
+    },
+    {
+     "name": "errno",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "E2BIG",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EACCES",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EADDRINUSE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EADDRNOTAVAIL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EAFNOSUPPORT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EAGAIN",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EALREADY",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EBADF",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EBADMSG",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EBUSY",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ECANCELED",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ECHILD",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ECONNABORTED",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ECONNREFUSED",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ECONNRESET",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EDEADLK",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EDESTADDRREQ",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EDOM",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EDQUOT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EEXIST",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EFAULT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EFBIG",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EHOSTUNREACH",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EIDRM",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EILSEQ",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EINPROGRESS",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EINTR",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EINVAL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EIO",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EISCONN",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EISDIR",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ELOOP",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EMFILE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EMLINK",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EMSGSIZE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EMULTIHOP",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENAMETOOLONG",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENETDOWN",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENETRESET",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENETUNREACH",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENFILE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOBUFS",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENODATA",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENODEV",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOENT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOEXEC",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOLCK",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOLINK",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOMEM",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOMSG",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOPROTOOPT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOSPC",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOSR",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOSTR",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOSYS",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOTCONN",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOTDIR",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOTEMPTY",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOTSOCK",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOTSUP",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENOTTY",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENXIO",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EOPNOTSUPP",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EOVERFLOW",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EPERM",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EPIPE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EPROTO",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EPROTONOSUPPORT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EPROTOTYPE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ERANGE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EROFS",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ESPIPE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ESRCH",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ESTALE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ETIME",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ETIMEDOUT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ETXTBSY",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EWOULDBLOCK",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "EXDEV",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      }
+     ]
+    },
+    {
+     "name": "priority",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "PRIORITY_ABOVE_NORMAL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "PRIORITY_BELOW_NORMAL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "PRIORITY_HIGH",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "PRIORITY_HIGHEST",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "PRIORITY_LOW",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "PRIORITY_NORMAL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      }
+     ]
+    },
+    {
+     "name": "signals",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "SIGABRT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGALRM",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGBUS",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGCHLD",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGCONT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGFPE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGHUP",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGILL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGINT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGIO",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGIOT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGKILL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGPIPE",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGPOLL",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGPROF",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGPWR",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGQUIT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGSEGV",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGSTKFLT",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGSTOP",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGSYS",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGTERM",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGTRAP",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGTSTP",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGTTIN",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGTTOU",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGURG",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGUSR1",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGUSR2",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGVTALRM",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGWINCH",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGXCPU",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "SIGXFSZ",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cpus",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "devNull",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "endianness",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "freemem",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "getPriority",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "homedir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [
+    {
+     "name": "withoutStackTrace",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "hostname",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [
+    {
+     "name": "withoutStackTrace",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "loadavg",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "machine",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "networkInterfaces",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "platform",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "release",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "setPriority",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "tmpdir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "totalmem",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "type",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "uptime",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [
+    {
+     "name": "withoutStackTrace",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "userInfo",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "version",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  }
+ ]
+}

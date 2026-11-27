@@ -1143,21 +1143,41 @@ impl<T> Drop for SharedValue<T> {
     fn drop(&mut self) {
         let key = self as *const Self as usize;
         native_links::forget(key);
+        // A removal hashes the key even from an empty table; most programs never fill these.
         let _ = PROTOTYPES.try_with(|table| {
-            let previous = { table.borrow_mut().remove(&key) };
+            let previous = {
+                let mut table = table.borrow_mut();
+                if table.is_empty() {
+                    None
+                } else {
+                    table.remove(&key)
+                }
+            };
             drop(previous);
         });
         let _ = ARRAY_HOLES.try_with(|holes| {
-            holes.borrow_mut().remove(&key);
+            let mut holes = holes.borrow_mut();
+            if !holes.is_empty() {
+                holes.remove(&key);
+            }
         });
         let _ = WRAPPER_BRANDS.try_with(|brands| {
-            brands.borrow_mut().remove(&key);
+            let mut brands = brands.borrow_mut();
+            if !brands.is_empty() {
+                brands.remove(&key);
+            }
         });
         let _ = GRAPH_PLAIN_OBJECTS.try_with(|objects| {
-            objects.borrow_mut().remove(&key);
+            let mut objects = objects.borrow_mut();
+            if !objects.is_empty() {
+                objects.remove(&key);
+            }
         });
         let _ = DETACHED_HANDLE_MARKERS.try_with(|markers| {
-            markers.borrow_mut().remove(&key);
+            let mut markers = markers.borrow_mut();
+            if !markers.is_empty() {
+                markers.remove(&key);
+            }
         });
         unsafe { thaw_object_clear_state(key as *const u8) };
     }
@@ -1201,6 +1221,111 @@ pub(crate) enum Value {
     Array(SharedArray),
     Object(SharedObject),
     Host(Rc<HostLease>),
+    /// A native byte view (Buffer, Uint8Array, ArrayBuffer, DataView) shared with the
+    /// compiled code: reads and writes alias the original store.
+    Bytes(Rc<BytesRef>),
+}
+
+/// Pins the native view record while any Json value refers to it.
+pub(crate) struct BytesRef {
+    record: *const u8,
+    _root: thaw_arena::ArenaRoot,
+}
+
+unsafe extern "C" {
+    fn thaw_bytes_console_info(buffer: *const u8, field: f64) -> f64;
+    fn thaw_bytes_data(buffer: *const u8) -> *mut u8;
+}
+
+impl BytesRef {
+    fn len(&self) -> usize {
+        unsafe { thaw_bytes_console_info(self.record, 1.0) as usize }
+    }
+    /// 0 Buffer, 1 ArrayBuffer, 2 DataView, 3 Uint8Array.
+    fn kind(&self) -> u8 {
+        unsafe { thaw_bytes_console_info(self.record, 0.0) as u8 }
+    }
+    #[allow(clippy::mut_from_ref)]
+    fn bytes(&self) -> &mut [u8] {
+        let (data, len) = (unsafe { thaw_bytes_data(self.record) }, self.len());
+        if data.is_null() {
+            &mut []
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(data, len) }
+        }
+    }
+}
+
+/// A fresh `Json` box aliasing the native byte view `record`.
+#[no_mangle]
+pub extern "C" fn thaw_json_from_bytes(record: *const u8) -> *mut Value {
+    if record.is_null() {
+        return leak(Value::Null);
+    }
+    leak(Value::Bytes(Rc::new(BytesRef {
+        record,
+        _root: thaw_arena::ArenaRoot::new(record as usize),
+    })))
+}
+
+/// The native view record behind a `Bytes` value, null for every other value.
+#[no_mangle]
+pub extern "C" fn thaw_json_bytes_record(value: *const Value) -> *const u8 {
+    match unsafe { value.as_ref() } {
+        Some(Value::Bytes(bytes)) => bytes.record,
+        _ => std::ptr::null(),
+    }
+}
+
+/// A branded `{"type":"Buffer","data":[...]}` snapshot (a copy) of a `Bytes` value, for the
+/// readers that only know the wrapper shape.
+fn bytes_wrapper(value: &Value) -> Option<Value> {
+    let Value::Bytes(bytes) = value else {
+        return None;
+    };
+    let data = bytes
+        .bytes()
+        .iter()
+        .map(|&byte| number_value(f64::from(byte)))
+        .collect();
+    Some(brand_internal_value(Value::shared_object(
+        indexmap::IndexMap::from([
+            (b"type".to_vec(), Value::String("Buffer".into())),
+            (b"data".to_vec(), Value::shared_array(data)),
+        ]),
+    )))
+}
+
+fn bytes_to_json_text(bytes: &BytesRef, out: &mut Vec<u8>) {
+    let data = bytes.bytes();
+    let list = |out: &mut Vec<u8>| {
+        out.push(b'[');
+        for (index, byte) in data.iter().enumerate() {
+            if index > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(byte.to_string().as_bytes());
+        }
+        out.push(b']');
+    };
+    match bytes.kind() {
+        0 => {
+            out.extend_from_slice(b"{\"type\":\"Buffer\",\"data\":");
+            list(out);
+            out.push(b'}');
+        }
+        3 => {
+            out.push(b'{');
+            for (index, byte) in data.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(format!("\"{index}\":{byte}").as_bytes());
+            }
+            out.push(b'}');
+        }
+        _ => out.extend_from_slice(b"{}"),
+    }
 }
 
 impl Value {
@@ -3019,6 +3144,9 @@ fn ordered_object_fields_shared(fields: &SharedObject) -> Vec<(&Vec<u8>, &Value)
 // `JSON.stringify(...)` call, precisely because it's reached *only*
 // from there -- see its own doc comment.
 fn ordered_json(value: &Value) -> Value {
+    if let Some(wrapper) = bytes_wrapper(value) {
+        return ordered_json(&wrapper);
+    }
     let Some(_ancestor) = stringify_ancestor(value) else {
         return Value::Null;
     };
@@ -3164,6 +3292,9 @@ fn ordered_json(value: &Value) -> Value {
 /// before they ever reach here -- see `top_level_undefined_string`'s
 /// own doc comment.
 fn ordered_json_omitting_undefined(value: &Value) -> Value {
+    if let Some(wrapper) = bytes_wrapper(value) {
+        return ordered_json_omitting_undefined(&wrapper);
+    }
     if non_finite_number(value).is_some() {
         return Value::Null;
     }
@@ -3770,6 +3901,46 @@ impl DestroyNode {
     }
 }
 
+/// True when no container below `root` has a second owner and none points back at `root`.
+/// Then the graph holds no cycle and no alias of its inner nodes: the Box drop frees exactly
+/// what only it owns (the whole tree, or nothing if `root` has an outside owner), so
+/// `release_isolated_json_cycles` has nothing to analyse. Host/N-API leases and prototype
+/// entries, whose release can re-enter, always take the full path.
+fn is_unshared_tree(root: &Value) -> bool {
+    if PROTOTYPES.with(|table| !table.borrow().is_empty()) {
+        return false;
+    }
+    let root_identity = object_identity_key(root);
+    let mut stack = vec![(root, true)];
+    while let Some((value, is_root)) = stack.pop() {
+        match value {
+            Value::Array(items) => {
+                let count = Rc::strong_count(items);
+                let back = !is_root && Some(Rc::as_ptr(items) as usize) == root_identity;
+                if (!is_root && count != 1) || back || items.napi_lease.borrow().is_some() {
+                    return false;
+                }
+                stack.extend(unsafe { &*items.get() }.iter().map(|child| (child, false)));
+            }
+            Value::Object(fields) => {
+                let count = Rc::strong_count(fields);
+                let back = !is_root && Some(Rc::as_ptr(fields) as usize) == root_identity;
+                if (!is_root && count != 1) || back || fields.napi_lease.borrow().is_some() {
+                    return false;
+                }
+                stack.extend(
+                    unsafe { &*fields.get() }
+                        .values()
+                        .map(|child| (child, false)),
+                );
+            }
+            Value::Host(_) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 // A graph result may contain native Rc cycles, including a HostLease inside
 // one of the cycle's fields. Dropping the Box alone cannot release them. Count
 // edges within the reachable component, then keep every node reachable from
@@ -3777,6 +3948,9 @@ impl DestroyNode {
 // The prototype side table owns real Value clones, so it participates as an
 // outgoing edge from its key's object rather than looking like an outside root.
 fn release_isolated_json_cycles(root: &Value) {
+    if is_unshared_tree(root) {
+        return;
+    }
     let root_identity = object_identity_key(root);
     let mut nodes = HashMap::<usize, DestroyNode>::new();
     let mut edges = HashMap::<usize, Vec<usize>>::new();
@@ -4173,6 +4347,9 @@ fn write_graph_token(
     ids: &mut HashMap<usize, usize>,
     nodes: &mut Vec<Value>,
 ) {
+    if let Some(wrapper) = bytes_wrapper(value) {
+        return write_graph_token(&wrapper, out, ids, nodes);
+    }
     if value
         .as_f64()
         .is_some_and(|number| number.to_bits() == (-0.0f64).to_bits())
@@ -6105,6 +6282,23 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
     if let Value::Host(lease) = value {
         return host_inspect_node(lease, stack);
     }
+    if let Value::Bytes(bytes) = value {
+        let data = bytes.bytes().to_vec();
+        return match bytes.kind() {
+            0 => Node::Buffer(data),
+            1 => Node::Raw(crate::inspect::format_array_buffer(&data, 0)),
+            // ponytail: a DataView prints its own range, not offset/store; fix with a runtime offset accessor
+            2 => Node::Raw(crate::inspect::format_data_view(&data, 0, data.len())),
+            _ => Node::Typed {
+                name: "Uint8Array".into(),
+                items: data
+                    .iter()
+                    .map(|&byte| Node::Number(f64::from(byte)))
+                    .collect(),
+                extra: Vec::new(),
+            },
+        };
+    }
     if let Some(bytes) = branded_buffer_bytes(value) {
         return Node::Buffer(bytes);
     }
@@ -6291,7 +6485,7 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
                 Node::Object { id, ctor, entries }
             }
         }
-        Value::Host(_) => unreachable!("handled above"),
+        Value::Host(_) | Value::Bytes(_) => unreachable!("handled above"),
     };
     if id != 0 && matches!(value, Value::Array(_) | Value::Object(_)) {
         stack.pop();
@@ -7235,6 +7429,7 @@ fn write_json_value(value: &Value, out: &mut Vec<u8>, indent: Option<&[u8]>, dep
         }
         Value::String(text) => write_json_string(text.as_bytes(), out),
         Value::Wtf8(bytes) => write_json_string(bytes, out),
+        Value::Bytes(bytes) => bytes_to_json_text(bytes, out),
         Value::Array(items) => {
             let items = shared_array_ref(items);
             if items.is_empty() {
@@ -7444,6 +7639,18 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
     if let Value::Host(lease) = value {
         return track_typed_decode_child(leak(host_get_property(lease, &key)));
     }
+    if let Value::Bytes(bytes) = value {
+        match key.as_slice() {
+            b"byteLength" => {
+                return track_typed_decode_child(leak(number_value(bytes.len() as f64)))
+            }
+            // The legacy wrapper fields.
+            // `.data` is the same view, so a decode into a byte buffer aliases it.
+            b"data" => return track_typed_decode_child(leak(value.clone())),
+            b"type" => return track_typed_decode_child(leak(Value::String("Buffer".into()))),
+            _ => {}
+        }
+    }
     if let Some(error) = error_ref(value) {
         return track_typed_decode_child(leak(error_prop_value(error, &key)));
     }
@@ -7646,10 +7853,12 @@ pub extern "C" fn thaw_json_index(value: *mut Value, index: f64, key: *const c_c
         // numeric-string key (`{"0": "one", ...}`, a real pattern this
         // same function already serves) falls through to the plain key
         // lookup below untouched.
+        Value::Bytes(bytes) if valid_index => bytes
+            .bytes()
+            .get(index as usize)
+            .map(|&byte| number_value(f64::from(byte))),
         Value::Object(_) if valid_index && json_array_or_buffer_data(value).is_some() => {
-            json_array_or_buffer_data(value)
-                .and_then(|items| items.get(index as usize))
-                .cloned()
+            json_array_or_buffer_data(value).and_then(|items| items.get(index as usize).cloned())
         }
         Value::Object(fields) => shared_object_ref(fields)
             .get(to_key(key).as_slice())
@@ -7698,6 +7907,9 @@ pub unsafe extern "C" fn thaw_json_index_set(
             json_buffer_index_store(container, index, value);
             return stored;
         }
+        if matches!(container, Value::Bytes(_)) {
+            return stored;
+        }
         match container {
             Value::Array(items)
                 if index.is_finite()
@@ -7736,6 +7948,18 @@ pub unsafe extern "C" fn thaw_json_index_set(
 /// `container` is Buffer-shaped (`thaw_json_is_buffer_shape`) and `index`
 /// is a valid array index.
 fn json_buffer_index_store(container: &Value, index: f64, value: &Value) {
+    if let Value::Bytes(bytes) = container {
+        let number = json_to_number(value);
+        let byte = if number.is_finite() {
+            number.trunc().rem_euclid(256.0) as u8
+        } else {
+            0
+        };
+        if let Some(slot) = bytes.bytes().get_mut(index as usize) {
+            *slot = byte;
+        }
+        return;
+    }
     let Value::Object(fields) = container else {
         return;
     };
@@ -7925,7 +8149,7 @@ fn json_to_number(value: &Value) -> f64 {
             number
         }
         Value::Object(_) if thaw_json_is_date_shape(value) != 0 => thaw_json_date_timestamp(value),
-        Value::Object(_) => f64::NAN,
+        Value::Object(_) | Value::Bytes(_) => f64::NAN,
         Value::Host(lease) => host_query(lease, 16)
             .map(|text| javascript_string_to_number(&text))
             .unwrap_or(f64::NAN),
@@ -8258,6 +8482,17 @@ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
             return unsafe { thaw_json_array_join(value, c",".as_ptr()) };
         }
         other @ Value::Object(_) if is_native_iterator(other) => "[object Generator]".to_string(),
+        Value::Bytes(bytes) => match bytes.kind() {
+            0 => String::from_utf8_lossy(bytes.bytes()).into_owned(),
+            1 => "[object ArrayBuffer]".to_string(),
+            2 => "[object DataView]".to_string(),
+            _ => bytes
+                .bytes()
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        },
         // A branded Buffer wrapper stringifies as its utf8 text, as `Buffer#toString()` does.
         Value::Object(_) => match branded_buffer_bytes(value) {
             Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -8292,7 +8527,7 @@ pub unsafe extern "C" fn thaw_json_typeof(value: *const Value) -> *const c_char 
         return c"number".as_ptr();
     }
     match value {
-        Value::Null | Value::Array(_) | Value::Object(_) => c"object".as_ptr(),
+        Value::Null | Value::Array(_) | Value::Object(_) | Value::Bytes(_) => c"object".as_ptr(),
         // A Json copy of an Error is an object.
         Value::String(_) if error_ref(value).is_some() => c"object".as_ptr(),
         Value::Host(lease) => match host_query(lease, 0).as_deref() {
@@ -8349,6 +8584,11 @@ fn json_object_tag(value: &Value) -> String {
         Value::Host(lease) => {
             return host_query(lease, 32).unwrap_or_else(|| "[object Object]".into());
         }
+        Value::Bytes(bytes) => match bytes.kind() {
+            1 => "ArrayBuffer",
+            2 => "DataView",
+            _ => "Uint8Array",
+        },
     };
     format!("[object {name}]")
 }
@@ -8397,7 +8637,7 @@ pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
         Value::BigInt(value) => u8::from(value != "0"),
         Value::String(value) => u8::from(!value.is_empty()),
         Value::Wtf8(bytes) => u8::from(!bytes.is_empty()),
-        Value::Array(_) | Value::Object(_) => 1,
+        Value::Array(_) | Value::Object(_) | Value::Bytes(_) => 1,
         Value::Host(lease) => u8::from(host_query(lease, 1).as_deref() == Some("1")),
     }
 }
@@ -8647,6 +8887,9 @@ pub extern "C" fn thaw_json_is_buffer_shape(value: *const Value) -> u8 {
     if is_graph_plain_object(value) {
         return 0;
     }
+    if matches!(value, Value::Bytes(_)) {
+        return 1;
+    }
     let Value::Object(fields) = value else {
         return 0;
     };
@@ -8703,6 +8946,8 @@ pub extern "C" fn thaw_json_is_not_iterable(value: *const Value) -> u8 {
     match value {
         Value::Array(_) | Value::String(_) | Value::Wtf8(_) | Value::Host(_) => 0,
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::BigInt(_) => 1,
+        // An ArrayBuffer / DataView has no iterator.
+        Value::Bytes(bytes) => u8::from(matches!(bytes.kind(), 1 | 2)),
         Value::Object(object) => {
             let fields = shared_object_ref(object);
             let carrier = fields.contains_key(b"__thaw_map_entries__".as_slice())
@@ -8732,7 +8977,7 @@ pub unsafe extern "C" fn thaw_json_is_primitive_operand(value: *const Value) -> 
             | Value::String(_)
             | Value::Wtf8(_),
         ) => 1,
-        Some(Value::Array(_) | Value::Object(_) | Value::Host(_)) => 0,
+        Some(Value::Array(_) | Value::Object(_) | Value::Host(_) | Value::Bytes(_)) => 0,
     }
 }
 
@@ -9442,6 +9687,10 @@ pub unsafe extern "C" fn thaw_json_is_buffer(value: *const Value) -> u8 {
     };
     if let Value::Host(lease) = value {
         return u8::from(host_query(lease, 11).as_deref() == Some("1"));
+    }
+    if let Value::Bytes(bytes) = value {
+        // ponytail: also serves `ArrayBuffer.isView`, so a Uint8Array/DataView counts; an ArrayBuffer does not
+        return u8::from(bytes.kind() != 1);
     }
     let Some(fields) = value.as_object() else {
         return 0;
@@ -10317,6 +10566,7 @@ pub unsafe extern "C" fn thaw_json_strict_equal(a: *const Value, b: *const Value
         (Value::Array(x), Value::Array(y)) => Rc::ptr_eq(x, y),
         (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
         (Value::Host(x), Value::Host(y)) => x.handle == y.handle,
+        (Value::Bytes(x), Value::Bytes(y)) => x.record == y.record,
         _ => false,
     })
 }
@@ -11469,18 +11719,34 @@ pub extern "C" fn thaw_json_map_or_set_entries_view(value: *const Value) -> *mut
     )
 }
 
-fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {
+fn json_array_or_buffer_data(value: &Value) -> Option<std::borrow::Cow<'_, [Value]>> {
+    use std::borrow::Cow;
     if is_graph_plain_object(value) {
-        return value.as_array();
+        return value
+            .as_array()
+            .map(|array| Cow::Borrowed(array.as_slice()));
     }
     if let Some(array) = value.as_array() {
-        return Some(array);
+        return Some(Cow::Borrowed(array.as_slice()));
+    }
+    if let Value::Bytes(bytes) = value {
+        // A copy: only the length-and-read callers use this, writes go through the view.
+        return Some(Cow::Owned(
+            bytes
+                .bytes()
+                .iter()
+                .map(|&byte| number_value(f64::from(byte)))
+                .collect(),
+        ));
     }
     let fields = value.as_object()?;
     if fields.get(b"type".as_slice()).and_then(Value::as_str) != Some("Buffer") {
         return None;
     }
-    fields.get(b"data".as_slice())?.as_array()
+    fields
+        .get(b"data".as_slice())?
+        .as_array()
+        .map(|array| Cow::Borrowed(array.as_slice()))
 }
 
 #[no_mangle]
@@ -11548,7 +11814,7 @@ pub extern "C" fn thaw_json_to_number_array(value: *mut Value) -> *mut u8 {
     }
     let values = unsafe { value.as_ref() }
         .and_then(json_array_or_buffer_data)
-        .cloned()
+        .map(std::borrow::Cow::into_owned)
         .unwrap_or_default();
     let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
     if output.is_null() {
@@ -11598,6 +11864,9 @@ pub extern "C" fn thaw_json_array_length(value: *mut Value) -> i64 {
         }
         return length as i64;
     }
+    if let Value::Bytes(bytes) = value {
+        return bytes.len() as i64;
+    }
     json_array_or_buffer_data(value).map_or(0, |values| values.len() as i64)
 }
 
@@ -11638,6 +11907,20 @@ pub extern "C" fn thaw_json_array_assign(target: *mut Value, source: *mut Value)
 /// or byte array) and returns `target`. A non-Buffer target is left unchanged.
 #[no_mangle]
 pub extern "C" fn thaw_json_buffer_sync(target: *mut Value, source: *mut Value) -> *mut Value {
+    // A `Bytes` target already aliases the bytes the method ran on; another source is copied over it.
+    if let Some(Value::Bytes(dest)) = unsafe { target.as_ref() } {
+        if let Some(src) = unsafe { source.as_ref() } {
+            if !matches!(src, Value::Bytes(same) if same.record == dest.record) {
+                let items = json_array_or_buffer_data(src)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default();
+                for (slot, item) in dest.bytes().iter_mut().zip(items.iter()) {
+                    *slot = item.as_f64().unwrap_or(0.0) as i64 as u8;
+                }
+            }
+        }
+        return target;
+    }
     let Some(items) = (unsafe { source.as_ref() })
         .and_then(json_array_or_buffer_data)
         .map(|items| items.to_vec())

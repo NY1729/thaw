@@ -636,6 +636,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonAsNative(inner, ty) => {
                 // Local frame: see the fresh producer in `inner` even without a statement frame.
                 self.begin_owned_json_discard_frame();
+                let alias_bytes = std::mem::take(&mut self.json_array_as_bytes);
                 let json = self.compile_expr(inner)?;
                 // This is a second root for recursive Object/Array decoding.
                 // A Function field can register its original JS handle before
@@ -649,7 +650,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[], "begin_json_as_native_scope",
                 ).map_err(|error| error.to_string())?;
                 self.push_catch_target(failed);
+                self.json_array_as_bytes = alias_bytes;
                 let value = self.compile_json_to_native(json, ty);
+                self.json_array_as_bytes = false;
                 self.pop_catch_target();
                 let value = value?;
                 self.builder.build_call(
