@@ -34,7 +34,8 @@ unsafe extern "C" {
 
 const THAW_FD_READABLE: u8 = 1;
 const THAW_FD_WRITABLE: u8 = 2;
-const MAX_REQUEST_HEAD: usize = 64 * 1024;
+/// Node's default `maxHeaderSize`: a request head past it is answered 431.
+const MAX_REQUEST_HEAD: usize = 16 * 1024;
 const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
 
 /// How the request body's length is framed, parsed from the head once
@@ -105,8 +106,27 @@ fn decode_chunked_body_incremental(bytes: &[u8], start: usize) -> Option<(Vec<u8
         let Some(line_end) = rest.windows(2).position(|pair| pair == b"\r\n") else {
             return Some((body, offset, false));
         };
-        let size =
-            usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).ok()?.trim(), 16).ok()?;
+        // `<hex>[;extension]`: only hex digits are a valid size (llhttp is strict about it).
+        let size_text = rest[..line_end].split(|&byte| byte == b';').next()?;
+        if size_text.is_empty() || !size_text.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let size = usize::from_str_radix(std::str::from_utf8(size_text).ok()?, 16).ok()?;
+        if size == 0 {
+            // Trailer lines, then the blank line that ends the body.
+            let mut position = line_end + 2;
+            loop {
+                let line = rest[position..].windows(2).position(|pair| pair == b"\r\n");
+                let Some(line) = line else {
+                    return Some((body, offset, false));
+                };
+                position += line + 2;
+                if line == 0 {
+                    offset += position;
+                    return Some((body, offset, true));
+                }
+            }
+        }
         let after_size = &rest[line_end + 2..];
         if after_size.len() < size + 2 {
             return Some((body, offset, false));
@@ -115,9 +135,6 @@ fn decode_chunked_body_incremental(bytes: &[u8], start: usize) -> Option<(Vec<u8
             return None;
         }
         offset += line_end + 2 + size + 2;
-        if size == 0 {
-            return Some((body, offset, true));
-        }
         body.extend_from_slice(&after_size[..size]);
     }
 }
@@ -1101,6 +1118,10 @@ impl RequestContext {
         context.request.headers_distinct = json[2];
         context.request.trailers = json[3];
         context.request.socket = json[4];
+        if !connection.is_null() && unsafe { (*connection).http10 } {
+            context._http_version = CString::new("1.0").unwrap_or_default();
+            context.request.http_version_minor = 0.0;
+        }
         context.request.http_version = context._http_version.as_ptr();
         context._request_json.extend(json);
         context
@@ -1478,7 +1499,15 @@ fn sync_request_body_buffer(connection: &mut ConnectionState, context: &mut Requ
                 // `write_response`, gated on `body_complete` alone, which
                 // doesn't distinguish "genuinely finished" from "gave up"
                 // -- both correctly force a close here).
-                None => (Vec::new(), connection.body_scan_offset, true),
+                None => {
+                    if connection.response.is_empty() && !context.headers_sent {
+                        if let Some(stream) = connection.stream.as_mut() {
+                            let _ = stream.write_all(&rejection_bytes(&Reject::BadRequest));
+                        }
+                    }
+                    mark_client_gone(connection);
+                    (Vec::new(), connection.body_scan_offset, true)
+                }
             }
         }
     };
@@ -3330,16 +3359,18 @@ fn distinct_request_headers(raw: &[(String, String)]) -> Vec<(String, Vec<String
 
 /// Parses a complete request head (bytes up to and including `\r\n\r\n`).
 fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan, Vec<(String, String)>) {
-    let head = String::from_utf8_lossy(head);
+    // Node decodes the request line and header values as latin1, not UTF-8.
+    let head: String = head.iter().map(|&byte| char::from(byte)).collect();
+    let head = head.as_str();
     let mut request_line = head.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET").to_string();
     let target = request_line.next().unwrap_or("/").to_string();
     (
         method,
         target,
-        negotiate_keep_alive(&head),
-        parse_body_plan(&head),
-        parse_headers(&head),
+        negotiate_keep_alive(head),
+        parse_body_plan(head),
+        parse_headers(head),
     )
 }
 
@@ -3359,15 +3390,220 @@ fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan, Vec<(String, Stri
 /// is still accumulated in `connection.request`/`context._raw_body`,
 /// bounded by `MAX_REQUEST_BODY` as before -- streaming here is about
 /// matching Node's actual timing/API contract, not backpressure.
+/// Why a request head is refused before the handler runs (llhttp's strict rules plus Node's own checks).
+#[derive(Debug, PartialEq)]
+enum Reject {
+    /// `400 Bad Request` + `Connection: close` (an llhttp `HPE_*` error).
+    BadRequest,
+    /// `431 Request Header Fields Too Large` (`HPE_HEADER_OVERFLOW`).
+    HeaderTooLarge,
+    /// An HTTP/1.1 request without `Host`.
+    MissingHost,
+    /// An `Expect` other than `100-continue`.
+    ExpectationFailed,
+    /// `CONNECT` without a `connect` listener: Node closes the socket without a response.
+    CloseSilently,
+}
+
+const KNOWN_METHODS: &[&str] = &[
+    "ACL",
+    "BIND",
+    "CHECKOUT",
+    "CONNECT",
+    "COPY",
+    "DELETE",
+    "GET",
+    "HEAD",
+    "LINK",
+    "LOCK",
+    "M-SEARCH",
+    "MERGE",
+    "MKACTIVITY",
+    "MKCALENDAR",
+    "MKCOL",
+    "MOVE",
+    "NOTIFY",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PROPFIND",
+    "PROPPATCH",
+    "PURGE",
+    "PUT",
+    "QUERY",
+    "REBIND",
+    "REPORT",
+    "SEARCH",
+    "SOURCE",
+    "SUBSCRIBE",
+    "TRACE",
+    "UNBIND",
+    "UNLINK",
+    "UNLOCK",
+    "UNSUBSCRIBE",
+];
+
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// Scans the buffered request head. `Ok(Some(end))` is a complete, acceptable head ending at `end`; `Ok(None)` needs
+/// more bytes; `Err` is a reason to answer with an error and close, found as early as the bytes allow.
+fn scan_head(buffer: &[u8]) -> Result<Option<usize>, Reject> {
+    let mut start = 0;
+    let mut first = true;
+    let mut content_lengths = 0;
+    let mut has_te = false;
+    let mut te_chunked_last = false;
+    let mut has_host = false;
+    let mut http11 = false;
+    let mut connect = false;
+    let mut expect: Option<String> = None;
+    loop {
+        let Some(newline) = buffer[start..].iter().position(|&byte| byte == b'\n') else {
+            return if buffer.len() > MAX_REQUEST_HEAD {
+                Err(Reject::HeaderTooLarge)
+            } else {
+                Ok(None)
+            };
+        };
+        let end = start + newline + 1;
+        if end > MAX_REQUEST_HEAD {
+            return Err(Reject::HeaderTooLarge);
+        }
+        if newline == 0 || buffer[start + newline - 1] != b'\r' {
+            return Err(Reject::BadRequest);
+        }
+        let line = &buffer[start..start + newline - 1];
+        start = end;
+        if first {
+            first = false;
+            let mut parts = line.split(|&byte| byte == b' ');
+            let (Some(method), Some(target), Some(version), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                return Err(Reject::BadRequest);
+            };
+            let method = std::str::from_utf8(method).map_err(|_| Reject::BadRequest)?;
+            if !KNOWN_METHODS.contains(&method)
+                || target.is_empty()
+                || target.iter().any(|&byte| byte <= b' ' || byte == 0x7f)
+                || !(version == b"HTTP/1.1" || version == b"HTTP/1.0")
+            {
+                return Err(Reject::BadRequest);
+            }
+            http11 = version == b"HTTP/1.1";
+            connect = method == "CONNECT";
+            continue;
+        }
+        if line.is_empty() {
+            if content_lengths > 1 || (has_te && (content_lengths > 0 || !te_chunked_last)) {
+                return Err(Reject::BadRequest);
+            }
+            if http11 && !has_host {
+                return Err(Reject::MissingHost);
+            }
+            if expect
+                .as_deref()
+                .is_some_and(|value| !value.eq_ignore_ascii_case("100-continue"))
+            {
+                return Err(Reject::ExpectationFailed);
+            }
+            if connect {
+                return Err(Reject::CloseSilently);
+            }
+            return Ok(Some(start));
+        }
+        if line[0] == b' ' || line[0] == b'\t' {
+            return Err(Reject::BadRequest);
+        }
+        let Some(colon) = line.iter().position(|&byte| byte == b':') else {
+            return Err(Reject::BadRequest);
+        };
+        let (name, value) = (&line[..colon], &line[colon + 1..]);
+        if name.is_empty() || !name.iter().all(|&byte| is_token_byte(byte)) {
+            return Err(Reject::BadRequest);
+        }
+        if value
+            .iter()
+            .any(|&byte| (byte < b' ' && byte != b'\t') || byte == 0x7f)
+        {
+            return Err(Reject::BadRequest);
+        }
+        let name = String::from_utf8_lossy(name).to_ascii_lowercase();
+        let value = String::from_utf8_lossy(value)
+            .trim_matches([' ', '\t'])
+            .to_string();
+        match name.as_str() {
+            "content-length" => {
+                content_lengths += 1;
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(Reject::BadRequest);
+                }
+            }
+            "transfer-encoding" => {
+                has_te = true;
+                te_chunked_last = value
+                    .rsplit(',')
+                    .next()
+                    .is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked"));
+            }
+            "host" => has_host = true,
+            "expect" => expect = Some(value),
+            _ => {}
+        }
+    }
+}
+
+/// The bytes Node writes for a refused request head.
+fn rejection_bytes(reject: &Reject) -> Vec<u8> {
+    match reject {
+        Reject::CloseSilently => Vec::new(),
+        Reject::BadRequest => b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".to_vec(),
+        Reject::HeaderTooLarge => {
+            b"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n".to_vec()
+        }
+        Reject::MissingHost => format!(
+            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nDate: {}\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            http_date()
+        )
+        .into_bytes(),
+        Reject::ExpectationFailed => format!(
+            "HTTP/1.1 417 Expectation Failed\r\nDate: {}\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            http_date()
+        )
+        .into_bytes(),
+    }
+}
+
+/// Answers a refused head and closes: nothing reaches the handler.
+fn reject_request(connection: &mut ConnectionState, reject: &Reject) -> Option<bool> {
+    connection.response = rejection_bytes(reject);
+    connection.written = 0;
+    connection.keep_alive = false;
+    connection.body_complete = true;
+    connection.dispatched = true;
+    write_response(connection);
+    Some(false)
+}
+
 fn try_buffered_request(connection_ptr: *mut ConnectionState) -> Option<bool> {
     {
         let connection = unsafe { &mut *connection_ptr };
         if connection.head_end == 0 {
-            let index = connection
+            // llhttp skips blank lines before the request line.
+            let blank = connection
                 .request
-                .windows(4)
-                .position(|bytes| bytes == b"\r\n\r\n")?;
-            connection.head_end = index + 4;
+                .chunks(2)
+                .take_while(|pair| *pair == b"\r\n")
+                .count()
+                * 2;
+            connection.request.drain(..blank);
+            match scan_head(&connection.request) {
+                Ok(Some(end)) => connection.head_end = end,
+                Ok(None) => return None,
+                Err(reject) => return reject_request(connection, &reject),
+            }
             let (_, _, _, body_plan, _) = parse_head(&connection.request[..connection.head_end]);
             connection.body_plan = body_plan;
             // Deliberately *not* pre-marking `body_complete` here even for
@@ -3467,6 +3703,14 @@ fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
         let (method, target, keep_alive, _, headers) =
             parse_head(&connection.request[..connection.head_end]);
         let callback = unsafe { &*connection.server }.callback as *const c_void;
+        if headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("expect") && value.trim().eq_ignore_ascii_case("100-continue")
+        }) {
+            // Node's default `checkContinue`: the interim response goes out before the handler runs.
+            if let Some(stream) = connection.stream.as_mut() {
+                let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+            }
+        }
         // The head is in and the handler is about to run -- cleared
         // unconditionally here; `run_server_callback` re-arms it as a
         // body-arrival deadline right after, once `sync_request_body_buffer`
@@ -5332,6 +5576,40 @@ mod tests {
         spec.reason = Some("Custom Msg".into());
         let response = render_response(spec, false);
         assert!(response.starts_with(b"HTTP/1.1 200 Custom Msg\r\n"));
+    }
+
+    #[test]
+    fn scan_head_refuses_what_llhttp_refuses() {
+        let ok = |head: &str| scan_head(head.as_bytes());
+        assert_eq!(ok("GET / HTTP/1.1\r\nHost: x\r\n\r\n"), Ok(Some(27)));
+        assert_eq!(ok("GET / HTTP/1.1\r\nHost: x\r\n"), Ok(None));
+        for bad in [
+            "GET\r\n\r\n",
+            "GET / HTTP/9.9\r\nHost: x\r\n\r\n",
+            "get / HTTP/1.1\r\nHost: x\r\n\r\n",
+            "GET / HTTP/1.1\nHost: x\n\n",
+            "GET / HTTP/1.1\r\nHost: x\r\nX-F: a\r\n  b\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: x\r\nX-S : a\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: x\r\ngarbage\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: x\r\nX: a\0b\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: identity\r\n\r\n",
+        ] {
+            assert_eq!(ok(bad), Err(Reject::BadRequest), "{bad:?}");
+        }
+        assert_eq!(ok("GET / HTTP/1.1\r\n\r\n"), Err(Reject::MissingHost));
+        assert_eq!(ok("GET / HTTP/1.0\r\n\r\n"), Ok(Some(18)));
+        let big = format!(
+            "GET / HTTP/1.1\r\nHost: x\r\nX: {}\r\n\r\n",
+            "a".repeat(20000)
+        );
+        assert_eq!(scan_head(big.as_bytes()), Err(Reject::HeaderTooLarge));
+        assert_eq!(
+            ok("POST / HTTP/1.1\r\nHost: x\r\nExpect: foo\r\n\r\n"),
+            Err(Reject::ExpectationFailed)
+        );
     }
 
     #[test]
