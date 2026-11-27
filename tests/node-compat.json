@@ -5515,6 +5515,11 @@
       "name": "readline promises namespace and Readline batching",
       "expect": "matched",
       "source": "import * as rl from 'node:readline'; import { Writable } from 'node:stream'; function main(): void { const p: any = (rl as any).promises; console.log(typeof p, typeof p.Interface, typeof p.Readline, typeof p.createInterface); let text = ''; const stream: any = new Writable({ write: (chunk: any, _e: any, cb: any) => { text += chunk.toString(); cb(); } }); const r = new p.Readline(stream); r.cursorTo(2, 3).moveCursor(-1, 1).clearLine(0); console.log(JSON.stringify(text)); r.commit().then(() => console.log(JSON.stringify(text))); }"
-    }
+    },
+  {
+    "name": "createServer handler wrapped through any: res.end() with omitted or undefined chunk",
+    "expect": "matched",
+    "source": "import http from 'http';\ntype Fn = (...a: any[]) => any;\nfunction wrap(fn: Fn): any { return function (...a: any[]) { return fn(...a); }; }\nasync function main(): Promise<void> {\n  const srv = http.createServer(wrap((req: any, res: any) => {\n    if (req.url === '/a') { res.end(); } else if (req.url === '/b') { res.end(undefined); } else { res.end('x'); }\n  }));\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const port = (srv.address() as any).port;\n  const out: string[] = [];\n  for (const p of ['/a', '/b', '/c']) {\n    const r = await fetch('http://127.0.0.1:' + port + p);\n    out.push(p + ':' + r.status + ':' + JSON.stringify(await r.text()));\n  }\n  console.log(out.join(','));\n  srv.close();\n}\n"
+  }
   ]
 }
