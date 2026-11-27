@@ -2739,7 +2739,7 @@ fn generator_try_catch_finally_survives_suspension() {
     "#;
     assert_eq!(
         compile_and_run(source, "generator_try_catch_finally"),
-        "1 0\nError: boom\n    at main (input.ts:17:9)\n2 11\n3 111\ntrue 111\n"
+        "1 0\nError: boom\n    at values (input.ts:3:9)\n    at values.next (<anonymous>)\n    at main (input.ts:17:9)\n2 11\n3 111\ntrue 111\n"
     );
 }
 

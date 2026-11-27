@@ -3027,10 +3027,31 @@ impl<'a> FnLowerer<'a> {
                             // one.
                             let ty = self.infer_expr_type_inner(&value)?;
                             if ty == HirType::Json {
-                                let result = HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_json_is_buffer".to_string())),
-                                    vec![value],
+                                // `__thaw_json_is_buffer` also answers `ArrayBuffer.isView`, so a
+                                // `DataView` held in `any` is screened out by its tag.
+                                let name = format!("__thaw_is_buffer_json_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(name.clone(), HirType::Json);
+                                let held = HirExpr::Var(name.clone());
+                                let is_view = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_buffer".to_string())), vec![held.clone()]);
+                                let tag = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_object_tag".to_string())), vec![held]);
+                                let is_dataview = HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(tag),
+                                    Box::new(HirExpr::Lit(HirLit::Str("[object DataView]".into()))),
                                 );
+                                let result = HirExpr::Conditional(
+                                    Box::new(is_view),
+                                    Box::new(HirExpr::Conditional(
+                                        Box::new(is_dataview),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                        HirType::Bool,
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                    HirType::Bool,
+                                );
+                                let result = self.wrap_call_argument_bindings(result, &[(name, HirType::Json, value)])?;
                                 return self.wrap_call_argument_bindings(result, &bindings);
                             }
                             // A `JsValue` -- a retained JS engine handle, real

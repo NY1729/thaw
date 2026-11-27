@@ -135,12 +135,36 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// Remembers that the function literals passed to an `Array` method run under that method's
+    /// frame (`at Array.map`), for `mark_user_function`.
+    fn note_array_callbacks(&mut self, member: &MemberExpr, property: &swc_ecma_ast::IdentName, call: &CallExpr) {
+        if !matches!(property.sym.as_ref(), "map" | "forEach" | "filter" | "sort" | "some" | "every" | "find"
+            | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight" | "flatMap")
+        {
+            return;
+        }
+        let is_array = matches!(member.obj.as_ref(), Expr::Array(_))
+            || matches!(self.peek_type_without_lowering(&member.obj), Some(HirType::Array(_)));
+        if !is_array {
+            return;
+        }
+        for argument in &call.args {
+            let span = match argument.expr.as_ref() {
+                Expr::Arrow(arrow) => arrow.span,
+                Expr::Fn(function) => function.function.span,
+                _ => continue,
+            };
+            CALLBACK_VIA.with(|via| via.borrow_mut().insert(span.lo, format!("Array.{}", property.sym)));
+        }
+    }
+
     fn lower_native_instance_builtin(
         &mut self,
         member: &MemberExpr,
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+        self.note_array_callbacks(member, property, call);
         // A Json storage slot may still be a live Buffer or another host object.
         // Calling its method through the Json snapshot path loses the receiver's
         // actual `toString` implementation (for example, Buffer's byte decoder).
@@ -274,7 +298,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `receiver.name(..args)` on an `any` value as a live dynamic call.
-    fn lower_json_dynamic_method_call(
+    pub(in crate::lower) fn lower_json_dynamic_method_call(
         &mut self,
         member: &MemberExpr,
         name: &str,
@@ -1067,6 +1091,7 @@ fn buffer_method_mutates(name: &str) -> Option<bool> {
     match name {
         "fill" | "set" | "copy" | "reverse" | "sort" | "copyWithin" | "swap16" | "swap32" | "swap64" => Some(true),
         _ if name.starts_with("write") => Some(true),
-        _ => None,
+        // `DataView.prototype.get*` / `set*` on a `DataView` held in `any`.
+        _ => FnLowerer::dataview_accessor(name).map(|(_, _, write)| write),
     }
 }

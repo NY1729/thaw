@@ -1024,7 +1024,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `(kind, big, write)` for `DataView.prototype.get*` / `set*`; `kind` as `thaw_dataview_get`.
-    fn dataview_accessor(property: &str) -> Option<(f64, bool, bool)> {
+    pub(super) fn dataview_accessor(property: &str) -> Option<(f64, bool, bool)> {
         let (write, rest) = match property.strip_prefix("set") {
             Some(rest) => (true, rest),
             None => (false, property.strip_prefix("get")?),

@@ -2,6 +2,18 @@
 // to `__thaw_timer_*` builtins (thaw-runtime's timer queue) instead of the JS engine globals, so a
 // timer-only program never creates a JS context. Ineligible calls return `Ok(None)` and take the
 // ordinary path; the CLI re-lowers without this mode when the program still needs JS engine.
+/// Node names the frame of a timer callback after the timer object (`at Timeout._onTimeout`).
+fn note_timer_callback(timer: &str, args: &[swc_ecma_ast::ExprOrSpread]) {
+    let Some(first) = args.first() else { return };
+    let span = match first.expr.as_ref() {
+        Expr::Arrow(arrow) => arrow.span,
+        Expr::Fn(function) => function.function.span,
+        _ => return,
+    };
+    let frame = if timer == "setImmediate" { "@Immediate.<anonymous>" } else { "@Timeout._onTimeout" };
+    CALLBACK_VIA.with(|via| via.borrow_mut().insert(span.lo, frame.into()));
+}
+
 impl<'a> FnLowerer<'a> {
     fn timer_global_unshadowed(&self, name: &str) -> bool {
         !self.scope.contains_key(name) && !self.signatures.contains_key(name)
@@ -54,6 +66,7 @@ impl<'a> FnLowerer<'a> {
         match callee.as_ref() {
             Expr::Ident(name) => {
                 if self.native_timer_set_kind(&Expr::Call(call.clone())).is_some() {
+                    note_timer_callback(name.sym.as_ref(), &call.args);
                     return self.lower_native_timer_set(call).map(Some);
                 }
                 if matches!(name.sym.as_ref(), "clearTimeout" | "clearInterval" | "clearImmediate")
