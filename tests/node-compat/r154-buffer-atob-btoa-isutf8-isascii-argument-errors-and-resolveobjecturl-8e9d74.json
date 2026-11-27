@@ -1,0 +1,5 @@
+{
+  "name": "r154 buffer atob btoa isUtf8 isAscii argument errors and resolveObjectURL",
+  "expect": "matched",
+  "source": "import * as buffer from 'node:buffer';\nfunction main(): void {\n  const b: any = buffer;\n  const calls: any[] = [() => b.atob(), () => b.btoa(), () => b.isUtf8(), () => b.isAscii()];\n  for (const call of calls) {\n    try { call(); console.log('no throw'); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  }\n  console.log(b.isUtf8(new Uint8Array([0x68, 0x69])), b.isUtf8(new Uint8Array([0xff])), b.isAscii(new Uint8Array([0x80])), b.isAscii(new ArrayBuffer(2)));\n  console.log(typeof b.resolveObjectURL, b.resolveObjectURL('blob:nodedata:missing'));\n  console.log(b.atob('aGk='), b.btoa('hi'));\n}\n"
+}
