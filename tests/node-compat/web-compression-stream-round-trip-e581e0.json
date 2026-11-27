@@ -1,0 +1,5 @@
+{
+  "name": "web compression stream round trip",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; import { CompressionStream, DecompressionStream, TextDecoderStream } from 'node:stream/web'; async function main(): Promise<void> { const compression = new CompressionStream('gzip'); const decompression = new DecompressionStream('gzip'); const decoder = new TextDecoderStream(); const output = compression.readable.pipeThrough(decompression).pipeThrough(decoder); const writer = compression.writable.getWriter(); const reader = output.getReader(); const pending = reader.read(); await writer.write(Buffer.from('hello')); await writer.close(); const result = await pending; console.log(result.value, result.done); }"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "timer throw exits 1",
+  "expect": "matched",
+  "exitCode": 1,
+  "source": "function main(): void { setTimeout(() => { throw new Error(\"timer\"); }, 0); }"
+}

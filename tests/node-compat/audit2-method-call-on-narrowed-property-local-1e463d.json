@@ -1,0 +1,5 @@
+{
+  "name": "audit2 method call on narrowed property local",
+  "expect": "matched",
+  "source": "class B { v = 1; m(): number { return this.v; } }\nclass A { b: B | null = null; }\nfunction main(): void {\n  const a = new A(); a.b = new B();\n  const x = a.b;\n  if (x !== null) console.log(x.m());\n  let c: B | null = new B();\n  while (c !== null) { c.v = 5; console.log(c.v); c = null; }\n}"
+}

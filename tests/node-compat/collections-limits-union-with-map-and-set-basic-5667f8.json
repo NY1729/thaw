@@ -1,0 +1,5 @@
+{
+  "name": "collections limits: union with map and set basic",
+  "expect": "matched",
+  "source": "function f(x: boolean): Map<string, number> | string {\n  if (x) { const m = new Map<string, number>(); m.set(\"a\", 1); return m; }\n  return \"no\";\n}\nfunction g(x: boolean): Set<number> | number {\n  return x ? new Set([1, 2]) : 5;\n}\nfunction h(x: Map<string, number> | undefined): Map<string, number> {\n  return x ?? new Map<string, number>([[\"z\", 26]]);\n}\nfunction main(): void {\n  const a = f(true), b = f(false);\n  console.log(a, b);\n  if (typeof a === \"string\") console.log(\"str\", a); else console.log(\"map\", a.size, a.get(\"a\"));\n  if (a instanceof Map) console.log(\"is map\", a.size);\n  if (typeof b === \"string\") console.log(\"str\", b.length);\n  console.log(g(true), g(false));\n  const s = g(true);\n  if (s instanceof Set) console.log(s.has(1), s.size);\n  console.log(h(undefined), h(new Map([[\"q\", 1]])));\n  const u: Map<string, number> | string = Math.random() > 2 ? \"x\" : new Map([[\"k\", 2]]);\n  console.log(u, typeof u);\n}\n"
+}

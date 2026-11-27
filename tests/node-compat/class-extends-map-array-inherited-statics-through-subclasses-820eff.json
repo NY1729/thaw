@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Array: inherited statics through subclasses",
+  "expect": "matched",
+  "source": "class Counter extends Map<string, number> { static made = 0; static mk(): Counter { Counter.made++; return new Counter(); } }\nclass Wide extends Counter { static other = 2; }\nclass Deeper extends Wide {}\nclass Arr extends Array<string> { static tag = \"A\"; static build(): Arr { return Arr.of(\"a\"); } }\nclass Arr2 extends Arr {}\nfunction main(): void {\n  console.log(Deeper.made, Deeper.other, Deeper.mk().size, Counter.made);\n  const g = Deeper.groupBy([\"a\", \"bb\", \"cc\"], (s: string) => s.length);\n  console.log(g, g instanceof Map, g instanceof Deeper);\n  console.log(Arr2.tag, Arr2.build(), Arr2.isArray([1]), Arr2.isArray(Arr2.of(\"z\")), Arr2.of(\"q\", \"r\"));\n  const f = Arr2.from([\"u\", \"v\"]);\n  console.log(f, f instanceof Arr2, f instanceof Arr, f.length);\n}\n"
+}

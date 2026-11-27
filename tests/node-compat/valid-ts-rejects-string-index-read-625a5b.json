@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: string index read",
+  "expect": "matched",
+  "source": "function main(): void {\n  const s = \"Hello\";\n  console.log(s[1], s[s.length - 1], s[0] + s[4]);\n  let n = 0;\n  for (let i = 0; i < s.length; i++) { if (s[i] === \"l\") n++; }\n  console.log(n);\n  const words = [\"ab\", \"cd\"];\n  console.log(words[1][0], words.map((w) => w[1]).join(\"\"));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "perf_hooks two PerformanceObserver callbacks on the same mark",
+  "expect": "matched",
+  "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const a = new PerformanceObserver((list) => { console.log(\"a\", list.getEntries().map((e) => e.name)); });\n  const b = new PerformanceObserver((list) => { console.log(\"b\", list.getEntries().map((e) => e.name)); });\n  a.observe({ entryTypes: [\"mark\"] });\n  b.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"x\");\n  setTimeout(() => { a.disconnect(); b.disconnect(); console.log(\"done\"); }, 20);\n}\n"
+}

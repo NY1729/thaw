@@ -1,0 +1,5 @@
+{
+  "name": "for await over dynamic async and sync iterables",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const src: any = new Function('return [Promise.resolve(1), 2, Promise.resolve(3)]')();\n  for await (const v of src) { console.log('v', v); }\n  const gen: any = new Function('return (async function* () { yield 10; yield 20; })()')();\n  for await (const g of gen) { console.log('g', g); }\n  const plain: any = [7, 8];\n  for await (const p of plain) { console.log('p', p); }\n}\n"
+}

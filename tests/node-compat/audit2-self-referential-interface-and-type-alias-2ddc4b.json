@@ -1,0 +1,5 @@
+{
+  "name": "audit2 self-referential interface and type alias",
+  "expect": "matched",
+  "source": "interface TreeNode { v: number; kids: TreeNode[]; parent?: TreeNode }\ntype Tree = { label: string; kids: Tree[] };\ntype Opt = { next: Opt | null; n: number };\nfunction sum(t: TreeNode): number { let s = t.v; for (const k of t.kids) s += sum(k); return s; }\nfunction depth(t: Tree): number { let d = 0; for (const k of t.kids) d = Math.max(d, depth(k)); return d + 1; }\nfunction len(o: Opt | null): number { return o === null ? 0 : 1 + len(o.next); }\nfunction main(): void {\n  const t: TreeNode = { v: 1, kids: [{ v: 2, kids: [] }, { v: 3, kids: [{ v: 4, kids: [] }] }] };\n  console.log(sum(t));\n  const u: Tree = { label: \"a\", kids: [{ label: \"b\", kids: [{ label: \"c\", kids: [] }] }] };\n  console.log(depth(u), u.kids[0].kids[0].label);\n  const o: Opt = { n: 1, next: { n: 2, next: null } };\n  console.log(len(o));\n  const extra: TreeNode = { v: 10, kids: [] }; t.kids.push(extra); console.log(sum(t));\n}"
+}

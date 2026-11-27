@@ -1,0 +1,5 @@
+{
+  "name": "nd8 Buffer.byteLength of a typed array and optional read/write offsets",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(Buffer.byteLength(new Uint8Array(3)), Buffer.byteLength(\"aGk=\", \"base64\"), Buffer.byteLength(\"\\u20ac\"));\n  const sec = Buffer.alloc(4);\n  sec.writeUInt32BE(7);\n  console.log(sec.readUInt32BE(), sec);\n  const f = Buffer.alloc(8);\n  f.writeDoubleLE(1.5);\n  console.log(f.readDoubleLE());\n  const g = Buffer.alloc(8);\n  g.writeBigInt64LE(5n);\n  console.log(g.readBigInt64LE());\n}\n"
+}

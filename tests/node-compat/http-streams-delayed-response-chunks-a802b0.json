@@ -1,0 +1,5 @@
+{
+  "name": "http streams delayed response chunks",
+  "expect": "matched",
+  "source": "import { spawn } from 'node:child_process'; import { get } from 'node:http'; function main(): void { const child = spawn('node', ['-e', \"const s=require('http').createServer((_q,r)=>{r.write('one');setTimeout(()=>r.end('two'),200)});s.listen(0,'127.0.0.1',()=>console.log(s.address().port))\"]); let started: boolean = false; child.stdout.on('data', (value) => { if (started) return; started = true; const port: string = String(value).trim(); get('http://127.0.0.1:' + port, (response) => { const chunks: string[] = []; response.setEncoding('utf8'); response.on('data', (chunk) => chunks.push(String(chunk))); response.on('end', () => { console.log(chunks.join('|'), response.complete); child.kill(); }); }); }); }"
+}

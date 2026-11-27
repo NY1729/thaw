@@ -1,0 +1,5 @@
+{
+  "name": "buffer concat of a list captured by a js callback closure",
+  "expect": "matched",
+  "source": "import { Readable } from \"node:stream\";\nfunction main(): void {\n  const chunks: Buffer[] = [];\n  const hex = \"68656c6c6f\";\n  const nums = [104, 105];\n  const r = Readable.from([Buffer.from(\"ab\"), Buffer.from(\"cd\")]);\n  r.on(\"data\", (c: Buffer) => { chunks.push(c); });\n  r.on(\"end\", () => {\n    const all = Buffer.concat(chunks);\n    console.log(all.length, all.toString());\n    const h = Buffer.from(hex, \"hex\");\n    console.log(h.length, h.toString());\n    const n = Buffer.from(nums);\n    console.log(n.length, n);\n    console.log(Buffer.from(hex).length);\n  });\n}\n"
+}

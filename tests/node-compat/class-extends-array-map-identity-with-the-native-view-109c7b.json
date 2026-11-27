@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array/Map: identity with the native view",
+  "expect": "matched",
+  "source": "class Stack extends Array<number> {}\nclass Reg extends Map<string, number> {}\nfunction takes(a: number[]): number { a.push(9); return a.length; }\nfunction main(): void {\n  const s = new Stack(); s.push(1);\n  const a: number[] = s;\n  console.log(a === s, a !== s, s === a);\n  console.log(takes(s), s.length, s);\n  const r = new Reg();\n  const m: Map<string, number> = r;\n  console.log(m === r, m !== r);\n  const t = new Stack();\n  console.log(a === t, s === s);\n}\n"
+}

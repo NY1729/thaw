@@ -1,0 +1,5 @@
+{
+  "name": "icu Date toLocaleTimeString options hour12 hourCycle and timeZone",
+  "expect": "matched",
+  "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleTimeString(\"en-US\", { timeZone: \"America/New_York\" }), d.toLocaleTimeString(\"en-US\", { timeZone: \"Asia/Tokyo\", hour12: false }), d.toLocaleTimeString(\"en-US\", { timeZone: \"UTC\", hour: \"2-digit\", minute: \"2-digit\" }), d.toLocaleTimeString(\"de-DE\", { timeZone: \"Europe/Berlin\", hour: \"2-digit\", minute: \"2-digit\" }), d.toLocaleTimeString(\"en-US\", { timeZone: \"UTC\", hourCycle: \"h23\" }), d.toLocaleString(\"en-GB\", { timeZone: \"Asia/Kolkata\" })); }"
+}

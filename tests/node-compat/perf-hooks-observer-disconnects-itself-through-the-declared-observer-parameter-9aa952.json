@@ -1,0 +1,5 @@
+{
+  "name": "perf_hooks observer disconnects itself through the declared observer parameter",
+  "expect": "matched",
+  "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const o = new PerformanceObserver((list, observer) => { console.log(\"once\", list.getEntries().length); observer.disconnect(); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"y\");\n  setTimeout(() => performance.mark(\"z\"), 20);\n  setTimeout(() => console.log(\"after\"), 40);\n}\n"
+}

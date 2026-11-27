@@ -1,0 +1,5 @@
+{
+  "name": "parentPort close keeps pending work alive",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.on('message', () => {}); parentPort.close(); setTimeout(() => { console.log('timer ran'); }, 30);`, { eval: true, stdout: false });\n  const log: string[] = [];\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  console.log('exit ' + code);\n}"
+}

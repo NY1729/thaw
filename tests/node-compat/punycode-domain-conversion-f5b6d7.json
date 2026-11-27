@@ -1,0 +1,5 @@
+{
+  "name": "punycode domain conversion",
+  "expect": "matched",
+  "source": "import { toASCII, toUnicode } from 'node:punycode'; function main(): void { console.log(toASCII('mañana.com'), toUnicode('xn--maana-pta.com')); }"
+}

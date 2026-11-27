@@ -1,0 +1,5 @@
+{
+  "name": "r3b Array.from length source with any-annotated mapper and large array printing",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = Array.from({ length: 101 }, (_: unknown, i: number) => i);\n  console.log(a.length, a);\n  const b = Array.from({ length: 30 }, (_: any, i: number) => i * 1000);\n  console.log(b);\n}"
+}

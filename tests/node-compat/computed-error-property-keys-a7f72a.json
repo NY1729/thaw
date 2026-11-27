@@ -1,0 +1,5 @@
+{
+  "name": "computed error property keys",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"p\") as any;\n  e[`k${1}`] = \"v\";\n  const key = \"dyn\";\n  e[key] = 2;\n  console.log(Object.keys(e), e.k1, e.dyn);\n  console.log(JSON.stringify(e), JSON.stringify({ err: 1 }), JSON.stringify(\"s\"));\n}\n"
+}

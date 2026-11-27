@@ -1,0 +1,5 @@
+{
+  "name": "web readable stream",
+  "expect": "matched",
+  "source": "import { ReadableStream } from 'node:stream/web'; async function main(): Promise<void> { const stream = new ReadableStream({ start(controller) { controller.enqueue('hello'); controller.close(); } }); const reader = stream.getReader(); const first = await reader.read(); const last = await reader.read(); console.log(first.value, first.done, last.done); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "error with props and stack prints like Node",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"boom\") as any;\n  e.stack = \"Error: boom\\n    at x (y:1:1)\";\n  e.code = \"E_X\";\n  console.log(e);\n  console.log(\"a\", e);\n  console.log({ err: e });\n  console.log([e]);\n  const j = { ...e };\n  console.log(j);\n  try { throw e; } catch (c: any) { console.log(c); console.log(String(c), Object.keys(c)); }\n  const f = new Error(\"p\") as any;\n  f.stack = \"Error: p\";\n  f.cause = new Error(\"inner\");\n  f.cause.stack = \"Error: inner\";\n  f.n = 1;\n  console.log(f);\n}\n"
+}

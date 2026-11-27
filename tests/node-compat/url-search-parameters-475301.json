@@ -1,0 +1,5 @@
+{
+  "name": "URL search parameters",
+  "expect": "matched",
+  "source": "import { URL } from 'node:url'; function main(): void { const url = new URL('https://example.com/a?x=1'); url.searchParams.append('x', '2'); console.log(url.hostname, url.pathname, JSON.stringify(url.searchParams.getAll('x'))); }"
+}

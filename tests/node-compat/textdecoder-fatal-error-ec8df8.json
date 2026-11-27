@@ -1,0 +1,5 @@
+{
+  "name": "TextDecoder fatal error",
+  "expect": "matched",
+  "source": "function main(): void { const decoder = new TextDecoder('utf-8', { fatal: true }); try { decoder.decode(new Uint8Array([255])); } catch (error) { console.log(error.name); } }"
+}

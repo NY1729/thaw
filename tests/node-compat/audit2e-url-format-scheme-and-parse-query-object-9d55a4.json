@@ -1,0 +1,5 @@
+{
+  "name": "audit2e url format scheme and parse query object",
+  "expect": "matched",
+  "source": "import * as url from \"node:url\"; function main(): void { console.log(url.format({ protocol: \"https\", hostname: \"a.com\", pathname: \"/x\", query: { a: \"1\" } })); console.log(url.format({ protocol: \"http:\", host: \"a.com:80\", search: \"?q=1\", hash: \"#h\" })); console.log(url.format({ protocol: \"https:\", hostname: \"a.com\", pathname: \"x\", search: \"q=1\", hash: \"h\" })); const r = url.parse(\"/p/a?x=1&x=2&y=3\", true); console.log(r.query, r.pathname, r.search, r.host); console.log(url.parse(\"/p?x=1\").query, url.parse(\"/p\", true).query); console.log(url.resolve(\"http://a.com/b/c\", \"../d\"), url.domainToASCII(\"münchen.de\"), url.domainToUnicode(\"xn--mnchen-3ya.de\")); }"
+}

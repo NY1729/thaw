@@ -1,0 +1,5 @@
+{
+  "name": "nd9 printing a class field of object-literal type does not overflow the compiler",
+  "expect": "matched",
+  "source": "class QB { parts: { n: number } = { n: 1 }; }\nfunction main(): void { const q = new QB(); console.log(q.parts); console.log(q); }\n"
+}

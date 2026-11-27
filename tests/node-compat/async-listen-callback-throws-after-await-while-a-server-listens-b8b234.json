@@ -1,0 +1,6 @@
+{
+  "name": "async listen callback throws after await while a server listens",
+  "expect": "matched",
+  "exitCode": 1,
+  "source": "import * as net from 'node:net';\nfunction main(): void {\n  const srv = net.createServer((s: any) => { s.end('x'); });\n  srv.listen(0, '127.0.0.1', async (): Promise<void> => {\n    console.log('listening');\n    await new Promise<void>((r) => setTimeout(r, 5));\n    throw new Error('boom');\n  });\n}"
+}

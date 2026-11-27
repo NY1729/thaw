@@ -1,0 +1,5 @@
+{
+  "name": "nd4 Array.from of a typed array map or slice result",
+  "expect": "matched",
+  "source": "function main(): void {\n  const u = new Uint8Array([1, 2, 3]);\n  console.log(Array.from(u.map(x => x * 2)));\n  const s = u.slice(1);\n  console.log(Array.from(s), Array.from(u.subarray(1)));\n  const m = u.map(x => x + 1);\n  console.log(Array.from(m), Array.from(u));\n}\n"
+}

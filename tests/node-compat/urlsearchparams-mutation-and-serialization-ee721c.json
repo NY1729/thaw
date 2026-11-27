@@ -1,0 +1,5 @@
+{
+  "name": "URLSearchParams mutation and serialization",
+  "expect": "matched",
+  "source": "import { URLSearchParams } from 'node:url'; function main(): void { const params = new URLSearchParams('b=2&a=1&a=3'); console.log(params.has('a'), params.size); params.delete('a', '1'); params.sort(); console.log(params.toString(), params.has('a', '1'), params.has('a', '3')); }"
+}

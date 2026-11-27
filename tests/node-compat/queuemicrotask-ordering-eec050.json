@@ -1,0 +1,5 @@
+{
+  "name": "queueMicrotask ordering",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { const order: string[] = []; queueMicrotask(() => order.push('microtask')); order.push('sync'); await Promise.resolve(); order.push('after'); console.log(order.join(',')); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "node test mock function records calls",
+  "expect": "matched",
+  "source": "import { mock } from 'node:test'; function main(): void { const twice = mock.fn((value: number): number => value * 2); console.log(twice(21), twice.mock.callCount()); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "JSON.stringify key order of Error subclasses",
+  "expect": "matched",
+  "source": "class A extends Error {\n  code: number;\n  constructor(m: string) { super(m); this.name = \"A\"; this.code = 3; }\n}\nclass B extends Error {\n  code = 4;\n  constructor(m: string) { super(m); this.name = \"B\"; }\n}\nfunction main(): void {\n  console.log(JSON.stringify(new A(\"x\")), Object.keys(new A(\"x\")));\n  console.log(JSON.stringify(new B(\"x\")), Object.keys(new B(\"x\")));\n}\n"
+}

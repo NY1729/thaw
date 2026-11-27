@@ -1,0 +1,5 @@
+{
+  "name": "private field read through a base-typed parameter returns the subclass instance's private value",
+  "expect": "matched",
+  "source": "class PrivBase { #x = 1; read(p: PrivBase): number { return p.#x; } }\nclass PrivSub extends PrivBase { }\nfunction main(): void {\n  console.log(new PrivBase().read(new PrivSub()));\n  console.log(new PrivBase().read(new PrivBase()));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "util callbackify promise",
+  "expect": "matched",
+  "source": "import { callbackify } from 'node:util'; async function twice(value: number): Promise<number> { return value * 2; } function main(): void { const callback = callbackify(twice); callback(21, (error: unknown, value: number): void => console.log(JSON.stringify(error), error === null, value)); }"
+}

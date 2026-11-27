@@ -1,0 +1,5 @@
+{
+  "name": "r2a error stack split inline",
+  "expect": "matched",
+  "source": "function main(): void { try { throw new Error(\"a b\"); } catch (e) { console.log((e as Error).stack!.split(\"\\n\")[0]); console.log((e as Error).message.split(\" \")[1]); } }"
+}

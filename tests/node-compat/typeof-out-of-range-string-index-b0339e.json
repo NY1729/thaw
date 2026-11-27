@@ -1,0 +1,5 @@
+{
+  "name": "typeof out-of-range string index",
+  "expect": "matched",
+  "source": "function main(): void {\n  const s = \"abc\";\n  console.log(typeof s[5], typeof s[1], typeof s[0]);\n  const i = 7;\n  console.log(typeof s[i]);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "util callbackify falsy rejection metadata",
+  "expect": "matched",
+  "source": "import { callbackify } from 'node:util'; async function fail(): Promise<void> { throw 0; } function main(): void { const callback = callbackify(fail); callback((error: JsValue): void => console.log(error.name, error.code, error.message, String(error.reason))); }"
+}

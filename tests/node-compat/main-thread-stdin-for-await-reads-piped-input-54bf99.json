@@ -1,0 +1,6 @@
+{
+  "name": "main thread stdin for await reads piped input",
+  "expect": "matched",
+  "stdin": "hello\nworld\n",
+  "source": "async function main(): Promise<void> {\n  const chunks: string[] = [];\n  for await (const chunk of process.stdin) { chunks.push(String(chunk)); }\n  console.log(JSON.stringify(chunks.join('')), chunks.length > 0);\n}"
+}

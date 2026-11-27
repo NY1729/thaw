@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage retains deep record aliases",
+  "expect": "matched",
+  "source": "function main(): void { const root: {next: any} = {next: null}; let cursor: any = root; for (let i = 0; i < 70; i++) { const next: any = {next: null}; cursor.next = next; cursor = next; } cursor.next = root; cursor.value = 7; let read: any = root; for (let i = 0; i < 70; i++) read = read.next; console.log(read === cursor, read.next === root, read.value); }"
+}

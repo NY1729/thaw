@@ -1,0 +1,5 @@
+{
+  "name": "child_process bare ChildProcess and callback arities",
+  "expect": "matched",
+  "source": "import * as cp from 'node:child_process'; function main(): void { const c: any = new cp.ChildProcess(); console.log(Object.keys(c).join(','), c.connected, c.exitCode, c.signalCode, c.killed, c.spawnfile, typeof c.kill, typeof c.ref, typeof c.unref, typeof c.spawn); console.log(cp.exec.length, cp.execFile.length, cp.execFileSync.length, cp.execSync.length, cp.fork.length, cp.spawn.length, cp.spawnSync.length); }"
+}

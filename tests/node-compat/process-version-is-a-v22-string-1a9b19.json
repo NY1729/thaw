@@ -1,0 +1,5 @@
+{
+  "name": "process version is a v22 string",
+  "expect": "matched",
+  "source": "function main(): void { console.log(process.version.startsWith('v22.'), typeof process.versions.node); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "URL string conversion",
+  "expect": "matched",
+  "source": "import { fileURLToPath } from 'node:url'; function main(): void { console.log(fileURLToPath('file:///tmp/a%20b')); }"
+}

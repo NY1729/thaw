@@ -1,0 +1,5 @@
+{
+  "name": "r133 http argument validation error codes",
+  "expect": "matched",
+  "source": "import * as http from 'node:http';\nfunction main(): void {\nconst M: any = http;\nfunction t(n: string, f: () => void): void {\n  try { f(); console.log(n, 'no throw'); } catch (e: any) { console.log(n, e.name, e.code, e.message); }\n}\nt('path', () => M.request({ path: '/a b' }));\nt('method', () => M.request({ method: 'G E' }));\nt('method2', () => M.request({ method: 5 }));\nt('host', () => M.request({ hostname: 5 }));\nt('host2', () => M.request({ host: {} }));\nt('hdrhost', () => M.request({ headers: { host: ['a', 'b'] } }));\nt('proto', () => M.request({ protocol: 'https:' }));\nt('timeout', () => M.request({ timeout: 'x' }));\nt('cb', () => M.request({}, 5));\nt('agent4', () => new M.Agent({ scheduling: 'x' }));\nt('vhn', () => M.validateHeaderName('a b'));\nt('vhv', () => M.validateHeaderValue('a', undefined));\n}\n"
+}

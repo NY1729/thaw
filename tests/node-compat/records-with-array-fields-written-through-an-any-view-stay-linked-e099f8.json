@@ -1,0 +1,5 @@
+{
+  "name": "records with array fields written through an any view stay linked",
+  "expect": "matched",
+  "source": "interface Row { n: number; tags: string[] }\nasync function main(): Promise<void> {\n  const rows: Row[] = [{ n: 1, tags: [\"a\"] }];\n  const v: any = rows;\n  const row: any = JSON.parse('{\"n\":2,\"tags\":[\"x\",\"y\"]}');\n  v[0] = row;\n  row.tags.push(\"z\");\n  console.log(rows[0].tags.join(\",\"), rows[0].n);\n  rows[0].tags.push(\"w\");\n  console.log(row.tags.join(\",\"));\n  row.n = 5;\n  console.log(rows[0].n);\n  rows[0].tags[0] = \"q\";\n  console.log(row.tags[0], v[0] === row);\n  const extra: any = JSON.parse('{\"n\":3,\"tags\":[]}');\n  v.push(extra);\n  extra.tags.push(\"t\");\n  console.log(rows.length, rows[1].tags.join(\",\"));\n  rows[1].tags.push(\"u\");\n  console.log(extra.tags.join(\",\"));\n}\n"
+}

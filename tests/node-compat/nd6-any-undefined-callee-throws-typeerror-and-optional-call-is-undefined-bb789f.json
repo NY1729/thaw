@@ -1,0 +1,5 @@
+{
+  "name": "nd6 any undefined callee throws TypeError and optional call is undefined",
+  "expect": "matched",
+  "source": "function main(): void {\n  const f: any = undefined;\n  console.log(f?.(), 1);\n  try { f(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  console.log(f?.call(null));\n  const g: any = null;\n  console.log(g?.(2));\n  try { g(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n}\n"
+}

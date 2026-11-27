@@ -1,0 +1,5 @@
+{
+  "name": "nd7 Intl NumberFormat unit names and infinity",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(new Intl.NumberFormat(\"de\").format(1234567.891), new Intl.NumberFormat(\"hi\").format(5));\n  console.log(new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"kilometer-per-hour\" }).format(5), new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"liter\", unitDisplay: \"long\" }).format(5), new Intl.NumberFormat().format(Infinity));\n  console.log(new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"celsius\" }).format(21.5), new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"kilometer-per-hour\", unitDisplay: \"long\" }).format(1), new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"megabyte\", unitDisplay: \"narrow\" }).format(3));\n  console.log(new Intl.NumberFormat(\"en-US\").format(-Infinity), new Intl.NumberFormat(\"en-US\", { style: \"percent\" }).format(Infinity), new Intl.NumberFormat(\"en-US\").format(NaN));\n  console.log(JSON.stringify(new Intl.NumberFormat(\"en-US\").formatToParts(Infinity)));\n}\n"
+}

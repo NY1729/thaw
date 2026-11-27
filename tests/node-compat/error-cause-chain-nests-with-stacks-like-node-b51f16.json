@@ -1,0 +1,5 @@
+{
+  "name": "error cause chain nests with stacks like Node",
+  "expect": "matched",
+  "source": "function main(): void {\n  const c1 = new Error(\"inner\") as any;\n  c1.stack = \"Error: inner\\n    at a (x:1:1)\\n    at b (x:2:1)\";\n  const e1 = new Error(\"outer\", { cause: c1 }) as any;\n  e1.stack = \"Error: outer\\n    at c (x:3:1)\\n    at b (x:2:1)\";\n  console.log(e1);\n  console.log([e1]);\n  console.log({ e: e1 });\n  const e5 = new Error(\"nested\", { cause: e1 }) as any;\n  e5.stack = \"Error: nested\\n    at n (x:7:1)\";\n  console.log(e5);\n  const e6 = new Error(\"withprop\", { cause: c1 }) as any;\n  e6.stack = \"Error: withprop\\n    at n (x:7:1)\";\n  e6.code = \"E1\";\n  console.log(e6);\n}\n"
+}

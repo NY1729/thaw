@@ -1,0 +1,5 @@
+{
+  "name": "diagnostics channel publish subscribe",
+  "expect": "matched",
+  "source": "import { channel } from 'node:diagnostics_channel'; function main(): void { const events = channel('thaw.test'); const listener = (message: Json): void => { console.log(message.value); }; events.subscribe(listener); events.publish({ value: 42 }); events.unsubscribe(listener); console.log(events.hasSubscribers); }"
+}

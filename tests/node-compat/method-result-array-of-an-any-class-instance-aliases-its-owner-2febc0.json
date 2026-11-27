@@ -1,0 +1,5 @@
+{
+  "name": "method result array of an any class instance aliases its owner",
+  "expect": "matched",
+  "source": "class Inner { arr: number[] = [1, 2]; get(): number[] { return this.arr; } }\nclass Holder { inner: Inner = new Inner(); }\nasync function main(): Promise<void> {\n  const v: any = new Holder();\n  v.inner.get().push(3);\n  console.log(v.inner.arr.length, v.inner.get() === v.inner.arr);\n  const r = v.inner.get();\n  r.push(4);\n  console.log(v.inner.arr.length, r.length, v.inner.arr[3]);\n}\n"
+}

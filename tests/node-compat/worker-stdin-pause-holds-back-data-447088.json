@@ -1,0 +1,5 @@
+{
+  "name": "worker stdin pause holds back data",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); const log = []; process.stdin.setEncoding('utf8'); process.stdin.on('data', (c) => { log.push('data ' + c); if (c === 'a') { process.stdin.pause(); setTimeout(() => { log.push('resume'); process.stdin.resume(); }, 40); } }); process.stdin.on('end', () => { parentPort.postMessage(log.join(',')); });`, { eval: true, stdin: true });\n  worker.on('message', (v: any) => { console.log(v); });\n  worker.stdin!.write('a');\n  setTimeout(() => { worker.stdin!.write('b'); worker.stdin!.end(); }, 10);\n  await new Promise<void>((resolve) => { worker.on('exit', () => { resolve(); }); });\n}"
+}

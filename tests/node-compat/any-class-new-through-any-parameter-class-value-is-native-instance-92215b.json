@@ -1,0 +1,5 @@
+{
+  "name": "any class new through any parameter class value is native instance",
+  "expect": "matched",
+  "source": "function helper(n: number): number { return n * 2; }\nclass C { x = 1; dbl(): number { return helper(this.x); } }\nconst mk = (K: any) => new K();\nconst id = (K: any) => K;\nfunction main(): void {\n  const o = mk(C); const t: C = o; t.x = 3;\n  console.log(t.dbl(), o.x, t === o, typeof o);\n  const k2 = id(C); const p = new k2(); console.log(p.dbl());\n}\n"
+}

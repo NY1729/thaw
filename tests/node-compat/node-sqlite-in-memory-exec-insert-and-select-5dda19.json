@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite in-memory exec insert and select",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score REAL)');\n  const insert = db.prepare('INSERT INTO users (name, score) VALUES (?, ?)');\n  insert.run('ada', 9.5);\n  insert.run('grace', 7);\n  const rows: any[] = db.prepare('SELECT id, name, score FROM users ORDER BY id').all();\n  for (const row of rows) console.log(row.id, row.name, row.score, typeof row.score);\n  console.log(rows.length, Object.getPrototypeOf(rows[0]) === null);\n  db.close();\n}"
+}

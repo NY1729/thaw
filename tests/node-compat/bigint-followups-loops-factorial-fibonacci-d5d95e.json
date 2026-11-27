@@ -1,0 +1,5 @@
+{
+  "name": "bigint followups: loops factorial fibonacci",
+  "expect": "matched",
+  "source": "function main(): void {\n  let total = 0n;\n  for (let i = 0n; i < 100n; i++) total += i * i * 2n ** 60n;\n  console.log(total);\n  let f = 1n;\n  for (let i = 2n; i <= 30n; i++) f *= i;\n  console.log(f, f.toString().length, f % 1000000007n);\n  let fib0 = 0n, fib1 = 1n;\n  for (let i = 0; i < 200; i++) { const t = fib0 + fib1; fib0 = fib1; fib1 = t; }\n  console.log(fib0);\n}\n"
+}

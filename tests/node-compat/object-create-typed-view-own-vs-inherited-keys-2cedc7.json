@@ -1,0 +1,5 @@
+{
+  "name": "object create typed view own vs inherited keys",
+  "expect": "matched",
+  "source": "function main(): void {\n  const proto = { f() { return 1; }, a: 1 };\n  const o = Object.create(proto) as { a: number; f(): number; b?: number };\n  o.b = 2;\n  console.log(JSON.stringify(o), o.a, o.f(), Object.keys(o), o.hasOwnProperty(\"a\"), o.hasOwnProperty(\"b\"));\n}"
+}

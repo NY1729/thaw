@@ -1,0 +1,5 @@
+{
+  "name": "console.log of a null-prototype object",
+  "expect": "matched",
+  "source": "function main(): void { console.log(Object.create(null)); }"
+}

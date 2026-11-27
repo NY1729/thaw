@@ -1,0 +1,5 @@
+{
+  "name": "audit2 D console format nullish bigint symbol",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(\"%s\", null, undefined, 5n, Symbol(\"q\"));\n  console.log(\"%d\", 5n, \"%i\", 7n);\n  console.log(\"%s\", 5n);\n  console.log(\"%s\", Symbol(\"r\"));\n}"
+}

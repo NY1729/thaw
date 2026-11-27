@@ -1,0 +1,5 @@
+{
+  "name": "caught Error keeps pointer identity under strict equality",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = new Error(\"x\");\n  const b = new Error(\"x\");\n  try { throw a; } catch (e: any) { console.log(e === a, e === b, e !== a); }\n  try { throw a; } catch (e) { console.log(e === a, e === b); }\n}\n"
+}

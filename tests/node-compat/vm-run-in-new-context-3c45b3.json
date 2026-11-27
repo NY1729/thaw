@@ -1,0 +1,5 @@
+{
+  "name": "vm run in new context",
+  "expect": "matched",
+  "source": "import { runInNewContext } from 'node:vm'; function main(): void { console.log(runInNewContext('value * 2', { value: 21 })); }"
+}

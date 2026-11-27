@@ -1,0 +1,5 @@
+{
+  "name": "bigint arbitrary precision: errors json and catch",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { console.log(1n / 0n); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { console.log(2n ** -1n); } catch (e) { console.log((e as Error).name); }\n  try { console.log(BigInt(\"12x\")); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { throw 2n ** 70n; } catch (e) { console.log(e); }\n  console.log(BigInt(\"0xff\"), BigInt(\"  42 \"), BigInt(\"\"), [2n ** 65n], { v: 2n ** 65n });\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "es module runs promises before nextTick",
+  "expect": "matched",
+  "source": "import { setImmediate as wait } from 'node:timers'; async function main(): Promise<void> { const order: string[] = []; process.nextTick(() => order.push('tick')); Promise.resolve().then(() => order.push('promise')); queueMicrotask(() => order.push('microtask')); await new Promise<void>((resolve) => wait(resolve)); console.log(order.join(',')); }"
+}

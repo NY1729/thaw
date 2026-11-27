@@ -1,0 +1,5 @@
+{
+  "name": "audit-silent object literal accessors bind this",
+  "expect": "matched",
+  "source": "const o = { _v: 1, get v() { return this._v; }, set v(x: number) { this._v = x * 2; } };\no.v = 5;\nconsole.log(o.v, o._v);\nconsole.log(JSON.stringify(o));\nconsole.log(Object.keys(o));\nfunction main(): void {}\n"
+}

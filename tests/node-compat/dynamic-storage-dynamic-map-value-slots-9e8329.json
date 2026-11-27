@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage dynamic map value slots",
+  "expect": "matched",
+  "source": "function main():void{const xs:number[]=[1];const map=new Map<string,any>();map.set(\"x\",xs);map.get(\"x\")[0]={x:7};console.log(typeof xs[0],xs[0].x);}"
+}

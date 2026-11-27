@@ -1,0 +1,5 @@
+{
+  "name": "performance monotonic clock",
+  "expect": "matched",
+  "source": "import { performance } from 'node:perf_hooks'; function main(): void { const start: number = performance.now(); const end: number = performance.now(); console.log(end >= start, typeof performance.timeOrigin === 'number'); }"
+}

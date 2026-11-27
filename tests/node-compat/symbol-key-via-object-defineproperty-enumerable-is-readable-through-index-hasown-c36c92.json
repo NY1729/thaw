@@ -1,0 +1,5 @@
+{
+  "name": "symbol key via Object.defineProperty enumerable is readable through index, hasOwnProperty.call and descriptor",
+  "expect": "matched",
+  "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = { a: 1 };\n  Object.defineProperty(o, S, { value: 5, enumerable: true, writable: true, configurable: true });\n  console.log(o[S]);\n  console.log(Object.prototype.hasOwnProperty.call(o, S));\n  const d: any = Object.getOwnPropertyDescriptor(o, S);\n  console.log(d.enumerable, d.value, d.writable);\n}"
+}

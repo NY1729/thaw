@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite setReadBigInts keeps integers above 2^53 exact",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  const stmt = db.prepare('SELECT 9007199254740993 AS big, 42 AS small');\n  try { stmt.get(); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  stmt.setReadBigInts(true);\n  console.log(String(stmt.get().big), typeof stmt.get().big, String(stmt.get().small), typeof stmt.get().small);\n  const echo = db.prepare('SELECT ? AS v');\n  echo.setReadBigInts(true);\n  db.close();\n}"
+}

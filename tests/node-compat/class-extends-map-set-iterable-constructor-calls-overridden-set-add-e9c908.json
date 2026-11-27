@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: iterable constructor calls overridden set/add",
+  "expect": "matched",
+  "source": "const LOG: string[] = [];\nconst SEEN: number[] = [];\nclass Reg extends Map<string, number> {\n  \n  set(k: string, v: number): this { LOG.push(k); return super.set(k, v * 2); }\n}\nclass Bag extends Set<number> {\n  \n  add(v: number): this { SEEN.push(v); return super.add(v + 100); }\n}\nclass Plain extends Map<string, number> {}\nclass PlainS extends Set<number> {}\nfunction main(): void {\n  const r = new Reg([[\"a\", 1], [\"b\", 2]]);\n  console.log(r, LOG);\n  const b = new Bag([1, 2, 2]);\n  console.log(b, SEEN);\n  const other = new Map<string, number>([[\"x\", 1]]);\n  const p = new Plain(other);\n  console.log(p, p.size, p instanceof Plain);\n  const ps = new PlainS(new Set([1, 2]));\n  console.log(ps, ps.size);\n  const p2 = new Plain(new Plain(other));\n  console.log(p2);\n  const ps2 = new PlainS([3, 4]);\n  console.log(ps2);\n  const pl = new Plain(r);\n  console.log(pl);\n}\n"
+}

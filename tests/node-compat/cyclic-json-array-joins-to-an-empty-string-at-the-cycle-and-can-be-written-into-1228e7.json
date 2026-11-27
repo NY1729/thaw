@@ -1,0 +1,5 @@
+{
+  "name": "cyclic json array joins to an empty string at the cycle and can be written into a typed slot",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const j: any = JSON.parse(\"[1,2]\");\n  j.push(j);\n  console.log(String(j));\n  console.log(j.join(\"-\"));\n  console.log(Number(j), \"\" + j);\n  const nat: number[][] = [[1]];\n  const v: any = nat;\n  v[0] = j;\n  console.log(nat.length, nat[0].length, v[0] === j);\n}\n"
+}

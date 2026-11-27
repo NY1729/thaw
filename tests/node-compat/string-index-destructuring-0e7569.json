@@ -1,0 +1,5 @@
+{
+  "name": "string index destructuring",
+  "expect": "matched",
+  "source": "function main(): void {\n  const { 0: x, 2: z } = \"xyz\";\n  console.log(x, z);\n  const { 1: y, length } = \"pqr\";\n  console.log(y, length);\n}\n"
+}

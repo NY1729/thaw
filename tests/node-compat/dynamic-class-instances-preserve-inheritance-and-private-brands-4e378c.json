@@ -1,0 +1,5 @@
+{
+  "name": "dynamic class instances preserve inheritance and private brands",
+  "expect": "matched",
+  "source": "class Base { #secret: number = 3; read(): number { return this.#secret; } } class Derived extends Base { get doubled(): number { return this.read() * 2; } } function main(): void { const values: Base[] = []; const exposed: any = values; const real = new Derived(); const plain: any = new Function(\"return {}\")(); exposed[0] = real; exposed[1] = plain; console.log(values[0] === real, values[0] instanceof Base, values[0] instanceof Derived, exposed[0].doubled, values[0].read()); try { exposed[0].read.call(plain); } catch (error) { console.log(error instanceof TypeError); } console.log(values[1] === plain, values[1] instanceof Base, typeof values[1].read); }"
+}
