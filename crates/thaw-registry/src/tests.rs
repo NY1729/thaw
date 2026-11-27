@@ -1533,7 +1533,7 @@ fn builtin_bundle_sha256(specifier: &str) -> String {
 fn node_util_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:util"),
-        "9e21c0ba19eebc1792ea88a8b0c3afba197c42285b8638910620ff463094fb19",
+        "447a21570dc678496211f930754972c8b92ade13c4893652a3c42eb5d8fc08d4",
         "node:util bundle sha256"
     );
 }

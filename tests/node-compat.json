@@ -5480,6 +5480,36 @@
     "name": "dynamic member calls on any keep this and callbacks in any restore as functions",
     "expect": "matched",
     "source": "import http from 'http';\nfunction mk(): any { return function (...a: any[]) { return a.length; }; }\nfunction main(): void {\n  const d: any = { n: 7, fn: (x: number) => x * 2, g: function (x: number) { return x + 1; } };\n  const keys = Object.keys(d);\n  console.log(d[keys[1]](4), d[keys[2]](4));\n  const name = keys[1];\n  console.log(d[name](3), typeof d.g, d.g.name);\n  const run = (cb: any) => cb(10);\n  console.log(run(d.g));\n  const s = http.createServer(mk());\n  s.listen(0, function () { console.log(typeof this.address().port); s.close(); });\n}\n"
-  }
+  },
+    {
+      "name": "r154 buffer atob btoa isUtf8 isAscii argument errors and resolveObjectURL",
+      "expect": "matched",
+      "source": "import * as buffer from 'node:buffer';\nfunction main(): void {\n  const b: any = buffer;\n  const calls: any[] = [() => b.atob(), () => b.btoa(), () => b.isUtf8(), () => b.isAscii()];\n  for (const call of calls) {\n    try { call(); console.log('no throw'); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  }\n  console.log(b.isUtf8(new Uint8Array([0x68, 0x69])), b.isUtf8(new Uint8Array([0xff])), b.isAscii(new Uint8Array([0x80])), b.isAscii(new ArrayBuffer(2)));\n  console.log(typeof b.resolveObjectURL, b.resolveObjectURL('blob:nodedata:missing'));\n  console.log(b.atob('aGk='), b.btoa('hi'));\n}\n"
+    },
+    {
+      "name": "r154 util MIMEType MIMEParams and TextDecoder have no own enumerable properties",
+      "expect": "matched",
+      "source": "import * as util from 'node:util';\nfunction main(): void {\n  const u: any = util;\n  const t: any = new u.MIMEType('text/html; charset=utf-8');\n  console.log(Object.keys(t), Object.keys(t.params), Object.keys(new TextDecoder()), Object.keys(new u.MIMEParams()));\n  console.log(t.essence, t.params.get('charset'), new TextDecoder('utf-8', { fatal: true }).fatal);\n}\n"
+    },
+    {
+      "name": "r154 zlib Z_MAX_CHUNK is Infinity and bytesRead mirrors bytesWritten",
+      "expect": "matched",
+      "source": "import * as zlib from 'node:zlib';\nfunction main(): void {\n  const z: any = zlib;\n  console.log(z.constants.Z_MAX_CHUNK, typeof z.constants.Z_MAX_CHUNK, z.constants.Z_DEFAULT_CHUNK);\n  const g: any = z.createGzip();\n  g.write('hello');\n  console.log(g.bytesWritten, g.bytesRead);\n  g.destroy();\n}\n"
+    },
+    {
+      "name": "r154 stream Readable.wrap and state class statics",
+      "expect": "matched",
+      "source": "import * as stream from 'node:stream';\nfunction main(): void {\n  const s: any = stream;\n  console.log(typeof s.Readable.wrap, typeof s.Readable.ReadableState, typeof s.Writable.WritableState);\n  const w: any = new s.Readable.ReadableState({ objectMode: true });\n  console.log(Object.keys(w), w.highWaterMark);\n  const src: any = s.Readable.from(['a', 'b']);\n  const wrapped: any = s.Readable.wrap(src);\n  const out: string[] = [];\n  wrapped.on('data', (c: any) => out.push(String(c)));\n  wrapped.on('end', () => console.log(out.join(',')));\n}\n"
+    },
+    {
+      "name": "r154 crypto ECDH.convertKey between point formats",
+      "expect": "matched",
+      "source": "import * as crypto from 'node:crypto';\nfunction main(): void {\n  const c: any = crypto;\n  for (const curve of ['prime256v1', 'secp384r1', 'secp521r1']) {\n    const e: any = c.createECDH(curve);\n    e.setPrivateKey(Buffer.from('0102030405060708090a0b0c0d0e0f10111213141516171819', 'hex').subarray(0, 24));\n    const pub: any = e.getPublicKey();\n    const comp: any = c.ECDH.convertKey(pub, curve, undefined, undefined, 'compressed');\n    const back: any = c.ECDH.convertKey(comp, curve, undefined, 'hex');\n    console.log(curve, comp.length, comp.toString('hex') === e.getPublicKey(undefined, 'compressed').toString('hex'), back === pub.toString('hex'),\n      c.ECDH.convertKey(pub, curve, undefined, 'hex', 'hybrid') === e.getPublicKey('hex', 'hybrid'));\n  }\n  const g: any = c.ECDH.convertKey('0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798', 'secp256k1', 'hex', 'hex');\n  console.log(g, c.ECDH.convertKey(g, 'secp256k1', 'hex', 'hex', 'hybrid'), c.ECDH.convertKey(g, 'secp256k1', 'hex', 'hex', 'compressed'));\n  for (const args of [[Buffer.alloc(33, 5), 'prime256v1'], [Buffer.alloc(33, 5), 'nope'], [1, 'prime256v1']]) {\n    try { c.ECDH.convertKey(...(args as any)); } catch (err: any) { console.log(err.code, err.message); }\n  }\n}\n"
+    },
+    {
+      "name": "r154 crypto Certificate SPKAC and KeyObject.from and cipher list constants",
+      "expect": "matched",
+      "source": "import * as crypto from 'node:crypto';\nfunction main(): void {\n  const c: any = crypto;\n  const spkac = 'MIIBPzCBqTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA5QOumLWNzeBxNTrz6sZ/744g8/T4L9gvDLaqvbBCJHknjAodt9gTV/wepphSGI/lqADc+xIaNkFKSydIJA0jNzL/2oZ4E//trmN2RP3sqFxSaHFz3N5Ox+Dw+f1S7WX7JTb7vR+ZTAckyABsNIEtoiNapBNBtgVqE9xIqLTqb+sCAwEAARYFaGVsbG8wDQYJKoZIhvcNAQEEBQADgYEA2C++mzdr22dT3ALJ9kukk7ixe4ALEKD+HAwnfO6kmaonLzcEddWqcwgSFWB54q4lHycojeS2beB9zMZCl9p0wROkaXMuDEBexh+yC70LXfC7DyGhq4SpGxcionl8PSSsmeIWSF63yjAJbqdUiWy3JroitDGcWLIkdSsdCFmgaCQ=';\n  console.log(c.Certificate.exportChallenge(spkac).toString(), c.Certificate.verifySpkac(Buffer.from(spkac)), c.Certificate.verifySpkac(Buffer.from('AAAA')));\n  console.log(c.Certificate.exportPublicKey(spkac).toString().split('\\n')[0]);\n  const cert: any = new c.Certificate();\n  console.log(cert instanceof c.Certificate, cert.exportChallenge(spkac).toString(), typeof c.Certificate() === 'object');\n  console.log(typeof c.constants.defaultCipherList, c.constants.defaultCoreCipherList.split(':')[0]);\n  try { c.KeyObject.from({}); } catch (e: any) { console.log(e.code, e.message); }\n}\n"
+    }
   ]
 }

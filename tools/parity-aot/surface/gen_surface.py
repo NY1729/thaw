@@ -8,7 +8,7 @@ One probe per inventory member, in the gen_modules manifest format, so aot_run.p
   prop.<a>.<b>                  members of plain-object exports
 Skips (with a reason) go to skips.json. At most PER_PROGRAM probes per program.
 """
-import json
+import json, subprocess
 import os
 import re
 import sys
@@ -44,12 +44,20 @@ def gen(inv_dir, out_dir, only):
             continue
         glob = mod == "globals"
         rows = []  # (id, body)
+        # An ESM namespace (`import * as M`) lacks the module object's non-enumerable properties (zlib.DEFLATE,
+        # crypto.fips/rng/prng, ...); Node itself reports undefined for them, so they are not probed.
+        ns = None
+        if not glob:
+            r = subprocess.run(["node", "--input-type=module", "-e", f"import('{mod}').then(n=>console.log(JSON.stringify(Object.keys(n))))"], capture_output=True, text=True)
+            ns = set(json.loads(r.stdout)) if r.returncode == 0 and r.stdout.strip() else None
 
         def add(pid, body):
             rows.append((f"{key(mod)}.{pid}", body))
 
         for e in inv["exports"]:
             n, kind = e["name"], e["kind"]
+            if ns is not None and n not in ns:
+                continue
             X = n if glob else acc("M", n)
             if kind in ("function", "class", "getter", "object", "value"):
                 add(f"{n}.exists", f"return typeof {X};")

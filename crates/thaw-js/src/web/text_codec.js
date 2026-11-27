@@ -104,12 +104,14 @@
       if (encoding === null) {
         throw __thawTextErr(RangeError, 'ERR_ENCODING_NOT_SUPPORTED', `The "${label}" encoding is not supported`);
       }
-      this._fatal = Boolean(options.fatal);
-      this._ignoreBOM = Boolean(options.ignoreBOM);
-      this._encoding = encoding;
-      this._pending = new __thawTextUint8Array();
-      this._bomSeen = false;
-      this._previousStreaming = false;
+      // non-enumerable: Node's TextDecoder instance has no own enumerable properties
+      const hidden = (key, value) => Object.defineProperty(this, key, { value, writable: true, configurable: true });
+      hidden('_fatal', Boolean(options.fatal));
+      hidden('_ignoreBOM', Boolean(options.ignoreBOM));
+      hidden('_encoding', encoding);
+      hidden('_pending', new __thawTextUint8Array());
+      hidden('_bomSeen', false);
+      hidden('_previousStreaming', false);
     }
     decode(input = new __thawTextUint8Array(), options = {}) {
       const source = __thawTextDescribeSource(input);

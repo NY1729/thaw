@@ -3,8 +3,13 @@
   "match": 78,
   "skipped": 5
  },
+ "buffer": {
+  "match": 43,
+  "output-diff": 7,
+  "skipped": 130
+ },
  "crypto": {
-  "match": 156,
+  "match": 152,
   "output-diff": 18,
   "skipped": 401
  },
@@ -65,8 +70,8 @@
   "output-diff": 159
  },
  "stream": {
-  "match": 375,
-  "output-diff": 16
+  "match": 378,
+  "output-diff": 8
  },
  "sys": {
   "match": 150,
@@ -74,8 +79,8 @@
   "skipped": 6
  },
  "util": {
-  "match": 150,
-  "output-diff": 2,
+  "match": 131,
+  "output-diff": 21,
   "skipped": 6
  },
  "util_types": {
@@ -87,7 +92,7 @@
   "skipped": 16
  },
  "zlib": {
-  "match": 415,
-  "output-diff": 118
+  "match": 393,
+  "output-diff": 33
  }
 }

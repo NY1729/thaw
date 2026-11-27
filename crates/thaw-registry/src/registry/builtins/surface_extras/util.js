@@ -3,7 +3,7 @@
   var U = module.exports;
   var TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, QUOTED = /^[\t\u0020-\u007e\u0080-\u00ff]*$/;
   function invalid(name, value) { var e = new TypeError('The MIME syntax for a ' + name + ' in "' + value + '" is invalid'); e.code = 'ERR_INVALID_MIME_SYNTAX'; return e; }
-  function MIMEParams() { this._map = new Map(); }
+  function MIMEParams() { Object.defineProperty(this, '_map', { value: new Map() }); }
   MIMEParams.prototype.delete = function (name) { this._map.delete(String(name).toLowerCase()); };
   MIMEParams.prototype.get = function (name) { var v = this._map.get(String(name).toLowerCase()); return v === undefined ? null : v; };
   MIMEParams.prototype.has = function (name) { return this._map.has(String(name).toLowerCase()); };
@@ -30,7 +30,7 @@
     var type = essence.slice(0, slash), subtype = essence.slice(slash + 1);
     if (!TOKEN.test(type)) throw invalid('type', input);
     if (!TOKEN.test(subtype.replace(/[ \t]+$/, ''))) throw invalid('subtype', input);
-    this._type = type.toLowerCase(); this._subtype = subtype.replace(/[ \t]+$/, '').toLowerCase(); this._params = new MIMEParams();
+    Object.defineProperties(this, { _type: { value: type.toLowerCase(), writable: true }, _subtype: { value: subtype.replace(/[ \t]+$/, '').toLowerCase(), writable: true }, _params: { value: new MIMEParams() } });
     var rest = semi < 0 ? '' : input.slice(semi + 1), re = /\s*([^=;]*)(?:=("(?:[^"\\]|\\.)*"|[^;]*))?(?:;|$)/g, m;
     while (rest && (m = re.exec(rest)) && m[0] !== '') {
       var name = m[1].toLowerCase(), value = m[2] === undefined ? '' : m[2];
