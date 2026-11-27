@@ -5520,6 +5520,11 @@
     "name": "createServer handler wrapped through any: res.end() with omitted or undefined chunk",
     "expect": "matched",
     "source": "import http from 'http';\ntype Fn = (...a: any[]) => any;\nfunction wrap(fn: Fn): any { return function (...a: any[]) { return fn(...a); }; }\nasync function main(): Promise<void> {\n  const srv = http.createServer(wrap((req: any, res: any) => {\n    if (req.url === '/a') { res.end(); } else if (req.url === '/b') { res.end(undefined); } else { res.end('x'); }\n  }));\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const port = (srv.address() as any).port;\n  const out: string[] = [];\n  for (const p of ['/a', '/b', '/c']) {\n    const r = await fetch('http://127.0.0.1:' + port + p);\n    out.push(p + ':' + r.status + ':' + JSON.stringify(await r.text()));\n  }\n  console.log(out.join(','));\n  srv.close();\n}\n"
-  }
+  },
+    {
+      "name": "r153 url legacy parse/format/resolve/Url and domainTo*",
+      "expect": "matched",
+      "source": "import * as url from 'node:url';\nfunction main(): void {\n  const u: any = url.parse('http://user:pw@Host.com:8080/p/a/t/h?query=string#hash', true);\n  console.log(u.protocol, u.auth, u.host, u.port, u.hostname, u.hash, u.search, JSON.stringify(u.query), u.pathname, u.path, u.href);\n  console.log(url.resolve('/one/two/three', 'four'), url.resolve('http://example.com/', '/one'), url.resolve('http://example.com/one', '/two'));\n  console.log(url.format({ protocol: 'https', hostname: 'example.com', pathname: '/some/path', query: { page: 1, format: 'json' } }));\n  const x = new url.Url();\n  console.log(x.protocol, Object.keys(x).length);\n  console.log(JSON.stringify((url as any).resolveObject('http://a.com/b/c', '../d')));\n  function t(f: () => any): string { try { return String(f()); } catch (e: any) { return 'THROW ' + e.name + ' ' + e.code + ': ' + e.message; } }\n  const d: any = url.domainToASCII, e: any = url.parse, fm: any = url.format;\n  console.log(t(() => d()), '|', t(() => e()), '|', t(() => fm(5)), '|', t(() => url.domainToASCII('español.com')), '|', t(() => url.domainToUnicode('xn--espaol-zwa.com')));\n  console.log(url.fileURLToPath.length, (url as any).fileURLToPathBuffer.length, (url as any).resolveObject.length, url.resolve.length);\n  console.log(url.format(new URL('https://a:b@測試?abc#foo'), { fragment: false, unicode: true, auth: false }));\n  console.log(JSON.stringify(url.parse('//foo/bar', false, true)));\n}\n"
+    }
   ]
 }
