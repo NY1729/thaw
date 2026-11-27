@@ -1,6 +1,6 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
-        "url" => Some(
+        "url" => Some(concat!(
             "function received(value) {\n\
              \x20\x20if (value === null || value === undefined) return String(value);\n\
              \x20\x20if (typeof value === 'function') return 'function ' + value.name;\n\
@@ -35,16 +35,6 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20if (url.username !== '' || url.password !== '') options.auth = decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password);\n\
              \x20\x20return options;\n\
              }\n\
-             function queryObject(search) {\n\
-             \x20\x20var result = Object.create(null);\n\
-             \x20\x20new globalThis.URLSearchParams(search || '').forEach(function(value, key) { if (!Object.prototype.hasOwnProperty.call(result, key)) result[key] = value; else if (Array.isArray(result[key])) result[key].push(value); else result[key] = [result[key], value]; });\n\
-             \x20\x20return result;\n\
-             }\n\
-             function queryString(query) {\n\
-             \x20\x20var fields = [];\n\
-             \x20\x20Object.keys(query).forEach(function(key) { (Array.isArray(query[key]) ? query[key] : [query[key]]).forEach(function(value) { var text = typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean' ? String(value) : ''; fields.push(encodeURIComponent(key) + '=' + encodeURIComponent(text)); }); });\n\
-             \x20\x20return fields.join('&');\n\
-             }\n\
              function punycodeToUnicode(input) {\n\
              \x20\x20return input.split('.').map(function(label) {\n\
              \x20\x20\x20\x20if (label.slice(0, 4) !== 'xn--') return label;\n\
@@ -59,38 +49,16 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20return String.fromCodePoint.apply(null, output);\n\
              \x20\x20}).join('.');\n\
              }\n\
-             function Url() { this.protocol = null; this.slashes = null; this.auth = null; this.host = null; this.port = null; this.hostname = null; this.hash = null; this.search = null; this.query = null; this.pathname = null; this.path = null; this.href = null; }\n\
-             function parse(input, parseQuery) {\n\
-             \x20\x20if (typeof input !== 'string') throw argError('url', 'of type string', input);\n\
-             \x20\x20var source = input;\n\
-             \x20\x20var absolute = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(source);\n\
-             \x20\x20var url = new globalThis.URL(source, 'http://thaw.invalid');\n\
-             \x20\x20return Object.assign(new Url(), { protocol: absolute ? url.protocol : null, slashes: absolute && source.indexOf('//') >= 0, auth: url.username || url.password ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : null, host: absolute ? url.host : null, port: absolute && url.port ? url.port : null, hostname: absolute ? url.hostname : null, hash: url.hash || null, search: url.search || null, query: parseQuery ? queryObject(url.search) : url.search ? url.search.slice(1) : null, pathname: url.pathname, path: url.pathname + url.search, href: source });\n\
-             }\n\
-             function format(input) {\n\
-             \x20\x20if (input instanceof globalThis.URL) return input.href;\n\
-             \x20\x20if (typeof input === 'string') return input;\n\
-             \x20\x20var protocol = input.protocol || '';\n\
-             \x20\x20if (protocol && protocol.charAt(protocol.length - 1) !== ':') protocol += ':';\n\
-             \x20\x20var authority = input.host || input.hostname || '';\n\
-             \x20\x20if (!input.host && input.port) authority += ':' + input.port;\n\
-             \x20\x20if (input.auth) authority = encodeURI(input.auth).replace(/%3A/i, ':') + '@' + authority;\n\
-             \x20\x20var slashes = (input.slashes || /^(https?|ftp|gopher|file|wss?):$/.test(protocol)) && (authority || input.slashes) ? '//' : protocol === 'file:' ? '//' : '';\n\
-             \x20\x20var pathname = input.pathname || '';\n\
-             \x20\x20if (slashes && authority && pathname && pathname.charAt(0) !== '/') pathname = '/' + pathname;\n\
-             \x20\x20var search = input.search ? input.search : (input.query && typeof input.query === 'object' ? queryString(input.query) : typeof input.query === 'string' ? input.query : '');\n\
-             \x20\x20if (search && search.charAt(0) !== '?') search = '?' + search;\n\
-             \x20\x20var hash = input.hash || '';\n\
-             \x20\x20if (hash && hash.charAt(0) !== '#') hash = '#' + hash;\n\
-             \x20\x20return protocol + slashes + authority + pathname.replace(/[?#]/g, encodeURIComponent) + search.replace('#', '%23') + hash;\n\
-             }\n\
-             function resolve(from, to) { if (typeof from !== 'string') throw argError('url', 'of type string', from); if (typeof to !== 'string') throw argError('to', 'of type string', to); var resolved = new globalThis.URL(String(to), new globalThis.URL(String(from), 'resolve://')); return resolved.protocol === 'resolve:' ? resolved.pathname + resolved.search + resolved.hash : resolved.href; }\n\
-             function domainToASCII(domain) { try { return new globalThis.URL('ws://' + domain).hostname; } catch (_) { return ''; } }\n\
-             function domainToUnicode(domain) { var ascii = domainToASCII(domain); return punycodeToUnicode(ascii); }\n\
-             module.exports = { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, Url: Url, resolve: resolve, domainToASCII: domainToASCII, domainToUnicode: domainToUnicode, parse: parse, format: format, pathToFileURL: pathToFileURL, fileURLToPath: fileURLToPath, urlToHttpOptions: urlToHttpOptions };\n\
+             // ponytail: undefined stands in for a missing argument (the typed call pads it); Node only throws for a truly missing one.\n\
+             function domainToASCII(domain) { if (arguments.length < 1 || domain === undefined) throw codedError(TypeError, 'ERR_MISSING_ARGS', 'The \"domain\" argument must be specified'); try { return new globalThis.URL('ws://' + domain).hostname; } catch (_) { return ''; } }\n\
+             function domainToUnicode(domain) { if (arguments.length < 1 || domain === undefined) throw codedError(TypeError, 'ERR_MISSING_ARGS', 'The \"domain\" argument must be specified'); var ascii = domainToASCII(domain); return punycodeToUnicode(ascii); }\n\
+             function fileURLToPathBuffer(input) { return globalThis.Buffer.from(fileURLToPath(input, arguments[1])); }\n\
+             var legacy = (function() {'use strict';\n\
+             ", include_str!("url_legacy.js"), "\n})();\n\
+             module.exports = { Url: legacy.Url, parse: legacy.parse, resolve: legacy.resolve, resolveObject: legacy.resolveObject, format: legacy.format, URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, domainToASCII: domainToASCII, domainToUnicode: domainToUnicode, pathToFileURL: pathToFileURL, fileURLToPath: fileURLToPath, fileURLToPathBuffer: fileURLToPathBuffer, urlToHttpOptions: urlToHttpOptions };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
-        ),
+        )),
         "querystring" => Some(
             "function escape(value) { return encodeURIComponent(String(value)); }\n\
              function unescape(value, decodeSpaces) {\n\
@@ -145,7 +113,17 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20});\n\
              \x20\x20return result;\n\
              }\n\
-             module.exports = { stringify: stringify, encode: stringify, parse: parse, decode: parse, escape: escape, unescape: unescape };\n\
+             function unescapeBuffer(value, decodeSpaces) {\n\
+             \x20\x20var source = globalThis.Buffer.from(String(value)), out = [];\n\
+             \x20\x20function hex(code) { return code >= 48 && code <= 57 ? code - 48 : code >= 65 && code <= 70 ? code - 55 : code >= 97 && code <= 102 ? code - 87 : -1; }\n\
+             \x20\x20for (var index = 0; index < source.length; index++) {\n\
+             \x20\x20\x20\x20var code = source[index];\n\
+             \x20\x20\x20\x20if (code === 37 && index + 2 < source.length) { var high = hex(source[index + 1]), low = hex(source[index + 2]); if (high >= 0 && low >= 0) { out.push(high * 16 + low); index += 2; continue; } }\n\
+             \x20\x20\x20\x20out.push(code === 43 && decodeSpaces ? 32 : code);\n\
+             \x20\x20}\n\
+             \x20\x20return globalThis.Buffer.from(out);\n\
+             }\n\
+             module.exports = { stringify: stringify, encode: stringify, parse: parse, decode: parse, escape: escape, unescape: unescape, unescapeBuffer: unescapeBuffer };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
