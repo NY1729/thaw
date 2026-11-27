@@ -1036,7 +1036,11 @@ impl<'a> FnLowerer<'a> {
         }
         let mut members = Vec::new();
         for value in &values {
-            let ty = self.infer_expr_type(value)?;
+            // The `any` slot a dynamic loop returns through is out of scope by the end of the body.
+            let ty = match value {
+                HirExpr::Var(name) if name.starts_with("__thaw_loop_return_") && !self.scope.contains_key(name) => HirType::Json,
+                _ => self.infer_expr_type(value)?,
+            };
             if ty == HirType::Dynamic {
                 return Ok(HirType::Dynamic);
             }
