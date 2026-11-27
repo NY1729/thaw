@@ -968,7 +968,7 @@ class X509Certificate {
     requireArg(typeof name === 'string', 'name', 'of type string', name);
     var x = this._x, dns = x.san ? x.san.split(', ').filter(function (e) { return e.indexOf('DNS:') === 0; }).map(function (e) { return e.slice(4); }) : [];
     if (!dns.length) { var cn = /(?:^|\n)CN=([^\n]*)/.exec(x.subject); if (cn) dns = [cn[1]]; }
-    for (var d of dns) if (x509HostMatch(d, name)) return d.indexOf('*.') === 0 ? name : d;
+    for (var d of dns) if (x509HostMatch(d, name)) return d;
     return undefined;
   }
   checkEmail(email) { requireArg(typeof email === 'string', 'email', 'of type string', email); var x = this._x, list = x.san ? x.san.split(', ').filter(function (e) { return e.indexOf('email:') === 0; }).map(function (e) { return e.slice(6); }) : []; if (!list.length) { var m = /(?:^|\n)emailAddress=([^\n]*)/.exec(x.subject); if (m) list = [m[1]]; } return list.indexOf(email) >= 0 ? email : undefined; }
