@@ -5480,6 +5480,8 @@
     "name": "dynamic member calls on any keep this and callbacks in any restore as functions",
     "expect": "matched",
     "source": "import http from 'http';\nfunction mk(): any { return function (...a: any[]) { return a.length; }; }\nfunction main(): void {\n  const d: any = { n: 7, fn: (x: number) => x * 2, g: function (x: number) { return x + 1; } };\n  const keys = Object.keys(d);\n  console.log(d[keys[1]](4), d[keys[2]](4));\n  const name = keys[1];\n  console.log(d[name](3), typeof d.g, d.g.name);\n  const run = (cb: any) => cb(10);\n  console.log(run(d.g));\n  const s = http.createServer(mk());\n  s.listen(0, function () { console.log(typeof this.address().port); s.close(); });\n}\n"
-  }
+  },
+  {"name": "stream toArray promise kept pending and awaited after a later timer", "expect": "matched", "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r = new Readable({ read() {} });\n  const p: any = r.toArray();\n  console.log(typeof p, p instanceof Promise);\n  setTimeout(() => { r.push('a'); r.push(null); }, 10);\n  console.log(await p);\n}\n"},
+  {"name": "held stream promises: unsettled at exit, rejected, several at once", "expect": "matched", "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r = new Readable({ read() {} });\n  const p: any = r.toArray();\n  console.log(typeof p, p instanceof Promise);\n  const r2 = new Readable({ read() {} });\n  const q: any = r2.toArray();\n  setTimeout(() => r2.destroy(new Error('boom')), 5);\n  try { await q; } catch (e: any) { console.log('rejected', e.message); }\n  const r3 = new Readable({ read() {} });\n  const r4 = new Readable({ read() {} });\n  const p3: any = r3.toArray();\n  const p4: any = r4.toArray();\n  setTimeout(() => { r3.push('x'); r3.push(null); r4.push('y'); r4.push(null); }, 5);\n  console.log(String((await p4)[0]), String((await p3)[0]));\n}\n"}
   ]
 }
