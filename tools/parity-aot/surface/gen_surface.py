@@ -89,6 +89,9 @@ def gen(inv_dir, out_dir, only):
             if kind == "object":
                 def walk(props, path):
                     for m in props:
+                        # Node's start-up module list differs run to run (which internals are loaded), so its elements are no oracle
+                        if n == "moduleLoadList" and m["name"].isdigit():
+                            continue
                         p = acc(path, m["name"])
                         add(f"{n}.prop{p[len(X):]}".replace('"', "'"), f"return typeof {p};")
                         if m.get("props"):

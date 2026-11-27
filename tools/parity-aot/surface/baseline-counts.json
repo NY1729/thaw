@@ -14,6 +14,13 @@
  "cluster": {
   "match": 45
  },
+ "console": {
+  "match": 57,
+  "skipped": 19
+ },
+ "constants": {
+  "match": 224
+ },
  "crypto": {
   "match": 152,
   "output-diff": 18,
@@ -39,13 +46,12 @@
   "output-diff": 20
  },
  "fs": {
-  "match": 245,
-  "output-diff": 44,
+  "match": 288,
+  "output-diff": 1,
   "skipped": 8
  },
  "fs_promises": {
-  "match": 117,
-  "output-diff": 2
+  "match": 119
  },
  "globals": {
   "match": 652,
@@ -69,21 +75,23 @@
   "match": 64
  },
  "module": {
-  "match": 171,
-  "output-diff": 12,
+  "match": 180,
+  "output-diff": 3,
   "skipped": 4
  },
  "os": {
   "match": 171
+ },
+ "path": {
+  "match": 106,
+  "output-diff": 1
  },
  "perf_hooks": {
   "match": 38,
   "skipped": 63
  },
  "process": {
-  "build-fail": 3,
-  "match": 518,
-  "output-diff": 159
+  "match": 430
  },
  "readline": {
   "match": 17,
@@ -97,8 +105,7 @@
   "output-diff": 8
  },
  "sys": {
-  "match": 150,
-  "output-diff": 2,
+  "match": 152,
   "skipped": 6
  },
  "trace_events": {
@@ -113,8 +120,8 @@
   "match": 86
  },
  "v8": {
-  "match": 36,
-  "output-diff": 31,
+  "match": 59,
+  "output-diff": 8,
   "skipped": 16
  },
  "vm": {
