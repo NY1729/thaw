@@ -6753,6 +6753,9 @@ unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
     if raw.first() == Some(&1) && !is_error_frame_text(raw) {
         return value;
     }
+    // A thrown record's display text (`\u{1}Name\u{1}message\u{5}{props}`) carries its own props in the
+    // legacy bag; the inspector reads the framed form.
+    let value = legacy_props_text_to_tagged(raw).unwrap_or(value);
     // A Json copy of an Error prints the live Error it refers to.
     let value = error_ref_bytes(unsafe { CStr::from_ptr(value) }.to_bytes()).unwrap_or(value);
     let merged = unsafe { thaw_error_with_props(value) };
@@ -6793,6 +6796,23 @@ unsafe fn error_inspect(value: *const c_char, console: bool) -> *const c_char {
         )),
         None => unsafe { thaw_error_to_string(value) },
     }
+}
+
+/// `\u{1}Name\u{1}message\u{5}{json}` (no other markers) as the framed wire form with the bag kept as suffix.
+fn legacy_props_text_to_tagged(raw: &[u8]) -> Option<*const c_char> {
+    if thaw_arena::error_wire::parse_tagged(raw).is_some() {
+        return None;
+    }
+    let bag = raw.iter().position(|byte| *byte == 5)?;
+    let (head, bag) = raw.split_at(bag);
+    let split = head.get(1..)?.iter().position(|byte| *byte == 1)? + 1;
+    let (name, message) = (&head[1..split], &head[split + 1..]);
+    if message.iter().any(|byte| matches!(byte, 2..=4)) {
+        return None;
+    }
+    let mut wire = thaw_arena::error_wire::encode_tagged(name, message, None)?;
+    wire.extend_from_slice(bag);
+    Some(thaw_arena::owned_string(wire) as *const c_char)
 }
 
 /// Whether `bytes` could be a framed Error string (`\u{1}Name\u{1}message`). A user string
