@@ -18,4 +18,4 @@ const routes = [];
 const route = (m, p) => routes.push({ m, re: new RegExp('^' + p.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$') });
 route('GET', '/u/:id');
 const m = routes[0].re.exec('/u/42');
-console.log(routes[0].re.test('/u/1'), m && m.groups.id);
+console.log(routes[0].re.test('/u/1'), m && m[1]);
