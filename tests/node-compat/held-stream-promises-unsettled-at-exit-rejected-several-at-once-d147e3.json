@@ -1,0 +1,5 @@
+{
+  "name": "held stream promises: unsettled at exit, rejected, several at once",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r = new Readable({ read() {} });\n  const p: any = r.toArray();\n  console.log(typeof p, p instanceof Promise);\n  const r2 = new Readable({ read() {} });\n  const q: any = r2.toArray();\n  setTimeout(() => r2.destroy(new Error('boom')), 5);\n  try { await q; } catch (e: any) { console.log('rejected', e.message); }\n  const r3 = new Readable({ read() {} });\n  const r4 = new Readable({ read() {} });\n  const p3: any = r3.toArray();\n  const p4: any = r4.toArray();\n  setTimeout(() => { r3.push('x'); r3.push(null); r4.push('y'); r4.push(null); }, 5);\n  console.log(String((await p4)[0]), String((await p3)[0]));\n}\n"
+}
