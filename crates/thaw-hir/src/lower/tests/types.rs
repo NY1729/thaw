@@ -6176,6 +6176,9 @@ fn truthy_narrowed_nullable_regex_match_member_reads_groups() {
 fn self_recursive_untyped_arrow_is_any_typed_in_implicit_any_programs() {
     let module = thaw_parser::parse_typescript(
         "function main(): void { const run = (i) => (i < 3 ? run(i + 1) + 1 : 0); console.log(run(0)); }",
+fn top_level_const_arrow_params_are_inferred_from_call_sites_in_js_programs() {
+    let module = thaw_parser::parse_typescript(
+        "const sq = (x) => x * x; function main(): void { console.log(sq(4)); }",
     )
     .expect("parse error");
     crate::set_implicit_any(true);
@@ -6211,4 +6214,7 @@ fn conditional_joining_a_live_any_call_with_a_record_union_becomes_any() {
     let result = lower_module(&module);
     crate::set_implicit_any(false);
     result.expect("conditional lowers");
+    let program = result.expect("lowers");
+    let sq = program.functions.iter().find(|f| f.name == "sq").expect("sq is a function declaration");
+    assert_eq!(sq.params[0].ty, HirType::F64);
 }
