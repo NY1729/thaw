@@ -2,10 +2,13 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "buffer" => Some(
             "function byteLength(value, encoding) { return globalThis.Buffer.byteLength(value, encoding); }\n\
-             function isUtf8(value) { try { new TextDecoder('utf-8', { fatal: true }).decode(value); return true; } catch (_) { return false; } }\n\
-             function isAscii(value) { var bytes; if (value instanceof ArrayBuffer) bytes = new Uint8Array(value); else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength); else { var typeError = new TypeError('The input argument must be an instance of ArrayBuffer, Buffer or TypedArray'); typeError.code = 'ERR_INVALID_ARG_TYPE'; throw typeError; } return bytes.every(function(byte) { return byte <= 127; }); }\n\
+             function describeReceived(v) { if (v == null) return ' Received ' + v; if (typeof v === 'function') return ' Received function ' + v.name; if (typeof v === 'object') return v.constructor && v.constructor.name ? ' Received an instance of ' + v.constructor.name : ' Received ' + Object.prototype.toString.call(v); var shown = typeof v === 'string' ? \"'\" + (v.length > 25 ? v.slice(0, 25) + '...' : v) + \"'\" : String(v); return ' Received type ' + typeof v + ' (' + shown + ')'; }\n\
+             function inputBytes(value) { if (value instanceof ArrayBuffer) return new Uint8Array(value); if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength); var typeError = new TypeError('The \"input\" argument must be an instance of ArrayBuffer, Buffer, or TypedArray.' + describeReceived(value)); typeError.code = 'ERR_INVALID_ARG_TYPE'; throw typeError; }\n\
+             function isUtf8(input) { var bytes = inputBytes(input); try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); return true; } catch (_) { return false; } }\n\
+             function isAscii(input) { return inputBytes(input).every(function(byte) { return byte <= 127; }); }\n\
+             function resolveObjectURL(id) { return undefined; }\n\
              function transcode(value, fromEncoding, toEncoding) { return globalThis.Buffer.from(globalThis.Buffer.from(value).toString(fromEncoding), toEncoding); }\n\
-             module.exports = { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer, byteLength: byteLength, isUtf8: isUtf8, isAscii: isAscii, transcode: transcode, atob: globalThis.atob, btoa: globalThis.btoa, Blob: globalThis.Blob, File: globalThis.File, constants: { MAX_LENGTH: 4294967296, MAX_STRING_LENGTH: 536870888 }, kMaxLength: 9007199254740991, INSPECT_MAX_BYTES: 50 };\n\
+             module.exports = { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer, byteLength: byteLength, isUtf8: isUtf8, isAscii: isAscii, resolveObjectURL: resolveObjectURL, transcode: transcode, atob: globalThis.atob, btoa: globalThis.btoa, Blob: globalThis.Blob, File: globalThis.File, constants: { MAX_LENGTH: 4294967296, MAX_STRING_LENGTH: 536870888 }, kMaxLength: 9007199254740991, INSPECT_MAX_BYTES: 50 };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
@@ -19,7 +22,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              }\n\
              function StringDecoder(encoding) {\n\
              \x20\x20if (!(this instanceof StringDecoder)) return new StringDecoder(encoding);\n\
-             \x20\x20this.encoding = normalizeEncoding(encoding); this._pending = globalThis.Buffer.alloc(0); this.lastNeed = 0; this.lastTotal = 0; this.lastChar = globalThis.Buffer.alloc(4);\n\
+             \x20\x20this.encoding = normalizeEncoding(encoding); [['_pending', globalThis.Buffer.alloc(0)], ['lastNeed', 0], ['lastTotal', 0], ['lastChar', globalThis.Buffer.alloc(4)]].forEach(function(p) { Object.defineProperty(this, p[0], { value: p[1], writable: true, enumerable: false, configurable: true }); }, this);\n\
              }\n\
              StringDecoder.prototype.write = function(value) {\n\
              \x20\x20var input = globalThis.Buffer.from(value); var combined = this._pending.length ? globalThis.Buffer.concat([this._pending, input]) : input; var complete = combined.length;\n\
@@ -36,6 +39,12 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
         ),
         "timers" => Some(
             "var timers = {}; ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate'].forEach(function (name) { Object.defineProperty(timers, name, { enumerable: true, get: function () { return globalThis[name]; } }); });\n\
+             function unenroll(item) { if (item._idleTimer) { globalThis.clearTimeout(item._idleTimer); item._idleTimer = null; } item._idleTimeout = -1; }\n\
+             function enroll(item, msecs) { if (typeof msecs !== 'number' || msecs < 0 || msecs !== msecs) { var e = new RangeError('The value of \"msecs\" is out of range. It must be a non-negative finite number. Received ' + String(msecs)); e.code = 'ERR_OUT_OF_RANGE'; throw e; } unenroll(item); item._idleTimeout = msecs; }\n\
+             function active(item) { var msecs = item._idleTimeout; if (msecs >= 0) item._idleTimer = globalThis.setTimeout(function() { item._idleTimer = null; if (typeof item._onTimeout === 'function') item._onTimeout(); }, msecs); }\n\
+             function _unrefActive(item) { active(item); if (item._idleTimer && item._idleTimer.unref) item._idleTimer.unref(); }\n\
+             timers._unrefActive = _unrefActive; timers.active = active; timers.enroll = enroll; timers.unenroll = unenroll;\n\
+             Object.defineProperty(timers, 'promises', { enumerable: true, configurable: true, get: function () { return require('node:timers/promises'); } });\n\
              module.exports = timers;\n\
              module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),

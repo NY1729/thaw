@@ -67,6 +67,7 @@ var hashBlockBits = { 'SHA-1': 512, 'SHA-256': 512, 'SHA-384': 1024, 'SHA-512': 
 var jwkHmacAlg = { 'SHA-1': 'HS1', 'SHA-256': 'HS256', 'SHA-384': 'HS384', 'SHA-512': 'HS512' };
 var jwkAesSuffix = { 'AES-CBC': 'CBC', 'AES-CTR': 'CTR', 'AES-GCM': 'GCM', 'AES-KW': 'KW' };
 var keySlots = new WeakMap();
+def(globalThis, '__thaw_cryptokey_secret', function (key) { var s = keySlots.get(key); return s ? s.bytes : undefined; }); // node:crypto KeyObject.from
 function canonIn(list, v) {
   var n = String(v !== null && typeof v === 'object' ? v.name : v).toUpperCase();
   return list.find(function (x) { return x.toUpperCase() === n; });
