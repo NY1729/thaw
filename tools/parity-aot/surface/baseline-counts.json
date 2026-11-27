@@ -3,10 +3,19 @@
   "match": 78,
   "skipped": 5
  },
+ "child_process": {
+  "match": 42
+ },
+ "cluster": {
+  "match": 45
+ },
  "crypto": {
   "match": 156,
   "output-diff": 18,
   "skipped": 401
+ },
+ "diagnostics_channel": {
+  "match": 19
  },
  "dns": {
   "match": 88,
@@ -15,6 +24,10 @@
  "dns_promises": {
   "match": 83,
   "output-diff": 4
+ },
+ "domain": {
+  "match": 31,
+  "output-diff": 1
  },
  "events": {
   "match": 57,
@@ -47,6 +60,9 @@
  "https": {
   "match": 146
  },
+ "inspector": {
+  "match": 64
+ },
  "module": {
   "match": 171,
   "output-diff": 12,
@@ -64,6 +80,13 @@
   "match": 518,
   "output-diff": 159
  },
+ "readline": {
+  "match": 17,
+  "skipped": 26
+ },
+ "repl": {
+  "match": 79
+ },
  "stream": {
   "match": 375,
   "output-diff": 16
@@ -72,6 +95,9 @@
   "match": 150,
   "output-diff": 2,
   "skipped": 6
+ },
+ "trace_events": {
+  "match": 4
  },
  "util": {
   "match": 150,
@@ -85,6 +111,13 @@
   "match": 36,
   "output-diff": 31,
   "skipped": 16
+ },
+ "vm": {
+  "match": 27
+ },
+ "worker_threads": {
+  "match": 29,
+  "skipped": 60
  },
  "zlib": {
   "match": 415,
