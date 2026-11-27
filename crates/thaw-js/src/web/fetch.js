@@ -1452,8 +1452,8 @@ const withPrototype = fn => Object.defineProperty(fn, 'prototype', { value: Obje
               } else if (!settled) { settled = true; cleanup(); resolve(response); }
             });
             active.once('error', function(error) { finishReject(networkFailure(error)); });
-            if (bytes.length) active.write(bytes);
-            active.end();
+            // One `end(bytes)` keeps the request length-framed; write() then end() would be chunked like Node.
+            active.end(bytes.length ? bytes : undefined);
           } catch (error) { finishReject(error); }
         }
         dispatch(request.url, request.method, body, false, initialHeaders);
