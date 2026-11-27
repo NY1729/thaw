@@ -160,6 +160,8 @@ struct ResponseSpec {
     body: Vec<u8>,
     /// HEAD, 1xx, 204 and 304 carry no body: no framing is added and no body byte is sent.
     bodyless: bool,
+    /// `write`+`end` without a framing header: Node appends `Transfer-Encoding: chunked` after `Connection`.
+    auto_chunked: bool,
 }
 
 /// Node's `_hasBody == false` cases: a HEAD request, or a 1xx/204/304 status.
@@ -174,6 +176,7 @@ impl ResponseSpec {
             headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
             body: body.into_bytes(),
             bodyless: false,
+            auto_chunked: false,
         }
     }
 }
@@ -355,6 +358,14 @@ fn is_transfer_encoding(name: &str) -> bool {
     name.eq_ignore_ascii_case("Transfer-Encoding")
 }
 
+fn placed_or(placed: bool, framing: &str) -> String {
+    if placed {
+        String::new()
+    } else {
+        framing.to_string()
+    }
+}
+
 fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
     if response_spec.bodyless {
         // Caller headers (including an explicit Content-Length) go out untouched.
@@ -362,12 +373,30 @@ fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8>
             .into_bytes();
     }
     // A caller-set `Transfer-Encoding: chunked` means the body is chunk-framed, not length-framed.
-    let chunked = response_spec.headers.iter().any(|(name, value)| {
-        is_transfer_encoding(name) && value.to_ascii_lowercase().contains("chunked")
-    });
-    response_spec.headers.retain(|(name, _)| {
-        !(name.eq_ignore_ascii_case("Content-Length") || chunked && is_transfer_encoding(name))
-    });
+    let chunked = response_spec.auto_chunked
+        || response_spec.headers.iter().any(|(name, value)| {
+            is_transfer_encoding(name) && value.to_ascii_lowercase().contains("chunked")
+        });
+    // Node leaves a caller-set framing header where the caller put it; only an absent one is appended.
+    let length = response_spec.body.len().to_string();
+    let mut placed = false;
+    let mut headers = Vec::with_capacity(response_spec.headers.len());
+    for (name, value) in std::mem::take(&mut response_spec.headers) {
+        let framing_header = if chunked {
+            is_transfer_encoding(&name)
+        } else {
+            name.eq_ignore_ascii_case("Content-Length")
+        };
+        if framing_header {
+            if !placed {
+                placed = true;
+                headers.push((name, if chunked { value } else { length.clone() }));
+            }
+        } else if !name.eq_ignore_ascii_case("Content-Length") {
+            headers.push((name, value));
+        }
+    }
+    response_spec.headers = headers;
     let (framing, body) = if chunked {
         let mut body = if response_spec.body.is_empty() {
             Vec::new()
@@ -375,10 +404,10 @@ fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8>
             frame_chunk(&response_spec.body)
         };
         body.extend_from_slice(CHUNKED_TERMINATOR);
-        ("Transfer-Encoding: chunked\r\n".to_string(), body)
+        (placed_or(placed, "Transfer-Encoding: chunked\r\n"), body)
     } else {
         (
-            format!("Content-Length: {}\r\n", response_spec.body.len()),
+            placed_or(placed, &format!("Content-Length: {length}\r\n")),
             response_spec.body,
         )
     };
@@ -398,20 +427,30 @@ fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8>
 /// isn't known when the head goes out. Any caller-set `Content-Length`
 /// or `Transfer-Encoding` is dropped (it would contradict or duplicate the chunked framing).
 fn render_streaming_head(status: u16, headers: &[(String, String)], keep_alive: bool) -> Vec<u8> {
+    // A caller-set `Transfer-Encoding` stays where the caller put it (Node); otherwise it is appended.
+    let mut placed = false;
     let headers: Vec<(String, String)> = headers
         .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"))
         .filter(|(name, _)| {
-            !name.eq_ignore_ascii_case("Content-Length") && !is_transfer_encoding(name)
+            let keep = !is_transfer_encoding(name) || !placed;
+            placed |= is_transfer_encoding(name);
+            keep
         })
-        .cloned()
+        .map(|(name, value)| {
+            if is_transfer_encoding(name) {
+                (name.clone(), "chunked".to_string())
+            } else {
+                (name.clone(), value.clone())
+            }
+        })
         .collect();
-    render_head(
-        status,
-        &headers,
-        "Transfer-Encoding: chunked\r\n",
-        keep_alive,
-    )
-    .into_bytes()
+    let framing = if placed {
+        ""
+    } else {
+        "Transfer-Encoding: chunked\r\n"
+    };
+    render_head(status, &headers, framing, keep_alive).into_bytes()
 }
 
 /// One `Transfer-Encoding: chunked` chunk: `<hex len>\r\n<bytes>\r\n`.
@@ -2080,17 +2119,15 @@ fn finish_response(context: &mut RequestContext) {
     connection.awaiting_handler = false;
     let mut headers = std::mem::take(&mut context.state.headers);
     let bodyless = context_is_bodyless(context);
-    if !bodyless
+    let auto_chunked = !bodyless
         && context.state.wrote
-        && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
-    {
-        headers.push(("Transfer-Encoding".into(), "chunked".into()));
-    }
+        && !headers.iter().any(|(name, _)| is_transfer_encoding(name));
     let spec = ResponseSpec {
         status: normalize_status(context.response.status_code),
         headers,
         body: std::mem::take(&mut context.state.body),
         bodyless,
+        auto_chunked,
     };
     connection.response = render_response(spec, connection.keep_alive);
     // Deliberately does not write here: this runs inside the async
@@ -2280,13 +2317,10 @@ fn run_server_callback(
     if context.state.ended || connection.is_null() {
         let mut headers = std::mem::take(&mut context.state.headers);
         let bodyless = context_is_bodyless(&context);
-        if !bodyless
+        let auto_chunked = !bodyless
             && context.state.wrote
             && !connection.is_null()
-            && !headers.iter().any(|(name, _)| is_transfer_encoding(name))
-        {
-            headers.push(("Transfer-Encoding".into(), "chunked".into()));
-        }
+            && !headers.iter().any(|(name, _)| is_transfer_encoding(name));
         // `finish`/`close` listeners read `res.*` through the context pointer: run them while it is alive.
         deliver_pending_response_events();
         CallbackOutcome::Ready(ResponseSpec {
@@ -2294,6 +2328,7 @@ fn run_server_callback(
             headers,
             body: std::mem::take(&mut context.state.body),
             bodyless,
+            auto_chunked,
         })
     } else {
         context.resumable = true;
@@ -2315,6 +2350,7 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
                 headers: context.state.headers.clone(),
                 body: context.state.body.clone(),
                 bodyless: context_is_bodyless(&context),
+                auto_chunked: false,
             }
         }
     }
@@ -5089,13 +5125,15 @@ mod tests {
                 headers: vec![("Transfer-Encoding".into(), "chunked".into())],
                 body: b"x".to_vec(),
                 bodyless: false,
+                auto_chunked: false,
             },
             true,
         );
         let text = String::from_utf8(response).unwrap();
         assert!(text.contains("Keep-Alive: timeout=5\r\n"), "{text}");
         assert!(
-            text.ends_with("Transfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n"),
+            text.starts_with("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n")
+                && text.ends_with("\r\n\r\n1\r\nx\r\n0\r\n\r\n"),
             "{text}"
         );
         assert!(!text.contains("Content-Length"), "{text}");
@@ -5109,6 +5147,48 @@ mod tests {
     }
 
     #[test]
+    fn caller_framing_headers_keep_their_position() {
+        let spec = |headers: Vec<(&str, &str)>| ResponseSpec {
+            status: 200,
+            headers: headers
+                .into_iter()
+                .map(|(n, v)| (n.into(), v.into()))
+                .collect(),
+            body: b"hello".to_vec(),
+            bodyless: false,
+            auto_chunked: false,
+        };
+        let length = render_response(
+            spec(vec![("X-A", "1"), ("Content-Length", "99"), ("X-B", "2")]),
+            false,
+        );
+        assert_eq!(
+            without_date(&length),
+            b"HTTP/1.1 200 OK\r\nX-A: 1\r\nContent-Length: 5\r\nX-B: 2\r\nConnection: close\r\n\r\nhello"
+        );
+        let chunked = render_response(
+            spec(vec![("Transfer-Encoding", "chunked"), ("X-A", "1")]),
+            false,
+        );
+        assert_eq!(
+            without_date(&chunked),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX-A: 1\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+        );
+        let streamed = render_streaming_head(
+            200,
+            &[
+                ("X-A".into(), "1".into()),
+                ("Transfer-Encoding".into(), "chunked".into()),
+            ],
+            false,
+        );
+        assert_eq!(
+            without_date(&streamed),
+            b"HTTP/1.1 200 OK\r\nX-A: 1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
     fn bodyless_response_adds_no_framing_and_keeps_explicit_length() {
         assert!(response_is_bodyless("HEAD", 200) && response_is_bodyless("GET", 204));
         assert!(response_is_bodyless("GET", 304) && !response_is_bodyless("GET", 200));
@@ -5118,6 +5198,7 @@ mod tests {
                 headers: vec![("Content-Length".into(), "5".into())],
                 body: b"hello".to_vec(),
                 bodyless: true,
+                auto_chunked: false,
             },
             false,
         );
@@ -5139,10 +5220,11 @@ mod tests {
                 ],
                 body: "é".as_bytes().to_vec(),
                 bodyless: false,
+                auto_chunked: false,
             },
             true,
         );
-        assert_eq!(without_date(&response), "HTTP/1.1 200 OK\r\nX-Trace: kept\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 2\r\n\r\né".as_bytes());
+        assert_eq!(without_date(&response), "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Trace: kept\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\né".as_bytes());
 
         let response = render_response(
             ResponseSpec {
@@ -5150,6 +5232,7 @@ mod tests {
                 headers: vec![("X-Trace".into(), "kept".into())],
                 body: b"ok".to_vec(),
                 bodyless: false,
+                auto_chunked: false,
             },
             false,
         );
@@ -5184,6 +5267,7 @@ mod tests {
                 headers: context.state.headers.clone(),
                 body: Vec::new(),
                 bodyless: false,
+                auto_chunked: false,
             },
             false,
         );
