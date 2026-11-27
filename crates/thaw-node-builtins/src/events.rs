@@ -8,7 +8,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "domain" => Some(
             r#"var EventEmitter = require('node:events'), stack = [];
-             function Domain() { if (!(this instanceof Domain)) return new Domain(); EventEmitter.call(this); this.members = []; }
+             // ponytail: Node keeps no-op newListener/removeListener as bare functions in _events; thaw's EventEmitter stores entry arrays, so two inert zero-length functions mimic the shape (listeners('newListener') would throw). Real fix: Node-style _events storage.
+             function Domain() { if (!(this instanceof Domain)) return new Domain(); Object.defineProperty(this, 'domain', { value: null, writable: true, configurable: true, enumerable: false }); EventEmitter.call(this); this.members = []; this._events.removeListener = function() {}; this._events.newListener = function() {}; }
              Domain.prototype = Object.create(EventEmitter.prototype); Domain.prototype.constructor = Domain;
              Domain.prototype.enter = function() { stack.push(module.exports.active); module.exports.active = this; if (globalThis.process) process.domain = this; return this; };
              Domain.prototype.exit = function() { if (module.exports.active !== this) return this; module.exports.active = stack.length ? stack.pop() : null; if (globalThis.process) process.domain = module.exports.active || null; return this; };
@@ -20,7 +21,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              Domain.prototype.intercept = function(fn) { if (typeof fn !== 'function') throw new TypeError('callback must be a function'); var domain = this; function intercepted(error) { if (error) return domain._handle(error); var args = Array.prototype.slice.call(arguments, 1), receiver = this; return domain.run(function() { return fn.apply(receiver, args); }); } intercepted.domain = domain; return intercepted; };
              Domain.prototype.dispose = function() { this.exit(); this.members.slice().forEach(this.remove, this); this.removeAllListeners(); return this; };
              function create() { return new Domain(); }
-             module.exports = { Domain: Domain, create: create, createDomain: create, active: null }; module.exports.default = module.exports; module.exports.__esModule = true;
+             module.exports = { _stack: stack, Domain: Domain, createDomain: create, create: create, active: null }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
         ),
         // Every prototype method below tolerates `this._events` being

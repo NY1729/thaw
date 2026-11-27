@@ -1,4 +1,16 @@
 {
+ "child_process": {
+  "match": 42
+ },
+ "cluster": {
+  "match": 45
+ },
+ "diagnostics_channel": {
+  "match": 19
+ },
+ "domain": {
+  "match": 32
+ },
  "events": {
   "match": 57,
   "output-diff": 20
@@ -16,8 +28,28 @@
  "https": {
   "match": 146
  },
+ "inspector": {
+  "match": 64
+ },
+ "readline": {
+  "match": 17,
+  "skipped": 26
+ },
+ "repl": {
+  "match": 79
+ },
  "stream": {
   "match": 375,
   "output-diff": 16
+ },
+ "trace_events": {
+  "match": 4
+ },
+ "vm": {
+  "match": 27
+ },
+ "worker_threads": {
+  "match": 29,
+  "skipped": 60
  }
 }
