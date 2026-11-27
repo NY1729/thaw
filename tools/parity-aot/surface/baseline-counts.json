@@ -17,8 +17,8 @@
   "output-diff": 4
  },
  "events": {
-  "match": 48,
-  "output-diff": 28
+  "match": 57,
+  "output-diff": 20
  },
  "fs": {
   "match": 245,
@@ -30,8 +30,7 @@
   "output-diff": 2
  },
  "globals": {
-  "build-fail": 39,
-  "match": 613,
+  "match": 652,
   "output-diff": 13,
   "skipped": 154
  },
@@ -46,8 +45,7 @@
   "skipped": 118
  },
  "https": {
-  "match": 132,
-  "output-diff": 11
+  "match": 146
  },
  "module": {
   "match": 171,
@@ -67,8 +65,8 @@
   "output-diff": 159
  },
  "stream": {
-  "match": 314,
-  "output-diff": 71
+  "match": 375,
+  "output-diff": 16
  },
  "sys": {
   "match": 150,

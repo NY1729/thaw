@@ -23,17 +23,8 @@ fn every_platform_global_lowers_in_value_and_typeof_position() {
 }
 
 /// Platform constructors that `new` still rejects at lowering (`only new Promise<T>` diagnostic).
-/// Pending decisions, not a design: each needs its own `DYNAMIC_NEW_CTORS` entry or a deliberate
-/// reason to stay rejected. Shrink-only: a name that starts lowering must leave this list.
-const UNLISTED_NEW_CTORS_PENDING: &[&str] = &[
-    "AbortSignal", "Buffer", "ByteLengthQueuingStrategy", "CompressionStream", "CountQueuingStrategy",
-    "Crypto", "CryptoKey", "DecompressionStream", "Navigator", "Performance", "PerformanceEntry",
-    "PerformanceMark", "PerformanceMeasure", "PerformanceObserver", "PerformanceObserverEntryList",
-    "PerformanceResourceTiming", "ReadableByteStreamController", "ReadableStreamBYOBReader",
-    "ReadableStreamBYOBRequest", "ReadableStreamDefaultController", "ReadableStreamDefaultReader",
-    "SubtleCrypto", "TextDecoderStream", "TextEncoderStream", "TransformStreamDefaultController",
-    "WritableStreamDefaultController", "WritableStreamDefaultWriter",
-];
+/// Shrink-only: `Buffer` has no realm constructor (see `compiled_models_keep_their_lowering_under_the_table`).
+const UNLISTED_NEW_CTORS_PENDING: &[&str] = &["Buffer"];
 
 #[test]
 fn platform_constructors_lower_under_new_to_the_realm_constructor() {
