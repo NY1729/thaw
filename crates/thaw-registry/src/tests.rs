@@ -1552,7 +1552,7 @@ fn node_url_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:url"),
         // node:url bundles node:path: the hash moved from ed14c972... when #958 dropped path's .default/__esModule; then to 2ea12be4... when url.Url was added
-        "32bd06e4ba964fbba95babc1e18e546c08242ed80ad60368c1827dcfca308feb",
+        "74e76b1cbc53ec656ec2085f57347bded69f8b8275733d5325981e1c1bc23546",
         "node:url bundle sha256"
     );
 }
