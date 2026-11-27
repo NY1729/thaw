@@ -462,6 +462,11 @@ pub unsafe extern "C" fn thaw_error_property_json(
     }
     match error_property_json(&text, &name) {
         Some(value) => arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast()),
+        // A `cause` the legacy text form carries after the `\u{2}` marker.
+        None if name == "cause" => split_error_cause(&text)
+            .and_then(|cause| serde_json::to_string(cause).ok())
+            .and_then(|json| arena_c_string(&json))
+            .map_or(std::ptr::null(), |value| value.cast()),
         None => std::ptr::null(),
     }
 }

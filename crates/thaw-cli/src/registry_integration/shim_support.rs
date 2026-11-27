@@ -955,7 +955,11 @@ fn constructor_imports(
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue; };
         let qualifier = import.src.value.as_str()
-            .and_then(|source| package_qualifiers.get(source));
+            .and_then(|source| {
+                package_qualifiers
+                    .get(source)
+                    .or_else(|| package_qualifiers.get(&format!("node:{source}")))
+            });
         for specifier in &import.specifiers {
             let local = match specifier {
                 ImportSpecifier::Named(value) => value.local.sym.to_string(),
