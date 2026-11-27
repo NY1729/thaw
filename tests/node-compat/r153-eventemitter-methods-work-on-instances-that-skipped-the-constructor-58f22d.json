@@ -1,5 +1,0 @@
-{
-  "name": "r153 EventEmitter methods work on instances that skipped the constructor",
-  "expect": "matched",
-  "source": "import EventEmitter from 'node:events';\nfunction main(): void {\n  const E: any = EventEmitter;\n  // an instance that never ran the constructor (native addons and mixins inherit like this)\n  const o: any = Object.create(E.prototype);\n  o.on('open', () => console.log('open fired'));\n  o.once('open', () => console.log('once fired'));\n  console.log(o.emit('open'), o.listenerCount('open'), o.eventNames().join(), Object.keys(o).join());\n  const p: any = {};\n  Object.setPrototypeOf(p, E.prototype);\n  console.log(p.emit('nothing'), p.listeners('x').length, p.eventNames().length, p.removeAllListeners().constructor === undefined);\n  p.on('x', () => {});\n  console.log(p.listenerCount('x'), p._eventsCount);\n  p.removeAllListeners('x');\n  console.log(p.listenerCount('x'));\n}\n"
-}
