@@ -401,13 +401,13 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                         let requests: number = 0;
                         const server = createServer(
                             (
-                                request: {{ method: string; url: string; statusCode: number; body: () => string }},
+                                request: {{ method: string; url: string; statusCode: number; __thaw_body: () => string }},
                                 response: {{
                                     statusCode: number;
-                                    setHeader: (name: string, value: string) => boolean;
+                                    setHeader: (name: string, value: any) => boolean;
                                     end: (chunk: string) => boolean;
                                     write: (chunk: string) => boolean;
-                                    endEncoded: (content: string, encoding: string) => boolean;
+                                    __thaw_endEncoded: (content: string, encoding: string) => boolean;
                                 }}
                             ): void => {{
                                 requests = requests + 1;
@@ -417,7 +417,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                                 response.end(request.url);
                             }}
                         );
-                        const target: string = server.listenMany({}, 2);
+                        const target: string = server.__thaw_listenMany({}, 2);
                         console.log(target);
                         console.log(requests);
                         console.log(server.close());
@@ -507,8 +507,8 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
             r#"import { createServer } from "node:http";
             function main(): void {
                 const server = createServer((
-                    request: { method: string; url: string; statusCode: number; body: () => string },
-                    response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+                    request: { method: string; url: string; statusCode: number; __thaw_body: () => string },
+                    response: { statusCode: number; setHeader: (name: string, value: any) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; __thaw_endEncoded: (content: string, encoding: string) => boolean }
                 ): boolean => true);
                 server.listen(70000);
             }"#,
@@ -669,8 +669,8 @@ fn node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_whe
         r#"import { createServer } from "node:http";
 function main(): void {
     const server = createServer((
-        request: { method: string; url: string; statusCode: number; body: () => string },
-        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+        request: { method: string; url: string; statusCode: number; __thaw_body: () => string },
+        response: { statusCode: number; setHeader: (name: string, value: any) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; __thaw_endEncoded: (content: string, encoding: string) => boolean }
     ): void => {
         response.setHeader("Content-Type", "text/plain");
         response.end("thaw:" + request.url);
@@ -791,12 +791,12 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: () => string; getHeader: (name: string) => string },
-        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+        request: { method: string; url: string; statusCode: number; __thaw_body: () => string; __thaw_getHeader: (name: string) => string },
+        response: { statusCode: number; setHeader: (name: string, value: any) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; __thaw_endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         if (request.url === "/pieces") {
-            const retained = request.getHeader("HOST");
-            const missing = request.getHeader("missing");
+            const retained = request.__thaw_getHeader("HOST");
+            const missing = request.__thaw_getHeader("missing");
             response.write("a");
             await delay(5);
             response.write("b");
@@ -955,8 +955,8 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: () => string },
-        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+        request: { method: string; url: string; statusCode: number; __thaw_body: () => string },
+        response: { statusCode: number; setHeader: (name: string, value: any) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; __thaw_endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         response.write("A" + request.url + ";");
         await delay(250);
@@ -1067,8 +1067,8 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: () => string },
-        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+        request: { method: string; url: string; statusCode: number; __thaw_body: () => string },
+        response: { statusCode: number; setHeader: (name: string, value: any) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; __thaw_endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         if (request.url === "/slow") {
             await delay(400);
@@ -1512,7 +1512,7 @@ function main(): void {
 }
 
 /// A handler that only ever uses `on("data"/"end", ...)` -- never
-/// `body()`/`bodyHex()`/`bodyBytes()` -- still gets a connection whose
+/// `body()`/`__thaw_bodyHex()`/`__thaw_bodyBytes()` -- still gets a connection whose
 /// body stops arriving mid-stream closed by the same read-side deadline
 /// (`refresh_body_deadline`, armed right after dispatch and refreshed on
 /// every real read), not held open forever. Complements
@@ -1593,8 +1593,8 @@ function main(): void {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `request.bodyHex()` returns the request body's raw bytes as a hex
-/// string -- the byte-exact alternative to lossy UTF-8 `request.body()`. A
+/// `request.__thaw_bodyHex()` returns the request body's raw bytes as a hex
+/// string -- the byte-exact alternative to lossy UTF-8 `request.__thaw_body()`. A
 /// four-byte body `00 ff 41 80` (NUL, non-UTF-8) round-trips exactly.
 #[test]
 fn node_http_exposes_the_raw_request_body_as_hex() {
@@ -1609,12 +1609,12 @@ fn node_http_exposes_the_raw_request_body_as_hex() {
         r#"import { createServer } from "node:http";
 function main(): void {
     const server = createServer((request, response): void => {
-        const hex: string = request.bodyHex();
+        const hex: string = request.__thaw_bodyHex();
         response.setHeader("Content-Type", "text/plain");
         response.end(
             request.method + " " + request.url
                 + " hex=" + hex
-                + " body=[" + request.body() + "]"
+                + " body=[" + request.__thaw_body() + "]"
         );
     });
     server.listen(Number(process.env.PORT));
@@ -1642,8 +1642,8 @@ function main(): void {
     keep.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
     // 00 ff 41 80: NUL, a non-UTF-8 lead byte, 'A', a bare continuation
-    // byte. `request.body()` preserves NUL and replaces invalid UTF-8;
-    // `bodyHex()` sees all four bytes.
+    // byte. `request.__thaw_body()` preserves NUL and replaces invalid UTF-8;
+    // `__thaw_bodyHex()` sees all four bytes.
     keep.write_all(b"POST /raw HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n\x00\xff\x41\x80")
         .unwrap();
     // `body`: NUL is preserved; each invalid byte becomes U+FFFD.
@@ -1665,16 +1665,16 @@ function main(): void {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `request.bodyBytes()` hands the handler the raw request body as a
+/// `request.__thaw_bodyBytes()` hands the handler the raw request body as a
 /// first-class `Buffer` (`HirType::Bytes`): it indexes, iterates, and
 /// takes `.length` of the bytes with no hex detour, then hands them back
-/// through `response.endBytes(...)` byte-for-byte. A `00 ff 41 80` body
+/// through `response.__thaw_endBytes(...)` byte-for-byte. A `00 ff 41 80` body
 /// (NUL, a non-UTF-8 lead byte, 'A', a bare continuation byte) survives
 /// the round trip exactly, and the handler-computed length / checksum
 /// prove the individual byte values arrived intact.
 ///
 /// `bytes` has no explicit type annotation -- the ambient `node:http`
-/// `.d.ts` itself now declares `bodyBytes(): Uint8Array` (previously
+/// `.d.ts` itself now declares `__thaw_bodyBytes(): Uint8Array` (previously
 /// `number[]`, since making thaw-bridge's `classify_ts_type` resolve
 /// `Uint8Array` at all used to reroute *every* npm package's own
 /// `Uint8Array` parameters into native marshaling and break Fallback
@@ -1683,7 +1683,7 @@ function main(): void {
 /// allow_native_bytes_type`, never a real npm package's), so this
 /// specifically exercises that the ambient declaration's own inferred
 /// type is correct end to end, not just that a `Uint8Array`-annotated
-/// local coerces from whatever `bodyBytes()` returns (which already
+/// local coerces from whatever `__thaw_bodyBytes()` returns (which already
 /// worked before this fix too, since `Bytes` and `Array(F64)` share a
 /// layout and coerce freely either way).
 #[test]
@@ -1699,7 +1699,7 @@ fn node_http_round_trips_a_binary_body_as_first_class_bytes() {
         r#"import { createServer } from "node:http";
 function main(): void {
     const server = createServer((request, response): void => {
-        const bytes = request.bodyBytes();
+        const bytes = request.__thaw_bodyBytes();
         let sum: number = 0;
         for (const value of bytes) {
             sum = sum + value;
@@ -1707,7 +1707,7 @@ function main(): void {
         response.setHeader("Content-Type", "application/octet-stream");
         response.setHeader("X-Byte-Length", "" + bytes.length);
         response.setHeader("X-Byte-Sum", "" + sum);
-        response.endBytes(bytes);
+        response.__thaw_endBytes(bytes);
     });
     server.listen(Number(process.env.PORT));
 }"#,
@@ -1765,7 +1765,7 @@ function main(): void {
         assert!(length > 0, "connection closed before body completed");
         buffer.extend_from_slice(&chunk[..length]);
     }
-    // `endBytes` sent the body back verbatim -- every byte, NUL included.
+    // `__thaw_endBytes` sent the body back verbatim -- every byte, NUL included.
     assert_eq!(
         &buffer[header_end..header_end + content_length],
         b"\x00\xff\x41\x80"
@@ -1777,7 +1777,7 @@ function main(): void {
 }
 
 /// The native server reads a request body (`Content-Length` or
-/// `Transfer-Encoding: chunked`), and exposes it as `request.body()`,
+/// `Transfer-Encoding: chunked`), and exposes it as `request.__thaw_body()`,
 /// live, on every call. Consuming it also means a body-carrying request
 /// no longer forces the connection closed -- several with distinct
 /// bodies ride one keep-alive connection without desyncing. Oversized
@@ -1796,10 +1796,10 @@ fn node_http_reads_request_bodies_and_keeps_the_connection_in_sync() {
         r#"import { createServer } from "node:http";
 function main(): void {
     const server = createServer((
-        request: { method: string; url: string; statusCode: number; body: () => string },
-        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+        request: { method: string; url: string; statusCode: number; __thaw_body: () => string },
+        response: { statusCode: number; setHeader: (name: string, value: any) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; __thaw_endEncoded: (content: string, encoding: string) => boolean }
     ): void => {
-        response.end(request.method + " " + request.url + " [" + request.body() + "]");
+        response.end(request.method + " " + request.url + " [" + request.__thaw_body() + "]");
     });
     server.listen(Number(process.env.PORT));
 }"#,
@@ -1977,17 +1977,17 @@ async function delay(ms: number): Promise<void> {
 }
 function main(): void {
     const server = createServer(async (
-        request: { method: string; url: string; statusCode: number; body: () => string },
-        response: { statusCode: number; setHeader: (name: string, value: string) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; endEncoded: (content: string, encoding: string) => boolean }
+        request: { method: string; url: string; statusCode: number; __thaw_body: () => string },
+        response: { statusCode: number; setHeader: (name: string, value: any) => boolean; end: (chunk: string) => boolean; write: (chunk: string) => boolean; __thaw_endEncoded: (content: string, encoding: string) => boolean }
     ): Promise<void> => {
         // A couple of paths make the handler genuinely suspend, so a
         // pipelined request behind them has to wait its turn.
         if (request.url === "/slow") {
             await delay(120);
-            response.end("slow[" + request.body() + "]");
+            response.end("slow[" + request.__thaw_body() + "]");
             return;
         }
-        response.end(request.method + " " + request.url + "[" + request.body() + "]");
+        response.end(request.method + " " + request.url + "[" + request.__thaw_body() + "]");
     });
     server.listen(Number(process.env.PORT));
 }"#,

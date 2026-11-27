@@ -1542,10 +1542,12 @@ impl<'a> FnLowerer<'a> {
         Ok(Some(literal))
     }
 
-    /// A native `Map`/`Set` stored in a field of an `any` literal crosses as the same Json snapshot
+    /// A native `Map`/`Set`/`RegExp` stored in a field of an `any` literal crosses as the same Json snapshot
     /// wrapper `const m: any = new Map()` uses (the realm revives it as a JS collection).
     fn any_literal_collection_field(&mut self, value: HirExpr, any_literal: bool) -> Result<HirExpr, String> {
-        if any_literal && matches!(self.infer_expr_type_inner(&value), Ok(HirType::Map(..) | HirType::Set(_))) {
+        if any_literal
+            && matches!(self.infer_expr_type_inner(&value), Ok(ty) if matches!(ty, HirType::Map(..) | HirType::Set(_)) || ty == regex_object_type())
+        {
             let nested = std::mem::replace(&mut self.alias_native_arrays, true);
             let converted = self.coerce_to_declared(&HirType::Json, value);
             self.alias_native_arrays = nested;
@@ -1740,7 +1742,14 @@ impl<'a> FnLowerer<'a> {
                                     Some(array) => array,
                                     None => self.lower_object_lit_field_value(value, expected)?,
                                 };
-                                self.coerce_to_declared(&HirType::JsValue, array)?
+                                // A plain-data array field is an `any` array (Rc-backed Json), not a retained
+                                // engine handle, which only a live engine can read back.
+                                let slot = if implicit_any() && !self.literal_holds_live_object(value) {
+                                    HirType::Json
+                                } else {
+                                    HirType::JsValue
+                                };
+                                self.coerce_to_declared(&slot, array)?
                             }
                             nested => {
                                 // `[..] as any[]` in an `any` literal is the same dynamic array.
@@ -3573,8 +3582,12 @@ impl<'a> FnLowerer<'a> {
                         self.dictionary_read_observing_absence(member.span, obj, key, element.as_ref())
                     }
                     HirType::Json => {
-                        let key = self.lower_expr(&computed.expr)?;
+                        let mut key = self.lower_expr(&computed.expr)?;
                         let mut key_type = self.infer_expr_type(&key)?;
+                        if key_type == HirType::JsValue {
+                            key = self.coerce_to_declared(&HirType::Json, key)?;
+                            key_type = HirType::Json;
+                        }
                         // An `any` key is a property key by ToPropertyKey: its string form.
                         let key = if key_type == HirType::Json {
                             key_type = HirType::Str;
@@ -5577,6 +5590,11 @@ impl<'a> FnLowerer<'a> {
                             read_type = HirType::JsValue;
                         }
                     }
+                }
+                // A native RegExp field crosses as the branded RegExp wrapper (`.test`/`.exec` keep working).
+                if read_type == regex_object_type() {
+                    read = self.coerce_to_declared(&HirType::Json, read)?;
+                    read_type = HirType::Json;
                 }
                 if let HirType::Object(nested) = &read_type {
                     if self.live_projection_supported_with_classes(&read_type) {

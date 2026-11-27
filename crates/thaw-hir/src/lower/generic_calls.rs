@@ -1804,8 +1804,12 @@ impl<'a> FnLowerer<'a> {
                     let invoked = self.coerce_to_declared(&HirType::Json, invoked)?;
                     let undefined =
                         self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Undefined))?;
-                    let member_value =
-                        HirExpr::JsonGet(Box::new(HirExpr::Var(name.clone())), property);
+                    // `any?.m(..)` skips the call when the receiver is nullish; `any.m?.(..)` when the member is.
+                    let member_value = if matches!(call.callee.as_ref(), Expr::OptChain(_)) {
+                        HirExpr::Var(name.clone())
+                    } else {
+                        HirExpr::JsonGet(Box::new(HirExpr::Var(name.clone())), property)
+                    };
                     let is_nullish = HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
                         vec![member_value],
