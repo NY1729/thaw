@@ -1,0 +1,10 @@
+{
+  "name": "process argv forwards command line arguments",
+  "expect": "matched",
+  "args": [
+    "alpha",
+    "two words",
+    "--count=3"
+  ],
+  "source": "function main(): void { console.log(process.argv.slice(2).join('|')); }"
+}

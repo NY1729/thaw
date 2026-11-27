@@ -1,0 +1,5 @@
+{
+  "name": "class fields: uninitialised function and any fields",
+  "expect": "matched",
+  "source": "class A { j: any; f: () => number; nl: string | null; constructor(c: boolean) { if (c) { this.j = { a: 1 }; this.f = () => 2; this.nl = null; } } }\nfunction main(): void {\n  const a = new A(false);\n  console.log(a.j, a.j === undefined, typeof a.f, a.nl, a.nl === null);\n  console.log(a.j ?? \"d\", a.nl ?? \"n\", a.j?.a);\n  try { a.f(); } catch (e) { console.log((e as Error).message, e instanceof TypeError); }\n  const b = new A(true);\n  console.log(b.j, b.f(), b.nl, b.j.a, b.nl === null);\n  console.log(a);\n  console.log(JSON.stringify(a));\n  b.nl = \"set\"; console.log(b.nl.length);\n}\n"
+}

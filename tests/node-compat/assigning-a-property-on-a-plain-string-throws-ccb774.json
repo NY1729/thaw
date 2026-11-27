@@ -1,0 +1,5 @@
+{
+  "name": "assigning a property on a plain string throws",
+  "expect": "matched",
+  "source": "function main(): void {\n  const s: any = \"plain\";\n  try {\n    (s as any).x = 1;\n    console.log(\"no throw\");\n  } catch (e: any) {\n    console.log(e.name, e.message);\n  }\n}\n"
+}

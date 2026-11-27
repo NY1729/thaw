@@ -1,0 +1,5 @@
+{
+  "name": "nd7 Intl Collator compare as sort callback",
+  "expect": "matched",
+  "source": "function main(): void {\n  const de = new Intl.Collator(\"de\");\n  console.log([\"z\", \"ä\", \"a\"].sort(de.compare));\n  const en = new Intl.Collator(\"en\");\n  console.log([\"b\", \"B\", \"a\", \"A\"].sort(en.compare));\n  const numeric = new Intl.Collator(\"en\", { numeric: true });\n  console.log([\"a10\", \"a9\", \"a1\"].toSorted(numeric.compare));\n}\n"
+}

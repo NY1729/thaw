@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage logical alias keeps dynamic storage",
+  "expect": "matched",
+  "source": "function main(): void { const xs: number[] = [1]; const exposed: any = xs || []; const original: any = {x: 7}; exposed[0] = original; console.log(xs[0] === original, typeof xs[0]); }"
+}

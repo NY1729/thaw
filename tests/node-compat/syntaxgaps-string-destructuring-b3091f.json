@@ -1,0 +1,5 @@
+{
+  "name": "syntaxgaps string destructuring",
+  "expect": "matched",
+  "source": "function main(): void {\n  const [a, b] = \"hi\";\n  const { length } = \"abc\";\n  console.log(a, b, length);\n  const [x, ...rest] = \"xyz\";\n  console.log(x, rest.join(\"-\"));\n  let p = \"\", q = \"\";\n  [p, q] = \"uv\";\n  console.log(p, q);\n}\n"
+}

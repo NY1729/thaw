@@ -1,0 +1,5 @@
+{
+  "name": "round10 generator object and array iterator print as Node inspects them",
+  "expect": "matched",
+  "source": "function* g(): Generator<number> { yield 1; } function main(): void { console.log(g(), [1].values()); }"
+}

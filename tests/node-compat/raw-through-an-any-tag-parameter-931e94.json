@@ -1,0 +1,5 @@
+{
+  "name": "raw through an any tag parameter",
+  "expect": "matched",
+  "source": "const seen: any[] = [];\nfunction tag(s: any, ...v: any[]): string { seen.push(s); return s.raw.length + \":\" + s.raw[1] + \":\" + s.length; }\nfunction site(): string { return tag`a${1}\\n${2}b`; }\nasync function main(): Promise<void> {\n  console.log(site());\n  console.log(site());\n  console.log(seen[0] === seen[1], seen[0].raw === seen[1].raw);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "readline promises closes interface",
+  "expect": "matched",
+  "source": "import { createInterface } from 'node:readline/promises'; import { Readable } from 'node:stream'; function main(): void { const reader = createInterface({ input: Readable.from([]) }); reader.close(); console.log(reader.closed); }"
+}

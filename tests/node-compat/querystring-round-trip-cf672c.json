@@ -1,0 +1,5 @@
+{
+  "name": "querystring round trip",
+  "expect": "matched",
+  "source": "import { parse, stringify } from 'node:querystring'; function main(): void { const encoded: string = stringify({ name: 'A B', page: 2 }); console.log(encoded, JSON.stringify(parse(encoded))); }"
+}

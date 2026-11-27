@@ -1,0 +1,5 @@
+{
+  "name": "var hoisting: read before declaration and redeclare",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(a, b);\n  var a = 1, b = 2;\n  var a = 3;\n  console.log(a, b);\n  var plain = 7;\n  console.log(plain);\n}"
+}

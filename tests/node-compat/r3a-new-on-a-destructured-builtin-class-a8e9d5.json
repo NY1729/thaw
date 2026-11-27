@@ -1,0 +1,5 @@
+{
+  "name": "r3a new on a destructured builtin class",
+  "expect": "matched",
+  "source": "import __d1 from \"node:stream\"; const { Writable } = __d1; function main(): void { const w = new Writable({ write(c: any, e: any, cb: any) { cb(); } }); console.log(typeof w.write); }"
+}

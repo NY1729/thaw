@@ -1,0 +1,5 @@
+{
+  "name": "class instances nested in literals and arrays stay live",
+  "expect": "matched",
+  "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const c = new C();\n  const o: any = { inner: c };\n  console.log(typeof o.inner.bump);\n  console.log(o.inner.n);\n  c.n = 5;\n  console.log(o.inner.n);\n  console.log(o.inner.bump(), c.n);\n  const l: any = [c];\n  console.log(l[0].n, typeof l[0].bump);\n}\n"
+}

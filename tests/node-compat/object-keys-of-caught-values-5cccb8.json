@@ -1,0 +1,5 @@
+{
+  "name": "Object.keys of caught values",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { throw { a: 1, b: 2 }; } catch (e: any) { console.log(Object.keys(e)); }\n  try { throw \"ab\"; } catch (e: any) { console.log(Object.keys(e)); }\n  try { throw new Error(\"x\"); } catch (e: any) { console.log(Object.keys(e)); }\n}\n"
+}

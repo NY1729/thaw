@@ -1,0 +1,5 @@
+{
+  "name": "util callbackify rejection",
+  "expect": "matched",
+  "source": "import { callbackify } from 'node:util'; async function fail(): Promise<number> { throw new Error('nope'); } function main(): void { const callback = callbackify(fail); callback((error: JsValue): void => console.log(String(error))); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "readable resume drains",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream'; async function main(): Promise<void> { const input = Readable.from(['done']); const ended = new Promise<void>((resolve) => { input.on('end', (): void => { resolve(); }); }); input.resume(); await ended; console.log('ended'); }"
+}

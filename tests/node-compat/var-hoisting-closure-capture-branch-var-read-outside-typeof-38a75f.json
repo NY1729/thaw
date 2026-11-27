@@ -1,0 +1,5 @@
+{
+  "name": "var hoisting: closure capture, branch var read outside, typeof",
+  "expect": "matched",
+  "source": "function f(): void {\n  const g = () => k;\n  var k = 4;\n  console.log(g());\n}\nfunction h(n: number): number {\n  for (let i = 0; i < 2; i++) { if (i === 1) { var last = i + n; } }\n  return last === undefined ? -1 : last;\n}\nfunction w(flag: boolean): string {\n  console.log(typeof q);\n  if (flag) { var q = \"set\"; }\n  return String(q);\n}\nfunction main(): void {\n  f();\n  console.log(h(5), w(true), w(false));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "collections limits: union array and string",
+  "expect": "matched",
+  "source": "function f(x: boolean): number[] | string {\n  if (x) { return [1, 2]; }\n  return \"no\";\n}\nfunction main(): void {\n  const a = f(true);\n  console.log(a, f(false));\n  if (typeof a === \"string\") console.log(\"str\", a); else console.log(\"arr\", a.length, a.indexOf(2), a.map(x => x + 1));\n  if (Array.isArray(a)) console.log(\"is arr\", a.length);\n}\n"
+}

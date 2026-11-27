@@ -1,0 +1,5 @@
+{
+  "name": "r2b iterator objects carry their toStringTag",
+  "expect": "matched",
+  "source": "function* gen(): Generator<number> { yield 1; } function main(): void { console.log(Object.prototype.toString.call([1, 2].entries()), Object.prototype.toString.call(new Map<number, number>().keys()), Object.prototype.toString.call(new Set<number>().values()), Object.prototype.toString.call(gen()), Object.prototype.toString.call('a1'.matchAll(/\\d/g))); }"
+}

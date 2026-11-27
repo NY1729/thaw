@@ -1,0 +1,5 @@
+{
+  "name": "nd10 invalid URL error carries ERR_INVALID_URL",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { new URL(\"not a url\"); } catch (e) { console.log((e as any).code, (e as Error).message, (e as Error).name, e instanceof TypeError); }\n}\n"
+}

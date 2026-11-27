@@ -1,0 +1,5 @@
+{
+  "name": "v8 shared date identity",
+  "expect": "matched",
+  "source": "import { deserialize, serialize } from 'node:v8'; function main(): void { const d = new Date(1234); const e = new Date(1234); const r: any = deserialize(serialize([d, d, e])); console.log(r[0] === r[1], r[1] === r[2], r[2].getTime(), r[0].getTime()); }"
+}

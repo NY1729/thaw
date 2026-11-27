@@ -1,0 +1,5 @@
+{
+  "name": "cluster executes worker process",
+  "expect": "matched",
+  "source": "import cluster, { isPrimary } from 'node:cluster'; import process from 'node:process'; function main(): void { if (isPrimary) cluster.fork(); else { console.log('worker'); process.disconnect(); } }"
+}

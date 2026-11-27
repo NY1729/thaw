@@ -1,0 +1,5 @@
+{
+  "name": "promise resolve of a thenable calls then after the synchronous code",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const events: string[] = [];\n  const thenable: any = {\n    get then() {\n      events.push(\"get\");\n      return function (resolve: any): void {\n        events.push(\"call\");\n        resolve(9);\n      };\n    },\n  };\n  events.push(\"before\");\n  const promise = Promise.resolve(thenable);\n  events.push(\"after\");\n  console.log(await promise, events.join(\",\"));\n}\n"
+}

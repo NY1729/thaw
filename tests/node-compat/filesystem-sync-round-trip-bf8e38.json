@@ -1,0 +1,5 @@
+{
+  "name": "filesystem sync round trip",
+  "expect": "matched",
+  "source": "import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'; function main(): void { const path: string = '/tmp/thaw-node-compat.txt'; writeFileSync(path, 'hello'); console.log(readFileSync(path, 'utf8')); unlinkSync(path); }"
+}

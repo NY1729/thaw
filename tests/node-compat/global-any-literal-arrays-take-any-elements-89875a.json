@@ -1,0 +1,5 @@
+{
+  "name": "global any literal arrays take any elements",
+  "expect": "matched",
+  "source": "let g: any = { a: [1] };\nconst h: any = { a: [1] };\nconst arr: any = [[1]];\nasync function main(): Promise<void> {\n  g.a.push(\"s\");\n  h.a.push(\"t\");\n  arr[0].push(\"u\");\n  console.log(JSON.stringify(g), JSON.stringify(h), JSON.stringify(arr));\n}\n"
+}

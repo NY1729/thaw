@@ -1,0 +1,5 @@
+{
+  "name": "worker evaluated thread",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads'; async function main(): Promise<void> { const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.postMessage(42);`, { eval: true }); await new Promise<void>((resolve, reject) => { worker.once('message', (value) => { console.log(value); resolve(); }); worker.once('error', reject); }); await worker.terminate(); }"
+}

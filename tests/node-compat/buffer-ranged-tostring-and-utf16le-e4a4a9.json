@@ -1,0 +1,5 @@
+{
+  "name": "buffer ranged toString and utf16le",
+  "expect": "matched",
+  "source": "function main(): void {\n  const s = Buffer.from(\"hello world\");\n  console.log(s.toString(\"utf8\", 2, 7), s.toString(\"hex\", 0, 3), s.toString(\"utf8\", 6), s.toString(\"base64\", 1, 4), s.toString(\"utf8\", 3, 100), \"[\" + s.toString(\"utf8\", 5, 2) + \"]\");\n  console.log(s.toString(\"utf16le\").length, Buffer.from(\"hi\", \"utf16le\"), Buffer.from(\"hi\", \"ucs2\").toString(\"ucs2\"), Buffer.from(\"\\u{1F600}x\", \"utf16le\"), Buffer.from(\"hé\", \"utf16le\").toString(\"utf16le\"));\n  const a = Buffer.from([97, 98, 99]);\n  const wide: any = Buffer.from([1, 2, 3]);\n  console.log(a.toString(), JSON.stringify(wide));\n}\n"
+}

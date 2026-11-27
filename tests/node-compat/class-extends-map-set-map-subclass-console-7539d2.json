@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: map subclass console",
+  "expect": "matched",
+  "source": "class Counter extends Map<string, number> {}\nclass Sub extends Counter {}\nclass Q<T> extends Set<T> {}\nfunction main(): void {\n  const e = new Counter();\n  console.log(e);\n  const s = new Sub(); s.set(\"k\", 1);\n  console.log(s, [s], { s });\n  const q = new Q<number>(); q.add(7);\n  console.log(q);\n  console.log({ a: { b: { c: { d: s } } } });\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "icu Number toLocaleString NaN and Infinity",
+  "expect": "matched",
+  "source": "function main(): void { console.log(NaN.toLocaleString(\"en-US\"), Infinity.toLocaleString(\"en-US\"), (-Infinity).toLocaleString(\"de-DE\")); }"
+}

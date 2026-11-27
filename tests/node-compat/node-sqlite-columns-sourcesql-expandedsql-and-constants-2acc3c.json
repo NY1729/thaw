@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite columns(), sourceSQL, expandedSQL and constants",
+  "expect": "matched",
+  "source": "import { DatabaseSync, constants } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE p (id INTEGER, label TEXT, weight REAL, body BLOB)');\n  const stmt = db.prepare('SELECT id, label AS shown, weight, body FROM p WHERE id = ?');\n  console.log(stmt.sourceSQL);\n  console.log(stmt.expandedSQL);\n  stmt.get(7);\n  console.log(stmt.expandedSQL);\n  console.log(JSON.stringify(stmt.columns()));\n  console.log(constants.SQLITE_CHANGESET_CONFLICT, constants.SQLITE_CHANGESET_FOREIGN_KEY, Object.keys(constants).length);\n  db.close();\n}"
+}

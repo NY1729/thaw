@@ -1,0 +1,5 @@
+{
+  "name": "literal key omitted enumerable on a dynamic target is non-enumerable",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { k: { value: 7, writable: true, configurable: true } });\n  console.log(o.k, Object.keys(o).join());\n}"
+}

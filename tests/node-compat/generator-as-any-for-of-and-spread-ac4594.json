@@ -1,0 +1,5 @@
+{
+  "name": "generator as any for of and spread",
+  "expect": "matched",
+  "source": "function* gen() { yield 1; yield 2; }\nfunction main(): void {\n  const g: any = gen();\n  for (const x of g) console.log(x);\n  const h: any = gen();\n  console.log([...h].length);\n}"
+}

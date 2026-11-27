@@ -402,7 +402,7 @@ jobs:
         run: |
           report="$RUNNER_TEMP/report.json"
           status=$(cat "$RUNNER_TEMP/exit-status" 2>/dev/null || echo not-run)
-          jq -r '.cases[] | select(.source | test("new Function|eval\\(")) | .name' tests/node-compat.json > "$RUNNER_TEMP/dynamic-names.txt"
+          python3 tools/node-compat-bundle.py | jq -r '.cases[] | select(.source | test("new Function|eval\\(")) | .name' > "$RUNNER_TEMP/dynamic-names.txt"
           {
             echo "### thaw-js node-compat: $MODE (exit $status)"
             if jq -e '.results' "$report" > /dev/null 2>&1; then

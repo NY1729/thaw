@@ -1,0 +1,5 @@
+{
+  "name": "JSON.stringify of Error subclass instances",
+  "expect": "matched",
+  "source": "class AppError extends Error {\n  constructor(msg: string) { super(msg); this.name = \"AppError\"; }\n}\nclass Coded extends Error {\n  code: number;\n  constructor(msg: string, code: number) { super(msg); this.code = code; }\n}\nclass Plain extends Error {\n  constructor(msg: string) { super(msg); }\n}\nfunction main(): void {\n  const a = new AppError(\"bad\");\n  console.log(JSON.stringify(a));\n  console.log(JSON.stringify({ err: a }));\n  console.log(JSON.stringify([a]));\n  console.log(Object.keys(a));\n  const c = new Coded(\"bad\", 3);\n  console.log(JSON.stringify(c), JSON.stringify({ c }));\n  const p = new Plain(\"bad\");\n  console.log(JSON.stringify(p), JSON.stringify([p, 1]));\n  console.log(JSON.stringify(new Error(\"x\")));\n  console.log(JSON.stringify({ e: new TypeError(\"y\") }));\n  console.log(JSON.stringify([new Error(\"z\"), 1]));\n  const w: any = new Error(\"q\");\n  w.code = 1;\n  console.log(JSON.stringify({ w }), JSON.stringify(w, null, 2));\n  console.log(JSON.stringify(new AggregateError([1], \"m\")));\n}\n"
+}

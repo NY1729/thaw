@@ -1,0 +1,5 @@
+{
+  "name": "collections limits: species required non numeric ctor",
+  "expect": "matched",
+  "source": "class Tagged extends Array<number> {\n  tag: any;\n  constructor(tag: string) { super(); this.tag = tag; console.log(\"ctor\", typeof tag, tag); }\n}\nfunction main(): void {\n  const t = new Tagged(\"x\"); t.push(1); t.push(2); t.push(3);\n  const m = t.map(x => x * 2);\n  console.log(m, m instanceof Tagged, m.length);\n  const f = t.filter(x => x > 1);\n  console.log(f, f instanceof Tagged);\n  console.log(t.slice(1), t.concat([9]));\n  const sp = t.splice(0, 1);\n  console.log(sp, sp instanceof Tagged);\n  console.log(Tagged.from([5, 6]), Tagged.of(7, 8));\n}\n"
+}

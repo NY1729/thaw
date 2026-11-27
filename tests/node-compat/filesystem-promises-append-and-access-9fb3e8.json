@@ -1,0 +1,5 @@
+{
+  "name": "filesystem promises append and access",
+  "expect": "matched",
+  "source": "import { access, appendFile, readFile, rm, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const path = '/tmp/thaw-fsp-append'; await rm(path, { force: true }); await writeFile(path, 'a'); await appendFile(path, 'b'); await access(path); console.log(await readFile(path, 'utf8')); await rm(path); }"
+}

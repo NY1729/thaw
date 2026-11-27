@@ -1,0 +1,5 @@
+{
+  "name": "audit2 C this in EventEmitter listener is the emitter",
+  "expect": "matched",
+  "source": "import { EventEmitter } from \"node:events\";\nfunction main(): void {\n  const e = new EventEmitter();\n  e.on(\"y\", function (this: any) { console.log(typeof this, this === e); });\n  e.on(\"z\", function (this: any, a: number) { console.log(this === e, a); });\n  e.once(\"w\", function (this: EventEmitter) { console.log(this === e); });\n  e.emit(\"y\"); e.emit(\"z\", 5); e.emit(\"w\");\n}"
+}

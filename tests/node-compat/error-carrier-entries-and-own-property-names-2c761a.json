@@ -1,0 +1,5 @@
+{
+  "name": "error carrier entries and own property names",
+  "expect": "matched",
+  "source": "function main(): void {\n  const x = new Error(\"c\") as any;\n  x.a = 1;\n  x.s = \"q\";\n  console.log(Object.entries(x), Object.getOwnPropertyNames(x), Reflect.ownKeys(x));\n  try { throw x; } catch (c: any) {\n    console.log(Object.entries(c), Object.getOwnPropertyNames(c), Reflect.ownKeys(c), Object.keys(c));\n  }\n  try { throw new Error(\"plain\"); } catch (c: any) {\n    console.log(Object.entries(c), Object.getOwnPropertyNames(c), Object.keys(c));\n  }\n}\n"
+}

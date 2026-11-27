@@ -1,0 +1,5 @@
+{
+  "name": "native collection replacer keeps requested custom properties",
+  "expect": "matched",
+  "source": "function main(): void { const native = new Map<string, number>(); native.set(\"a\", 1); const m: any = native; m.extra = 7; m.missing = undefined; m.inf = Infinity; console.log(JSON.stringify(m, [\"size\", \"extra\", \"missing\", \"inf\"])); const set = new Set<number>([1, 2]); const s: any = set; s.extra = \"kept\"; console.log(JSON.stringify(s, [\"extra\", \"size\"])); }"
+}

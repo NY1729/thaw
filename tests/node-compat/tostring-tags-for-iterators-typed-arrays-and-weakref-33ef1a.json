@@ -1,0 +1,5 @@
+{
+  "name": "toString tags for iterators, typed arrays and WeakRef",
+  "expect": "matched",
+  "source": "function main(): void { const xs: number[] = [1, 2]; const m = new Map<string, number>(); console.log(Object.prototype.toString.call(xs.values()), Object.prototype.toString.call(m.entries()), Object.prototype.toString.call(new Uint8Array(1)), Object.prototype.toString.call(new WeakRef<object>({ a: 1 }))); }"
+}

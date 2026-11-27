@@ -1,0 +1,5 @@
+{
+  "name": "http2 settings round trip",
+  "expect": "matched",
+  "source": "import { getDefaultSettings, getPackedSettings, getUnpackedSettings } from 'node:http2'; function main(): void { const defaults = getDefaultSettings(); const restored = getUnpackedSettings(getPackedSettings(defaults)); console.log(typeof defaults.headerTableSize, restored.headerTableSize === defaults.headerTableSize); }"
+}

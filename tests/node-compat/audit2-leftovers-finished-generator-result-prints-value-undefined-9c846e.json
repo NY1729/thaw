@@ -1,0 +1,5 @@
+{
+  "name": "audit2 leftovers finished generator result prints value undefined",
+  "expect": "matched",
+  "source": "function* g(): Generator<number, void, undefined> { yield 1; yield 2; }\nfunction* h(): Generator<number, string, undefined> { yield 1; return \"r\"; }\nfunction main(): void {\n  const it = g();\n  console.log(it.next(), it.next(), it.next(), it.next());\n  const it3 = h();\n  console.log(it3.next(), it3.next(), it3.next());\n  const r = g().next();\n  if (!r.done) console.log(r.value + 1);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "audit-silent top-level recursive function values",
+  "expect": "matched",
+  "source": "const fact = function f(n: number): number { return n <= 1 ? 1 : n * f(n - 1); };\nconst fib = (n: number): number => (n < 2 ? n : fib(n - 1) + fib(n - 2));\nconsole.log(fact(5), fib(15));\nfunction main(): void {}\n"
+}

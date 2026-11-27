@@ -1,0 +1,5 @@
+{
+  "name": "audit2 leftovers class field inferred from a conditional of constructions",
+  "expect": "matched",
+  "source": "class A { x = 1; hi(): string { return \"hi\" + this.x; } }\nclass B {\n  a = process.argv.length > 0 ? new A() : new A();\n  c = process.argv.length > 0 ? [1, 2] : [3];\n}\nfunction main(): void {\n  const b = new B();\n  b.a.x = 7;\n  console.log(b.a.hi(), b.c.length, b);\n}"
+}

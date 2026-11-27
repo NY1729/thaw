@@ -1,0 +1,5 @@
+{
+  "name": "https.globalAgent exposes Node's agent properties and https helper arities",
+  "expect": "matched",
+  "source": "import * as https from \"node:https\";\nfunction main(): void {\n  const a: any = https.globalAgent;\n  console.log(a.scheduling, a.agentKeepAliveTimeoutBuffer, a.maxCachedSessions, a.keepAlive);\n  const o = a.options;\n  console.log(o.defaultPort, o.protocol, o.noDelay, o.scheduling, o.timeout, o.path, o.keepAlive);\n  console.log(https.createServer.length, https.get.length);\n}\n"
+}

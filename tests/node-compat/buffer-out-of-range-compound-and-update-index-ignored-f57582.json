@@ -1,0 +1,5 @@
+{
+  "name": "Buffer out-of-range compound and update index ignored",
+  "expect": "matched",
+  "source": "function main(): void { const u = new Uint8Array(4); const i = 10; u[10] += 1; u[10]++; ++u[10]; u[i] |= 1; u[-1] -= 1; u[2] += 5; u[2]++; console.log(u.length, u[10], u[2]); }"
+}

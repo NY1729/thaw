@@ -1,0 +1,5 @@
+{
+  "name": "audit2 C async generator with timer await under for await",
+  "expect": "matched",
+  "source": "const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));\nasync function* gen() { await sleep(1); yield 1; await sleep(1); yield 2; }\nasync function main() {\n  for await (const v of gen()) console.log(\"g\", v);\n  console.log(\"end\");\n  for await (const v of gen()) { if (v === 1) break; }\n  console.log(\"broke\");\n}"
+}

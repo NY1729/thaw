@@ -1,0 +1,5 @@
+{
+  "name": "r3b null-prototype groupBy result and regex groups",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(Object.groupBy([1, 2, 3, 4], (x: number) => (x % 2 ? \"odd\" : \"even\")));\n  const m = /(?<y>\\d{4})-(?<m>\\d\\d)/.exec(\"on 2020-05 ok\")!;\n  console.log(m);\n  console.log(m.groups, \"x\".match(/(?<n>y)?/)!.groups);\n}"
+}

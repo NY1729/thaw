@@ -1,0 +1,5 @@
+{
+  "name": "any receivers: call result, await, JSON.parse chain",
+  "expect": "matched",
+  "source": "function mk(): any { return { a: [1, 2] }; }\nasync function main(): Promise<void> {\n  const o = mk();\n  mk().a.push(3);\n  o.a.push(\"x\");\n  console.log(o.a.length, JSON.stringify(o.a));\n  const r = mk();\n  r.a.push({ k: 1 });\n  console.log(JSON.stringify(r));\n}\n"
+}

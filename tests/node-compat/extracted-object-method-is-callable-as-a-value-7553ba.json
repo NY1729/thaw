@@ -1,0 +1,5 @@
+{
+  "name": "extracted object method is callable as a value",
+  "expect": "matched",
+  "source": "const o = { k: 7, double(x: number): number { return x * 2; } };\nfunction main(): void {\n  const f = o.double;\n  console.log(f(4), typeof f, o.double(6));\n}\n"
+}

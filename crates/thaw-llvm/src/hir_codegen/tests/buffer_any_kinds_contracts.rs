@@ -79,3 +79,20 @@ fn s3_any_arraybuffer_and_dataview_stringify_as_empty_objects() {
         "{\"x\":{},\"y\":{},\"z\":{\"type\":\"Buffer\",\"data\":[97]}}\n"
     );
 }
+
+#[test]
+fn s3_any_bytes_top_level_stringify_keeps_kind() {
+    let source = r##"function main(): void {
+    const ab = new ArrayBuffer(2);
+    const a: any = ab;
+    const dv: any = new DataView(ab);
+    const b: any = Buffer.from("a");
+    console.log(JSON.stringify(a), JSON.stringify(dv), JSON.stringify(b));
+}
+"##;
+    assert_eq!(
+        compile_and_run(source, "s3_any_bytes_top_level_stringify_keeps_kind"),
+        "{} {} {\"type\":\"Buffer\",\"data\":[97]}\n"
+    );
+}
+

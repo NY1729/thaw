@@ -1,0 +1,5 @@
+{
+  "name": "any class new through any variable builds native instance",
+  "expect": "matched",
+  "source": "function helper(n: number): number { return n * 2; }\nclass C { x = 1; dbl(): number { return helper(this.x); } }\nfunction main(): void {\n  const k: any = C; const o = new k(); const p = new k();\n  console.log(o.dbl(), o instanceof k, o.x, p === o);\n  o.x = 7; console.log(o.dbl(), p.x, o.constructor === k);\n}\n"
+}

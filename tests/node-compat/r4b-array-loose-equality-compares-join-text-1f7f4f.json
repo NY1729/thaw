@@ -1,0 +1,5 @@
+{
+  "name": "r4b array loose equality compares join text",
+  "expect": "matched",
+  "source": "function main(): void {\n    const s: any = \"1,2\";\n    const a = [1, 2];\n    const b: any = [1, 2];\n    console.log(a == s, s == a, b == s, [1, 2] == \"1,2\", [\"a\"] == (\"a\" as any), [1, [2, 3]] == (\"1,2,3\" as any), [1] == (1 as any));\n    console.log([] == false, [1] == true, [0] == \"\", [1, 2] != \"1,2\", [5] == 5);\n}"
+}

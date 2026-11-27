@@ -1,0 +1,5 @@
+{
+  "name": "native Map and Set held in an any literal stay live",
+  "expect": "matched",
+  "source": "function main(): void { const m = new Map<string, number>(); m.set(\"a\", 1); const o: any = { m }; m.set(\"b\", 2); console.log(o.m.size, o.m.get(\"b\")); const s = new Set<number>(); s.add(1); const p: any = { s }; s.add(2); console.log(p.s.size, p.s.has(2)); }"
+}

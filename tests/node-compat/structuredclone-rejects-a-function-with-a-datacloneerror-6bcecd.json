@@ -1,0 +1,5 @@
+{
+  "name": "structuredClone rejects a function with a DataCloneError",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const f: any = (x: number) => x;\n  let name = \"none\";\n  let ok = false;\n  try { structuredClone(f); } catch (e: any) { name = e.name; ok = e.message.endsWith(\"could not be cloned.\"); }\n  console.log(name, ok);\n  let inner = \"none\";\n  try { structuredClone({ f }); } catch (e: any) { inner = e.name; }\n  console.log(inner);\n}\n"
+}

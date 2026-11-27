@@ -1,0 +1,5 @@
+{
+  "name": "collections limits: union collections narrowing",
+  "expect": "matched",
+  "source": "class Reg extends Map<string, number> { n = 1; }\nfunction pick(x: number): Map<string, number> | number[] | string {\n  if (x === 0) return new Map<string, number>([[\"a\", 1]]);\n  if (x === 1) return [1, 2];\n  return \"s\";\n}\nfunction opt(x: Set<number> | null): number { return x ? x.size : -1; }\nfunction main(): void {\n  for (const i of [0, 1, 2]) {\n    const v = pick(i);\n    if (v instanceof Map) console.log(\"map\", v.size, v.get(\"a\"), v.has(\"b\"));\n    else if (Array.isArray(v)) console.log(\"arr\", v.length, v.join(\"-\"));\n    else console.log(\"str\", v.toUpperCase());\n    console.log(v, typeof v);\n  }\n  const s = new Set([1, 2, 3]);\n  const w: Set<number> | string = s;\n  console.log(w, opt(s), opt(null));\n  const r = new Reg(); r.set(\"k\", 1);\n  const m: Map<string, number> | undefined = r;\n  console.log(m, m instanceof Reg);\n  const n = Math.random() > 5 ? \"no\" : (new Map([[1, \"x\"]]) as Map<number, string> | string);\n  if (typeof n !== \"string\") { n.set(2, \"y\"); console.log(n.size, [...n.keys()]); }\n}\n"
+}

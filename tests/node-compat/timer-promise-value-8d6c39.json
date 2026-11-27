@@ -1,0 +1,5 @@
+{
+  "name": "timer promise value",
+  "expect": "matched",
+  "source": "import { setTimeout } from 'node:timers/promises'; async function main(): Promise<void> { console.log(JSON.stringify(await setTimeout(1, 'done'))); }"
+}

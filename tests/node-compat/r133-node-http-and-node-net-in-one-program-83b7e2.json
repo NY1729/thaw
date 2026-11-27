@@ -1,0 +1,5 @@
+{
+  "name": "r133 node:http and node:net in one program",
+  "expect": "matched",
+  "source": "import * as http from 'node:http';\nimport * as net from 'node:net';\nasync function main(): Promise<void> {\n  const h = http.createServer((req: any, res: any) => { res.end('http-ok'); });\n  const n = net.createServer((sock: any) => { sock.end('net-ok'); });\n  await new Promise<void>((r) => n.listen(0, '127.0.0.1', () => r()));\n  console.log('net port', typeof (n.address() as any).port);\n  n.close();\n  await new Promise<void>((r) => h.listen(0, '127.0.0.1', () => r()));\n  const r = await fetch('http://127.0.0.1:' + (h.address() as any).port + '/');\n  console.log(await r.text());\n  h.close();\n}\n"
+}

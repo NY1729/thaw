@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure copywithin receiver",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"abcd\");\n  const u = new Uint8Array(b.buffer, b.byteOffset, b.length);\n  Promise.resolve(b).then((q) => { q.copyWithin(0, 2); console.log(b.toString(\"hex\"), u[0]); });\n}\n"
+}

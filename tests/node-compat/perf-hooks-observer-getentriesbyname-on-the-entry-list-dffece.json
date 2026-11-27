@@ -1,0 +1,5 @@
+{
+  "name": "perf_hooks observer getEntriesByName on the entry list",
+  "expect": "matched",
+  "source": "import { performance, PerformanceObserver } from \"node:perf_hooks\";\nfunction main(): void {\n  const o = new PerformanceObserver((list) => { console.log(\"named\", list.getEntriesByName(\"c\").length, list.getEntriesByType(\"mark\").length, list.getEntriesByName(\"c\", \"mark\")[0].entryType); });\n  o.observe({ entryTypes: [\"mark\"] });\n  performance.mark(\"c\");\n  setTimeout(() => o.disconnect(), 20);\n}\n"
+}

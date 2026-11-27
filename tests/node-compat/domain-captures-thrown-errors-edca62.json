@@ -1,0 +1,5 @@
+{
+  "name": "domain captures thrown errors",
+  "expect": "matched",
+  "source": "import { create } from 'node:domain'; function main(): void { const scope = create(); scope.on('error', (error) => console.log(error.message)); scope.run(() => { throw new Error('captured'); }); }"
+}

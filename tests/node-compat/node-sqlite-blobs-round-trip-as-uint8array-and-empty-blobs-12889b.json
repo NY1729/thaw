@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite blobs round trip as Uint8Array and empty blobs",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE b (data BLOB)');\n  const put = db.prepare('INSERT INTO b VALUES (?)');\n  put.run(new Uint8Array([0, 1, 254, 255]));\n  put.run(new Uint8Array(0));\n  const rows: any[] = db.prepare('SELECT data, typeof(data) AS t FROM b ORDER BY rowid').all();\n  console.log(Array.from(rows[0].data).join(','), rows[0].t);\n  console.log(rows[1].data.length, rows[1].t);\n  console.log(db.prepare(\"SELECT typeof(x'') AS t\").get().t);\n  db.close();\n}"
+}

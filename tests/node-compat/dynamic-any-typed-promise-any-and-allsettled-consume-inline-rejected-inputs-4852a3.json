@@ -1,0 +1,5 @@
+{
+  "name": "dynamic any-typed Promise.any and allSettled consume inline rejected inputs",
+  "expect": "matched",
+  "source": "function main(): void {\n  const P: any = Promise;\n  P.any([P.reject(1), P.resolve(2)]).then((v: any): void => { console.log('any ' + v); });\n  P.allSettled([P.resolve(1), P.reject(2)]).then((v: any): void => { console.log(JSON.stringify(v)); });\n  P.allSettled([P.reject(3), P.reject(4)]).then((v: any): void => { console.log('settled-all-rejected ' + v.length + ' ' + v[1].reason); });\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage unknown callable arguments retain actual values",
+  "expect": "matched",
+  "source": "function invoke(callback: any, value: number[], original: any): void { callback(value, original); } function main(): void { const values: number[] = []; const original: any = {x: 7}; const writer: any = new Function(\"value\", \"original\", \"value[0] = original\"); invoke(writer, values, original); console.log(values[0] === original, typeof values[0], values[0].x); }"
+}

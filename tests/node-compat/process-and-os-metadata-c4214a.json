@@ -1,0 +1,5 @@
+{
+  "name": "process and os metadata",
+  "expect": "matched",
+  "source": "import { cwd } from 'node:process'; import { platform } from 'node:os'; function main(): void { console.log(cwd().length > 0, platform()); }"
+}

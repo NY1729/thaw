@@ -1,0 +1,5 @@
+{
+  "name": "class optional fields print as undefined",
+  "expect": "matched",
+  "source": "class P { o?: number; s?: string; n: number = 1; }\nclass D extends P { x?: boolean; }\ninterface I { o?: number }\nfunction main(): void {\n  console.log(new P());\n  console.log(new D());\n  const lit: I = {};\n  console.log(lit);\n  console.log({ p: new P() });\n  console.log(JSON.stringify(new P()));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage nested dynamic parameter slots",
+  "expect": "matched",
+  "source": "function write(holder: {slot:any}):void{holder.slot[0]={x:7};} function main():void{const xs:number[]=[1];const holder={slot:xs};write(holder);console.log(typeof xs[0],xs[0].x);}"
+}

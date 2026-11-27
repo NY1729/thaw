@@ -1,0 +1,5 @@
+{
+  "name": "ce1 console group count table dir",
+  "expect": "matched",
+  "source": "function main(): void { console.group(\"G\"); console.log(\"inside\"); console.group(); console.log(\"deeper\\nmultiline\"); console.error(\"to stderr\"); console.groupEnd(); console.groupEnd(); console.groupEnd(); console.log(\"out\"); console.group(\"A\", \"b\"); console.log(); console.log(\"a\", \"b\"); console.groupEnd(); console.count(); console.count(\"x\"); console.count(); console.countReset(); console.count(); console.countReset(\"never\"); console.table([{ a: 1, b: \"x\" }, { a: 2, c: true }]); console.table([[1, 2], [3, 4]]); console.table([1, 2]); console.table(\"str\"); console.table([{ a: 1, b: { x: 1 } }, { a: \"long string here\", b: [1, 2, 3, 4, 5] }], [\"a\"]); console.table({ r1: { c: 1 }, r2: { c: 2 } }); console.dir({ a: { b: { c: { d: 1 } } } }, { depth: 0 }); console.dir({ a: { b: { c: { d: 1 } } } }, { depth: null }); console.dir(\"s\"); console.dir([1, 2]); console.timeEnd(\"nolabel\"); console.log(\"after\"); }"
+}

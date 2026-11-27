@@ -1,0 +1,5 @@
+{
+  "name": "nd5a RegExp and Intl constructors called without new",
+  "expect": "matched",
+  "source": "function main(): void {\n  const r = RegExp(\"a+\", \"g\");\n  console.log(r.test(\"caat\"), \"aa\".replace(r, \"x\"));\n  const f = Intl.DateTimeFormat(\"en-US\", { timeZone: \"UTC\" });\n  console.log(f.format(new Date(0)));\n  console.log(Intl.NumberFormat(\"en-US\").format(1234.5));\n}\n"
+}

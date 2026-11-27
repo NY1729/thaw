@@ -1,0 +1,5 @@
+{
+  "name": "querystring parse stringify",
+  "expect": "matched",
+  "source": "import { parse, stringify } from 'node:querystring'; function main(): void { const value = parse('name=Alice+Smith&tag=a&tag=b&empty='); console.log(value.name, JSON.stringify(value.tag), value.empty); console.log(stringify({ q: 'a b', page: 2, enabled: true })); }"
+}

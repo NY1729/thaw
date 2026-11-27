@@ -1,0 +1,5 @@
+{
+  "name": "linked json values survive arena resets",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const words: string[][] = [[\"a\"]];\n  const wv: any = words;\n  const w: any = [\"x\"];\n  wv[0] = w;\n  const objs: { n: number; s: string }[] = [{ n: 0, s: \"z\" }];\n  const ov: any = objs;\n  const o: any = { n: 1, s: \"q\" };\n  ov[0] = o;\n  let sum = 0;\n  for (let i = 0; i < 200; i++) {\n    w.push(\"item\" + i);\n    o.n = i;\n    o.s = \"s\" + i;\n    await new Promise<void>((resolve) => setTimeout(resolve, 0));\n    const junk: string[] = [];\n    for (let k = 0; k < 200; k++) junk.push(\"junk\" + k + i);\n    sum += junk.length + words[0].length + objs[0].n;\n    if (words[0][words[0].length - 1] !== \"item\" + i || objs[0].s !== \"s\" + i) {\n      console.log(\"MISMATCH\", i, words[0][words[0].length - 1], objs[0].s);\n      return;\n    }\n  }\n  console.log(words[0].length, objs[0].n, sum, w.length, o.s);\n}\n"
+}

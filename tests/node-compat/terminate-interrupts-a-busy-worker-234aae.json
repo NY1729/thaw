@@ -1,0 +1,5 @@
+{
+  "name": "terminate interrupts a busy worker",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`require('node:worker_threads').parentPort.postMessage('started'); while (true) {}`, { eval: true });\n  await new Promise<void>((resolve) => { worker.once('message', () => { resolve(); }); });\n  const code: number = await worker.terminate();\n  console.log('terminated ' + code);\n}"
+}

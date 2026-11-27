@@ -1,0 +1,5 @@
+{
+  "name": "r2d unit celsius and fahrenheit in a non-English locale",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(new Intl.NumberFormat(\"de-DE\", { style: \"unit\", unit: \"celsius\" }).format(21.5));\n  console.log(new Intl.NumberFormat(\"en-US\", { style: \"unit\", unit: \"celsius\" }).format(21.5));\n}\n"
+}

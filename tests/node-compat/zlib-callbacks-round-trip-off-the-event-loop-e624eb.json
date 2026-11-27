@@ -1,0 +1,5 @@
+{
+  "name": "zlib callbacks round trip off the event loop",
+  "expect": "matched",
+  "source": "import zlib from 'node:zlib';\nconst input = Buffer.from('hello hello hello hello');\nfunction roundTrip(next: () => void): void { zlib.gzip(input, (error: any, packed: Buffer) => { const first = error === null; zlib.gunzip(packed, (error2: any, plain: Buffer) => { console.log(first, error2 === null, plain.toString()); next(); }); }); }\nfunction invalid(next: () => void): void { zlib.gunzip(Buffer.from('not gzip data'), (error3: any, none: any) => { console.log(error3.code, none === undefined); next(); }); }\nfunction withOptions(next: () => void): void { zlib.deflate(input, { level: 9 }, (error4: any, deflated: Buffer) => { const ok = error4 === null; zlib.inflate(deflated, (error5: any, inflated: Buffer) => { console.log(ok, error5 === null, inflated.toString() === 'hello hello hello hello'); next(); }); }); }\nfunction main(): void { roundTrip(() => { invalid(() => { withOptions(() => { console.log('done'); }); }); }); }"
+}

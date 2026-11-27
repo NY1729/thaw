@@ -1,0 +1,5 @@
+{
+  "name": "async class assigned to a Promise-returning interface",
+  "expect": "matched",
+  "source": "class R { async run(): Promise<number> { return 7; } async x(a: number): Promise<string> { return \"x\" + a; } }\ninterface Runner { run(): Promise<number>; x(a: number): Promise<string>; }\nasync function main(): Promise<void> {\n  const r: Runner = new R();\n  console.log(await r.run(), await r.x(2));\n}\n"
+}

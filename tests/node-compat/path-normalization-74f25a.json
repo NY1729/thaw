@@ -1,0 +1,5 @@
+{
+  "name": "path normalization",
+  "expect": "matched",
+  "source": "import { normalize, parse, format } from 'node:path'; function main(): void { const value = parse('/tmp/example.txt'); console.log(normalize('/a/../b//c'), value.dir, value.name, format(value)); }"
+}

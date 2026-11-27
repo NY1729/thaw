@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage survives repeated awaits and exceptions",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { const values: {x: number}[] = []; const exposed: any = values; const original: any = new Function(\"return {x: 1}\")(); exposed[0] = original; const fail: any = new Function(\"value\", \"throw value\"); for (let i = 0; i < 40; i++) { await Promise.resolve(); try { fail(original); } catch (error) { } original.x += 1; } console.log(values[0] === original, exposed[0] === original, values[0].x); }"
+}

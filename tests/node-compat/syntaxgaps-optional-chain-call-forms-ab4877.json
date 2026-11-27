@@ -1,0 +1,5 @@
+{
+  "name": "syntaxgaps optional chain call forms",
+  "expect": "matched",
+  "source": "function main(): void {\n  second();\n  const o: any = { a: { b() { return 1; }, c() { return 2; } }, f() { return 3; } };\n  console.log(o?.a?.[\"c\"](), o?.a?.b(), o.f?.());\n  const n: any = null;\n  console.log(n?.a?.[\"c\"](), n?.a?.b(), n?.f?.(), o.g?.());\n  const t: { a?: { b(): number }, f?: () => number } = { a: { b: () => 7 } };\n  console.log(t?.a?.b(), t.f?.(), t.a?.b?.());\n}\nfunction second(): void {\n  const o: any = { a: { c() { return 2; } }, f() { return 3; } };\n  console.log(o[\"f\"](), o.a[\"c\"](), o?.a[\"c\"](), o.a?.[\"c\"]());\n}\n"
+}

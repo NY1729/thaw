@@ -1,0 +1,5 @@
+{
+  "name": "audit-silent record missing key is absent",
+  "expect": "matched",
+  "source": "const counts: Record<string, number> = {};\nfor (const w of \"a b a c b a\".split(\" \")) counts[w] = (counts[w] ?? 0) + 1;\nconsole.log(counts, Object.entries(counts).sort((x, y) => y[1] - x[1]));\nconst names: Record<string, string> = {};\nconsole.log(names[\"x\"] ?? \"none\", names[\"x\"] === undefined, counts[\"a\"] ?? -1, counts[\"zz\"] ?? -1);\nfunction main(): void {}\n"
+}

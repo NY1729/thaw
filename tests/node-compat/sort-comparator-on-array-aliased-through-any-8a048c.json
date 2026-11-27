@@ -1,0 +1,5 @@
+{
+  "name": "sort comparator on array aliased through any",
+  "expect": "matched",
+  "source": "interface R { k: string }\nfunction main(): void {\n  const names: string[] = [\"b\", \"a\", \"c\"];\n  const aliasOfNames: any = names;\n  names.sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));\n  console.log(names.join(), aliasOfNames.join());\n  const nums: number[] = [3, 1, 10, 2];\n  const aliasOfNums: any = nums;\n  nums.sort((x, y) => y - x);\n  console.log(nums.join(), aliasOfNums.join());\n  const rows: R[] = [{ k: \"b\" }, { k: \"a\" }, { k: \"c\" }];\n  const aliasOfRows: any = rows;\n  rows.sort((x, y) => (x.k < y.k ? -1 : x.k > y.k ? 1 : 0));\n  console.log(rows.map((r) => r.k).join(), aliasOfRows.length);\n}"
+}

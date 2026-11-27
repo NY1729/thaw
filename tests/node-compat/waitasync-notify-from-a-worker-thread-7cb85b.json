@@ -1,0 +1,5 @@
+{
+  "name": "waitAsync notify from a worker thread",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nfunction main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  const worker = new Worker(`\n    const { parentPort, workerData } = require('node:worker_threads');\n    const ia = new Int32Array(workerData);\n    const keep = setTimeout(() => {}, 300);\n    Atomics.waitAsync(ia, 0, 0).value.then((v) => { parentPort.postMessage('got ' + v); clearTimeout(keep); });\n    parentPort.postMessage('ready');\n  `, { eval: true, workerData: ia.buffer });\n  worker.on('message', (m: any) => {\n    if (m === 'ready') {\n      setTimeout(() => console.log('notify', Atomics.notify(ia, 0, 1)), 50);\n    } else {\n      console.log('main saw', m);\n      void worker.terminate();\n    }\n  });\n}"
+}

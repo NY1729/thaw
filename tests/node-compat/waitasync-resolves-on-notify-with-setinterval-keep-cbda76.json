@@ -1,0 +1,5 @@
+{
+  "name": "waitAsync resolves on notify with setInterval keep",
+  "expect": "matched",
+  "source": "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(16));\n  const out: any[] = [];\n  const keep = setInterval(() => {}, 50);\n  (async () => {\n    const r: any = Atomics.waitAsync(ia, 0, 0, 5);\n    out.push(await r.value);\n    out.push(Atomics.notify(ia, 0));\n    const r2: any = Atomics.waitAsync(ia, 0, 0, 1000);\n    out.push(Atomics.notify(ia, 0, 1), await r2.value);\n    clearInterval(keep);\n    console.log(JSON.stringify(out));\n  })();\n}"
+}
