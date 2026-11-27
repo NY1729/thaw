@@ -1542,7 +1542,7 @@ fn node_util_bundle_text_is_pinned() {
 fn node_events_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:events"),
-        "dc90a5ecc6c00dbb5b7d753059c3ff8630b613650f361d0ee512d264453c8ca9",
+        "bc6761f3cbe27cf3b0a2d8b7dc3b937471ce5ef3ae8b29b1a7c62afab264de5c",
         "node:events bundle sha256"
     );
 }
@@ -1552,7 +1552,7 @@ fn node_url_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:url"),
         // node:url bundles node:path: the hash moved from ed14c972... when #958 dropped path's .default/__esModule; then to 2ea12be4... when url.Url was added
-        "2ea12be409148185055f11eb4e3ce9b8c78632c6adcc7878bc64356e983ce786",
+        "916ee0722a2931728afd6f9ec7a1cfbf74cf39cc54b348886310574e9e5f86e4",
         "node:url bundle sha256"
     );
 }
