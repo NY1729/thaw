@@ -362,6 +362,11 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = specialize_new_target_constructors(&normalized);
     let normalized = annotate_untyped_default_parameters(&normalized);
     let normalized = normalize_default_parameter_closures(&normalized);
+    let normalized = if crate::lower::implicit_any() {
+        hoist_top_level_const_arrows(&normalized)
+    } else {
+        normalized
+    };
     let normalized = normalize_implicit_returns(&normalized);
     let normalized = infer_collection_type_args(&normalized);
     let normalized = normalize_any_async_call_aliases(&normalized);
