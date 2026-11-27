@@ -3294,6 +3294,12 @@ impl<'a> FnLowerer<'a> {
                 if self.json_receiver_candidate(&member.obj)
                     && !Self::is_native_instance_builtin(prop.sym.as_ref())
                 {
+                    // A `DataView` held in `any` runs its accessors natively on the view.
+                    if Self::dataview_accessor(prop.sym.as_ref()).is_some() {
+                        if let Ok(lowered) = self.lower_json_dynamic_method_call(member, prop.sym.as_ref(), call) {
+                            return Ok(lowered);
+                        }
+                    }
                     return self.lower_dynamic_value_method_call(
                         &member.obj,
                         prop.sym.as_ref(),
