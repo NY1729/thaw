@@ -1,0 +1,5 @@
+{
+  "name": "zlib invalid data error code",
+  "expect": "matched",
+  "source": "import { gunzipSync } from 'node:zlib'; function main(): void { try { gunzipSync('not gzip'); } catch (error) { console.log(error.name, error.code); } }"
+}

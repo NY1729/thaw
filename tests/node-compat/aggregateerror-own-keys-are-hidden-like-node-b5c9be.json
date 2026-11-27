@@ -1,0 +1,5 @@
+{
+  "name": "AggregateError own keys are hidden like Node",
+  "expect": "matched",
+  "source": "function main(): void {\n  const ag = new AggregateError([1, 2], \"m\", { cause: \"c\" });\n  console.log(Object.keys(ag), Object.getOwnPropertyNames(ag), Object.entries(ag), JSON.stringify(ag));\n  console.log(Object.getOwnPropertyNames(new AggregateError([1], \"m\")), Object.values(ag), Reflect.ownKeys(ag));\n  for (const k in ag) console.log(\"forin\", k);\n  console.log(Object.assign({}, ag), { ...ag });\n}\n"
+}

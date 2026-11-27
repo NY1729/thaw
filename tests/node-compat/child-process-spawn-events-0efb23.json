@@ -1,0 +1,5 @@
+{
+  "name": "child process spawn events",
+  "expect": "matched",
+  "source": "import { spawn } from 'node:child_process'; async function main(): Promise<void> { const child = spawn('printf', ['spawn']); let output: string = ''; child.stdout.on('data', (chunk) => { output += String(chunk); }); await new Promise<void>((resolve) => { child.on('close', () => resolve()); }); console.log(output); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "class extends EventEmitter from node:events emits to listeners, once, instanceof",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events';\nclass Svc extends EventEmitter { n: number = 0; run(): void { this.n++; this.emit('ran', this.n); } }\nfunction main(): void {\n  const s = new Svc();\n  s.on('ran', (n: number) => console.log('ran', n));\n  s.once('ran', (n: number) => console.log('once', n));\n  s.run(); s.run();\n  console.log(s instanceof EventEmitter, s instanceof Svc, s.listenerCount('ran'), s.eventNames());\n  try { s.emit('error', new Error('boom')); } catch (e: any) { console.log(e.message); }\n}"
+}

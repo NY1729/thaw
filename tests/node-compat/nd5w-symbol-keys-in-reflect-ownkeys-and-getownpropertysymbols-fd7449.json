@@ -1,0 +1,5 @@
+{
+  "name": "nd5w symbol keys in Reflect.ownKeys and getOwnPropertySymbols",
+  "expect": "matched",
+  "source": "function main(): void { const sym = Symbol(\"k\"); const o = { [sym]: 1, b: 2, 2: \"x\", 1: \"y\", a: 3, [Symbol.for(\"g\")]: 4 }; console.log(Reflect.ownKeys(o), Object.getOwnPropertySymbols(o).length, Object.keys(o)); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "native ArrayBuffer transfer, detached and annotated views",
+  "expect": "matched",
+  "source": "function main(): void {\n  const ab = new ArrayBuffer(8);\n  console.log(ab.byteLength, ab.detached, ab.resizable, ab.maxByteLength);\n  const moved = ab.transfer(16);\n  console.log(moved.byteLength, ab.byteLength, ab.detached, moved.detached);\n  const fixed = moved.transferToFixedLength(4);\n  console.log(fixed.byteLength, moved.detached);\n  const keep = new ArrayBuffer(3);\n  new Uint8Array(keep)[1] = 7;\n  const copy = keep.transfer();\n  console.log(copy.byteLength, new Uint8Array(copy)[1], keep.byteLength);\n  const ann: ArrayBuffer = new ArrayBuffer(4);\n  const u = new Uint8Array(ann);\n  u[0] = 5;\n  const d2: DataView = new DataView(ann);\n  console.log(d2.getUint8(0), ann.byteLength);\n  const sliced: ArrayBuffer = ann.slice(1);\n  console.log(sliced.byteLength);\n  const n = new Uint8Array(ann);\n  console.log(n.length, n[0]);\n}\n"
+}

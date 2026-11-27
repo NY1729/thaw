@@ -1,0 +1,6 @@
+{
+  "name": "unhandledRejection handler handles the rejection and exits 0 while a server listens",
+  "expect": "matched",
+  "exitCode": 0,
+  "source": "import * as net from 'node:net';\nimport process from 'node:process';\nfunction main(): void {\n  const srv = net.createServer((s: any) => { s.end('x'); });\n  process.on('unhandledRejection', (): void => { console.log('h'); srv.close(); });\n  srv.listen(0, '127.0.0.1', (): void => { Promise.reject(new Error('x')); });\n}"
+}

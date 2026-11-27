@@ -1,0 +1,5 @@
+{
+  "name": "native error subclass keeps its JavaScript prototype",
+  "expect": "matched",
+  "source": "class Failure extends Error { constructor(){super(\"failure\");} } function main():void {const cls:any=Failure;const e=new Failure();console.log(e instanceof Error,e.message,cls.prototype instanceof Error); }"
+}

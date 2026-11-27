@@ -1,0 +1,5 @@
+{
+  "name": "collection and number array callback parameters retain escaped owners",
+  "expect": "matched",
+  "source": "class Box {stored:Map<string,number>=new Map<string,number>();run(m:Map<string,number>,values:number[]):number {this.stored=m;m.set(\"sum\",values[0]+values[1]);return m.size;}}\nfunction make():any {const box=new Box();const a:any=box;const m=new Map<string,number>();const b:any=m;console.log(a.run(b,[2,3]),m.get(\"sum\"));return a;}\nasync function main():Promise<void>{const a:any=make();for(let i=0;i<40;i++){await new Promise<void>((resolve)=>setTimeout(resolve,1));}console.log(a.stored.get(\"sum\"));}"
+}

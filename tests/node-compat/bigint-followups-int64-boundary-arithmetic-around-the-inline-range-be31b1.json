@@ -1,0 +1,5 @@
+{
+  "name": "bigint followups: int64 boundary arithmetic around the inline range",
+  "expect": "matched",
+  "source": "function main(): void {\n  let a = 2n ** 62n;\n  console.log(a, a + a, a * 2n, a * 4n, -a, -a - a, -a - a - 1n);\n  let b = (2n ** 62n) - 1n;\n  console.log(b, b + 1n, b + 2n, -(b + 1n), -(b + 1n) - 1n);\n  let c = 2n ** 63n;\n  console.log(c - 1n, c, c + 1n, -c, -c - 1n);\n  console.log((c - 1n) === 9223372036854775807n, c === 9223372036854775808n, -c === -9223372036854775808n);\n}\n"
+}

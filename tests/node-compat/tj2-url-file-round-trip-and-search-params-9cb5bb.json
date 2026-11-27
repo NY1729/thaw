@@ -1,0 +1,5 @@
+{
+  "name": "tj2 url file round trip and search params",
+  "expect": "matched",
+  "source": "import { fileURLToPath, pathToFileURL, URL } from 'node:url';\nfunction main(): void {\n  const back = fileURLToPath(pathToFileURL('/tmp/x y'));\n  const u = new URL('https://e.com/p?a=1');\n  u.searchParams.set('b', '2');\n  console.log(back, u.href);\n}"
+}

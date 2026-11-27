@@ -1,0 +1,5 @@
+{
+  "name": "error cause is a hidden own property",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"x\", { cause: { code: 5 } }) as any;\n  console.log(e.cause, e.cause.code, Object.keys(e), Object.getOwnPropertyNames(e), \"cause\" in e);\n  console.log(JSON.stringify(e), String(e), e.message);\n  e.cause = 7;\n  console.log(e.cause, Object.keys(e));\n  delete e.cause;\n  console.log(\"cause\" in e, e.cause);\n}\n"
+}

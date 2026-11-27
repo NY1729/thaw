@@ -1,0 +1,5 @@
+{
+  "name": "infer destructuring assignment swap on module bindings and indexed targets",
+  "expect": "matched",
+  "source": "let a = 1, b = 2;\nlet [c, d] = [3, 4];\nfunction main(): void {\n  [a, b] = [b, a];\n  [c, d] = [d, c];\n  const xs = [3, 1, 2];\n  let i = 0, j = 2;\n  [xs[i], xs[j]] = [xs[j], xs[i]];\n  ({ a } = { a: 5 });\n  console.log(a, b, c, d, xs);\n}"
+}

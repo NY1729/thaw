@@ -1,0 +1,5 @@
+{
+  "name": "audit2 toString is used by join and array conversion",
+  "expect": "matched",
+  "source": "class A { toString(): string { return \"A!\"; } }\nfunction main(): void {\n  const a = new A();\n  const o = { toString() { return \"O\"; } };\n  console.log(String(a), `${a}`, a + \"\", [a].join(), [a, a].join(\"-\"), [a].toString(), \"\" + [a]);\n  console.log(String(o), `${o}`, [o].join());\n}"
+}

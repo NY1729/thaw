@@ -1,0 +1,5 @@
+{
+  "name": "r6b computed-key object methods named after their keys",
+  "expect": "matched",
+  "source": "function main(): void {\n  const k = \"dyn\";\n  const o = { [k + \"1\"]: 1, [`t${2}`]: 2, f() { return this; } };\n  console.log(o, o.f() === o);\n  console.log({ [k]() { return 1; }, y: 2 });\n}\n"
+}

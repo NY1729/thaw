@@ -1,0 +1,5 @@
+{
+  "name": "non-null assertion on absent optional number is NaN",
+  "expect": "matched",
+  "source": "class P { o?: number }\nfunction main(): void {\n  console.log(new P().o! + 1);\n  const q = new P();\n  q.o = 2;\n  console.log(q.o! + 1);\n}\n"
+}

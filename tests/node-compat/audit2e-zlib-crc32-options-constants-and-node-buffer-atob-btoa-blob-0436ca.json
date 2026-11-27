@@ -1,0 +1,5 @@
+{
+  "name": "audit2e zlib crc32 options constants and node:buffer atob btoa Blob",
+  "expect": "matched",
+  "source": "import * as zlib from \"node:zlib\"; import { Blob, atob, btoa } from \"node:buffer\"; async function main(): Promise<void> { const s = Buffer.from(\"hello hello hello hello\"); console.log(zlib.crc32(\"abc\"), zlib.crc32(\"def\", zlib.crc32(\"abc\")), zlib.crc32(Buffer.from(\"abcdef\"))); console.log(zlib.constants.Z_BEST_COMPRESSION, zlib.constants.Z_DEFAULT_COMPRESSION, zlib.deflateSync(s, { level: 0 }).length, zlib.inflateSync(zlib.deflateSync(s, { level: 9 })).toString()); console.log(zlib.gunzipSync(zlib.gzipSync(s, { level: 1 })).toString(), zlib.inflateRawSync(zlib.deflateRawSync(s, { level: 6 })).toString()); console.log(btoa(\"hello\"), atob(\"aGVsbG8=\")); const b = new Blob([\"hello \", \"world\"]); console.log(b.size, await b.text()); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "a chain of method calls that returns its own receiver stays a live object",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events';\nfunction main(): void {\n  const e: any = new EventEmitter();\n  const f = () => {};\n  const k: any = e.on('b', f).on('c', f);\n  console.log(typeof k, k === e, k.listenerCount('c'));\n  const j: any = e.on('b', f).on('c', f).on('d', f);\n  console.log(j === e, j.listenerCount('d'));\n  k.marker = 5;\n  console.log(e.marker);\n}\n"
+}

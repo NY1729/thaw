@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: generic subclass species and flat",
+  "expect": "matched",
+  "source": "class Stack extends Array<number> {\n  top(): number { return this[this.length - 1]; }\n}\nclass GStack<T> extends Array<T> {\n  last(): T { return this[this.length - 1]; }\n}\nclass Sized extends Array<number> {\n  tag: string;\n  constructor(tag: string) { super(); this.tag = tag; }\n}\nfunction main(): void {\n  const g = new GStack<number>(); g.push(1); g.push(2);\n  const gm = g.map(x => \"v\" + x);\n  console.log(gm, gm.length);\n  const gf = g.filter(x => x > 1);\n  console.log(gf, gf.last());\n  const fl = new GStack<number[]>(); fl.push([1, 2]); fl.push([3]);\n  console.log(fl.flat(), fl.flatMap(x => x));\n}\n"
+}

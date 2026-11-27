@@ -1,0 +1,5 @@
+{
+  "name": "await settled promise drains queued thenable and microtasks in order",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { const events: string[] = []; const thenable: any = { then(resolve: any): void { events.push('then'); resolve(1); } }; Promise.resolve(thenable); Promise.resolve().then(() => { events.push('micro'); }); events.push('sync'); await Promise.resolve(); events.push('after'); console.log(events.join(',')); }"
+}

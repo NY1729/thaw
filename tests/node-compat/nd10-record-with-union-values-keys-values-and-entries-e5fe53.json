@@ -1,0 +1,5 @@
+{
+  "name": "nd10 Record with union values keys values and entries",
+  "expect": "matched",
+  "source": "function main(): void {\n  const flags: Record<string, string | boolean> = { a: true, b: \"x\" };\n  console.log(Object.entries(flags).map(([k, v]) => `${k}=${v}`), Object.keys(flags), flags.a, typeof flags.b);\n}\n"
+}

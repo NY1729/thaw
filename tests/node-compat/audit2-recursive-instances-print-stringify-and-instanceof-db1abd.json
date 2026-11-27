@@ -1,0 +1,5 @@
+{
+  "name": "audit2 recursive instances print stringify and instanceof",
+  "expect": "matched",
+  "source": "class N { next: N | null = null; v: number; constructor(v: number) { this.v = v; } }\nclass T { kids: T[] = []; label: string; constructor(l: string) { this.label = l; } }\nfunction main(): void {\n  const a = new N(1); a.next = new N(2); a.next.next = new N(3);\n  console.log(a);\n  console.log(JSON.stringify(a));\n  console.log(a instanceof N, a.next instanceof N);\n  const t = new T(\"r\"); t.kids.push(new T(\"a\")); t.kids[0].kids.push(new T(\"b\")); t.kids.push(new T(\"c\"));\n  console.log(t);\n  console.log(JSON.stringify(t));\n  const c = new N(9); c.next = c;\n  try { console.log(JSON.stringify(c)); } catch (e) { console.log((e as Error).name); }\n}"
+}

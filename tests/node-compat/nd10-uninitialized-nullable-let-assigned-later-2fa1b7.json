@@ -1,0 +1,5 @@
+{
+  "name": "nd10 uninitialized nullable let assigned later",
+  "expect": "matched",
+  "source": "function main(): void {\n  let m: string[] | null;\n  m = \"a b\".split(\" \");\n  console.log(m.length);\n}\n"
+}

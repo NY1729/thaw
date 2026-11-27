@@ -1,0 +1,5 @@
+{
+  "name": "tagged template whose tag is a member of an any value",
+  "expect": "matched",
+  "source": "function tag(s: any, ...v: any[]): string { return s.raw.join(\"|\") + v.length; }\nfunction mk(): any { return { t: tag }; }\nasync function main(): Promise<void> {\n  console.log(tag`a${1}b${2}c`);\n  console.log(mk().t`x${1}y`);\n  const o: any = { t: tag, deep: { t: tag } };\n  console.log(o.t`p${1}q`, o.deep.t`r${2}s${3}t`);\n}\n"
+}

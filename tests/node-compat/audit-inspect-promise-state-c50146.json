@@ -1,0 +1,5 @@
+{
+  "name": "audit inspect promise state",
+  "expect": "matched",
+  "source": "async function later(): Promise<number> {\n  return 5;\n}\nfunction main(): void {\n  const r = Promise.reject(3);\n  r.catch(() => {});\n  console.log(Promise.resolve(1), new Promise<void>(() => {}), Promise.resolve(\"s\"), Promise.resolve({ a: [1, 2] }), r, later());\n  const e = Promise.reject(\"why\");\n  e.catch(() => {});\n  console.log(e);\n  const t = Promise.reject(true);\n  t.catch(() => {});\n  console.log(t, Promise.resolve([1, 2, 3]), Promise.resolve(null as string | null), Promise.resolve(undefined));\n}"
+}

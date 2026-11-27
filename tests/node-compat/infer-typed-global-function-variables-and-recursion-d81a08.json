@@ -1,0 +1,5 @@
+{
+  "name": "infer typed global function variables and recursion",
+  "expect": "matched",
+  "source": "const add: (a: number, b: number) => number = (x, y) => x + y;\nconst fib = (n: number): number => (n < 2 ? n : fib(n - 1) + fib(n - 2));\nconst fact = function g(n: number): number { return n <= 1 ? 1 : n * g(n - 1); };\nconst handlers: { on: (cb: (v: string) => void) => void } = { on(cb) { cb(\"hi\"); } };\nfunction main(): void { console.log(add(1, 2), fib(15), fact(5)); handlers.on((v) => console.log(v)); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage retains deep and cyclic graph identity",
+  "expect": "matched",
+  "source": "function main(): void { const root: number[][] = []; const first: any = root; let cursor: any = first; for (let i = 0; i < 70; i++) { const next: any = []; cursor[0] = next; cursor = next; } cursor[0] = first; let read: any = root; for (let i = 0; i < 70; i++) read = read[0]; console.log(read === cursor, read[0] === root); const other: number[][] = []; const second: any = other; second[0] = first; first[1] = second; const identity: any = new Function(\"value\", \"return value\"); console.log(first[1][0] === first, identity(first) === root); }"
+}

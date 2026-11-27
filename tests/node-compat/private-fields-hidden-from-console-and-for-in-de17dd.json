@@ -1,0 +1,5 @@
+{
+  "name": "private fields hidden from console and for in",
+  "expect": "matched",
+  "source": "class P {\n  a = 1;\n  #x = 2;\n  b = \"s\";\n  get x(): number { return this.#x; }\n}\nfunction main(): void {\n  const p = new P();\n  console.log(p);\n  console.log([p]);\n  console.log({ p });\n  const seen: string[] = [];\n  for (const k in p) seen.push(k);\n  console.log(seen.join(), Object.keys(p).join(), p.x);\n}"
+}

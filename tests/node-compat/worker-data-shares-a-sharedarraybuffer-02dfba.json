@@ -1,0 +1,5 @@
+{
+  "name": "worker data shares a SharedArrayBuffer",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const shared = new SharedArrayBuffer(8);\n  const view = new Int32Array(shared);\n  const worker = new Worker(`const { parentPort, workerData } = require('node:worker_threads'); const view = new Int32Array(workerData); Atomics.store(view, 0, 42); parentPort.postMessage(workerData instanceof SharedArrayBuffer);`, { eval: true, workerData: shared });\n  const kind: boolean = await new Promise<boolean>((resolve) => { worker.once('message', (value: boolean) => { resolve(value); }); });\n  await worker.terminate();\n  console.log(kind, view[0]);\n}"
+}

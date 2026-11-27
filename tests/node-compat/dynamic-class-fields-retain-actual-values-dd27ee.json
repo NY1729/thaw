@@ -1,0 +1,5 @@
+{
+  "name": "dynamic class fields retain actual values",
+  "expect": "matched",
+  "source": "class Box { value: number = 1; read(): number { return this.value; } } function main(): void { const box = new Box(); const exposed: any = box; const original: any = new Function(\"return {x: 7}\")(); exposed.value = original; console.log(box.read() === original, box.value === original, typeof box.value); }"
+}

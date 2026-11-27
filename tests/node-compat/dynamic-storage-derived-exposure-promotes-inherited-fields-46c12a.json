@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage derived exposure promotes inherited fields",
+  "expect": "matched",
+  "source": "class Base { value: number = 1; read(): number { return this.value; } } class Derived extends Base {} function main(): void { const value = new Derived(); const exposed: any = value; const original: any = {x: 7}; exposed.value = original; console.log(value.value === original, typeof value.value, typeof value.read()); }"
+}

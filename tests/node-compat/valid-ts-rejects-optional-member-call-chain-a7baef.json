@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: optional member call chain",
+  "expect": "matched",
+  "source": "function main(): void {\n  const t: { a?: { f?: () => number } } = { a: { f: () => 3 } };\n  console.log(t.a?.f?.());\n  const u: { a?: { f?: () => number } } = {};\n  console.log(u.a?.f?.());\n  const v: { a?: { f?: () => number } } = { a: {} };\n  console.log(v.a?.f?.());\n}"
+}

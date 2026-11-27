@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage preserves holes spreads evaluation and await values",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { const original: any = new Function(\"return {x: 1}\")(); const sparse: any[] = [, original]; const exposed: any = sparse; console.log(0 in exposed, 1 in exposed, exposed[1] === original); const copied: any = [...exposed, await Promise.resolve(original)]; console.log(0 in copied, copied[1] === original, copied[2] === original); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "r2d discriminated union narrowing on an indexed class field",
+  "expect": "matched",
+  "source": "type Tok = { t: \"num\"; v: number } | { t: \"end\" };\nclass P {\n  toks: Tok[];\n  constructor(toks: Tok[]) {\n    this.toks = toks;\n  }\n  at(i: number): number {\n    const t = this.toks[i];\n    if (t.t === \"num\") return t.v;\n    return -1;\n  }\n}\nfunction viaParam(p: P): number {\n  const t = p.toks[0];\n  if (t.t === \"num\") return t.v;\n  return 0;\n}\nfunction main(): void {\n  const p = new P([{ t: \"num\", v: 4 }, { t: \"end\" }]);\n  console.log(p.at(0), p.at(1), viaParam(p));\n}\n"
+}

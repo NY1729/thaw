@@ -1,0 +1,5 @@
+{
+  "name": "json stringify runs class to json",
+  "expect": "matched",
+  "source": "class W { v = 1; toJSON(): string { return \"TJ\"; } }\nclass Sub extends W { toJSON(): string { return \"SUB\"; } }\nclass Holder { a = 1; #p = 2; w: W = new W(); list: W[] = [new W()]; }\nfunction dump(x: W): string { return JSON.stringify(x); }\nfunction main(): void {\n  console.log(JSON.stringify(new W()), JSON.stringify([new W()]));\n  console.log(JSON.stringify({ w: new W() }));\n  console.log(JSON.stringify(new Holder()));\n  console.log(dump(new Sub()), dump(new W()));\n}"
+}

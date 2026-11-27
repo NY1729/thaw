@@ -1,0 +1,5 @@
+{
+  "name": "error call without new is an instance",
+  "expect": "matched",
+  "source": "function main(): void { const e0 = Error('x'); console.log(e0 instanceof Error, e0.message, String(e0), e0.name); const e1 = TypeError('y'); console.log(e1 instanceof TypeError, e1 instanceof Error, e1.name, String(e1)); const a = new Error('x'); console.log(a instanceof Error, a instanceof TypeError); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "process nextTick ordering",
+  "expect": "matched",
+  "source": "import process from 'node:process'; function main(): void { console.log('sync'); process.nextTick((): void => console.log('tick')); Promise.resolve().then((): void => console.log('promise')); }"
+}

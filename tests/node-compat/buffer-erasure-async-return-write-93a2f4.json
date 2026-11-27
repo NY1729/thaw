@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure async return write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  async function mk(): Promise<Buffer> { return Buffer.from(\"hi\"); }\n  (async () => { const x = await mk(); x[0] = 90; console.log(x.toString(), x[1]); })();\n}\n"
+}

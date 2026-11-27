@@ -1,0 +1,5 @@
+{
+  "name": "typed error props survive throw",
+  "expect": "matched",
+  "source": "function main(): void {\n  try {\n    const x = new RangeError(\"r\") as any;\n    x.code = \"ERANGE\";\n    x.n = 3;\n    throw x;\n  } catch (c: any) {\n    console.log(c.code, c.n, c.message, c.name, c instanceof RangeError);\n  }\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "distinct errors with equal text keep separate properties",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = new Error(\"x\") as any;\n  const b = new Error(\"x\") as any;\n  a.tag = \"A\";\n  b.tag = \"B\";\n  console.log(a.tag, b.tag, Object.keys(a), Object.keys(b));\n}\n"
+}

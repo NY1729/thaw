@@ -1,0 +1,5 @@
+{
+  "name": "default-parameter closures see the callee's parameter cell",
+  "expect": "matched",
+  "source": "function f(a: number = 1, g: () => number = () => a): number { a = 2; return g(); }\nfunction mk(x: number = 0, inc: () => number = () => ++x): () => number { return inc; }\nasync function main(): Promise<void> {\n  console.log(f());\n  console.log(f(5));\n  const i1 = mk();\n  const i2 = mk();\n  console.log(i1(), i1(), i2());\n  console.log(mk(10)());\n}\n"
+}

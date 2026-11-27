@@ -1,0 +1,5 @@
+{
+  "name": "icu Number toLocaleString currency and percent",
+  "expect": "matched",
+  "source": "function main(): void { console.log((1234.5).toLocaleString(\"en-US\", { style: \"currency\", currency: \"USD\" }), (1234.5).toLocaleString(\"de-DE\", { style: \"currency\", currency: \"EUR\" }), (1234.5).toLocaleString(\"ja-JP\", { style: \"currency\", currency: \"JPY\" }), (1234.5).toLocaleString(\"fr-FR\", { style: \"currency\", currency: \"EUR\" }), (1234.5).toLocaleString(\"en-US\", { style: \"currency\", currency: \"EUR\", currencyDisplay: \"code\" }), (1234.5).toLocaleString(\"en-US\", { style: \"currency\", currency: \"USD\", currencyDisplay: \"name\" }), (0.256).toLocaleString(\"en-US\", { style: \"percent\" }), (0.256).toLocaleString(\"de-DE\", { style: \"percent\", minimumFractionDigits: 1 }), (-1234.5).toLocaleString(\"en-US\", { style: \"currency\", currency: \"USD\" })); }"
+}

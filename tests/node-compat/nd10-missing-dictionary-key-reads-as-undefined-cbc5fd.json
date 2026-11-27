@@ -1,0 +1,5 @@
+{
+  "name": "nd10 missing dictionary key reads as undefined",
+  "expect": "matched",
+  "source": "function main(): void {\n  const t: Record<string, string> = { x: \"a\" };\n  const v = t[\"nope\"];\n  console.log(v, !v, typeof v, v === undefined);\n  const n: Record<string, number> = { x: 1 };\n  const w = n[\"nope\"];\n  console.log(w, typeof w, w === undefined);\n  const state: Record<string, Record<string, string>> = { idle: { go: \"run\" } };\n  const next = state[\"idle\"][\"go\"];\n  console.log(next);\n}\n"
+}

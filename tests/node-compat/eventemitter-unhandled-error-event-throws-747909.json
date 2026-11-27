@@ -1,0 +1,5 @@
+{
+  "name": "EventEmitter unhandled error event throws",
+  "expect": "matched",
+  "source": "import { EventEmitter, once } from 'node:events'; function show(e: any): string { return (e && e.constructor && e.constructor.name) + '|' + (e && e.code) + '|' + (e && e.message) + '|' + (e && e.context); } async function main(): Promise<void> {   const em = new EventEmitter();   try { em.emit('error', new Error('boom')); } catch (e: any) { console.log('1', show(e)); }   try { em.emit('error', 'str'); } catch (e: any) { console.log('2', show(e)); }   try { em.emit('error', { a: 1 }); } catch (e: any) { console.log('3', show(e)); }   try { em.emit('error'); } catch (e: any) { console.log('4', show(e)); }   const p = once(em, 'x');   em.emit('x', 1, 'b');   console.log('5', JSON.stringify(await p));   const p2 = once(em, 'y');   em.emit('error', new Error('bad'));   try { await p2; } catch (e: any) { console.log('6', show(e)); } }"
+}

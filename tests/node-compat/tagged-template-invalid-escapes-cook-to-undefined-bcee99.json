@@ -1,0 +1,5 @@
+{
+  "name": "tagged template invalid escapes cook to undefined",
+  "expect": "matched",
+  "source": "function tag(s: TemplateStringsArray, ...v: number[]): string {\n  const parts: string[] = [];\n  for (let i = 0; i < s.length; i++) parts.push(s[i] === undefined ? 'U' : s[i]);\n  return parts.join('|') + '#' + s.raw.join('|') + '#' + (s[1] ?? 'dflt');\n}\nasync function main(): Promise<void> {\n  console.log(tag`a\\unicode${1}b`);\n  console.log(tag`ok${2}\\xz`);\n}\n"
+}

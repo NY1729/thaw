@@ -1,0 +1,5 @@
+{
+  "name": "audit-perf 1e5 pushes/appends and 2e4 sort within budget",
+  "expect": "matched",
+  "source": "interface Item { id: number; name: string }\nfunction main(): void {\n  const start = Date.now();\n  const nums: number[] = [];\n  for (let i = 0; i < 100000; i++) nums.push(i * 2);\n  const strs: string[] = [];\n  for (let i = 0; i < 20000; i++) strs.push(\"s\" + i);\n  const items: Item[] = [];\n  for (let i = 0; i < 20000; i++) items.push({ id: i, name: \"n\" + i });\n  let s = \"\";\n  for (let i = 0; i < 100000; i++) s += \"x\";\n  const desc: number[] = [];\n  for (let i = 0; i < 20000; i++) desc.push((i * 7919) % 20011);\n  desc.sort((x, y) => y - x);\n  const elapsed = Date.now() - start;\n  console.log(nums.length, strs.length, items.length, s.length, desc[0], desc[19999]);\n  console.log(\"rss under 400MB:\", process.memoryUsage().rss < 400 * 1024 * 1024);\n  console.log(\"time under 20s:\", elapsed < 20000);\n}\n"
+}

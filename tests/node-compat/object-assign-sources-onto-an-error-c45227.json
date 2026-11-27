@@ -1,0 +1,5 @@
+{
+  "name": "Object.assign sources onto an Error",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = Object.assign(new Error(\"m\"), { a: 1, b: \"two\" }, { c: true }) as any;\n  console.log(Object.keys(e), e.a, e.b, e.c);\n  const j: any = { d: [1, 2] };\n  Object.assign(e, j);\n  console.log(Object.keys(e), e.d);\n  console.log(Object.getOwnPropertyNames(e));\n}\n"
+}

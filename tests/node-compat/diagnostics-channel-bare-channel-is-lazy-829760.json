@@ -1,0 +1,5 @@
+{
+  "name": "diagnostics_channel bare Channel is lazy",
+  "expect": "matched",
+  "source": "import * as dc from 'node:diagnostics_channel'; function main(): void { const c: any = new dc.Channel('x'); console.log(Object.keys(c).join(','), c._subscribers, c._stores, c.hasSubscribers); const f = (m: any) => console.log('got', m); c.subscribe(f); console.log(c.hasSubscribers); c.publish(1); console.log(c.unsubscribe(f), c.hasSubscribers); }"
+}

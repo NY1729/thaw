@@ -1,0 +1,5 @@
+{
+  "name": "audit2 C instanceof Promise on any-typed JS promise",
+  "expect": "matched",
+  "source": "function main(): void {\n  const P: any = (globalThis as any).Promise;\n  const p: any = new P((r: any) => r(1));\n  const o: any = {};\n  console.log(p instanceof Promise, o instanceof Promise);\n}"
+}

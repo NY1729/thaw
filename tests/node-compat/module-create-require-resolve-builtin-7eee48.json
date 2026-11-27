@@ -1,0 +1,5 @@
+{
+  "name": "module create require resolve builtin",
+  "expect": "matched",
+  "source": "import { createRequire } from 'node:module'; function main(): void { const require = createRequire('/tmp/example/main.js'); console.log(require.resolve('node:path')); }"
+}

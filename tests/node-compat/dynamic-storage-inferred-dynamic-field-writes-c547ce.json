@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage inferred dynamic field writes",
+  "expect": "matched",
+  "source": "function main():void{const xs:number[]=[1];const holder={slot:undefined as any};holder.slot=xs;holder.slot[0]={x:7};console.log(typeof xs[0],xs[0].x);}"
+}

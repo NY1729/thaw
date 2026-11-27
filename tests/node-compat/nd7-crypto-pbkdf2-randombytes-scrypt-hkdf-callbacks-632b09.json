@@ -1,0 +1,5 @@
+{
+  "name": "nd7 crypto pbkdf2 randomBytes scrypt hkdf callbacks",
+  "expect": "matched",
+  "source": "import * as crypto from \"node:crypto\";\nfunction main(): void {\n  crypto.pbkdf2(\"pw\", \"salt\", 10, 8, \"sha1\", (e, k) => {\n    console.log(\"pbkdf2\", e, k.toString(\"hex\"));\n    crypto.randomBytes(4, (e2, b) => {\n      console.log(\"randomBytes\", e2, b.length);\n      crypto.scrypt(\"pw\", \"salt\", 8, (e3, k3) => {\n        console.log(\"scrypt\", e3, k3.toString(\"hex\"));\n        crypto.hkdf(\"sha256\", \"key\", \"salt\", \"info\", 8, (e4, k4) => console.log(\"hkdf\", e4, k4.byteLength));\n      });\n    });\n  });\n}\n"
+}

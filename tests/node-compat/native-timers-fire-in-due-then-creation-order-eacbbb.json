@@ -1,0 +1,5 @@
+{
+  "name": "native timers fire in due then creation order",
+  "expect": "matched",
+  "source": "function main(): void {\n  setTimeout(() => console.log(\"t250\"), 250);\n  setTimeout(() => console.log(\"t0\"), 0);\n  setTimeout(() => console.log(\"t1\"), 1);\n  setTimeout(() => console.log(\"t120\"), 120);\n  setTimeout(() => console.log(\"t40a\"), 40);\n  setTimeout(() => console.log(\"t40b\"), 40);\n  console.log(\"sync\");\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "console.log of querystring.parse and parseArgs results",
+  "expect": "matched",
+  "source": "import * as qs from \"node:querystring\"; import { parseArgs } from \"node:util\"; function main(): void { console.log(qs.parse(\"a=1&a=2&b=%20x&c\")); console.log(parseArgs({ args: [\"-f\"], options: { foo: { type: \"boolean\", short: \"f\" } } })); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "https global agent protocol",
+  "expect": "matched",
+  "source": "import { globalAgent } from 'node:https'; function main(): void { console.log(globalAgent.protocol); }"
+}

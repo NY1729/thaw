@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: math function values",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log([1.5, 2.5, -1.2].map(Math.floor));\n  console.log([-1, 2].map(Math.abs));\n  const f = Math.max;\n  console.log(f(1, 5, 3));\n  const g = Math.min;\n  console.log(g(4, 2), g());\n  const p = Math.pow;\n  console.log(p(2, 10), [4, 9].map(Math.sqrt));\n}"
+}

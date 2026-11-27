@@ -1,0 +1,5 @@
+{
+  "name": "hasOwnProperty of a class method through any is false",
+  "expect": "matched",
+  "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } m() { return 1; } }\nasync function main(): Promise<void> {\n  const c: any = new C();\n  console.log(c.hasOwnProperty(\"n\"), c.hasOwnProperty(\"bump\"), c.hasOwnProperty(\"m\"));\n}\n"
+}

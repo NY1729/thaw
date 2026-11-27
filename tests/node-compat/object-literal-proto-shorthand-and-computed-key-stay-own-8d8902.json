@@ -1,0 +1,5 @@
+{
+  "name": "object literal __proto__ shorthand and computed key stay own",
+  "expect": "matched",
+  "source": "function main(): void { const __proto__ = 7; const s: any = { __proto__ }; const c: any = { ['__proto__']: 3 }; console.log(Object.keys(s).join(','), s.__proto__, Object.keys(c).join(','), c.__proto__); }"
+}

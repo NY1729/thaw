@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: set subclass",
+  "expect": "matched",
+  "source": "class Tags extends Set<string> {\n  addAll(xs: string[]): this { for (const x of xs) this.add(x); return this; }\n}\nfunction main(): void {\n  const t = new Tags(); t.addAll([\"a\", \"b\", \"a\"]);\n  console.log(t.size, t.has(\"a\"), t instanceof Set, Array.isArray(t), [...t].join(\"|\"));\n  console.log(t);\n  console.log(t.union(new Set([\"c\"])).size);\n}\n"
+}

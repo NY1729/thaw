@@ -1,0 +1,5 @@
+{
+  "name": "crypto random integer range",
+  "expect": "matched",
+  "source": "import { randomInt } from 'node:crypto'; function main(): void { const value: number = randomInt(10, 20); console.log(value >= 10 && value < 20); }"
+}

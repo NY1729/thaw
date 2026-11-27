@@ -1,0 +1,5 @@
+{
+  "name": "perf2b native process hrtime",
+  "expect": "matched",
+  "source": "function main(): void {\n  const t0: number[] = process.hrtime();\n  const b0 = process.hrtime.bigint();\n  let x = 0;\n  for (let i = 0; i < 100000; i++) x += i;\n  const d = process.hrtime(t0);\n  const b1 = process.hrtime.bigint();\n  console.log(typeof b0, b1 >= b0, b0 > 0n, t0.length, d.length, d[0] >= 0, d[1] >= 0 && d[1] < 1e9, Number.isInteger(t0[1]), x);\n  const fixed: number[] = [1, 900000000];\n  const r = process.hrtime(fixed);\n  console.log(r[1] >= 0 && r[1] < 1e9);\n}\n"
+}

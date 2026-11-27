@@ -1,0 +1,5 @@
+{
+  "name": "any class any class value constructor reaches native helpers",
+  "expect": "matched",
+  "source": "function helper(n: number): number { return n * 2; }\nclass C { x = 1; dbl(): number { return helper(this.x); } }\nclass D { c: C = new C(); run(): number { return this.c.dbl(); } }\nclass E extends C { y = 5; sum(): number { return this.dbl() + this.y; } }\nfunction main(): void {\n  const k: any = D; console.log(new k().run());\n  const e: any = E; const inst = new e(); console.log(inst.sum(), inst instanceof e);\n}\n"
+}

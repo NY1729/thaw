@@ -1,0 +1,5 @@
+{
+  "name": "r2b Object.keys(globalThis) does not list console",
+  "expect": "matched",
+  "source": "function main(): void { console.log(Object.keys(globalThis).includes('console')); }"
+}

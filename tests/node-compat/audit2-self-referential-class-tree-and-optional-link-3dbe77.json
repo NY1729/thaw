@@ -1,0 +1,5 @@
+{
+  "name": "audit2 self-referential class tree and optional link",
+  "expect": "matched",
+  "source": "class T {\n  left: T | null = null; right: T | null = null; v: number;\n  constructor(v: number) { this.v = v; }\n  insert(v: number): void {\n    if (v < this.v) { const l = this.left; if (l === null) this.left = new T(v); else l.insert(v); }\n    else { const r = this.right; if (r === null) this.right = new T(v); else r.insert(v); }\n  }\n  inorder(out: number[]): void {\n    const l = this.left; if (l !== null) l.inorder(out);\n    out.push(this.v);\n    const r = this.right; if (r !== null) r.inorder(out);\n  }\n}\nclass N2 { next?: N2; v = 1; }\nfunction main(): void {\n  const root = new T(5);\n  for (const x of [3, 8, 1, 4, 9, 7]) root.insert(x);\n  const out: number[] = []; root.inorder(out);\n  console.log(out.join(\",\"));\n  const h = new N2(); h.next = new N2();\n  console.log(h.next.v, h.next.next === undefined);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "Error.captureStackTrace on plain objects and errors",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: any = {};\n  Error.captureStackTrace(o);\n  console.log(typeof o.stack, o.stack.split(\"\\n\")[0], o.stack.split(\"\\n\").length > 1);\n  const p: any = { name: \"Foo\", message: \"bar\" };\n  Error.captureStackTrace(p);\n  console.log(p.stack.split(\"\\n\")[0]);\n  const q: any = { name: \"\", message: \"only\" };\n  Error.captureStackTrace(q);\n  console.log(q.stack.split(\"\\n\")[0]);\n  const r: any = { message: \"m\" };\n  Error.captureStackTrace(r);\n  console.log(r.stack.split(\"\\n\")[0]);\n  const n = new Error(\"n\");\n  Error.captureStackTrace(n);\n  console.log(n.stack!.split(\"\\n\")[0]);\n  class Custom extends Error { constructor(m: string) { super(m); this.name = \"Custom\"; Error.captureStackTrace(this); } }\n  console.log(new Custom(\"cc\").stack!.split(\"\\n\")[0]);\n}\n"
+}

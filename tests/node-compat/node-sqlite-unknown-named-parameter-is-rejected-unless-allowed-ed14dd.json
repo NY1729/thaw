@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite unknown named parameter is rejected unless allowed",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  try { db.prepare('SELECT :a AS a').get({ b: 1 }); } catch (e: any) { console.log(e.code, e.message); }\n  const s = db.prepare('SELECT :a AS a');\n  s.setAllowUnknownNamedParameters(true);\n  console.log(JSON.stringify(s.get({ b: 1 })));\n  db.close();\n}"
+}

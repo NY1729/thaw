@@ -1,0 +1,5 @@
+{
+  "name": "g034 generators iterate numeric",
+  "expect": "matched",
+  "source": "function* fib() { let [a, b] = [0, 1]; for (;;) { yield a; [a, b] = [b, a + b]; } }\nfunction* count() { yield 1; yield 2; yield 3; }\nfunction main(): void {\n  const out: number[] = [];\n  for (const v of fib()) { if (v > 50) break; out.push(v); }\n  console.log(out);\n  let sum = 0;\n  for (const v of count()) { if (v >= 2) sum += v * 2; }\n  console.log(sum, [...count()].map((v) => v + 1));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "r2a exhaustive switch without default",
+  "expect": "matched",
+  "source": "type Sh = { k: \"a\"; r: number } | { k: \"b\"; w: number; h: number }; function area(s: Sh): number { switch (s.k) { case \"a\": return s.r * 2; case \"b\": return s.w * s.h; } } const label = (s: Sh): string => { switch (s.k) { case \"a\": return \"circle\"; case \"b\": return \"rect\"; } }; function main(): void { console.log(area({ k: \"a\", r: 3 }), area({ k: \"b\", w: 2, h: 5 }), label({ k: \"b\", w: 1, h: 1 })); }"
+}

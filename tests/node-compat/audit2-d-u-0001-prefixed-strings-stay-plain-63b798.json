@@ -1,0 +1,5 @@
+{
+  "name": "audit2 D U+0001-prefixed strings stay plain",
+  "expect": "matched",
+  "source": "function main(): void {\n  const s: string = \"\\u0001abc\";\n  console.log(s.length, s === \"\\u0001abc\", JSON.stringify(s), s.charCodeAt(0));\n  console.log([\"\\u0001\", \"\\u0001x\"], { k: \"\\u0001y\" });\n  console.log(\"\\u0001q\");\n}"
+}

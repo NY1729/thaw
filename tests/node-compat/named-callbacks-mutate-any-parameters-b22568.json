@@ -1,0 +1,5 @@
+{
+  "name": "named callbacks mutate any parameters",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const rows: any = [{ n: 0, list: [1] }, { n: 0, list: [2] }];\n  const f = (x: any) => { x.n = 1; };\n  rows.forEach(f);\n  const g = (x: any) => x.list.push(7);\n  rows.map(g);\n  function h(x: any) { x.n += 10; return x.n; }\n  const ns = rows.map(h);\n  const ok = rows.filter((x: any) => x.n > 5).length;\n  console.log(JSON.stringify(rows), JSON.stringify(ns), ok);\n}\n"
+}
