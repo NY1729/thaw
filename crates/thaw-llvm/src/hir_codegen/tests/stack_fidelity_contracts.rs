@@ -9,7 +9,7 @@ fn stack_fidelity_tail() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -32,7 +32,7 @@ fn stack_fidelity_inline() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -55,7 +55,7 @@ fn stack_fidelity_recur() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -76,7 +76,7 @@ fn stack_fidelity_mutual() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -98,7 +98,7 @@ fn stack_fidelity_class() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -130,7 +130,7 @@ fn stack_fidelity_arrow() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -146,14 +146,13 @@ function main(): void { console.log(names(g())); }
 }
 
 #[test]
-#[ignore = "known gap vs Node: anonymous arrows and named function-expression (iife) frames are not in the stack section"]
 fn stack_fidelity_closure() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -173,14 +172,13 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: callback frames from Array.map/forEach/sort missing or wrong"]
 fn stack_fidelity_callbacks() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -204,14 +202,13 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: async stack: no `async` caller frames and missing frames after await"]
 fn stack_fidelity_async() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -231,14 +228,13 @@ async function main(): Promise<void> {
 }
 
 #[test]
-#[ignore = "known gap vs Node: generator frames (gen, gen.next) missing"]
 fn stack_fidelity_generator() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -254,14 +250,13 @@ function main(): void { console.log(names(drive())); }
 }
 
 #[test]
-#[ignore = "known gap vs Node: promise .then callback frames missing after the first"]
 fn stack_fidelity_then() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -285,7 +280,7 @@ fn stack_fidelity_timeout() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -308,7 +303,7 @@ fn stack_fidelity_capture() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -335,7 +330,7 @@ fn stack_fidelity_limit() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -356,14 +351,14 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: the `cause` of a caught error has no frames (its text copy loses the side table)"]
+#[ignore = "known gap vs Node: `e.cause` of a caught native error reads back as a thaw-js handle marker string (typeof string, no stack); the cause needs to stay a native/live Error with its frames"]
 fn stack_fidelity_rethrow() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -389,7 +384,7 @@ fn stack_fidelity_deep() {
   for (const raw of String(e.stack).split("\n").slice(1)) {
     const l = raw.trim().split(" (")[0];
     if (l.startsWith("at Object.<anonymous>") || l.startsWith("at Timeout.") || l.startsWith("at listOnTimeout")) break;
-    out.push(l.includes("/") ? "at <anon>" : l);
+    out.push(l.includes("/") || l.startsWith("at input.ts") ? "at <anon>" : l);
     if (l === "at main" || l === "at async main") break;
   }
   return out.join("|");
@@ -424,5 +419,36 @@ async function main(): Promise<void> {
     assert_eq!(
         compile_and_run(source, "stack_overflow_lambda_async"),
         "arrow true Maximum call stack size exceeded\nmethod true\nasync true\nafter\n"
+    );
+}
+
+// The same shapes with statically typed helpers (no value reaches `any`), so the array methods stay
+// native and the frames under the callback are visible.
+#[test]
+fn stack_fidelity_callbacks_native() {
+    let source = r#"function cb(x: number): Error { return new Error("x"); }
+function names(e: Error): string {
+  const out: string[] = [];
+  for (const raw of e.stack!.split("\n").slice(1)) {
+    const l = raw.trim().split(" (")[0];
+    out.push(l.startsWith("at input.ts") ? "at <anon>" : l);
+    if (l === "at main") break;
+  }
+  return out.join("|");
+}
+function main(): void {
+  const m: Error[] = [1].map((x: number) => cb(x));
+  console.log(names(m[0]));
+  let f: Error = m[0];
+  [1].forEach((x: number) => { f = cb(x); });
+  console.log(names(f));
+  let s: Error = m[0];
+  [2, 1].sort((a: number, b: number) => { s = cb(a); return a - b; });
+  console.log(names(s));
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "stack_fidelity_callbacks_native"),
+        "at cb|at <anon>|at Array.map|at main\nat cb|at <anon>|at Array.forEach|at main\nat cb|at <anon>|at Array.sort|at main\n"
     );
 }

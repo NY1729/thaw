@@ -3352,6 +3352,9 @@ impl<'a> FnLowerer<'a> {
         ) && !self.scope.contains_key(&callee_name)
             && !self.signatures.contains_key(&callee_name)
         {
+            if matches!(callee_name.as_str(), "setTimeout" | "setInterval" | "setImmediate") {
+                note_timer_callback(&callee_name, &call.args);
+            }
             let binding = format!("__thaw_global_timer_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(binding.clone(), HirType::JsValue);

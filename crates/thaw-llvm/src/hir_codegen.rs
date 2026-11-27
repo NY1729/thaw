@@ -515,6 +515,8 @@ pub struct HirCompiler<'ctx> {
     /// Symbol of the lambda compiled last, and the source names given to lambda symbols (`const f = () => ..`).
     last_lambda_symbol: Option<String>,
     lambda_frame_names: HashMap<String, String>,
+    /// The builtin whose frame Node shows under a function (`Array.map` for a `.map` callback), by symbol.
+    frame_vias: HashMap<String, String>,
     /// NUL-terminated string constants already emitted, so each distinct text exists once.
     /// Whole-program builds route synthetic errors through one shared setter function.
     share_error_setter: bool,
@@ -878,6 +880,7 @@ impl<'ctx> HirCompiler<'ctx> {
             stack_locs: HashMap::new(),
             last_lambda_symbol: None,
             lambda_frame_names: HashMap::new(),
+            frame_vias: HashMap::new(),
             share_error_setter: false,
             interned_strings: std::cell::RefCell::new(HashMap::new()),
             uses_napi: false,
