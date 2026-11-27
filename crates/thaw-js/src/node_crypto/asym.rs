@@ -833,7 +833,10 @@ pub(crate) fn crypto_import_key_json(bytes_hex: &str, is_der: bool, passphrase: 
 }
 
 fn digest_size_matches(digest_algorithm: &str) -> Result<(), String> {
-    if matches!(digest_algorithm, "sha1" | "sha256" | "sha384" | "sha512") {
+    if matches!(
+        digest_algorithm,
+        "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512"
+    ) {
         Ok(())
     } else {
         Err(format!("unsupported digest algorithm: {digest_algorithm}"))
@@ -972,7 +975,9 @@ fn sign_rsa_pkcs1v15(
     data: &[u8],
 ) -> Result<Vec<u8>, String> {
     match digest_algorithm {
+        "md5" => rsa_pkcs1v15_sign_for!(key, md5::Md5, data),
         "sha1" => rsa_pkcs1v15_sign_for!(key, sha1::Sha1, data),
+        "sha224" => rsa_pkcs1v15_sign_for!(key, sha2::Sha224, data),
         "sha256" => rsa_pkcs1v15_sign_for!(key, sha2::Sha256, data),
         "sha384" => rsa_pkcs1v15_sign_for!(key, sha2::Sha384, data),
         "sha512" => rsa_pkcs1v15_sign_for!(key, sha2::Sha512, data),
@@ -997,7 +1002,9 @@ fn verify_rsa_pkcs1v15(
     signature: &[u8],
 ) -> bool {
     match digest_algorithm {
+        "md5" => rsa_pkcs1v15_verify_for!(key, md5::Md5, data, signature),
         "sha1" => rsa_pkcs1v15_verify_for!(key, sha1::Sha1, data, signature),
+        "sha224" => rsa_pkcs1v15_verify_for!(key, sha2::Sha224, data, signature),
         "sha256" => rsa_pkcs1v15_verify_for!(key, sha2::Sha256, data, signature),
         "sha384" => rsa_pkcs1v15_verify_for!(key, sha2::Sha384, data, signature),
         "sha512" => rsa_pkcs1v15_verify_for!(key, sha2::Sha512, data, signature),
@@ -1019,7 +1026,9 @@ fn sign_rsa_pss(
     data: &[u8],
 ) -> Result<Vec<u8>, String> {
     match digest_algorithm {
+        "md5" => rsa_pss_sign_for!(key, md5::Md5, data),
         "sha1" => rsa_pss_sign_for!(key, sha1::Sha1, data),
+        "sha224" => rsa_pss_sign_for!(key, sha2::Sha224, data),
         "sha256" => rsa_pss_sign_for!(key, sha2::Sha256, data),
         "sha384" => rsa_pss_sign_for!(key, sha2::Sha384, data),
         "sha512" => rsa_pss_sign_for!(key, sha2::Sha512, data),
@@ -1044,7 +1053,9 @@ fn verify_rsa_pss(
     signature: &[u8],
 ) -> Result<bool, String> {
     match digest_algorithm {
+        "md5" => rsa_pss_verify_for!(key, md5::Md5, data, signature),
         "sha1" => rsa_pss_verify_for!(key, sha1::Sha1, data, signature),
+        "sha224" => rsa_pss_verify_for!(key, sha2::Sha224, data, signature),
         "sha256" => rsa_pss_verify_for!(key, sha2::Sha256, data, signature),
         "sha384" => rsa_pss_verify_for!(key, sha2::Sha384, data, signature),
         "sha512" => rsa_pss_verify_for!(key, sha2::Sha512, data, signature),
