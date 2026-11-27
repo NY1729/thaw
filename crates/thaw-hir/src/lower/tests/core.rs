@@ -1999,3 +1999,18 @@ function main(): void {
     .unwrap();
     lower_module(&module).unwrap();
 }
+
+#[test]
+fn rest_slot_callback_with_fixed_prefix_and_rest_slices_remaining_arguments() {
+    let program = lower(
+        r#"
+        function call(fn: (...a: any[]) => any, x: any): any { return fn(x); }
+        function main(): void {
+            call(function (err: any, ...args: any[]) { console.log(err, args.length); }, 5);
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let hir = format!("{:?}", main.body);
+    assert!(hir.contains("__thaw_rest_callback_") && hir.contains("__thaw_array_slice"), "{hir}");
+}
