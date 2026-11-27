@@ -65,7 +65,7 @@ def capture(cmd, scene):
         buf = buf or None
     finally:
         p.kill(); p.wait(); srv.close()
-    return buf
+    return buf.replace(str(port).encode(), b"<port>") if buf else buf
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--write-baseline", action="store_true"); ap.add_argument("--label", default="thaw")

@@ -297,7 +297,7 @@ def report(a, rows, tid, dims=("status", "hstyle", "bstyle", "method", "conn", "
             out.append(f"- {d}: {top}")
         for r in rs[:3]:
             s = r[0]
-            out.append(f"- example s{s['id']} {s['method']} status={s['status']} {s['hstyle']} {s['bstyle']} conn={s['conn']} reqbody={s['reqbody']} reqhdr={s['reqhdr']}")
+            out.append(f"- example s{s['id']} " + " ".join(f"{k}={v}" for k, v in s.items() if k not in ("id", "raw")))
             for l in (r[3] or [r[2]])[:6]: out.append("    " + l.replace("\r", "")[:160])
         out.append("")
     rp = os.path.join(WORK, f"report-{a.label}-{a.scenes}-{a.seed}.md")

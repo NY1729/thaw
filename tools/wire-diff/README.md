@@ -29,3 +29,11 @@ cause signature with per-dimension concentration (`value:count/total`) and examp
 
 `baseline.json` records scenes, seed and the SAME/DIFF counts; a run with the same scenes+seed prints `REGRESSION`
 when SAME drops. Not part of CI.
+
+## Request side and client side
+
+- `python3 wire_req.py`: 48 raw requests (bad request lines, duplicate headers, huge headers, chunked bodies, Expect, Upgrade,
+  pipelines, no Host, ...) against one echo server. Baseline: `baseline-req.json`.
+- `python3 wire_client.py`: the bytes `http.request`/`http.get` send (26 variants) into a raw socket. The Host port is masked.
+  Baseline: `baseline-client.json`.
+- Rebuild the thaw binary after merging main: a stale binary builds programs against a newer std and crashes at startup.
