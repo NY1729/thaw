@@ -1,0 +1,1061 @@
+{
+ "module": "node:module",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "Module",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [
+    {
+     "name": "Module",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 0
+    },
+    {
+     "name": "SourceMap",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "builtinModules",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    },
+    {
+     "name": "constants",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    },
+    {
+     "name": "createRequire",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "enableCompileCache",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "findPackageJSON",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "findSourceMap",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "flushCompileCache",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getCompileCacheDir",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getSourceMapsSupport",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "globalPaths",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    },
+    {
+     "name": "isBuiltin",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "register",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "registerHooks",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "runMain",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "setSourceMapsSupport",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "stripTypeScriptTypes",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "syncBuiltinESMExports",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "wrap",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "wrapper",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    }
+   ],
+   "proto": [
+    {
+     "name": "isPreloading",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "load",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "parent",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "require",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "children",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    },
+    {
+     "name": "exports",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    },
+    {
+     "name": "filename",
+     "typeof": "null",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "id",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "loaded",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "path",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "SourceMap",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [],
+   "proto": [
+    {
+     "name": "findEntry",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "findOrigin",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "lineLengths",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "payload",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "_cache",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "/home/fedora/work/thaw-tmp/r130/tools/parity-aot/surface/inv.js",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "children",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "exports",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      },
+      {
+       "name": "filename",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "id",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "loaded",
+       "typeof": "boolean",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "path",
+       "typeof": "string",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "paths",
+       "typeof": "object",
+       "kind": "object",
+       "arity": null
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "_debug",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_extensions",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": ".js",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": ".json",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": ".node",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    }
+   ]
+  },
+  {
+   "name": "_findPath",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_initPaths",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_load",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_nodeModulePaths",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_pathCache",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "/home/fedora/work/thaw-tmp/r130/tools/parity-aot/surface/inv.js\u0000",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "_preloadModules",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_readPackage",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "_resolveFilename",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_resolveLookupPaths",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_stat",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "builtinModules",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "0",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "1",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "10",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "11",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "12",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "13",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "14",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "15",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "16",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "17",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "18",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "19",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "2",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "20",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "21",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "22",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "23",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "24",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "25",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "26",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "27",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "28",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "29",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "3",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "30",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "31",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "32",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "33",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "34",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "35",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "36",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "37",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "38",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "39",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "4",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "40",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "41",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "42",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "43",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "44",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "45",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "46",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "47",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "48",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "49",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "5",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "50",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "51",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "52",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "53",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "54",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "55",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "56",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "57",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "58",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "59",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "6",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "60",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "61",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "62",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "63",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "64",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "65",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "66",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "67",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "7",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "8",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "9",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "constants",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "compileCacheStatus",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null,
+     "props": [
+      {
+       "name": "ALREADY_ENABLED",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "DISABLED",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "ENABLED",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      },
+      {
+       "name": "FAILED",
+       "typeof": "number",
+       "kind": "value",
+       "arity": null
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "createRequire",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "enableCompileCache",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "findPackageJSON",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "findSourceMap",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "flushCompileCache",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "getCompileCacheDir",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getSourceMapsSupport",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "globalPaths",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "0",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "1",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "2",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "isBuiltin",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "length",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "name",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "prototype",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "isPreloading",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "load",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "parent",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "require",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ]
+  },
+  {
+   "name": "register",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "registerHooks",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "runMain",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "setSourceMapsSupport",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "stripTypeScriptTypes",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "syncBuiltinESMExports",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "wrap",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "wrapper",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  }
+ ]
+}

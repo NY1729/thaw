@@ -1,0 +1,41 @@
+{
+ "module": "node:stream/consumers",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "arrayBuffer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "blob",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "buffer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "json",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "text",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  }
+ ]
+}

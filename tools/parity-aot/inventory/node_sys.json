@@ -1,0 +1,822 @@
+{
+ "module": "node:sys",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "MIMEParams",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "delete",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "entries",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "get",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "has",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "keys",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "set",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "toJSON",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "toString",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "values",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "ok",
+   "instance": []
+  },
+  {
+   "name": "MIMEType",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [],
+   "proto": [
+    {
+     "name": "essence",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "params",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "subtype",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "toJSON",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "toString",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "type",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "TextDecoder",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "decode",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "encoding",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "fatal",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "ignoreBOM",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    }
+   ],
+   "construct": "ok",
+   "instance": []
+  },
+  {
+   "name": "TextEncoder",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "encode",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "encodeInto",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "encoding",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    }
+   ],
+   "construct": "ok",
+   "instance": []
+  },
+  {
+   "name": "_errnoException",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_exceptionWithHostPort",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "_extend",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "aborted",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "callbackify",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "debug",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "debuglog",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "deprecate",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "diff",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "format",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "formatWithOptions",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getCallSite",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getCallSites",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getSystemErrorMap",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getSystemErrorMessage",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getSystemErrorName",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "inherits",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "inspect",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [
+    {
+     "name": "colors",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    },
+    {
+     "name": "custom",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "defaultOptions",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "styles",
+     "typeof": "object",
+     "kind": "object",
+     "arity": null
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "isArray",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isBoolean",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isBuffer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isDate",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isDeepStrictEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "isError",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isFunction",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isNull",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isNullOrUndefined",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isNumber",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isObject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isPrimitive",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isRegExp",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isString",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isSymbol",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isUndefined",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "log",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "parseArgs",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": []
+  },
+  {
+   "name": "parseEnv",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "promisify",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [
+    {
+     "name": "custom",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "setTraceSigInt",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "stripVTControlCharacters",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "styleText",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "toUSVString",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "transferableAbortController",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "transferableAbortSignal",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "types",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "isAnyArrayBuffer",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isArgumentsObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isArrayBuffer",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isArrayBufferView",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isAsyncFunction",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isBigInt64Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isBigIntObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isBigUint64Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isBooleanObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isBoxedPrimitive",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isCryptoKey",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isDataView",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isDate",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isExternal",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isFloat16Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isFloat32Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isFloat64Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isGeneratorFunction",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isGeneratorObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isInt16Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isInt32Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isInt8Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isKeyObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isMap",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isMapIterator",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isModuleNamespaceObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isNativeError",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isNumberObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isPromise",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isProxy",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isRegExp",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSet",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSetIterator",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSharedArrayBuffer",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isStringObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isSymbolObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isTypedArray",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isUint16Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isUint32Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isUint8Array",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isUint8ClampedArray",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "isWeakMap",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "isWeakSet",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,438 @@
+{
+ "module": "node:events",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "EventEmitter",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [
+    {
+     "name": "EventEmitter",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "EventEmitterAsyncResource",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": false
+    },
+    {
+     "name": "addAbortListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "captureRejectionSymbol",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "captureRejections",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "defaultMaxListeners",
+     "kind": "getter",
+     "typeof": "accessor",
+     "set": true
+    },
+    {
+     "name": "errorMonitor",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "getEventListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "getMaxListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "init",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "kMaxEventTargetListeners",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "kMaxEventTargetListenersWarned",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "listenerCount",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "usingDomains",
+     "typeof": "boolean",
+     "kind": "value",
+     "arity": null
+    }
+   ],
+   "proto": [
+    {
+     "name": "addListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "emit",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "eventNames",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getMaxListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "listenerCount",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "listeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "off",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependOnceListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "rawListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeAllListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "domain",
+     "typeof": "null",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "EventEmitterAsyncResource",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": false
+  },
+  {
+   "name": "addAbortListener",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "captureRejectionSymbol",
+   "typeof": "symbol",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "captureRejections",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "defaultMaxListeners",
+   "kind": "getter",
+   "typeof": "accessor",
+   "set": true
+  },
+  {
+   "name": "errorMonitor",
+   "typeof": "symbol",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "getEventListeners",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "getMaxListeners",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "init",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "kMaxEventTargetListeners",
+   "typeof": "symbol",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "kMaxEventTargetListenersWarned",
+   "typeof": "symbol",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "length",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "listenerCount",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "name",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "on",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "once",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": []
+  },
+  {
+   "name": "prototype",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "addListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "emit",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "eventNames",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "getMaxListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "listenerCount",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "listeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "off",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "on",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "once",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prependOnceListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "rawListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeAllListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "removeListener",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "setMaxListeners",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ]
+  },
+  {
+   "name": "setMaxListeners",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "usingDomains",
+   "typeof": "boolean",
+   "kind": "value",
+   "arity": null
+  }
+ ]
+}

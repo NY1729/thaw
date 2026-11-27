@@ -1,0 +1,139 @@
+{
+ "module": "node:vm",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "Script",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [],
+   "proto": [
+    {
+     "name": "createCachedData",
+     "from": "ContextifyScript",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "runInContext",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "runInNewContext",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "runInThisContext",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "sourceMapURL",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "sourceURL",
+     "typeof": "undefined",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "compileFunction",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "constants",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": [
+    {
+     "name": "DONT_CONTEXTIFY",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "USE_MAIN_CONTEXT_DEFAULT_LOADER",
+     "typeof": "symbol",
+     "kind": "value",
+     "arity": null
+    }
+   ]
+  },
+  {
+   "name": "createContext",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "createScript",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "isContext",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "measureMemory",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "runInContext",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "runInNewContext",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "runInThisContext",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

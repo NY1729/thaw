@@ -1,0 +1,25 @@
+{
+ "events": {
+  "match": 48,
+  "output-diff": 28
+ },
+ "globals": {
+  "build-fail": 39,
+  "match": 613,
+  "output-diff": 13,
+  "skipped": 154
+ },
+ "http": {
+  "build-fail": 173,
+  "match": 195,
+  "output-diff": 114
+ },
+ "https": {
+  "match": 132,
+  "output-diff": 11
+ },
+ "stream": {
+  "match": 314,
+  "output-diff": 71
+ }
+}
