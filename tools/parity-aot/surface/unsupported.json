@@ -1,0 +1,14 @@
+{
+ "zlib.<107 top-level constants and aliases: Z_*, ZSTD_*, DEFLATE, GZIP, ...>.exists": "not a gap: they are non-enumerable on Node's zlib, so Node's ESM namespace (what the probe imports) omits them; thaw exposes them like Node CJS and @types/node",
+ "crypto.fips / prng / rng / pseudoRandomBytes .exists": "not a gap: same non-enumerable (deprecated) case as zlib; present on thaw like Node CJS",
+ "module.stripTypeScriptTypes": "needs a TypeScript type stripper inside the runtime bundle; not available to node:module",
+ "module.findPackageJSON": "declared but not implemented at runtime (needs node:fs/url in the node:module bundle, which would be pulled into every bundle that uses node:module)",
+ "v8.Serializer / Deserializer / DefaultSerializer / DefaultDeserializer": "V8 wire format; thaw's v8.serialize uses its own graph format, so a byte-compatible Serializer class is a separate project",
+ "v8.promiseHooks": "needs promise lifecycle hooks in the engine; a registration-only stub would silently never fire",
+ "v8.queryObjects": "needs heap enumeration by constructor prototype",
+ "dns.resolveTlsa / dns.promises.resolveTlsa": "the resolver has no TLSA record type",
+ "http2.performServerHandshake": "needs the raw-socket HTTP/2 server session API",
+ "process._events.* / process.argv index probes / process.moduleLoadList / process.features.typescript": "probe artifacts or Node-internal state (listener tables, loaded internal bindings)",
+ "arity: callback-typed or overloaded declarations": "an extra optional parameter breaks the native lowering (http.createServer) or overload resolution (fs.readFileSync); arity_sync.py lists them as skipped: child_process.exec/execFile/execFileSync, dns.lookup, crypto.scrypt/randomBytes/randomInt, assert.rejects/doesNotReject, fs.readFile/watch/stat/lstat/writeFile/readdir/readFileSync/readdirSync, fs/promises.readFile/readdir, http.createServer, timers/promises.setTimeout/setImmediate, zlib.zstdCompress/zstdDecompress",
+ "dns.lookupService service names": "dns.promises.lookupService maps only the common well-known TCP ports (no /etc/services reader); other ports return the number"
+}

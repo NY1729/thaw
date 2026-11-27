@@ -1,7 +1,33 @@
 {
+ "async_hooks": {
+  "match": 78,
+  "skipped": 5
+ },
+ "crypto": {
+  "match": 156,
+  "output-diff": 18,
+  "skipped": 401
+ },
+ "dns": {
+  "match": 88,
+  "output-diff": 3
+ },
+ "dns_promises": {
+  "match": 83,
+  "output-diff": 4
+ },
  "events": {
   "match": 48,
   "output-diff": 28
+ },
+ "fs": {
+  "match": 245,
+  "output-diff": 44,
+  "skipped": 8
+ },
+ "fs_promises": {
+  "match": 117,
+  "output-diff": 2
  },
  "globals": {
   "build-fail": 39,
@@ -14,12 +40,56 @@
   "match": 195,
   "output-diff": 114
  },
+ "http2": {
+  "match": 270,
+  "output-diff": 1,
+  "skipped": 118
+ },
  "https": {
   "match": 132,
   "output-diff": 11
  },
+ "module": {
+  "match": 171,
+  "output-diff": 12,
+  "skipped": 4
+ },
+ "os": {
+  "match": 171
+ },
+ "perf_hooks": {
+  "match": 38,
+  "skipped": 63
+ },
+ "process": {
+  "build-fail": 3,
+  "match": 518,
+  "output-diff": 159
+ },
  "stream": {
   "match": 314,
   "output-diff": 71
+ },
+ "sys": {
+  "match": 150,
+  "output-diff": 2,
+  "skipped": 6
+ },
+ "util": {
+  "match": 150,
+  "output-diff": 2,
+  "skipped": 6
+ },
+ "util_types": {
+  "match": 86
+ },
+ "v8": {
+  "match": 36,
+  "output-diff": 31,
+  "skipped": 16
+ },
+ "zlib": {
+  "match": 415,
+  "output-diff": 118
  }
 }
