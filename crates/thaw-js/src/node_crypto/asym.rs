@@ -832,8 +832,37 @@ pub(crate) fn crypto_import_key_json(bytes_hex: &str, is_der: bool, passphrase: 
     .to_string()
 }
 
+/// ECDSA over the digest the caller named (`createSign('sha256')` on a P-384 key signs a SHA-256 digest, as OpenSSL
+/// does); a digest this module cannot compute falls back to the curve's own digest.
+macro_rules! ecdsa_sign_with_digest {
+    ($key:expr, $alg:expr, $data:expr) => {{
+        use signature::hazmat::PrehashSigner;
+        match super::digest::digest_bytes($alg, $data) {
+            Some(hashed) => $key
+                .sign_prehash(&hashed)
+                .map_err(|error| error.to_string())?,
+            None => $key.sign($data),
+        }
+    }};
+}
+
+macro_rules! ecdsa_verify_with_digest {
+    ($curve:ident, $key:expr, $alg:expr, $data:expr, $signature:expr) => {{
+        use signature::hazmat::PrehashVerifier;
+        $curve::ecdsa::Signature::from_der($signature).is_ok_and(|sig| {
+            match super::digest::digest_bytes($alg, $data) {
+                Some(hashed) => $key.verify_prehash(&hashed, &sig).is_ok(),
+                None => $key.verify($data, &sig).is_ok(),
+            }
+        })
+    }};
+}
+
 fn digest_size_matches(digest_algorithm: &str) -> Result<(), String> {
-    if matches!(digest_algorithm, "sha1" | "sha256" | "sha384" | "sha512") {
+    if matches!(
+        digest_algorithm,
+        "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512"
+    ) {
         Ok(())
     } else {
         Err(format!("unsupported digest algorithm: {digest_algorithm}"))
@@ -858,15 +887,18 @@ pub(crate) fn crypto_asymmetric_sign_hex(
             sign_rsa_pkcs1v15(&key, digest_algorithm, data)
         }
         ParsedKey::EcPrivateP256(key) => {
-            let signature: p256::ecdsa::Signature = key.sign(data);
+            let signature: p256::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::EcPrivateP384(key) => {
-            let signature: p384::ecdsa::Signature = key.sign(data);
+            let signature: p384::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::EcPrivateP521(key) => {
-            let signature: p521::ecdsa::Signature = key.sign(data);
+            let signature: p521::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::Ed25519Private(key) => {
@@ -917,18 +949,12 @@ pub(crate) fn crypto_asymmetric_verify(
             digest_size_matches(digest_algorithm)?;
             verify_rsa_pkcs1v15(&key, digest_algorithm, data, signature)
         }
-        ParsedKey::EcPrivateP256(key) => p256::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP256(key) => p256::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
-        ParsedKey::EcPrivateP384(key) => p384::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP384(key) => p384::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
-        ParsedKey::EcPrivateP521(key) => p521::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| p521::ecdsa::VerifyingKey::from(&*key).verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP521(key) => p521::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
+        ParsedKey::EcPrivateP256(key) => ecdsa_verify_with_digest!(p256, key.verifying_key(), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP256(key) => ecdsa_verify_with_digest!(p256, &key, digest_algorithm, data, signature),
+        ParsedKey::EcPrivateP384(key) => ecdsa_verify_with_digest!(p384, key.verifying_key(), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP384(key) => ecdsa_verify_with_digest!(p384, &key, digest_algorithm, data, signature),
+        ParsedKey::EcPrivateP521(key) => ecdsa_verify_with_digest!(p521, &p521::ecdsa::VerifyingKey::from(&*key), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP521(key) => ecdsa_verify_with_digest!(p521, &key, digest_algorithm, data, signature),
         ParsedKey::Ed25519Private(key) => ed25519_dalek::Signature::from_slice(signature)
             .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
         ParsedKey::Ed25519Public(key) => ed25519_dalek::Signature::from_slice(signature)
@@ -972,7 +998,9 @@ fn sign_rsa_pkcs1v15(
     data: &[u8],
 ) -> Result<Vec<u8>, String> {
     match digest_algorithm {
+        "md5" => rsa_pkcs1v15_sign_for!(key, md5::Md5, data),
         "sha1" => rsa_pkcs1v15_sign_for!(key, sha1::Sha1, data),
+        "sha224" => rsa_pkcs1v15_sign_for!(key, sha2::Sha224, data),
         "sha256" => rsa_pkcs1v15_sign_for!(key, sha2::Sha256, data),
         "sha384" => rsa_pkcs1v15_sign_for!(key, sha2::Sha384, data),
         "sha512" => rsa_pkcs1v15_sign_for!(key, sha2::Sha512, data),
@@ -997,7 +1025,9 @@ fn verify_rsa_pkcs1v15(
     signature: &[u8],
 ) -> bool {
     match digest_algorithm {
+        "md5" => rsa_pkcs1v15_verify_for!(key, md5::Md5, data, signature),
         "sha1" => rsa_pkcs1v15_verify_for!(key, sha1::Sha1, data, signature),
+        "sha224" => rsa_pkcs1v15_verify_for!(key, sha2::Sha224, data, signature),
         "sha256" => rsa_pkcs1v15_verify_for!(key, sha2::Sha256, data, signature),
         "sha384" => rsa_pkcs1v15_verify_for!(key, sha2::Sha384, data, signature),
         "sha512" => rsa_pkcs1v15_verify_for!(key, sha2::Sha512, data, signature),
@@ -1019,7 +1049,9 @@ fn sign_rsa_pss(
     data: &[u8],
 ) -> Result<Vec<u8>, String> {
     match digest_algorithm {
+        "md5" => rsa_pss_sign_for!(key, md5::Md5, data),
         "sha1" => rsa_pss_sign_for!(key, sha1::Sha1, data),
+        "sha224" => rsa_pss_sign_for!(key, sha2::Sha224, data),
         "sha256" => rsa_pss_sign_for!(key, sha2::Sha256, data),
         "sha384" => rsa_pss_sign_for!(key, sha2::Sha384, data),
         "sha512" => rsa_pss_sign_for!(key, sha2::Sha512, data),
@@ -1044,7 +1076,9 @@ fn verify_rsa_pss(
     signature: &[u8],
 ) -> Result<bool, String> {
     match digest_algorithm {
+        "md5" => rsa_pss_verify_for!(key, md5::Md5, data, signature),
         "sha1" => rsa_pss_verify_for!(key, sha1::Sha1, data, signature),
+        "sha224" => rsa_pss_verify_for!(key, sha2::Sha224, data, signature),
         "sha256" => rsa_pss_verify_for!(key, sha2::Sha256, data, signature),
         "sha384" => rsa_pss_verify_for!(key, sha2::Sha384, data, signature),
         "sha512" => rsa_pss_verify_for!(key, sha2::Sha512, data, signature),
