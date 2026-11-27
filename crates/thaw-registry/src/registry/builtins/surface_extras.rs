@@ -4,6 +4,8 @@ pub(super) fn extra(module: &str) -> Option<&'static str> {
     match module {
         "module" => Some(include_str!("surface_extras/module.js")),
         "v8" => Some(include_str!("surface_extras/v8.js")),
+        "fs" => Some(include_str!("surface_extras/fs.js")),
+        "fs/promises" => Some(include_str!("surface_extras/fs_promises.js")),
         "dns/promises" => Some(include_str!("surface_extras/dns_promises.js")),
         "util" => Some(include_str!("surface_extras/util.js")),
         _ => None,

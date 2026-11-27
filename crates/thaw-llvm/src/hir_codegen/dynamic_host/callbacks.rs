@@ -3083,6 +3083,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     | HirType::Bool
                     | HirType::Null
                     | HirType::Undefined
+                    | HirType::Json
                     | HirType::Object(_)
                     | HirType::Array(_)
                     | HirType::Tuple(_)
@@ -3166,6 +3167,8 @@ impl<'ctx> HirCompiler<'ctx> {
             let matches = match scalar {
                 HirType::Undefined => is_undefined,
                 HirType::Null => is_null,
+                // `Json` accepts any value: a union naming it matches here when no earlier member did.
+                HirType::Json => self.context.bool_type().const_int(1, false),
                 HirType::F64 => self.compile_typeof_matches(typeof_string, "number")?,
                 HirType::Str => self.compile_typeof_matches(typeof_string, "string")?,
                 HirType::Bool => self.compile_typeof_matches(typeof_string, "boolean")?,
@@ -3577,7 +3580,10 @@ impl<'ctx> HirCompiler<'ctx> {
             // ever calls it or not).
             HirType::Union(elements) => {
                 let value = self.compile_json_to_union_result(json, elements)?;
-                self.compile_destroy_decoded_owned_json(json, ty)?;
+                // ponytail: a `Json` member aliases the input box, so it is not destroyed (small leak); free per-member if it matters.
+                if !elements.contains(&HirType::Json) {
+                    self.compile_destroy_decoded_owned_json(json, ty)?;
+                }
                 Ok(value)
             },
             HirType::Optional(payload) => {
