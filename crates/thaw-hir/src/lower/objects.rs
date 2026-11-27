@@ -4245,6 +4245,11 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
                         )
                     }
+                    // `typeof buf.at` / `const f = arr.fill`: a method (or any other non-`length`
+                    // property) of an array or byte buffer read as a value.
+                    HirType::Array(_) | HirType::Tuple(_) | HirType::Bytes => {
+                        self.lower_array_member_as_value(obj, &prop.sym)
+                    }
                     other => Err(format!(
                         "unsupported property access `.{}` on a value of type {other:?}",
                         prop.sym
@@ -4253,6 +4258,13 @@ impl<'a> FnLowerer<'a> {
             }
             _ => Err("unsupported property access".into()),
         }
+    }
+
+    /// Reads a non-`length` property of an array / byte buffer as a value through the dynamic
+    /// (JS realm) path, so a method such as `buf.at` is the realm's function value.
+    fn lower_array_member_as_value(&mut self, receiver: HirExpr, name: &str) -> Result<HirExpr, String> {
+        let receiver = self.coerce_to_declared(&HirType::JsValue, receiver)?;
+        self.lower_dynamic_value_property_read(receiver, HirExpr::Lit(HirLit::Str(name.to_string())))
     }
 
     fn lower_optional_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
