@@ -79,6 +79,34 @@ struct PendingAllocation {
     serial: u64,
 }
 
+/// Hasher for sets keyed by addresses: one multiply, high bits folded down because addresses are
+/// aligned and hashbrown indexes by the low bits. Not DoS-resistant, which a native address
+/// set does not need.
+#[derive(Default)]
+struct AddrHasher(u64);
+
+impl std::hash::Hasher for AddrHasher {
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 29)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type AddrSet = HashSet<usize, std::hash::BuildHasherDefault<AddrHasher>>;
+
+/// Capacity of the pending-record buffer kept across resets (24 bytes each).
+const RETAINED_PENDING_RECORDS: usize = 128 * 1024;
+
 /// More pending allocations than this are folded into `ALLOCATIONS` before a lookup; fewer are
 /// scanned in place.
 const PENDING_SCAN_LIMIT: usize = 32;
@@ -93,7 +121,6 @@ thread_local! {
     /// a reset sorts them once and keeps just the live ones.
     static PENDING_ALLOCATIONS: RefCell<Vec<PendingAllocation>> = const { RefCell::new(Vec::new()) };
     static NEXT_ALLOCATION_ID: Cell<u64> = const { Cell::new(0) };
-    static GRAPH_EPOCH: Cell<Option<u64>> = const { Cell::new(Some(0)) };
     static ROOTS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static RECLAIMED: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
     static REFERENCES: RefCell<BTreeMap<usize, Vec<usize>>> = const { RefCell::new(BTreeMap::new()) };
@@ -574,9 +601,12 @@ pub fn snapshot_native_graph() -> Result<NativeGraphSnapshot, SnapshotError> {
             .map(|pinned| pinned.clone())
             .map_err(|_| SnapshotError::BorrowConflict)
     })?;
-    let epoch = GRAPH_EPOCH
-        .with(Cell::get)
-        .ok_or(SnapshotError::IdentityUnavailable)?;
+    // Every traced allocation takes the next serial, so the serial counter is the epoch; it
+    // stops advancing only if the counter is exhausted, when identities are unavailable too.
+    let epoch = NEXT_ALLOCATION_ID.with(Cell::get);
+    if epoch == u64::MAX {
+        return Err(SnapshotError::IdentityUnavailable);
+    }
     Ok(NativeGraphSnapshot {
         epoch,
         allocations,
@@ -700,7 +730,6 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
                 serial,
             });
         });
-        GRAPH_EPOCH.with(|epoch| epoch.set(epoch.get().and_then(|value| value.checked_add(1))));
     }
     pointer
 }
@@ -927,8 +956,10 @@ fn reset_inner() {
         STACK_ROOTS.with(|words| {
             pending.extend(words.borrow().iter().flat_map(|&w| [w, w.wrapping_sub(1)]))
         });
-        let mut live = HashSet::new();
-        let mut owners = HashSet::new();
+        let phase = stats::stats_enabled().then(std::time::Instant::now);
+        let mut live = AddrSet::default();
+        let mut owners = AddrSet::default();
+        let mut generations = HashSet::new();
         while let Some(pointer) = pending.pop() {
             let found = nearest(pointer);
             if owners.insert(pointer) {
@@ -958,6 +989,7 @@ fn reset_inner() {
             if pointer - start >= size || !live.insert(start) {
                 continue;
             }
+            generations.insert(record.generation);
             for offset in (0..size.saturating_sub(std::mem::size_of::<usize>() - 1))
                 .step_by(std::mem::size_of::<usize>())
             {
@@ -969,10 +1001,10 @@ fn reset_inner() {
                 }
             }
         }
-        let generations = live
-            .iter()
-            .filter_map(|&start| nearest(start).map(|(_, record)| record.generation))
-            .collect::<HashSet<_>>();
+        if let Some(phase) = phase {
+            stats::MARK_NS.with(|c| c.set(c.get() + phase.elapsed().as_nanos() as u64));
+        }
+        let phase = stats::stats_enabled().then(std::time::Instant::now);
         REFERENCES.with(|references| {
             references
                 .borrow_mut()
@@ -1052,6 +1084,16 @@ fn reset_inner() {
         stats::RECLAIMED_BYTES
             .with(|c| c.set(c.get() + RECLAIMED.with(|r| ranges_bytes(&r.borrow()))));
         *allocations = survivors.into_iter().collect();
+        // Keep a modest buffer for the next cycle's records: regrowing it from empty (and
+        // faulting its pages in again) every reset costs more than the 3 MB it holds.
+        fresh.clear();
+        fresh.shrink_to(RETAINED_PENDING_RECORDS);
+        PENDING_ALLOCATIONS.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            if pending.is_empty() {
+                *pending = std::mem::take(&mut fresh);
+            }
+        });
         RETAINED.with(|retained| {
             let mut retained = retained.borrow_mut();
             let current = retained.len();
@@ -1078,6 +1120,9 @@ fn reset_inner() {
                 record.generation = mapping[&record.generation];
             }
         });
+        if let Some(phase) = phase {
+            stats::SWEEP_NS.with(|c| c.set(c.get() + phase.elapsed().as_nanos() as u64));
+        }
     });
     strings::reset_lengths(true);
     let hooks = stats::stats_enabled().then(std::time::Instant::now);
