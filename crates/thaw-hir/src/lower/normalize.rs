@@ -3158,3 +3158,100 @@ pub fn enum_keys_as_literals(module: &Module) -> Module {
     result.visit_mut_with(&mut Rewrite { literal_union: &literal_union, values: &values });
     result
 }
+
+/// JS programs: a `const o = { ... }` record that is handed to a closure (`f(o)` where `f` is a
+/// local/parameter/array-element callee, not a top-level function declaration whose parameter is
+/// inferred from its call sites) escapes into an `any` slot. A fixed record would be copied there;
+/// annotating the binding `any` makes it the shared Json reference object, as in `const o: any = {..}`.
+/// Bindings that never escape keep the fixed-record layout.
+pub fn annotate_escaping_record_bindings(module: &Module) -> Module {
+    use std::collections::HashSet;
+    use swc_ecma_ast::*;
+    use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+    #[derive(Default)]
+    struct Collect {
+        functions: HashSet<String>,
+        locals: HashSet<String>,
+        escaping: HashSet<String>,
+        depth: usize,
+    }
+    impl Visit for Collect {
+        fn visit_fn_decl(&mut self, decl: &FnDecl) {
+            if self.depth == 0 {
+                self.functions.insert(decl.ident.sym.to_string());
+            }
+            self.depth += 1;
+            decl.function.visit_with(self);
+            self.depth -= 1;
+        }
+        fn visit_arrow_expr(&mut self, arrow: &ArrowExpr) {
+            self.depth += 1;
+            arrow.visit_children_with(self);
+            self.depth -= 1;
+        }
+        fn visit_binding_ident(&mut self, binding: &BindingIdent) {
+            self.locals.insert(binding.id.sym.to_string());
+        }
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            call.visit_children_with(self);
+            let Callee::Expr(callee) = &call.callee else { return };
+            let closure_callee = match callee.as_ref() {
+                Expr::Ident(ident) => Some(ident.sym.to_string()),
+                Expr::Member(member) if matches!(member.prop, MemberProp::Computed(_)) => match member.obj.as_ref() {
+                    Expr::Ident(ident) => Some(ident.sym.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if closure_callee.is_none() {
+                return;
+            }
+            for arg in &call.args {
+                if let (None, Expr::Ident(ident)) = (arg.spread, arg.expr.as_ref()) {
+                    self.escaping.insert(format!("{}\u{0}{}", closure_callee.as_ref().unwrap(), ident.sym));
+                }
+            }
+        }
+    }
+    let mut collect = Collect::default();
+    module.visit_with(&mut collect);
+    // `callee\0arg` pairs: keep the argument when the callee is a local closure, not a declaration.
+    let escaping: HashSet<String> = collect
+        .escaping
+        .iter()
+        .filter_map(|pair| {
+            let (callee, arg) = pair.split_once('\u{0}')?;
+            (collect.locals.contains(callee) && !collect.functions.contains(callee)).then(|| arg.to_string())
+        })
+        .collect();
+    if escaping.is_empty() {
+        return module.clone();
+    }
+    struct Annotate<'a>(&'a HashSet<String>);
+    impl VisitMut for Annotate<'_> {
+        fn visit_mut_var_decl(&mut self, var: &mut VarDecl) {
+            var.visit_mut_children_with(self);
+            if var.kind == VarDeclKind::Var || var.declare {
+                return;
+            }
+            for declarator in &mut var.decls {
+                let Pat::Ident(binding) = &mut declarator.name else { continue };
+                if binding.type_ann.is_none()
+                    && self.0.contains(binding.id.sym.as_ref())
+                    && matches!(declarator.init.as_deref(), Some(Expr::Object(_)))
+                {
+                    binding.type_ann = Some(Box::new(TsTypeAnn {
+                        span: swc_common::DUMMY_SP,
+                        type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                            span: swc_common::DUMMY_SP,
+                            kind: TsKeywordTypeKind::TsAnyKeyword,
+                        })),
+                    }));
+                }
+            }
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Annotate(&escaping));
+    module
+}
