@@ -535,7 +535,7 @@ fn peer_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
         let Some(source) = PEER_SOURCES.with(|s| s.borrow().get(spec).cloned()) else {
             return Ok(None);
         };
-        register_bundle(spec.to_string(), &source).map_err(|e| js_error(it, &e.to_string()))?;
+        register_declared(spec, &source).map_err(|e| js_error(it, &e.to_string()))?;
     }
     let Some((handle, path)) = resolve_export(spec, "") else {
         return Ok(None);
@@ -8217,10 +8217,29 @@ fn load_declared(name: &str) {
     if std::env::var_os("THAW_JS_TRACE").is_some() {
         eprintln!("thaw-js: lazily loading package `{name}`");
     }
-    if let Err(e) = register_bundle(name.to_string(), &source) {
+    if let Err(e) = register_declared(name, &source) {
         eprintln!("thaw-js: failed to load package `{name}`: {e}");
         LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());
     }
+}
+
+/// Loads a declared package on first use. `THAW_TIMINGS=1` prints one row per lazy load (a table of package and ms).
+fn register_declared(name: &str, source: &str) -> Result<(), HostError> {
+    let timed = std::env::var_os("THAW_TIMINGS").is_some();
+    let start = std::time::Instant::now();
+    let result = register_bundle(name.to_string(), source);
+    if timed {
+        thread_local!(static HEADER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+        if !HEADER.with(|h| h.replace(true)) {
+            eprintln!("thaw-lazy-load: {:<40} {:>10}", "package", "load ms");
+        }
+        let ok = if result.is_ok() { "" } else { " (failed)" };
+        eprintln!(
+            "thaw-lazy-load: {name:<40} {:>10.2}{ok}",
+            start.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    result
 }
 
 /// Load `src` as package `name` and register it (the body of [`thaw_tjs_register`], also used by the peer

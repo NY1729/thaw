@@ -239,6 +239,19 @@ fn generates_load_script_call_per_bundle() {
     ];
     let lazy = generate_module_init_with(&bundles, true);
     assert!(lazy.contains("declareThawJs(\"left-pad\"") && !lazy.contains("loadThawJs("), "{lazy}");
+    for impure in [
+        "process.on('exit', f);",
+        "globalThis.foo = 1;",
+        "Array.prototype.last = function () {};",
+        "Object.defineProperty(globalThis, 'x', {});",
+    ] {
+        assert!(!pure_at_load(impure), "{impure}");
+        let b = [ModuleBundle { package_name: "bad", js_source: impure }];
+        assert!(generate_module_init_with(&b, true).contains("loadThawJs(\"bad\""));
+    }
+    for pure in ["globalThis.__thaw_bundle_exports = 1;\nif (globalThis.x == 1) {}", " * Object.prototype.a = 1", "var a = globalThis.Intl; MyArray.prototype.x = 1;"] {
+        assert!(pure_at_load(pure), "{pure}");
+    }
     let realm = [ModuleBundle { package_name: "path/posix", js_source: "/* __thaw_bundle_realm */" }];
     assert!(generate_module_init_with(&realm, true).contains("loadThawJs(\"path/posix\""));
     let init = generate_module_init(&bundles);
