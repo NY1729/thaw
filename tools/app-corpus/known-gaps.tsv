@@ -17,6 +17,6 @@ task-runner.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot infer Promise t
 text-templating.mjs	BUILD-FAIL	error: unsupported on thaw-js: `.map()` requires a homogeneous array, got Json
 timers-scheduler.mjs	DIFF	stdout line 3: node=AbortError ABORT_ERR thaw=[ 'micro', 'tick', 'immediate' ] imm
 ts-inventory.ts	BUILD-FAIL	error: unsupported on thaw-js: unsupported type annotation TsTypeQuery(TsTypeQuery { span: 30222..30237, expr_name: TsEntityName(Ident(Ident { span: 30229..30237, ctxt: #0, sym: "Category", optional: 
-url-router.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot access `.groups` because union member Nullable(Array(Optional(Str))) is not an object
+url-router.mjs	BUILD-FAIL	error: unsupported on thaw-js: conditional expression branches have incompatible types JsValue and Union([Object([("status", F64), ("body", Json)]), Object([("status", F64), ("body", Null)])])
 worker-eval-channel.mjs	DIFF	stdout line 1: node=[ { echo: 2 }, { echo: 4 }, { echo: 6 }, { echo: 8 } ] 10 0 thaw=[] 0 undefined
 worker-fanout.mjs	BUILD-FAIL	error: unsupported on thaw-js: cannot infer the return type of function `__thawmod0_isPrime`; add an explicit return annotation at bytes 24807..24938
