@@ -6180,6 +6180,20 @@ fn implicit_any_object_literal_that_gains_a_property_later_is_a_growable_any() {
 }
 
 #[test]
+fn top_level_const_arrow_params_are_inferred_from_call_sites_in_js_programs() {
+    let module = thaw_parser::parse_typescript(
+        "const sq = (x) => x * x; function main(): void { console.log(sq(4)); }",
+    )
+    .expect("parse error");
+    crate::set_implicit_any(true);
+    let result = lower_module(&module);
+    crate::set_implicit_any(false);
+    let program = result.expect("lowers");
+    let sq = program.functions.iter().find(|f| f.name == "sq").expect("sq is a function declaration");
+    assert_eq!(sq.params[0].ty, HirType::F64);
+}
+
+#[test]
 fn truthy_narrowed_nullable_regex_match_member_reads_groups() {
     let program = lower(
         r#"function f(re: RegExp, s: string, ok: boolean): string {

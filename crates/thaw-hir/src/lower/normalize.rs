@@ -3158,3 +3158,80 @@ pub fn enum_keys_as_literals(module: &Module) -> Module {
     result.visit_mut_with(&mut Rewrite { literal_union: &literal_union, values: &values });
     result
 }
+
+/// JS programs: a top-level `const f = (a, b) => ...` with an untyped parameter becomes
+/// `function f(a, b) { ... }`, so its parameters are inferred from call sites like any function
+/// declaration (a closure parameter is otherwise `any`, which copies records passed to it).
+/// Arrows that use `this`/`arguments`/`new.target` (lexical in an arrow) are left alone.
+pub fn hoist_top_level_const_arrows(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    use swc_ecma_visit::{Visit, VisitWith};
+    struct Lexical(bool);
+    impl Visit for Lexical {
+        fn visit_this_expr(&mut self, _: &ThisExpr) {
+            self.0 = true;
+        }
+        fn visit_meta_prop_expr(&mut self, _: &MetaPropExpr) {
+            self.0 = true;
+        }
+        fn visit_ident(&mut self, ident: &Ident) {
+            self.0 |= ident.sym == *"arguments";
+        }
+        fn visit_function(&mut self, _: &Function) {}
+    }
+    // Calls of `name` that pass an object/array literal: a function declaration whose `any`
+    // parameter receives different record shapes mishandles array fields, which an arrow did not.
+    struct LiteralCalls<'a> {
+        name: &'a str,
+        count: usize,
+    }
+    impl Visit for LiteralCalls<'_> {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if matches!(&call.callee, Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Ident(i) if i.sym == self.name))
+                && call.args.iter().any(|arg| matches!(arg.expr.as_ref(), Expr::Object(_) | Expr::Array(_)))
+            {
+                self.count += 1;
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let original = module.clone();
+    let mut module = module.clone();
+    for item in &mut module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) = item else { continue };
+        if var.kind != VarDeclKind::Const || var.declare {
+            continue;
+        }
+        let [declarator] = var.decls.as_slice() else { continue };
+        let Pat::Ident(binding) = &declarator.name else { continue };
+        let Some(Expr::Arrow(arrow)) = declarator.init.as_deref() else { continue };
+        let untyped = |pat: &Pat| matches!(pat, Pat::Ident(b) if b.type_ann.is_none());
+        if binding.type_ann.is_some()
+            || arrow.is_generator
+            || arrow.type_params.is_some()
+            || !arrow.params.iter().any(untyped)
+        {
+            continue;
+        }
+        let mut lexical = Lexical(false);
+        arrow.body.visit_with(&mut lexical);
+        for param in &arrow.params {
+            param.visit_with(&mut lexical);
+        }
+        if lexical.0 {
+            continue;
+        }
+        let mut calls = LiteralCalls { name: binding.id.sym.as_ref(), count: 0 };
+        original.visit_with(&mut calls);
+        if calls.count > 1 {
+            continue;
+        }
+        let Some(function) = rhs_function(&Expr::Arrow(arrow.clone())) else { continue };
+        *item = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
+            ident: binding.id.clone(),
+            declare: false,
+            function: Box::new(function),
+        })));
+    }
+    module
+}
