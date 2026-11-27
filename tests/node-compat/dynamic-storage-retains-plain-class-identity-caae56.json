@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage retains plain class identity",
+  "expect": "matched",
+  "source": "class Plain { value: number = 1; } function main(): void { const source = new Plain(); const values: Plain[] = []; const exposed: any = values; exposed[0] = source; console.log(values[0] === source, values[0] instanceof Plain); const object: any = new Function(\"return {value: 2}\")(); exposed[1] = object; console.log(values[1] === object, values[1] instanceof Plain); }"
+}

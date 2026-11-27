@@ -1,0 +1,5 @@
+{
+  "name": "assert strict success",
+  "expect": "matched",
+  "source": "import { deepStrictEqual, strictEqual } from 'node:assert'; function main(): void { strictEqual(1 + 1, 2); deepStrictEqual({ value: [1, 2] }, { value: [1, 2] }); console.log('ok'); }"
+}

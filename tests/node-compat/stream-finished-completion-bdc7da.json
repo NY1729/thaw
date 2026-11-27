@@ -1,0 +1,5 @@
+{
+  "name": "stream finished completion",
+  "expect": "matched",
+  "source": "import { Readable, finished } from 'node:stream'; async function main(): Promise<void> { const input = Readable.from(['done']); const pending = new Promise<void>((resolve, reject) => { finished(input, (error: unknown): void => { if (error) reject(error); else resolve(); }); }); input.resume(); await pending; console.log('finished'); }"
+}

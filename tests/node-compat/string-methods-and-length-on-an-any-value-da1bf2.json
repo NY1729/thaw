@@ -1,0 +1,5 @@
+{
+  "name": "string methods and length on an any value",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const o: any = { s: \"Ab\", n: 3.14159 };\n  console.log(o.s.toLowerCase(), o.s.toUpperCase(), o.s.length, o.s.indexOf(\"b\"), o.s.split(\"b\").length);\n  console.log(o.s.slice(1), o.s.trim(), o.s.at(0), o.n.toFixed(2), o.s.charAt(1), o.s.padStart(4, \"-\"));\n  const p: any = \"xyz\";\n  console.log(p.toUpperCase(), p.includes(\"y\"), p.replace(\"y\", \"Y\"), p.startsWith(\"x\"));\n}\n"
+}

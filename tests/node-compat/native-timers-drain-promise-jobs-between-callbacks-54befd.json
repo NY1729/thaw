@@ -1,0 +1,5 @@
+{
+  "name": "native timers drain promise jobs between callbacks",
+  "expect": "matched",
+  "source": "function main(): void {\n  setTimeout(() => { console.log(\"a\"); Promise.resolve().then(() => console.log(\"a micro\")); }, 1);\n  setTimeout(() => { console.log(\"b\"); Promise.resolve().then(() => console.log(\"b micro\")); }, 1);\n  setTimeout(() => console.log(\"c\"), 1);\n  Promise.resolve().then(() => console.log(\"main micro\"));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "infer string replace callback params",
+  "expect": "matched",
+  "source": "function main(): void { console.log(\"abc\".replace(/b/, (m) => m.toUpperCase()), \"a-b\".replace(/-(\\w)/g, (_m, c) => c.toUpperCase()), \"x1y2\".replaceAll(/\\d/g, function (d) { return \"<\" + d + \">\"; })); }"
+}

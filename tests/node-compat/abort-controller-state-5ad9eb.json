@@ -1,0 +1,5 @@
+{
+  "name": "abort controller state",
+  "expect": "matched",
+  "source": "function main(): void { const controller = new AbortController(); console.log(controller.signal.aborted); controller.abort('stop'); console.log(controller.signal.aborted, controller.signal.reason); }"
+}

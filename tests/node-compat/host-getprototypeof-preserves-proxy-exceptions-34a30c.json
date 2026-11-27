@@ -1,0 +1,5 @@
+{
+  "name": "host getPrototypeOf preserves proxy exceptions",
+  "expect": "matched",
+  "source": "function main():void {const proxy:any=new Function(\"return new Proxy({}, {getPrototypeOf(){throw new Error('prototype failed');}})\")();try{Object.getPrototypeOf(proxy);console.log(\"accepted\");}catch(e:any){console.log(e.message);} }"
+}

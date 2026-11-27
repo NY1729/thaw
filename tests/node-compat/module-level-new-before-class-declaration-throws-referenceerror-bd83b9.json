@@ -1,0 +1,5 @@
+{
+  "name": "module level new before class declaration throws ReferenceError",
+  "expect": "matched",
+  "source": "function main(): void {}\ntry { const a = new D(); console.log(a.v); } catch (e) { console.log((e as Error).name, (e as Error).message); }\nclass D { v = 1; }\nconsole.log(new D().v);"
+}

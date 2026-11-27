@@ -1,0 +1,5 @@
+{
+  "name": "class fields limits: undefined through returns, containers and literals",
+  "expect": "matched",
+  "source": "class P { n!: number; s!: string; set(n: number): void { this.n = n; } }\nfunction h(p: P): number { return p.n }\nconst ar = (p: P): number => p.n;\nconst ar2 = (p: P): number => { return p.n; };\nfunction touch(p: P): number { p.n = 5; return p.n; }\nfunction main(): void {\n  const p = new P();\n  console.log(h(p), ar(p), ar2(p));\n  const arr: number[] = [];\n  arr.push(p.n);\n  console.log(arr);\n  const m = new Map<string, number>();\n  m.set(\"k\", p.n);\n  console.log(m);\n  console.log({ n: p.n });\n  const o = { n: p.n, s: p.s };\n  console.log(o);\n  const ps = [new P(), new P()];\n  ps[0].set(3);\n  const mapped = ps.map(x => x.n);\n  console.log(mapped);\n  console.log(Math.max(...mapped));\n  console.log(Math.max(...ps.map(x => x.n)));\n  const v = p.n;\n  console.log(v);\n  let w: number = p.n;\n  console.log(w, typeof w);\n  const z = [p.n, 1];\n  console.log(z);\n  const q = new P();\n  console.log(touch(q), q.n);\n  q.set(9);\n  console.log(h(q), q);\n}\n"
+}

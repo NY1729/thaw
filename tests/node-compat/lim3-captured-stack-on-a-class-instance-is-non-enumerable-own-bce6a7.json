@@ -1,0 +1,5 @@
+{
+  "name": "lim3 captured stack on a class instance is non-enumerable own",
+  "expect": "matched",
+  "source": "class Q { v: number = 1; } function main(): void { const q = new Q(); Error.captureStackTrace(q); console.log(Object.keys(q), Object.getOwnPropertyNames(q), JSON.stringify(q), typeof (q as any).stack); }"
+}

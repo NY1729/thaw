@@ -1,0 +1,5 @@
+{
+  "name": "r3b inline promise chain prints its state",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(Promise.resolve(2).then((v) => v), Promise.reject(1).catch(() => {}), Promise.resolve(3));\n  const t = setTimeout(() => {}, 5);\n  clearTimeout(t);\n  console.log(t.hasRef());\n}"
+}

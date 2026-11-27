@@ -1,0 +1,5 @@
+{
+  "name": "invalid date inspect",
+  "expect": "matched",
+  "source": "function main(): void { const d = new Date(NaN); console.log(d, [d], { d }); }"
+}

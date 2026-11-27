@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure async arrow return write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const f = async () => b;\n  f().then((q) => { q[0] = 65; console.log(b.toString(), q[1]); });\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage constructor arguments retain actual values",
+  "expect": "matched",
+  "source": "class Holder { constructor(value: number[], original: any) { const exposed: any = value; exposed[0] = original; } } function main(): void { const values: number[] = []; const original: any = {x: 7}; const holder = new Holder(values, original); console.log(values[0] === original, typeof values[0], values[0].x); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "r2d Promise.allSettled settles concurrently with an unrelated pending timer",
+  "expect": "matched",
+  "source": "function sleep(ms: number): Promise<void> {\n  return new Promise<void>((r) => setTimeout(r, ms));\n}\nasync function worker(n: string, ms: number): Promise<string> {\n  await sleep(ms);\n  return n;\n}\nasync function fail(ms: number): Promise<string> {\n  await sleep(ms);\n  throw new Error(\"bad\");\n}\nasync function run(): Promise<void> {\n  worker(\"slow\", 400);\n  const t = Date.now();\n  const r = await Promise.allSettled([worker(\"a\", 30), worker(\"b\", 5), fail(10)]);\n  console.log(Date.now() - t < 200);\n  console.log(r.map((x) => x.status));\n  console.log(r[0], r[1]);\n  console.log((r[2] as PromiseRejectedResult).reason.message);\n}\nfunction main(): void {\n  run();\n}\n"
+}

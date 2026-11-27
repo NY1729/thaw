@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage retains self references in typed arrays",
+  "expect": "matched",
+  "source": "function main(): void { const xs: number[][] = []; const a: any = xs; a[0] = a; console.log(a[0] === a, xs[0] === xs, typeof xs[0]); }"
+}

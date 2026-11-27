@@ -1,0 +1,5 @@
+{
+  "name": "any class any param of function variable receives a class value",
+  "expect": "matched",
+  "source": "class C { x = 1; }\nconst show = (K: any) => typeof K;\nfunction f1(): number { return 1; }\nfunction main(): void { console.log(show(f1), show({ a: 1 }), show(5), show(C), show(() => 2), show(Date), show(Map)); const k: any = C; console.log(show(k)); }\n"
+}

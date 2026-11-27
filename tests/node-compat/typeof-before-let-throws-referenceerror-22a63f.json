@@ -1,0 +1,5 @@
+{
+  "name": "typeof before let throws ReferenceError",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { console.log(typeof w); } catch (e) { console.log((e as Error).name); }\n  let w = 1;\n  console.log(typeof w);\n}"
+}

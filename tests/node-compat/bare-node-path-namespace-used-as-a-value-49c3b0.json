@@ -1,0 +1,5 @@
+{
+  "name": "bare node:path namespace used as a value",
+  "expect": "matched",
+  "source": "import * as path from 'node:path';\nconst p: any = path;\nfunction main(): void {\n  console.log(typeof p.default, typeof p.join, p.default.join('a', 'b'), typeof p.posix);\n}"
+}

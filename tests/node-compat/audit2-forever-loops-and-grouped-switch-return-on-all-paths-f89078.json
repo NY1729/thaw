@@ -1,0 +1,5 @@
+{
+  "name": "audit2 forever loops and grouped switch return on all paths",
+  "expect": "matched",
+  "source": "function h(n: number): string { while (true) { if (n++ > 3) return \"w\" + n; } }\nfunction f(n: number): string { for (;;) { if (n > 2) return \"x\"; n++; } }\nfunction g(n: number): string { do { if (n > 2) return \"y\"; n++; } while (true); }\nfunction s(n: number): string { switch (n) { case 1: case 2: return \"12\"; default: return \"d\"; } }\nfunction main(): void { console.log(h(0), f(0), g(0), s(1), s(2), s(3)); }"
+}

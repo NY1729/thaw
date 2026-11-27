@@ -1,0 +1,5 @@
+{
+  "name": "error message assignment is observable",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"x\");\n  e.message = \"changed\";\n  console.log(e.message, String(e), e.stack!.split(\"\\n\")[0]);\n}\n"
+}

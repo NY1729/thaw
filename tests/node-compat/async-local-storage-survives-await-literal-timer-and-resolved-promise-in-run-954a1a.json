@@ -1,0 +1,5 @@
+{
+  "name": "async local storage survives await literal, timer and resolved promise in run",
+  "expect": "matched",
+  "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function awaitLit(): Promise<void> { await 1; rec('await-lit'); }\nasync function awaitTimer(): Promise<void> { await sleep(2); rec('await-timer'); await Promise.resolve(); rec('await-resolved'); }\nasync function main(): Promise<void> {\n  await als.run('A', async (): Promise<void> => { rec('sync'); await awaitLit(); await awaitTimer(); rec('end'); });\n  rec('after-run');\n}\n"
+}

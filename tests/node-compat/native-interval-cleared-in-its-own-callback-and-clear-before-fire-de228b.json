@@ -1,0 +1,5 @@
+{
+  "name": "native interval cleared in its own callback and clear before fire",
+  "expect": "matched",
+  "source": "function main(): void {\n  let n = 0;\n  const id = setInterval(() => {\n    n++;\n    console.log(\"tick \" + n);\n    if (n === 3) { clearInterval(id); console.log(\"cleared\"); }\n  }, 5);\n  const gone = setTimeout(() => console.log(\"never\"), 3);\n  clearTimeout(gone);\n  const imm = setImmediate(() => console.log(\"never imm\"));\n  clearImmediate(imm);\n}\n"
+}

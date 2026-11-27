@@ -1,0 +1,5 @@
+{
+  "name": "syntaxgaps delete optional chain",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: any = { a: { b: 1, c: 2 }, k: 5 };\n  console.log(delete o?.a.b, JSON.stringify(o));\n  console.log(delete o?.[\"k\"], JSON.stringify(o));\n  const n: any = null;\n  console.log(delete n?.a.b, delete n?.[\"k\"]);\n}\n"
+}

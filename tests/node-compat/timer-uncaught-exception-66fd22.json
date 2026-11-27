@@ -1,0 +1,5 @@
+{
+  "name": "timer uncaught exception",
+  "expect": "matched",
+  "source": "function main(): void { process.once('uncaughtException', (error) => console.log(error.message)); setTimeout(() => { throw new Error('timer boom'); }, 0); }"
+}

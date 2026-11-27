@@ -1,0 +1,5 @@
+{
+  "name": "Object.hasOwn sees a shadowed inherited static field",
+  "expect": "matched",
+  "source": "class Parent { static value: number = 1; }\nclass Child extends Parent {}\nfunction main(): void {\n    Child.value = 2;\n    console.log(Parent.value, Child.value, Object.hasOwn(Child, \"value\"));\n}\n"
+}

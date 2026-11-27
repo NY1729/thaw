@@ -1,0 +1,5 @@
+{
+  "name": "bigint followups: union and nullable members compare heap-backed bigints by value",
+  "expect": "matched",
+  "source": "function main(): void {\n  const t = 2n ** 70n;\n  const v: bigint | string = 2n ** 70n;\n  console.log(v === t, v === 2n ** 70n, v !== t, typeof v);\n  const n: bigint | null = 2n ** 70n;\n  console.log(n === t, n !== t, n === 2n ** 71n);\n  const u: bigint | undefined = 2n ** 70n;\n  console.log(u === t, u === 2n ** 71n);\n  const arr: (bigint | null)[] = [2n ** 70n, null, 5n];\n  console.log(arr[0] === t, arr[1] === t, arr[2] === 5n, arr[1] === null);\n  let m: bigint | string = \"x\";\n  console.log(m === t);\n  m = 2n ** 70n;\n  console.log(m === t);\n}\n"
+}

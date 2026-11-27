@@ -1,0 +1,5 @@
+{
+  "name": "generator throw keeps thrown object identity",
+  "expect": "matched",
+  "source": "function* generator(): Generator<any, void, unknown> {\n  try { yield 1; } catch (error) { yield error; }\n}\nfunction main(): void {\n  const marker: any = { value: 42 };\n  const iterator = generator();\n  iterator.next();\n  const result = iterator.throw(marker);\n  console.log(result.value === marker, result.value.value, result.done);\n}\n"
+}

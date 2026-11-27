@@ -1,0 +1,5 @@
+{
+  "name": "late promise rejection handler event",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { const events: string[] = []; process.on('unhandledRejection', () => events.push('unhandled')); process.on('rejectionHandled', () => events.push('handled')); const pending = Promise.reject(new Error('late')); await new Promise<void>((resolve) => setTimeout(resolve, 1)); pending.catch(() => {}); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(events.join(',')); }"
+}

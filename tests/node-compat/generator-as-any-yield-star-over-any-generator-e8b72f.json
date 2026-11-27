@@ -1,0 +1,5 @@
+{
+  "name": "generator as any yield star over any generator",
+  "expect": "matched",
+  "source": "function* inner() { yield 10; yield 11; return 12; }\nfunction* outer(g: any): Generator<any, void, unknown> { const r = yield* g; console.log(\"r\", r); yield 99; }\nfunction main(): void {\n  for (const v of outer(inner() as any)) console.log(v);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage any type aliases expose actual owners",
+  "expect": "matched",
+  "source": "type DynamicValue = any; function main(): void { const xs: number[] = [1]; const exposed: DynamicValue = xs; exposed[0] = {x: 7}; console.log(typeof xs[0]); }"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "uncaught plain object exits 1",
+  "expect": "matched",
+  "exitCode": 1,
+  "source": "function main(): void { throw { code: 5, msg: \"obj\" }; }"
+}

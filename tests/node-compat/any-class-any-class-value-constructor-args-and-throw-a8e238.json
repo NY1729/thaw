@@ -1,0 +1,5 @@
+{
+  "name": "any class any class value constructor args and throw",
+  "expect": "matched",
+  "source": "class Q { v: number; constructor(v: number) { if (v < 0) throw new RangeError(\"neg\"); this.v = v; } get(): number { return this.v; } }\nclass In { a = 2; get(): number { return this.a; } }\nclass W { items: number[]; inner: In; label: string;\n  constructor(items: number[], inner: In, label: string) { this.items = items; this.inner = inner; this.label = label; }\n  total(): number { return this.items.reduce((s, x) => s + x, 0) + this.inner.get(); }\n  add(n: number): void { this.items.push(n); }\n}\nfunction main(): void {\n  const q: any = Q; console.log(new q(4).get());\n  try { new q(-1); } catch (e: any) { console.log(\"caught\", e.message); }\n  const k: any = W; const i = new In(); const arr = [1, 2];\n  const w = new k(arr, i, \"hi\"); w.add(4);\n  console.log(w.total(), w.label, arr.length, w.items.length);\n}\n"
+}

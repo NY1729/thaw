@@ -1,0 +1,5 @@
+{
+  "name": "timer handle ref state",
+  "expect": "matched",
+  "source": "function main(): void { const handle = setTimeout(() => {}, 100); console.log(handle.hasRef()); handle.unref(); console.log(handle.hasRef()); handle.ref(); console.log(handle.hasRef()); clearTimeout(handle); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "object literal __proto__ null has no inherited members",
+  "expect": "matched",
+  "source": "function main(): void { const o: any = { __proto__: null }; console.log(o.toString, Object.getPrototypeOf(o) === null); }"
+}

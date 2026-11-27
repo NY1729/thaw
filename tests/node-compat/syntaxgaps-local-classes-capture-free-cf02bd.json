@@ -1,0 +1,5 @@
+{
+  "name": "syntaxgaps local classes capture free",
+  "expect": "matched",
+  "source": "function make(): string {\n  class Counter {\n    static made = 0;\n    n: number;\n    constructor() { this.n = 1; Counter.made++; }\n    inc() { this.n += 2; return this.n; }\n    static twice() { return Counter.made * 2; }\n  }\n  class Sub extends Counter { inc() { return super.inc() + 1; } }\n  const c = new Sub(); new Counter();\n  return [c.inc(), Counter.twice(), c instanceof Counter].join(\",\");\n}\nfunction main(): void {\n  console.log(make());\n  {\n    class B { v = 3; get d() { return this.v * 2; } }\n    console.log(new B().d);\n  }\n  for (let i = 0; i < 2; i++) { class L { x = 7; } console.log(new L().x + i); }\n}\n"
+}

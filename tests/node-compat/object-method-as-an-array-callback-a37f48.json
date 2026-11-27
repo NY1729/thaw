@@ -1,0 +1,5 @@
+{
+  "name": "object method as an array callback",
+  "expect": "matched",
+  "source": "const o = {\n  k: 3,\n  scale(n: number): number { return n * this.k; },\n  pure(n: number): number { return n + 1; },\n};\nasync function main(): Promise<void> {\n  console.log([1, 2].map(o.pure).join(\",\"));\n  try { console.log([1, 2].map(o.scale).join(\",\")); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log([1, 2].map(o.scale, { k: 4 }).join(\",\"));\n  console.log([1, 2].map(o.scale.bind(o)).join(\",\"));\n  console.log([1, 2, 3].filter(o.pure).length);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "computed keys that omit writable and configurable read back the value and stay non-enumerable",
+  "expect": "matched",
+  "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({ a: 1 }, { [S]: { value: 7 }, ['x' + 'y']: { value: 8 } });\n  console.log(o[S], o.xy, Object.keys(o).join(), Object.getOwnPropertySymbols(o).length);\n  const c: any = Object.assign({}, o);\n  console.log(c.xy, Object.keys(c).join());\n  console.log(JSON.stringify(o));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "nd5a default import of a node builtin destructured",
+  "expect": "matched",
+  "source": "import fs from \"node:fs\";\nimport os from \"node:os\";\nfunction main(): void {\n  const { existsSync } = fs;\n  const { EOL: eol } = os;\n  console.log(existsSync(\"/\"), JSON.stringify(eol));\n}\n"
+}

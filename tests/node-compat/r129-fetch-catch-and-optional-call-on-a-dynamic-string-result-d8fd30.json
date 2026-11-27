@@ -1,0 +1,5 @@
+{
+  "name": "r129 fetch(...).catch and optional call on a dynamic string result",
+  "expect": "matched",
+  "source": "import * as http from 'node:http';\nasync function main(): Promise<void> {\n  const srv = http.createServer((req, res) => { res.setHeader('content-type', 'text/event-stream'); res.end('ok'); });\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const port = (srv.address() as any).port;\n  const bad = await fetch('http://127.0.0.1:1/').catch((e: any) => 'failed');\n  console.log(bad);\n  const good: any = await fetch('http://127.0.0.1:' + port + '/').catch(() => null);\n  const isSse = good.headers.get('content-type')?.includes('text/event-stream');\n  const none = good.headers.get('x-none')?.includes('x');\n  console.log(isSse, none, typeof isSse);\n  srv.close();\n}\n"
+}

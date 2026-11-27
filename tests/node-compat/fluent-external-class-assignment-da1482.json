@@ -1,0 +1,5 @@
+{
+  "name": "fluent external class assignment",
+  "expect": "matched",
+  "source": "import { createHash } from 'node:crypto'; function main(): void { const base = createHash('sha256').update('prefix'); console.log(base.copy().digest('hex')); }"
+}

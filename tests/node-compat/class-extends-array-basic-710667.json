@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: basic",
+  "expect": "matched",
+  "source": "class Stack extends Array<number> { top(): number { return this[this.length - 1]; } }\nfunction main(): void {\n  const s = new Stack(); s.push(1); s.push(2);\n  console.log(s.length, s.top(), s instanceof Array, s instanceof Stack, Array.isArray(s));\n  console.log(s);\n}\n"
+}

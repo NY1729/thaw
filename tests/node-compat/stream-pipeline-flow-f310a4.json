@@ -1,0 +1,5 @@
+{
+  "name": "stream pipeline flow",
+  "expect": "matched",
+  "source": "import { Readable, Writable, pipeline } from 'node:stream'; function main(): void { let text: string = ''; const output = new Writable({ write(chunk, encoding, done) { text += String(chunk); done(); } }); pipeline(Readable.from(['a', 'b']), output, (error: unknown): void => { console.log(error === undefined, text); }); }"
+}

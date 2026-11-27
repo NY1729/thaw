@@ -1,0 +1,5 @@
+{
+  "name": "repl default writer",
+  "expect": "matched",
+  "source": "import { writer } from 'node:repl'; function main(): void { console.log(writer({ answer: 42 }).includes('42')); }"
+}

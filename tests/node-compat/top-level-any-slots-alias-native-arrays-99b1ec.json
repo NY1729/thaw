@@ -1,0 +1,5 @@
+{
+  "name": "top-level any slots alias native arrays",
+  "expect": "matched",
+  "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nconst nums: number[] = [1];\nconst alias: any = nums;\nnums.push(2);\nconst nat: C[] = [new C()];\nconst view: any = nat;\nview[1] = new C();\nconsole.log(alias.length, view.length, nat.length, nat[1].n);\nasync function main(): Promise<void> {}\n"
+}

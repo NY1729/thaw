@@ -1,0 +1,5 @@
+{
+  "name": "audit2 leftovers arguments.length counts passed arguments",
+  "expect": "matched",
+  "source": "function f(a?: number, b?: number): number { return arguments.length; }\nfunction h(a: number, b: number): string { return `${arguments.length}:${arguments[0]}`; }\nfunction s(): number { let t = 0; for (let i = 0; i < arguments.length; i++) t += arguments[i]; return t; }\nfunction main(): void {\n  console.log(f(), f(1), f(1, 2));\n  console.log((h as any)(7, 8, 9), (s as any)(1, 2, 3));\n}"
+}

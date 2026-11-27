@@ -1,0 +1,5 @@
+{
+  "name": "r3a BigInt64Array construction",
+  "expect": "matched",
+  "source": "function main(): void { const a = new BigInt64Array(2); const b = new BigUint64Array(3); console.log(a.length, b.length); }"
+}

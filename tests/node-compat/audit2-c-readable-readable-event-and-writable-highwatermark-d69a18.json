@@ -1,0 +1,5 @@
+{
+  "name": "audit2 C Readable readable event and Writable highWaterMark",
+  "expect": "matched",
+  "source": "import { Readable, Writable } from \"node:stream\";\nfunction main(): void {\n  const r = new Readable({ read() {} });\n  r.push(\"abc\"); r.push(\"def\"); r.push(null);\n  r.setEncoding(\"utf8\");\n  r.on(\"readable\", () => { let c; while ((c = r.read()) !== null) console.log(\"read\", c); });\n  r.on(\"end\", () => console.log(\"end\"));\n  const log: string[] = [];\n  const w = new Writable({ highWaterMark: 3, write(c: any, _e: any, cb: any) { log.push(\"w:\" + String(c)); setTimeout(cb, 1); } });\n  console.log(w.write(\"ab\"), w.writableLength, w.writableHighWaterMark);\n  console.log(w.write(\"cd\"), w.writableLength, w.writableNeedDrain);\n  w.on(\"drain\", () => console.log(\"drain\", w.writableLength));\n  w.on(\"finish\", () => console.log(\"finish\", log.join()));\n  w.end();\n}"
+}

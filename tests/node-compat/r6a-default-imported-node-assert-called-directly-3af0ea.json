@@ -1,0 +1,5 @@
+{
+  "name": "r6a default-imported node assert called directly",
+  "expect": "matched",
+  "source": "import assert from \"node:assert\";\nfunction main(): void {\n  try { assert(null); } catch (e: any) { console.log(e.name); }\n  assert(1);\n  console.log(\"ok\");\n}"
+}

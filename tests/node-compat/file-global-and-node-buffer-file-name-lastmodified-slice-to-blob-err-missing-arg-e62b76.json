@@ -1,0 +1,5 @@
+{
+  "name": "File global and node:buffer File: name, lastModified, slice to Blob, ERR_MISSING_ARGS, descriptor",
+  "expect": "matched",
+  "source": "import { File, Blob } from 'node:buffer'; async function main(): Promise<void> { const f = new File(['hello ', new Uint8Array([119, 111, 114, 108, 100])], 'greeting.txt', { type: 'Text/Plain', lastModified: 1700000000000 }); console.log(f.name, f.size, f.type, f.lastModified, typeof (f as any).webkitRelativePath); console.log(f instanceof File, f instanceof Blob, globalThis.File instanceof Function); const s = f.slice(0, 5, 'Text/Html'); console.log(s instanceof File, s instanceof Blob, s.size, s.type, await s.text(), await f.text()); const d: any = Object.getOwnPropertyDescriptor(globalThis, 'File'); console.log(typeof d.value, d.writable, d.enumerable, d.configurable); try { new (File as any)(['a']); } catch (e: any) { console.log(e.name, e.code, e.message); } const before = Date.now(); const dflt = new File([], 'd.bin'); const after = Date.now(); console.log(dflt.lastModified >= before && dflt.lastModified <= after, JSON.stringify(dflt.type), dflt.size); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "annotated forEach callbacks on an any Map, Set and array",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const o: any = { m: new Map<string, number>(), s: new Set<number>([5, 6]) };\n  o.m.set(\"a\", 1);\n  o.m.set(\"b\", 2);\n  o.m.forEach((v: number, k: string) => console.log(k, v));\n  o.s.forEach((v: number) => console.log(v));\n  const list: any = [3, 4];\n  list.forEach((x: number, i: number) => console.log(i, x));\n}\n"
+}

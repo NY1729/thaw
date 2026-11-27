@@ -1,0 +1,5 @@
+{
+  "name": "child stdio inherit writes straight to the parent output",
+  "expect": "matched",
+  "source": "import { spawn } from 'node:child_process'; function main(): void { console.log('before'); const child = spawn('echo', ['inherited'], { stdio: 'inherit' }); child.on('close', (code: any) => { console.log('closed', code, child.stdout === null, child.stderr === null, child.stdin === null); }); }"
+}

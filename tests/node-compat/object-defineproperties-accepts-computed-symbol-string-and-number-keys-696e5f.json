@@ -1,0 +1,5 @@
+{
+  "name": "Object.defineProperties accepts computed symbol, string and number keys",
+  "expect": "matched",
+  "source": "function main(): void {\n  const S = Symbol('s');\n  const o: any = Object.defineProperties({}, { [S]: { value: 1, enumerable: true, writable: true, configurable: true }, ['a' + 'b']: { value: 2, enumerable: true, writable: true, configurable: true }, 3: { value: 3, enumerable: true, writable: true, configurable: true } });\n  console.log(o[S], o.ab, o[3]);\n  console.log(Object.prototype.hasOwnProperty.call(o, S), Object.prototype.hasOwnProperty.call(o, 'ab'), Object.prototype.hasOwnProperty.call(o, 3));\n  console.log(Object.getOwnPropertySymbols(o).length, Object.keys(o).join());\n}"
+}

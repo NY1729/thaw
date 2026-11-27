@@ -1,0 +1,5 @@
+{
+  "name": "r133 http module values OutgoingMessage METHODS STATUS_CODES Agent",
+  "expect": "matched",
+  "source": "import * as http from 'node:http';\nfunction main(): void {\nconst M: any = http;\nconsole.log(typeof M.IncomingMessage, typeof M.Server, typeof M.OutgoingMessage, typeof M.ClientRequest, typeof M.Agent, typeof M.ServerResponse);\nconsole.log(M.METHODS.length, Object.keys(M.STATUS_CODES).length, M.STATUS_CODES[418], M.STATUS_CODES[511], M.METHODS.includes('QUERY'));\nconst o = new M.OutgoingMessage();\nconsole.log(o.sendDate, o.chunkedEncoding, o.writable, o.finished, o.headersSent, o.destroyed, o.shouldKeepAlive, o.useChunkedEncodingByDefault, o.writableEnded);\nconsole.log(o.setHeader('A', 1) === o, o.getHeaderNames().join(','), o.hasHeader('a'), o.getHeader('a'));\nconsole.log(o instanceof M.OutgoingMessage, M.Agent.length, new M.Agent({ keepAlive: true, maxSockets: 2 }).maxSockets);\n}\n"
+}

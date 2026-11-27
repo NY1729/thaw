@@ -1,0 +1,5 @@
+{
+  "name": "error property read, in and delete",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"boom\") as any;\n  e.code = \"E_X\";\n  e.status = 404;\n  e.meta = { a: [1, 2], ok: true };\n  console.log(Object.keys(e), e.code, e.status, e.meta, e.message, String(e));\n  console.log(\"code\" in e, \"nope\" in e, \"message\" in e);\n  delete e.code;\n  console.log(Object.keys(e), \"code\" in e, e.code);\n}\n"
+}

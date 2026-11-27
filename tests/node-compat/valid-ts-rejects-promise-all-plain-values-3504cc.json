@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: promise all plain values",
+  "expect": "matched",
+  "source": "async function d(x: number): Promise<number> { await Promise.resolve(0); return x * 2; }\nasync function main(): Promise<void> {\n  const r = await Promise.all([1, Promise.resolve(2), d(3)]);\n  console.log(r.join(\",\"));\n  const w = await Promise.all([\"a\", Promise.resolve(\"b\")]);\n  console.log(w.join(\",\"));\n}"
+}

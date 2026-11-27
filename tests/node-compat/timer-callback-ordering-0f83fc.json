@@ -1,0 +1,5 @@
+{
+  "name": "timer callback ordering",
+  "expect": "matched",
+  "source": "import { setImmediate, setTimeout } from 'node:timers'; async function main(): Promise<void> { const values: string[] = []; await new Promise<void>((resolve) => { setTimeout(() => { values.push('timeout'); setImmediate(() => { values.push('immediate'); resolve(); }); }, 1); }); console.log(values.join(',')); }"
+}

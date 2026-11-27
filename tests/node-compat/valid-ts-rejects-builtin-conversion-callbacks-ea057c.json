@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: builtin conversion callbacks",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log([0, 1, 2, 0, 3].filter(Boolean));\n  console.log([\"a\", \"\", \"b\"].filter(Boolean).length);\n  console.log([\"1\", \"2\"].map(Number));\n  console.log([1, 2].map(String));\n}"
+}
