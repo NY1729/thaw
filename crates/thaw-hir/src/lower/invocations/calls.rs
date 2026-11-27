@@ -618,8 +618,16 @@ impl<'a> FnLowerer<'a> {
         // Listener callbacks run with `this` = the emitter/server (`srv.listen(0, function () { this.address() })`,
         // `emitter.on(e, function () { this.x })`): a `function` expression argument has its `this` bound to the
         // receiver, an arrow keeps the lexical one.
-        if let Some(bound) = bind_listener_receiver(call) {
-            return self.lower_call_unread(&bound);
+        let listener_name = format!("__thaw_listener_recv_{}", self.next_binding);
+        if let Some((bound, receiver)) = bind_listener_receiver(call, &listener_name) {
+            let Some(receiver) = receiver else { return self.lower_call_unread(&bound) };
+            // A call-chain receiver (`createServer(..).listen(0, function () { this })`) is evaluated once into a temp.
+            self.next_binding += 1;
+            let value = self.lower_expr(&receiver)?;
+            let ty = self.infer_expr_type(&value)?;
+            self.scope.insert(listener_name.clone(), ty.clone());
+            let lowered = self.lower_call_unread(&bound)?;
+            return self.wrap_call_argument_bindings(lowered, &[(listener_name, ty, value)]);
         }
         if let Some(has_own) = self.lower_prototype_has_own_symbol_call(call)? {
             return Ok(has_own);
@@ -6462,7 +6470,7 @@ impl<'a> FnLowerer<'a> {
 
 /// `recv.on(.., function () { this })`: the call with the callback's `this` replaced by `recv` (a plain
 /// identifier/`this` path, so evaluating it again is side-effect free). `None` when nothing applies.
-fn bind_listener_receiver(call: &CallExpr) -> Option<CallExpr> {
+fn bind_listener_receiver(call: &CallExpr, temp: &str) -> Option<(CallExpr, Option<Expr>)> {
     use swc_ecma_visit::{VisitMut, VisitMutWith, VisitWith};
     let Callee::Expr(callee) = &call.callee else { return None };
     let Expr::Member(member) = callee.as_ref() else { return None };
@@ -6480,9 +6488,16 @@ fn bind_listener_receiver(call: &CallExpr) -> Option<CallExpr> {
             _ => false,
         }
     }
-    if !plain_path(&member.obj) {
+    let chained = !plain_path(&member.obj);
+    if chained && !matches!(member.obj.as_ref(), Expr::Call(_) | Expr::New(_)) {
         return None;
     }
+    // The expression the callback's `this` becomes: the receiver itself, or a temp holding a chained one.
+    let this_value: Box<Expr> = if chained {
+        Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(temp.into(), member.span)))
+    } else {
+        member.obj.clone()
+    };
     struct UsesThis(bool);
     impl swc_ecma_visit::Visit for UsesThis {
         fn visit_this_expr(&mut self, _: &swc_ecma_ast::ThisExpr) {
@@ -6510,7 +6525,7 @@ fn bind_listener_receiver(call: &CallExpr) -> Option<CallExpr> {
         let mut finder = UsesThis(false);
         body.visit_with(&mut finder);
         if finder.0 {
-            body.visit_mut_with(&mut Replace(member.obj.clone()));
+            body.visit_mut_with(&mut Replace(this_value.clone()));
             changed = true;
         }
     };
@@ -6528,5 +6543,17 @@ fn bind_listener_receiver(call: &CallExpr) -> Option<CallExpr> {
             _ => {}
         }
     }
-    changed.then_some(routed)
+    if !changed {
+        return None;
+    }
+    if !chained {
+        return Some((routed, None));
+    }
+    let receiver = member.obj.as_ref().clone();
+    if let Callee::Expr(callee) = &mut routed.callee {
+        if let Expr::Member(routed_member) = callee.as_mut() {
+            *routed_member.obj = (*this_value).clone();
+        }
+    }
+    Some((routed, Some(receiver)))
 }
