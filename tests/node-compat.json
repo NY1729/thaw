@@ -5480,6 +5480,11 @@
     "name": "dynamic member calls on any keep this and callbacks in any restore as functions",
     "expect": "matched",
     "source": "import http from 'http';\nfunction mk(): any { return function (...a: any[]) { return a.length; }; }\nfunction main(): void {\n  const d: any = { n: 7, fn: (x: number) => x * 2, g: function (x: number) { return x + 1; } };\n  const keys = Object.keys(d);\n  console.log(d[keys[1]](4), d[keys[2]](4));\n  const name = keys[1];\n  console.log(d[name](3), typeof d.g, d.g.name);\n  const run = (cb: any) => cb(10);\n  console.log(run(d.g));\n  const s = http.createServer(mk());\n  s.listen(0, function () { console.log(typeof this.address().port); s.close(); });\n}\n"
+  },
+  {
+    "name": "createServer handler wrapped through any: res.end() with omitted or undefined chunk",
+    "expect": "matched",
+    "source": "import http from 'http';\ntype Fn = (...a: any[]) => any;\nfunction wrap(fn: Fn): any { return function (...a: any[]) { return fn(...a); }; }\nasync function main(): Promise<void> {\n  const srv = http.createServer(wrap((req: any, res: any) => {\n    if (req.url === '/a') { res.end(); } else if (req.url === '/b') { res.end(undefined); } else { res.end('x'); }\n  }));\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const port = (srv.address() as any).port;\n  const out: string[] = [];\n  for (const p of ['/a', '/b', '/c']) {\n    const r = await fetch('http://127.0.0.1:' + port + p);\n    out.push(p + ':' + r.status + ':' + JSON.stringify(await r.text()));\n  }\n  console.log(out.join(','));\n  srv.close();\n}\n"
   }
   ]
 }
