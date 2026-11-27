@@ -130,6 +130,7 @@ impl<'a> FnLowerer<'a> {
             called_bindings: HashSet::new(),
             assigned_later: HashSet::new(),
             awaited_bindings: HashSet::new(),
+            member_assignments: HashSet::new(),
             catch_bindings: HashSet::new(),
             promise_catch_bindings: HashSet::new(),
             promise_catch_parameter: None,

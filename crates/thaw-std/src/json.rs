@@ -49,6 +49,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use thaw_arena::NativeStr as CStr;
 
+pub(crate) mod http_glue;
 mod native_links;
 mod structured_clone;
 

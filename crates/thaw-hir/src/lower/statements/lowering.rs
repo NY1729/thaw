@@ -2125,14 +2125,14 @@ impl<'a> FnLowerer<'a> {
 
             Stmt::ForOf(for_of) => {
                 // `for await (const chunk of req)` over a native `http.IncomingMessage`: its body is read
-                // synchronously (`bodyBytes()`), so iterate the one-chunk (or empty) array of it.
+                // synchronously (`__thaw_bodyBytes()`), so iterate the one-chunk (or empty) array of it.
                 if let (true, Expr::Ident(request)) = (for_of.is_await, for_of.right.as_ref()) {
                     if matches!(self.peek_type_without_lowering(&for_of.right), Some(HirType::Object(fields))
-                        if ["bodyBytes", "bodyHex", "getHeader"].iter().all(|name| fields.iter().any(|(field, _)| field == name)))
+                        if ["__thaw_bodyBytes", "__thaw_bodyHex", "__thaw_getHeader"].iter().all(|name| fields.iter().any(|(field, _)| field == name)))
                     {
                         let name = request.sym.to_string();
                         let snippet = format!(
-                            "const __thaw_chunks = [{name}.bodyBytes()].filter((chunk) => chunk.length > 0);"
+                            "const __thaw_chunks = [{name}.__thaw_bodyBytes()].filter((chunk) => chunk.length > 0);"
                         );
                         if let Ok(module) = thaw_parser::parse_typescript(&snippet) {
                             if let Some(ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration)))) = module.body.first() {

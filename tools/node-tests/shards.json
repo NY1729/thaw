@@ -1,0 +1,8 @@
+{
+ "http": {"prefix": "test-http-"},
+ "stream": {"prefix": "test-stream-,test-stream2-,test-stream3-"},
+ "buffer": {"prefix": "test-buffer-"},
+ "whatwg-fetch": {"prefix": "test-whatwg-,test-fetch"},
+ "events": {"prefix": "test-event-,test-events-"},
+ "path-url": {"prefix": "test-path-,test-url-"}
+}

@@ -659,7 +659,7 @@ impl<'a> FnLowerer<'a> {
                     let method_name = method.sym.as_ref();
                     if matches!(method_name, "end" | "write")
                         && matches!(self.peek_type_without_lowering(receiver), Some(HirType::Object(fields))
-                            if ["endBytes", "endEncoded", "writeBytes"].iter().all(|name| fields.iter().any(|(field, _)| field == name)))
+                            if ["__thaw_endBytes", "__thaw_endEncoded", "__thaw_writeBytes"].iter().all(|name| fields.iter().any(|(field, _)| field == name)))
                         && call.args.iter().all(|argument| argument.spread.is_none())
                     {
                         let rename = |name: &str| {
@@ -726,12 +726,12 @@ impl<'a> FnLowerer<'a> {
                                 });
                                 Some(routed)
                             }
-                            ("end", 1, _) if first_is_bytes => Some(rename("endBytes")),
-                            ("write", 1, _) if first_is_bytes => Some(rename("writeBytes")),
-                            ("end", 1, Some(HirType::Array(element))) if *element == HirType::F64 => Some(rename("endBytes")),
-                            ("write", 1, Some(HirType::Array(element))) if *element == HirType::F64 => Some(rename("writeBytes")),
+                            ("end", 1, _) if first_is_bytes => Some(rename("__thaw_endBytes")),
+                            ("write", 1, _) if first_is_bytes => Some(rename("__thaw_writeBytes")),
+                            ("end", 1, Some(HirType::Array(element))) if *element == HirType::F64 => Some(rename("__thaw_endBytes")),
+                            ("write", 1, Some(HirType::Array(element))) if *element == HirType::F64 => Some(rename("__thaw_writeBytes")),
                             ("end", 2, Some(HirType::Str)) if self.peek_type_without_lowering(&call.args[1].expr) == Some(HirType::Str) => {
-                                Some(rename("endEncoded"))
+                                Some(rename("__thaw_endEncoded"))
                             }
                             _ => None,
                         };
@@ -753,6 +753,67 @@ impl<'a> FnLowerer<'a> {
                 && !self.scope.contains_key("Array")
             {
                 return self.lower_array_constructor(&call.args, call.type_args.as_deref(), None);
+            }
+        }
+        // `server.listen(port, host)` without a callback: the native entry point wants one, so pass a no-op.
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::Member(MemberExpr { obj, prop: MemberProp::Ident(listen), .. }) = callee.as_ref() {
+                if listen.sym == *"listen"
+                    && call.args.len() == 2
+                    && call.args.iter().all(|argument| argument.spread.is_none())
+                    && matches!(self.peek_type_without_lowering(obj), Some(HirType::Object(fields))
+                        if fields.iter().any(|(name, _)| name == "__thaw_listenWithHostCallback"))
+                    && (matches!(call.args[1].expr.as_ref(), Expr::Lit(swc_ecma_ast::Lit::Str(_)))
+                        || self.peek_type_without_lowering(&call.args[1].expr) == Some(HirType::Str))
+                {
+                    if let Ok(module) = thaw_parser::parse_typescript("const __thaw_noop = () => {};") {
+                        if let Some(ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration)))) = module.body.first() {
+                            if let Some(noop) = declaration.decls.first().and_then(|d| d.init.clone()) {
+                                let mut routed = call.clone();
+                                routed.args.push(swc_ecma_ast::ExprOrSpread { spread: None, expr: noop });
+                                return self.lower_call(&routed);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // `fetch(url, { body: req })` with a native `IncomingMessage`: the request body (read to completion) is the payload.
+        if !self.scope.contains_key("fetch") {
+            if let Some(Expr::Call(routed)) = self.fetch_call_with_request_body(call).map(Box::new).map(|b| *b) {
+                return self.lower_call(&routed);
+            }
+        }
+        // `once(res, "drain")` (node:events) on a native `ServerResponse`: a promise settled by the response's own `once`.
+        if let Callee::Expr(callee) = &call.callee {
+            let is_events_once = match callee.as_ref() {
+                Expr::Ident(name) => name.sym == *"once",
+                Expr::Member(member) => matches!(&member.prop, MemberProp::Ident(prop) if prop.sym == *"once")
+                    && !matches!(self.peek_type_without_lowering(&member.obj), Some(HirType::Object(fields))
+                        if fields.iter().any(|(name, _)| name == "__thaw_writeHead")),
+                _ => false,
+            };
+            if is_events_once && call.args.len() == 2 && call.args.iter().all(|argument| argument.spread.is_none()) {
+                if let (Expr::Ident(emitter), Expr::Lit(swc_ecma_ast::Lit::Str(event))) =
+                    (call.args[0].expr.as_ref(), call.args[1].expr.as_ref())
+                {
+                    if matches!(self.peek_type_without_lowering(&call.args[0].expr), Some(HirType::Object(fields))
+                        if fields.iter().any(|(name, _)| name == "__thaw_writeHead"))
+                    {
+                        let snippet = format!(
+                            "const __thaw_once = new Promise<void>((__thaw_resolve) => {{ {}.once({:?}, () => __thaw_resolve()); }});",
+                            emitter.sym,
+                            event.value.to_string_lossy()
+                        );
+                        if let Ok(module) = thaw_parser::parse_typescript(&snippet) {
+                            if let Some(ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration)))) = module.body.first() {
+                                if let Some(init) = declaration.decls.first().and_then(|d| d.init.clone()) {
+                                    return self.lower_expr(&init);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         if let Some(head) = self.try_lower_response_write_head(call)? {
@@ -946,6 +1007,68 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, payload, value)]).map(Some)
     }
 
+    /// `fetch(url, { body: req })` where `req` is a native `IncomingMessage`: the call with `req` replaced by its body bytes.
+    fn fetch_call_with_request_body(&mut self, call: &CallExpr) -> Option<Expr> {
+        let Callee::Expr(callee) = &call.callee else { return None };
+        if !matches!(callee.as_ref(), Expr::Ident(name) if name.sym == *"fetch") || call.args.len() < 2 {
+            return None;
+        }
+        let mut routed = call.clone();
+        let mut changed = false;
+        // The init object may be wrapped (`{ .. } as any`, parentheses).
+        let mut init_expr = routed.args[1].expr.as_mut();
+        while let Expr::TsAs(wrapped) = init_expr {
+            init_expr = wrapped.expr.as_mut();
+        }
+        while let Expr::Paren(wrapped) = init_expr {
+            init_expr = wrapped.expr.as_mut();
+        }
+        if let Expr::Object(init) = init_expr {
+            for property in &mut init.props {
+                if let swc_ecma_ast::PropOrSpread::Prop(property) = property {
+                    if let swc_ecma_ast::Prop::KeyValue(pair) = property.as_mut() {
+                        if matches!(&pair.key, swc_ecma_ast::PropName::Ident(key) if key.sym == *"body") {
+                            changed |= self.native_request_body_payload(pair.value.as_mut());
+                        }
+                    }
+                }
+            }
+        }
+        changed.then_some(Expr::Call(routed))
+    }
+
+    /// Rewrites an expression that is (or conditionally is) a native `IncomingMessage` into its body bytes;
+    /// returns whether anything changed.
+    fn native_request_body_payload(&mut self, expr: &mut Expr) -> bool {
+        match expr {
+            Expr::Ident(request)
+                if matches!(self.peek_type_without_lowering(&Expr::Ident(request.clone())),
+                    Some(HirType::Object(fields)) if fields.iter().any(|(name, _)| name == "__thaw_bodyBytes")) =>
+            {
+                let span = request.span;
+                *expr = Expr::Call(CallExpr {
+                    span,
+                    ctxt: Default::default(),
+                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                        span,
+                        obj: Box::new(Expr::Ident(request.clone())),
+                        prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("__thaw_bodyBytes".into(), span)),
+                    }))),
+                    args: Vec::new(),
+                    type_args: None,
+                });
+                true
+            }
+            Expr::Cond(cond) => {
+                let consequent = self.native_request_body_payload(cond.cons.as_mut());
+                let alternate = self.native_request_body_payload(cond.alt.as_mut());
+                consequent || alternate
+            }
+            Expr::Paren(inner) => self.native_request_body_payload(inner.expr.as_mut()),
+            _ => false,
+        }
+    }
+
     /// `res.writeHead(code, { "Name": value, .. })` on a native `ServerResponse` (a response
     /// object exposing `statusCode` + `setHeader`) is `res.statusCode = code` followed by one
     /// `res.setHeader(name, String(value))` per header of the (literal) headers object.
@@ -953,10 +1076,7 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         call: &CallExpr,
     ) -> Result<Option<HirExpr>, String> {
-        use swc_ecma_ast::{
-            AssignExpr, AssignOp, AssignTarget, Prop, PropName, PropOrSpread, SeqExpr,
-            SimpleAssignTarget,
-        };
+        use swc_ecma_ast::SeqExpr;
         let Callee::Expr(callee) = &call.callee else {
             return Ok(None);
         };
@@ -977,85 +1097,44 @@ impl<'a> FnLowerer<'a> {
         let Some(HirType::Object(fields)) = self.peek_type_without_lowering(&member.obj) else {
             return Ok(None);
         };
-        if !fields.iter().any(|(name, _)| name == "setHeader")
-            || !fields.iter().any(|(name, _)| name == "statusCode")
-        {
+        if !fields.iter().any(|(name, _)| name == "__thaw_writeHead") {
             return Ok(None);
         }
-        // `writeHead(code, statusMessage?, headers?)`
-        let headers = call
-            .args
-            .iter()
-            .skip(1)
-            .find_map(|a| match a.expr.as_ref() {
-                Expr::Object(object) => Some(Ok(object)),
-                Expr::Lit(swc_ecma_ast::Lit::Str(_)) => None,
-                _ => Some(Err(
-                    "`writeHead` headers must be an object literal".to_string()
-                )),
-            });
+        // `writeHead(code, statusMessage?, headers?)` -> `(res.__thaw_writeHead(code, message, headers), res)`:
+        // the native closure takes all three (`""` / `undefined` when absent); the comma keeps `writeHead(..).end()`.
         let span = call.span;
         let ident = |name: &str| Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), span));
-        let target = |prop: &str| {
-            Expr::Member(MemberExpr {
+        let string_arg = |text: &str| Box::new(Expr::Lit(swc_ecma_ast::Lit::Str(text.into())));
+        let (message, headers) = match call.args.len() {
+            1 => (string_arg(""), Box::new(ident("undefined"))),
+            2 => {
+                let second = call.args[1].expr.clone();
+                let is_message = matches!(second.as_ref(), Expr::Lit(swc_ecma_ast::Lit::Str(_)))
+                    || self.peek_type_without_lowering(&second) == Some(HirType::Str);
+                if is_message {
+                    (second, Box::new(ident("undefined")))
+                } else {
+                    (string_arg(""), second)
+                }
+            }
+            _ => (call.args[1].expr.clone(), call.args[2].expr.clone()),
+        };
+        let native = Expr::Call(CallExpr {
+            span,
+            ctxt: Default::default(),
+            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
                 span,
                 obj: Box::new(ident(response.sym.as_ref())),
-                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(prop.into(), span)),
-            })
-        };
-        let mut parts: Vec<Box<Expr>> = vec![Box::new(Expr::Assign(AssignExpr {
-            span,
-            op: AssignOp::Assign,
-            left: AssignTarget::Simple(SimpleAssignTarget::Member(match target("statusCode") {
-                Expr::Member(member) => member,
-                _ => unreachable!(),
-            })),
-            right: call.args[0].expr.clone(),
-        }))];
-        if let Some(headers) = headers {
-            for property in &headers?.props {
-                let PropOrSpread::Prop(property) = property else {
-                    return Err("`writeHead` headers cannot contain spreads".into());
-                };
-                let (name, value): (String, Box<Expr>) = match property.as_ref() {
-                    Prop::KeyValue(pair) => {
-                        let name = match &pair.key {
-                            PropName::Ident(i) => i.sym.to_string(),
-                            PropName::Str(s) => s.value.to_string_lossy().into_owned(),
-                            _ => return Err("`writeHead` header names must be literal".into()),
-                        };
-                        (name, pair.value.clone())
-                    }
-                    Prop::Shorthand(i) => (i.sym.to_string(), Box::new(Expr::Ident(i.clone()))),
-                    _ => return Err("unsupported `writeHead` header".into()),
-                };
-                parts.push(Box::new(Expr::Call(CallExpr {
-                    span,
-                    ctxt: Default::default(),
-                    callee: Callee::Expr(Box::new(target("setHeader"))),
-                    args: vec![
-                        swc_ecma_ast::ExprOrSpread {
-                            spread: None,
-                            expr: Box::new(Expr::Lit(swc_ecma_ast::Lit::Str(name.into()))),
-                        },
-                        swc_ecma_ast::ExprOrSpread {
-                            spread: None,
-                            expr: Box::new(Expr::Call(CallExpr {
-                                span,
-                                ctxt: Default::default(),
-                                callee: Callee::Expr(Box::new(ident("String"))),
-                                args: vec![swc_ecma_ast::ExprOrSpread {
-                                    spread: None,
-                                    expr: value,
-                                }],
-                                type_args: None,
-                            })),
-                        },
-                    ],
-                    type_args: None,
-                })));
-            }
-        }
+                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("__thaw_writeHead".into(), span)),
+            }))),
+            args: vec![
+                swc_ecma_ast::ExprOrSpread { spread: None, expr: call.args[0].expr.clone() },
+                swc_ecma_ast::ExprOrSpread { spread: None, expr: message },
+                swc_ecma_ast::ExprOrSpread { spread: None, expr: headers },
+            ],
+            type_args: None,
+        });
+        let mut parts: Vec<Box<Expr>> = vec![Box::new(native)];
         parts.push(Box::new(ident(response.sym.as_ref())));
         self.lower_expr(&Expr::Seq(SeqExpr { span, exprs: parts }))
             .map(Some)
@@ -2800,6 +2879,19 @@ impl<'a> FnLowerer<'a> {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
                 if matches!(property.sym.as_ref(), "finally" | "then" | "catch") {
+                    // `fetch(..).catch(..)` / a `JsValue` thenable: the realm's Promise handles the chain.
+                    let realm_fetch = (!self.scope.contains_key("fetch"))
+                        .then(|| Self::realm_fetch_call(&member.obj))
+                        .flatten();
+                    if realm_fetch.is_some() || receiver_is_dynamic {
+                        let receiver = realm_fetch.unwrap_or_else(|| member.obj.as_ref().clone());
+                        return self.lower_dynamic_value_method_call(
+                            &receiver,
+                            property.sym.as_ref(),
+                            &call.args,
+                            Some(&HirType::JsValue),
+                        );
+                    }
                     return self.lower_promise_member_call(member, property, call);
                 }
             }
@@ -2881,16 +2973,16 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                     let resolved_property = match (requested_property, call.args.len()) {
-                        ("listen", 2) => "__listenWithCallback",
-                        ("listen", 3) => "__listenWithHostCallback",
-                        ("close", 1) => "__closeWithCallback",
+                        ("listen", 2) => "__thaw_listenWithCallback",
+                        ("listen", 3) => "__thaw_listenWithHostCallback",
+                        ("close", 1) => "__thaw_closeWithCallback",
                         ("on", 2)
                             if matches!(
                                 call.args.first().map(|arg| arg.expr.as_ref()),
                                 Some(Expr::Lit(Lit::Str(event))) if event.value == *"error"
                             ) =>
                         {
-                            "__onError"
+                            "__thaw_onError"
                         }
                         _ => requested_property,
                     };
