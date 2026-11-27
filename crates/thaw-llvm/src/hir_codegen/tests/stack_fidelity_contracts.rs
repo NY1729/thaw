@@ -172,7 +172,6 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: the callbacks reach `any` (`names`), so storage analysis runs the array method inside thaw-js and its frames end at the engine; see stack_fidelity_callbacks_native"]
 fn stack_fidelity_callbacks() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
@@ -352,7 +351,7 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "known gap vs Node: the `cause` of a caught error has no frames (its text copy loses the side table)"]
+#[ignore = "known gap vs Node: `e.cause` of a caught native error reads back as a thaw-js handle marker string (typeof string, no stack); the cause needs to stay a native/live Error with its frames"]
 fn stack_fidelity_rethrow() {
     let source = r#"function names(e: any): string {
   const out: string[] = [];
