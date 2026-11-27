@@ -546,7 +546,7 @@ impl TypedArr {
             let x = it.bigint_element_of(v)?;
             self.set_big(i, &x);
         } else {
-            let n = it.num(v);
+            let n = it.tonum(v)?;
             self.set(i, n);
         }
         Ok(())
@@ -1271,7 +1271,7 @@ impl Interp {
                 Value::Undefined => 0,
                 v => {
                     // ToIntegerOrInfinity: a negative or infinite offset is a RangeError, not a clamp to 0
-                    let n = it.num(&v);
+                    let n = it.tonum(&v)?;
                     let n = if n.is_nan() { 0.0 } else { n.trunc() };
                     if n < 0.0 || n.is_infinite() {
                         return it.throw_error("RangeError", "offset is out of bounds");
@@ -1301,7 +1301,12 @@ impl Interp {
                     Some(i) => i,
                     None => {
                         let n = it.get(&arg(a, 0), "length")?;
-                        let n = it.num(&n) as usize;
+                        let n = it.tonum(&n)?;
+                        let n = if n.is_nan() {
+                            0
+                        } else {
+                            n.trunc().max(0.0) as usize
+                        };
                         if off + n > t.cur_len() {
                             return it.throw_error("RangeError", "offset is out of bounds");
                         }
@@ -1333,19 +1338,20 @@ impl Interp {
                 );
             }
             let n = t.cur_len() as f64;
-            let rel = |it: &mut Interp, v: Value, d: f64| {
+            let rel = |it: &mut Interp, v: Value, d: f64| -> R<f64> {
                 let x = if matches!(v, Value::Undefined) {
                     d
                 } else {
-                    it.num(&v).trunc()
+                    let x = it.tonum(&v)?;
+                    if x.is_nan() {
+                        0.0
+                    } else {
+                        x.trunc()
+                    }
                 };
-                if x < 0.0 {
-                    (n + x).max(0.0)
-                } else {
-                    x.min(n)
-                }
+                Ok(if x < 0.0 { (n + x).max(0.0) } else { x.min(n) })
             };
-            let (s, e) = (rel(it, arg(a, 0), 0.0), rel(it, arg(a, 1), n));
+            let (s, e) = (rel(it, arg(a, 0), 0.0)?, rel(it, arg(a, 1), n)?);
             let len = if e > s { (e - s) as usize } else { 0 };
             // a length-tracking view with no end stays tracking (spec: the result's length is auto too)
             let track = t.track && matches!(arg(a, 1), Value::Undefined);
@@ -1374,19 +1380,20 @@ impl Interp {
                 );
             }
             let n = t.cur_len() as f64;
-            let rel = |it: &mut Interp, v: Value, d: f64| {
+            let rel = |it: &mut Interp, v: Value, d: f64| -> R<f64> {
                 let x = if matches!(v, Value::Undefined) {
                     d
                 } else {
-                    it.num(&v).trunc()
+                    let x = it.tonum(&v)?;
+                    if x.is_nan() {
+                        0.0
+                    } else {
+                        x.trunc()
+                    }
                 };
-                if x < 0.0 {
-                    (n + x).max(0.0)
-                } else {
-                    x.min(n)
-                }
+                Ok(if x < 0.0 { (n + x).max(0.0) } else { x.min(n) })
             };
-            let (s, e) = (rel(it, arg(a, 0), 0.0), rel(it, arg(a, 1), n));
+            let (s, e) = (rel(it, arg(a, 0), 0.0)?, rel(it, arg(a, 1), n)?);
             let (s, e) = (s as usize, (e as usize).max(s as usize));
             // same element type on both sides: the bytes copy as they are (no f64 round trip)
             let out = it.typed_with_len(t.ty, e - s);
@@ -1414,7 +1421,7 @@ impl Interp {
                 );
             }
             let n = t.cur_len();
-            let rel = match it.num(&arg(a, 0)).trunc() {
+            let rel = match it.tonum(&arg(a, 0))?.trunc() {
                 x if x.is_nan() => 0.0,
                 x => x,
             };
@@ -1475,7 +1482,15 @@ const TYPED_PRELUDE: &str = r#"
   });
   // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function. Compiled `Array.from(view)` and `for..of` use the protocol.
   def(TP, Symbol.iterator, TP.values);
-  def(TP, 'toLocaleString', AP.toString);
+  def(TP, 'toLocaleString', function () {
+    var len = this.length, out = '';
+    for (var i = 0; i < len; i++) {
+      if (i) out += ',';
+      var v = this[i];
+      if (v !== undefined && v !== null) out += v.toLocaleString();
+    }
+    return out;
+  });
   def(TP, 'indexOf', function (v, from) {
     from = from === undefined ? 0 : (from < 0 ? Math.max(this.length + from, 0) : from);
     for (var i = from; i < this.length; i++) if (this[i] === v) return i;
@@ -1500,15 +1515,42 @@ const TYPED_PRELUDE: &str = r#"
     for (var i = 0, j = this.length - 1; i < j; i++, j--) { var t = this[i]; this[i] = this[j]; this[j] = t; }
     return this;
   });
+  // TypedArraySpeciesCreate: the default constructor of each kind is captured here, before user code runs
+  var DEFAULTS = {};
+  ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'].forEach(function (n) {
+    if (typeof globalThis[n] === 'function') DEFAULTS[n] = globalThis[n];
+  });
+  var isBig = function (o) { return /^Big/.test(o[TAG]); };
+  function speciesCtor(o) {
+    var dflt = DEFAULTS[o[TAG]], C = o.constructor;
+    if (C === undefined) return dflt;
+    if ((typeof C !== 'object' && typeof C !== 'function') || C === null) throw new TypeError('object.constructor is not an object');
+    var S = C[Symbol.species];
+    if (S === undefined || S === null) return dflt;
+    if (typeof S !== 'function') throw new TypeError('object.constructor[Symbol.species] is not a constructor');
+    return S;
+  }
+  function speciesCreate(o, args, count) {
+    var r = Reflect.construct(speciesCtor(o), args);
+    if (!isTA(r) || gone(r)) throw new TypeError('species constructor did not return a TypedArray');
+    if (isBig(r) !== isBig(o)) throw new TypeError('Content type mismatch');
+    if (count !== undefined && r.length < count) throw new TypeError('species constructor returned a too short TypedArray');
+    return r;
+  }
   def(TP, 'map', function (f, t) {
-    var r = new this.constructor(this.length);
-    for (var i = 0; i < this.length; i++) r[i] = f.call(t, this[i], i, this);
+    var len = this.length;
+    if (typeof f !== 'function') throw new TypeError(String(f) + ' is not a function');
+    var r = speciesCreate(this, [len], len);
+    for (var i = 0; i < len; i++) r[i] = f.call(t, this[i], i, this);
     return r;
   });
   def(TP, 'filter', function (f, t) {
-    var kept = [];
-    for (var i = 0; i < this.length; i++) if (f.call(t, this[i], i, this)) kept.push(this[i]);
-    return new this.constructor(kept);
+    var kept = [], len = this.length;
+    if (typeof f !== 'function') throw new TypeError(String(f) + ' is not a function');
+    for (var i = 0; i < len; i++) if (f.call(t, this[i], i, this)) kept.push(this[i]);
+    var r = speciesCreate(this, [kept.length], kept.length);
+    for (var j = 0; j < kept.length; j++) r[j] = kept[j];
+    return r;
   });
   def(TP, 'sort', function (cmp) {
     var a = Array.from(this);
@@ -1516,8 +1558,8 @@ const TYPED_PRELUDE: &str = r#"
     for (var i = 0; i < a.length; i++) this[i] = a[i];
     return this;
   });
-  def(TP, 'toSorted', function (cmp) { return this.slice().sort(cmp); });
-  def(TP, 'toReversed', function () { return this.slice().reverse(); });
+  def(TP, 'toSorted', function (cmp) { return nSlice.call(this, 0, this.length).sort(cmp); });
+  def(TP, 'toReversed', function () { return nSlice.call(this, 0, this.length).reverse(); });
   def(TP, 'copyWithin', function (target, start, end) {
     var n = this.length, vals = Array.from(this);
     target = target < 0 ? Math.max(n + target, 0) : Math.min(target, n);
@@ -1541,14 +1583,45 @@ const TYPED_PRELUDE: &str = r#"
     at: 'at', keys: 'keys', values: 'values', entries: 'entries', join: 'join', includes: 'includes',
     indexOf: 'indexOf', lastIndexOf: 'lastIndexOf', map: 'map', filter: 'filter', sort: 'sort',
     toSorted: 'toSorted', toReversed: 'toReversed', reverse: 'reverse', copyWithin: 'copyWithin',
-    toString: 'join' };
+    toString: 'join', toLocaleString: 'toLocaleString' };
   Object.keys(detachedNames).forEach(function (n) {
     var orig = TP[n];
     if (typeof orig !== 'function') return;
     def(TP, n, function () {
+      if (n !== 'toString' && !isTA(this)) throw new TypeError('this is not a typed array.');
       if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + detachedNames[n] + ' on a detached ArrayBuffer');
       return orig.apply(this, arguments);
     });
+  });
+  // slice / subarray: a user species constructor builds the result; the default (and Buffer) keep the native path
+  function relIdx(v, len, d) {
+    if (v === undefined) return d;
+    var x = +v;
+    x = x !== x ? 0 : Math.trunc(x);
+    return x < 0 ? Math.max(len + x, 0) : Math.min(x, len);
+  }
+  function plainCtor(C, o) { return C === DEFAULTS[o[TAG]] || (typeof Buffer === 'function' && C === Buffer); }
+  var nSlice = TP.slice, nSub = TP.subarray;
+  def(TP, 'slice', function (start, end) {
+    if (!isTA(this)) throw new TypeError('this is not a typed array.');
+    if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer');
+    var len = this.length, s = relIdx(start, len, 0), e = relIdx(end, len, len), C = speciesCtor(this);
+    if (plainCtor(C, this)) return nSlice.call(this, s, e);
+    var cnt = Math.max(e - s, 0), r = speciesCreate(this, [cnt], cnt);
+    if (cnt > 0) {
+      if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer');
+      e = Math.min(e, this.length);
+      for (var k = s, n = 0; k < e; k++, n++) r[n] = this[k];
+    }
+    return r;
+  });
+  def(TP, 'subarray', function (begin, end) {
+    if (!isTA(this)) throw new TypeError('this is not a typed array.');
+    var len = this.length, s = relIdx(begin, len, 0), e = relIdx(end, len, len), C = speciesCtor(this);
+    if (plainCtor(C, this)) return nSub.call(this, s, end === undefined ? undefined : e);
+    var args = [this.buffer, this.byteOffset + s * this.BYTES_PER_ELEMENT];
+    args.push(Math.max(e - s, 0)); // ponytail: a length-tracking source loses tracking in the species path
+    return speciesCreate(this, args);
   });
   // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function (the guarded one now).
   def(TP, Symbol.iterator, TP.values);
