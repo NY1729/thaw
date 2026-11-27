@@ -16,6 +16,9 @@ thread_local! {
     pub(crate) static PEAK_BYTES: Cell<u64> = const { Cell::new(0) };
     pub(crate) static RESET_NS: Cell<u64> = const { Cell::new(0) };
     pub(crate) static HOOK_NS: Cell<u64> = const { Cell::new(0) };
+    /// Nanoseconds of the mark phase and of the sweep (record walk plus generation release).
+    pub(crate) static MARK_NS: Cell<u64> = const { Cell::new(0) };
+    pub(crate) static SWEEP_NS: Cell<u64> = const { Cell::new(0) };
     pub(crate) static CHUNKS: Cell<u64> = const { Cell::new(0) };
     static STRESS_TICKS: Cell<u64> = const { Cell::new(0) };
 }
@@ -134,6 +137,8 @@ pub fn stats_summary() -> String {
     sink.add("arena", "reclaimed", get(&RECLAIMED_BYTES));
     sink.add("arena", "reset_ms", get(&RESET_NS) / 1_000_000);
     sink.add("arena", "hook_ms", get(&HOOK_NS) / 1_000_000);
+    sink.add("arena", "mark_ms", get(&MARK_NS) / 1_000_000);
+    sink.add("arena", "sweep_ms", get(&SWEEP_NS) / 1_000_000);
     sink.add("arena", "chunks", crate::chunk_count() as u64);
     sink.add("arena", "peak_pending", get(&PEAK_PENDING));
     sink.add("arena", "tracing", u64::from(crate::is_tracing()));
