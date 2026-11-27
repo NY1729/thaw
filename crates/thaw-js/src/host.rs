@@ -545,6 +545,37 @@ fn peer_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
         .map_err(|e| js_error(it, &e.to_string()))
 }
 
+/// The declared (not yet loaded) `node:*` bundles of this thread, by name: a spawned worker's realm declares the
+/// same ones, so its `require('node:x')` finds them (`worker.rs`).
+pub(crate) fn declared_builtin_sources() -> Vec<(String, String)> {
+    let mut all: HashMap<String, String> = LOADED_BUILTIN_SOURCES.with(|m| m.borrow().clone());
+    PEER_SOURCES.with(|s| {
+        for (name, text) in s
+            .borrow()
+            .iter()
+            .filter(|(name, _)| name.starts_with("node:"))
+        {
+            all.entry(name.clone()).or_insert_with(|| text.clone());
+        }
+    });
+    all.into_iter().collect()
+}
+
+/// Declares `sources` on this thread (a worker thread), keeping a name the thread already has.
+pub(crate) fn declare_sources(sources: Vec<(String, String)>) {
+    PEER_SOURCES.with(|s| {
+        let mut s = s.borrow_mut();
+        for (name, text) in sources {
+            s.entry(name).or_insert(text);
+        }
+    });
+}
+
+/// The exports of the builtin `node:<bare>` when a declared or loaded bundle of this thread serves it.
+pub(crate) fn builtin_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
+    peer_exports(it, spec)
+}
+
 /// Whether `peer_exports(spec)` would find a package (no load happens).
 fn peer_known(spec: &str) -> bool {
     BOOTING.with(|b| b.borrow().iter().any(|(name, _)| name == spec))
@@ -8122,6 +8153,8 @@ pub struct ThawResult {
 thread_local! {
     /// Bundles declared by `thaw_tjs_declare`, by package name: loaded by a peer `require` on first use.
     static PEER_SOURCES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// The text of each `node:*` bundle this thread loaded, so a worker spawned from here can load it too.
+    static LOADED_BUILTIN_SOURCES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     /// Entry modules still running (a load in progress), by package name, with their partial `module.exports`.
     static BOOTING: RefCell<Vec<(String, Value)>> = const { RefCell::new(Vec::new()) };
     static BY_NAME: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
@@ -8268,6 +8301,9 @@ fn register_declared(name: &str, source: &str) -> Result<(), HostError> {
 /// fallback). A declared name that is already loaded keeps that instance: a peer's `require` and the
 /// program's own registration then share one module.
 fn register_bundle(name: String, src: &str) -> Result<(), HostError> {
+    if name.starts_with("node:") {
+        LOADED_BUILTIN_SOURCES.with(|m| m.borrow_mut().insert(name.clone(), src.to_string()));
+    }
     let declared_and_loaded = PEER_SOURCES.with(|s| s.borrow().contains_key(&name))
         && BY_NAME.with(|m| m.borrow().contains_key(&name));
     if declared_and_loaded {
