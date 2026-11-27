@@ -144,7 +144,17 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20});\n\
              \x20\x20return result;\n\
              }\n\
-             module.exports = { stringify: stringify, encode: stringify, parse: parse, decode: parse, escape: escape, unescape: unescape };\n\
+             function unescapeBuffer(value, decodeSpaces) {\n\
+             \x20\x20var source = globalThis.Buffer.from(String(value)), out = [];\n\
+             \x20\x20function hex(code) { return code >= 48 && code <= 57 ? code - 48 : code >= 65 && code <= 70 ? code - 55 : code >= 97 && code <= 102 ? code - 87 : -1; }\n\
+             \x20\x20for (var index = 0; index < source.length; index++) {\n\
+             \x20\x20\x20\x20var code = source[index];\n\
+             \x20\x20\x20\x20if (code === 37 && index + 2 < source.length) { var high = hex(source[index + 1]), low = hex(source[index + 2]); if (high >= 0 && low >= 0) { out.push(high * 16 + low); index += 2; continue; } }\n\
+             \x20\x20\x20\x20out.push(code === 43 && decodeSpaces ? 32 : code);\n\
+             \x20\x20}\n\
+             \x20\x20return globalThis.Buffer.from(out);\n\
+             }\n\
+             module.exports = { stringify: stringify, encode: stringify, parse: parse, decode: parse, escape: escape, unescape: unescape, unescapeBuffer: unescapeBuffer };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),

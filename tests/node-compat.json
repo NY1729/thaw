@@ -5520,6 +5520,11 @@
     "name": "createServer handler wrapped through any: res.end() with omitted or undefined chunk",
     "expect": "matched",
     "source": "import http from 'http';\ntype Fn = (...a: any[]) => any;\nfunction wrap(fn: Fn): any { return function (...a: any[]) { return fn(...a); }; }\nasync function main(): Promise<void> {\n  const srv = http.createServer(wrap((req: any, res: any) => {\n    if (req.url === '/a') { res.end(); } else if (req.url === '/b') { res.end(undefined); } else { res.end('x'); }\n  }));\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const port = (srv.address() as any).port;\n  const out: string[] = [];\n  for (const p of ['/a', '/b', '/c']) {\n    const r = await fetch('http://127.0.0.1:' + port + p);\n    out.push(p + ':' + r.status + ':' + JSON.stringify(await r.text()));\n  }\n  console.log(out.join(','));\n  srv.close();\n}\n"
-  }
+  },
+    {
+      "name": "r153 punycode throws, querystring.unescapeBuffer, StringDecoder fields, legacy timers",
+      "expect": "matched",
+      "source": "import * as punycode from 'node:punycode';\nimport * as qs from 'node:querystring';\nimport { StringDecoder } from 'node:string_decoder';\nimport * as timers from 'node:timers';\nfunction main(): void {\n  function t(f: () => any): string { try { return String(f()); } catch (e: any) { return 'THROW ' + e.name + ': ' + e.message; } }\n  const pd: any = punycode.decode, pe: any = punycode.encode, pa: any = punycode.toASCII, pu: any = punycode.toUnicode;\n  console.log(t(() => pd()), '|', t(() => pe()), '|', t(() => pa()), '|', t(() => pu()));\n  console.log(punycode.encode('mañana'), punycode.toASCII('mañana.com'));\n  const q: any = qs;\n  console.log(q.unescapeBuffer('a%20b+c', true).toString(), q.unescapeBuffer.length, q.unescape.length);\n  console.log(Object.keys(new StringDecoder('utf8')).join(','));\n  const tm: any = timers;\n  const item: any = { _onTimeout() { console.log('tick'); } };\n  tm.enroll(item, 5);\n  console.log(item._idleTimeout);\n  tm.active(item);\n  console.log(typeof tm.promises.setTimeout, tm._unrefActive.length, tm.active.length, tm.enroll.length, tm.unenroll.length);\n}\n"
+    }
   ]
 }
