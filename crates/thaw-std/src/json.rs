@@ -1300,7 +1300,10 @@ fn bytes_wrapper(value: &Value) -> Option<Value> {
 /// What `JSON.stringify` sees for a `Bytes` value: an `ArrayBuffer` / `DataView` has no own
 /// enumerable properties (`{}`), every other kind is the Buffer wrapper.
 fn bytes_stringify_form(value: &Value) -> Option<Value> {
-    if matches!(value, Value::Bytes(bytes) if matches!(bytes.kind(), 1 | 2)) {
+    // On the thaw-js wire the bytes must arrive (as the Buffer wrapper), not `{}`.
+    if !DATE_WIRE.with(Cell::get)
+        && matches!(value, Value::Bytes(bytes) if matches!(bytes.kind(), 1 | 2))
+    {
         return Some(Value::shared_object(indexmap::IndexMap::new()));
     }
     bytes_wrapper(value)
