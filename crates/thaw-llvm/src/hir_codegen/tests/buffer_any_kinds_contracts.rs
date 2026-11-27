@@ -95,3 +95,4 @@ fn s3_any_bytes_top_level_stringify_keeps_kind() {
         "{} {} {\"type\":\"Buffer\",\"data\":[97]}\n"
     );
 }
+

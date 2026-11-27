@@ -5435,6 +5435,51 @@
     "name": "r129 http ServerResponse EventEmitter members",
     "expect": "matched",
     "source": "import * as http from 'node:http';\nasync function main(): Promise<void> {\n  const out: string[] = [];\n  let done: () => void = () => {};\n  const closed = new Promise<void>((r) => { done = r; });\n  const srv = http.createServer((req, res) => {\n    const base = res.listenerCount('finish');\n    const a = () => { out.push('a'); };\n    const b = () => { out.push('b'); };\n    res.on('finish', a);\n    res.prependListener('finish', b);\n    res.once('close', () => { out.push('close'); done(); });\n    out.push('count:' + (res.listenerCount('finish') - base) + ':' + res.eventNames().join('|') + ':' + res.getMaxListeners());\n    res.removeListener('finish', a);\n    out.push('after-remove:' + (res.listenerCount('finish') - base) + ':' + res.emit('nope'));\n    res.end('x');\n  });\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const r = await fetch('http://127.0.0.1:' + (srv.address() as any).port + '/');\n  console.log(await r.text());\n  await closed;\n  console.log(out.join(','));\n  srv.close();\n}\n"
+  },
+  {
+    "name": "r147 http HEAD, 204 and 304 responses carry no framing or body",
+    "expect": "matched",
+    "source": "import * as http from 'node:http';\nasync function raw(port: number, method: string, path: string): Promise<string> {\n  const res = await fetch('http://127.0.0.1:' + port + path, { method });\n  const h: string[] = [];\n  res.headers.forEach((v: string, k: string) => { if (k !== 'date' && k !== 'connection' && k !== 'keep-alive') h.push(k + ': ' + v); });\n  return res.status + ' ' + h.sort().join('|') + ' body=' + JSON.stringify(await res.text());\n}\nasync function main(): Promise<void> {\n  const srv = http.createServer(async (req, res) => {\n    if (req.url === '/204') { res.writeHead(204, { 'x-a': '1' }); res.end(); return; }\n    if (req.url === '/304') { res.writeHead(304, { etag: 'e' }); res.end(); return; }\n    if (req.url === '/len') { res.writeHead(200, { 'content-length': '5' }); res.end(req.method === 'HEAD' ? undefined : 'hello'); return; }\n    if (req.url === '/async') { await new Promise<void>((r) => setTimeout(() => r(), 5)); res.writeHead(200, { 'x-a': '1' }); res.end(req.method === 'HEAD' ? undefined : 'hello'); return; }\n    res.writeHead(200, { 'content-type': 'text/plain' });\n    res.end(req.method === 'HEAD' ? undefined : 'hello');\n  });\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const port = (srv.address() as any).port;\n  for (const [m, p] of [['HEAD', '/'], ['GET', '/'], ['HEAD', '/len'], ['GET', '/len'], ['HEAD', '/async'], ['GET', '/async'], ['GET', '/204'], ['GET', '/304']]) {\n    console.log(m, p, await raw(port, m, p));\n  }\n  srv.close();\n}\n"
+  },
+  {
+    "name": "r143 callback with fixed prefix and rest stored in a rest-typed slot",
+    "expect": "matched",
+    "source": "function call(fn: (...a: any[]) => any, x: any): any { return fn(x); }\nfunction wrap(fn: (...a: any[]) => any): any {\n  return function (...a: any[]) { return fn(...a); };\n}\nfunction succeed(fn: (...a: any[]) => any): any {\n  return wrap(function (err: any, ...args: any[]) { return fn(...args); });\n}\nfunction main(): void {\n  console.log(call(function (err: any, ...rest: any[]) { return err + ':' + rest.length; }, 5));\n  console.log(call((err: any, ...rest: any[]) => err + ':' + rest.length, 6));\n  const cb = succeed((x: number, y: number) => x + y);\n  console.log(cb(null, 3, 4));\n  const cb2 = wrap((e: any, a: any, ...r: any[]) => e + '|' + a + '|' + r.join(','));\n  console.log(cb2('e', 'a', 1, 2, 3));\n}\n"
+  },
+    {
+      "name": "r133 node:http and node:net in one program",
+      "expect": "matched",
+      "source": "import * as http from 'node:http';\nimport * as net from 'node:net';\nasync function main(): Promise<void> {\n  const h = http.createServer((req: any, res: any) => { res.end('http-ok'); });\n  const n = net.createServer((sock: any) => { sock.end('net-ok'); });\n  await new Promise<void>((r) => n.listen(0, '127.0.0.1', () => r()));\n  console.log('net port', typeof (n.address() as any).port);\n  n.close();\n  await new Promise<void>((r) => h.listen(0, '127.0.0.1', () => r()));\n  const r = await fetch('http://127.0.0.1:' + (h.address() as any).port + '/');\n  console.log(await r.text());\n  h.close();\n}\n"
+    },
+    {
+      "name": "r133 http argument validation error codes",
+      "expect": "matched",
+      "source": "import * as http from 'node:http';\nfunction main(): void {\nconst M: any = http;\nfunction t(n: string, f: () => void): void {\n  try { f(); console.log(n, 'no throw'); } catch (e: any) { console.log(n, e.name, e.code, e.message); }\n}\nt('path', () => M.request({ path: '/a b' }));\nt('method', () => M.request({ method: 'G E' }));\nt('method2', () => M.request({ method: 5 }));\nt('host', () => M.request({ hostname: 5 }));\nt('host2', () => M.request({ host: {} }));\nt('hdrhost', () => M.request({ headers: { host: ['a', 'b'] } }));\nt('proto', () => M.request({ protocol: 'https:' }));\nt('timeout', () => M.request({ timeout: 'x' }));\nt('cb', () => M.request({}, 5));\nt('agent4', () => new M.Agent({ scheduling: 'x' }));\nt('vhn', () => M.validateHeaderName('a b'));\nt('vhv', () => M.validateHeaderValue('a', undefined));\n}\n"
+    },
+    {
+      "name": "r133 http module values OutgoingMessage METHODS STATUS_CODES Agent",
+      "expect": "matched",
+      "source": "import * as http from 'node:http';\nfunction main(): void {\nconst M: any = http;\nconsole.log(typeof M.IncomingMessage, typeof M.Server, typeof M.OutgoingMessage, typeof M.ClientRequest, typeof M.Agent, typeof M.ServerResponse);\nconsole.log(M.METHODS.length, Object.keys(M.STATUS_CODES).length, M.STATUS_CODES[418], M.STATUS_CODES[511], M.METHODS.includes('QUERY'));\nconst o = new M.OutgoingMessage();\nconsole.log(o.sendDate, o.chunkedEncoding, o.writable, o.finished, o.headersSent, o.destroyed, o.shouldKeepAlive, o.useChunkedEncodingByDefault, o.writableEnded);\nconsole.log(o.setHeader('A', 1) === o, o.getHeaderNames().join(','), o.hasHeader('a'), o.getHeader('a'));\nconsole.log(o instanceof M.OutgoingMessage, M.Agent.length, new M.Agent({ keepAlive: true, maxSockets: 2 }).maxSockets);\n}\n"
+    },
+    {
+      "name": "r133 http server listening and timeout members",
+      "expect": "matched",
+      "source": "import * as http from 'node:http';\nfunction main(): void {\n  const s = http.createServer((req: any, res: any) => { res.end('ok'); });\n  console.log(s.listening, typeof s.timeout, s.headersTimeout, s.requestTimeout, s.keepAliveTimeout, s.maxRequestsPerSocket);\n  s.listen(0, '127.0.0.1', () => {\n    console.log('listening', s.listening);\n    s.close(() => { console.log('closed', s.listening); });\n    console.log('after close call', s.listening);\n  });\n}\n"
+    },
+    {
+      "name": "r133 http server connection control methods",
+      "expect": "matched",
+      "source": "import * as http from 'node:http';\nfunction main(): void {\n  const s = http.createServer((req: any, res: any) => { res.end('ok'); });\n  s.on('listening', async () => {\n    const r = await fetch('http://127.0.0.1:' + (s.address() as any).port + '/');\n    console.log(await r.text());\n    s.getConnections((err: any, n: number) => { console.log('conns', typeof n); });\n    s.closeIdleConnections();\n    s.closeAllConnections();\n    s.ref(); s.unref();\n    s.close(() => { console.log('closed'); });\n  });\n  s.listen(0, '127.0.0.1');\n}\n"
+    },
+    {
+      "name": "r133 http ClientRequest.setTimeout and Agent options",
+      "expect": "matched",
+      "source": "import * as http from 'node:http';\nimport * as net from 'node:net';\nasync function main(): Promise<void> {\n  const s = net.createServer((sock: any) => { sock.on('data', () => {}); });\n  await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));\n  const port = (s.address() as any).port;\n  await new Promise<void>((resolve) => {\n    const req: any = (http as any).request({ host: '127.0.0.1', port, agent: false });\n    req.setTimeout(50, () => { console.log('timeout fired'); req.destroy(); });\n    req.on('error', () => {}); req.on('close', () => { console.log('closed'); resolve(); });\n    req.end();\n  });\n  const a: any = new (http as any).Agent({ keepAlive: true, maxSockets: 2, maxFreeSockets: 3, timeout: 50, scheduling: 'fifo' });\n  console.log(a.maxSockets, a.maxFreeSockets, a.keepAlive, a.options.timeout, a.scheduling, a.defaultPort, a.protocol);\n  s.close();\n  \n}\n"
+    },
+  {
+    "name": "dynamic member calls on any keep this and callbacks in any restore as functions",
+    "expect": "matched",
+    "source": "import http from 'http';\nfunction mk(): any { return function (...a: any[]) { return a.length; }; }\nfunction main(): void {\n  const d: any = { n: 7, fn: (x: number) => x * 2, g: function (x: number) { return x + 1; } };\n  const keys = Object.keys(d);\n  console.log(d[keys[1]](4), d[keys[2]](4));\n  const name = keys[1];\n  console.log(d[name](3), typeof d.g, d.g.name);\n  const run = (cb: any) => cb(10);\n  console.log(run(d.g));\n  const s = http.createServer(mk());\n  s.listen(0, function () { console.log(typeof this.address().port); s.close(); });\n}\n"
   }
-]
+  ]
 }

@@ -135,12 +135,36 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// Remembers that the function literals passed to an `Array` method run under that method's
+    /// frame (`at Array.map`), for `mark_user_function`.
+    fn note_array_callbacks(&mut self, member: &MemberExpr, property: &swc_ecma_ast::IdentName, call: &CallExpr) {
+        if !matches!(property.sym.as_ref(), "map" | "forEach" | "filter" | "sort" | "some" | "every" | "find"
+            | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight" | "flatMap")
+        {
+            return;
+        }
+        let is_array = matches!(member.obj.as_ref(), Expr::Array(_))
+            || matches!(self.peek_type_without_lowering(&member.obj), Some(HirType::Array(_)));
+        if !is_array {
+            return;
+        }
+        for argument in &call.args {
+            let span = match argument.expr.as_ref() {
+                Expr::Arrow(arrow) => arrow.span,
+                Expr::Fn(function) => function.function.span,
+                _ => continue,
+            };
+            CALLBACK_VIA.with(|via| via.borrow_mut().insert(span.lo, format!("Array.{}", property.sym)));
+        }
+    }
+
     fn lower_native_instance_builtin(
         &mut self,
         member: &MemberExpr,
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+        self.note_array_callbacks(member, property, call);
         // A Json storage slot may still be a live Buffer or another host object.
         // Calling its method through the Json snapshot path loses the receiver's
         // actual `toString` implementation (for example, Buffer's byte decoder).
@@ -177,6 +201,34 @@ impl<'a> FnLowerer<'a> {
                 result,
                 &[(receiver_name, receiver_type, receiver)],
             );
+        }
+        // A mixed-type literal (`[1, 'x', null]`) is a tuple; its read-only Array methods run on its
+        // Json form (the elements keep their JavaScript types).
+        if matches!(
+            property.sym.as_ref(),
+            "map" | "filter" | "reduce" | "reduceRight" | "some" | "every" | "find" | "findIndex" | "findLast"
+                | "findLastIndex" | "forEach" | "indexOf" | "lastIndexOf" | "includes" | "join" | "slice"
+                | "concat" | "at" | "flat" | "flatMap"
+        ) && matches!(self.peek_type_without_lowering(&member.obj), Some(HirType::Tuple(_)))
+        {
+            let receiver = self.lower_required_member_receiver(&member.obj, property.sym.as_ref())?;
+            if let HirType::Tuple(elements) = self.infer_expr_type_inner(&receiver)? {
+                if elements.iter().all(Self::spread_json_encodable_type) {
+                    let json = self.coerce_to_declared(&HirType::Json, receiver)?;
+                    let name = format!("__thaw_tuple_json_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), HirType::Json);
+                    let mut synthetic_member = member.clone();
+                    *synthetic_member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        name.clone().into(),
+                        member.span,
+                    ));
+                    let mut synthetic_call = call.clone();
+                    synthetic_call.callee = Callee::Expr(Box::new(Expr::Member(synthetic_member.clone())));
+                    let result = self.lower_native_instance_builtin(&synthetic_member, property, &synthetic_call)?;
+                    return self.wrap_call_argument_bindings(result, &[(name, HirType::Json, json)]);
+                }
+            }
         }
         if let Some(result) = self.lower_bytes_generic_array_method(member, property, call)? {
             return Ok(result);
@@ -510,6 +562,13 @@ impl<'a> FnLowerer<'a> {
     /// `?.`/`?:`/`||`/`??`/`&&` forms of those. A wrong guess is harmless: the caller lowers
     /// the receiver once and re-checks its real type.
     fn json_receiver_candidate(&self, expr: &Expr) -> bool {
+        // `(x as any)` is a dynamic receiver whatever `x` is.
+        if let Expr::TsAs(assertion) = expr {
+            if matches!(assertion.type_ann.as_ref(), swc_ecma_ast::TsType::TsKeywordType(keyword)
+                if matches!(keyword.kind, swc_ecma_ast::TsKeywordTypeKind::TsAnyKeyword | swc_ecma_ast::TsKeywordTypeKind::TsUnknownKeyword)) {
+                return true;
+            }
+        }
         if matches!(expr, Expr::Array(_) | Expr::Object(_) | Expr::Call(_) | Expr::OptChain(_)) && has_dynamic_storage(expr.span()) { return true; }
         if let Some(ty) = self.peek_type_without_lowering(expr) {
             return ty == HirType::Json;

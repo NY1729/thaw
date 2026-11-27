@@ -326,8 +326,9 @@ fn pbkdf2_sha256_600k_iterations_stays_within_budget() {
         "669cfe52482116fda1aa2cbe409b2f56c8e4563752b7a28f6eaab614ee005178"
     );
     assert!(
-        // ~4 s in a debug build on a quiet host; the guard only has to catch an order-of-magnitude slowdown.
-        elapsed.as_secs_f64() < 20.0,
+        // ~4 s in a debug build on a quiet host; the guard only has to catch an order-of-magnitude slowdown
+        // (more room when the suite runs in parallel on a loaded machine).
+        elapsed < crate::tests::slow_test_deadline(20),
         "pbkdf2-sha256 with 600000 iterations took {elapsed:?}"
     );
 }
