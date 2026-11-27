@@ -3438,7 +3438,11 @@ impl<'a> FnLowerer<'a> {
                         let index = self.lower_expr(&computed.expr)?;
                         self.expect_type(&HirType::F64, &index, "index expression")?;
                         let HirExpr::Lit(HirLit::F64(position)) = index else {
-                            return Err("tuple index must be a numeric literal".into());
+                            // A computed index reads the elements as one dynamic array.
+                            // ponytail: the tuple is converted to Json per read (O(n) each); a hot loop
+                            // over a mixed literal should be declared `any[]`.
+                            let json = self.coerce_to_declared(&HirType::Json, obj)?;
+                            return Ok(HirExpr::JsonIndex(Box::new(json), Box::new(index)));
                         };
                         let position = position as usize;
                         let element = elements

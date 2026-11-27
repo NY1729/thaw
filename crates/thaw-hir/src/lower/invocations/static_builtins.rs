@@ -375,6 +375,7 @@ impl<'a> FnLowerer<'a> {
             HirType::F64
             | HirType::Str
             | HirType::Bool
+            | HirType::BigInt
             | HirType::Null
             | HirType::Undefined
             | HirType::Json => true,
