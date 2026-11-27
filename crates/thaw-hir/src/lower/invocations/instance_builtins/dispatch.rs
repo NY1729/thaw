@@ -534,6 +534,13 @@ impl<'a> FnLowerer<'a> {
     /// `?.`/`?:`/`||`/`??`/`&&` forms of those. A wrong guess is harmless: the caller lowers
     /// the receiver once and re-checks its real type.
     fn json_receiver_candidate(&self, expr: &Expr) -> bool {
+        // `(x as any)` is a dynamic receiver whatever `x` is.
+        if let Expr::TsAs(assertion) = expr {
+            if matches!(assertion.type_ann.as_ref(), swc_ecma_ast::TsType::TsKeywordType(keyword)
+                if matches!(keyword.kind, swc_ecma_ast::TsKeywordTypeKind::TsAnyKeyword | swc_ecma_ast::TsKeywordTypeKind::TsUnknownKeyword)) {
+                return true;
+            }
+        }
         if matches!(expr, Expr::Array(_) | Expr::Object(_) | Expr::Call(_) | Expr::OptChain(_)) && has_dynamic_storage(expr.span()) { return true; }
         if let Some(ty) = self.peek_type_without_lowering(expr) {
             return ty == HirType::Json;

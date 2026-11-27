@@ -2283,7 +2283,7 @@ impl<'a> FnLowerer<'a> {
             HirType::Str => Ok(HirExpr::JsonAsString(Box::new(value))),
             HirType::Bool => Ok(HirExpr::JsonAsBool(Box::new(value))),
             HirType::Json => Ok(value),
-            HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_) => {
+            HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_) | HirType::Function(..) | HirType::CallableFunction(..) => {
                 Ok(HirExpr::JsonAsNative(Box::new(value), element.clone()))
             }
             other => Err(format!(
