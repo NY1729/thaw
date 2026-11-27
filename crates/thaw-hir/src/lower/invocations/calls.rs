@@ -545,9 +545,13 @@ impl<'a> FnLowerer<'a> {
     fn lower_array_element_call(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
         let Callee::Expr(callee) = &call.callee else { return Ok(None) };
         let Expr::Member(member) = callee.as_ref() else { return Ok(None) };
-        let (Expr::Ident(owner), MemberProp::Computed(_)) = (member.obj.as_ref(), &member.prop) else {
+        let (Expr::Ident(owner), MemberProp::Computed(computed)) = (member.obj.as_ref(), &member.prop) else {
             return Ok(None);
         };
+        // `obj[Symbol.iterator]()` / `obj["name"]()` are method calls: they keep `this`.
+        if matches!(computed.expr.as_ref(), Expr::Member(_) | Expr::Lit(Lit::Str(_)) | Expr::Tpl(_)) {
+            return Ok(None);
+        }
         let _ = owner;
         let owner_value = self.lower_expr(&member.obj)?;
         let element = match self.infer_expr_type(&owner_value) {
