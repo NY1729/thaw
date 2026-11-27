@@ -47,6 +47,10 @@ def split_params(s):
 
 
 def declared_len(params):
+    for p in params:
+        m = re.match(r"(?:\.\.\.__length_|[\w$]+__length_)(\d+)\b", p)
+        if m:
+            return int(m.group(1))
     return sum(1 for p in params if not p.startswith("...") and not p.startswith("argsArray"))
 
 
@@ -106,7 +110,17 @@ def process_arm(mods, body, fix):
         d = declared_len(params)
         if d == n:
             continue
-        if name in KEEP or "assert" in mods[0] or any("=>" in p or "JsValue" in p or "argsArray" in p or p.startswith("...") for p in params):
+        if len(spans) == 1 and len(params) == 1 and (params[0].startswith("...") or params[0].startswith("argsArray")) and mods[0] != "assert" and name not in KEEP:
+            # rest-only (or dynamic `argsArray`) declaration: call lowering is unchanged, only `.length` is reported (rest named __length_N)
+            bad.append((mods[0], name, d, n))
+            edits.append((a, b, f"...__length_{n}: " + (params[0].split(":", 1)[1].strip() if params[0].startswith("...") else "any[]")))
+        elif mods[0] in MARKER_MODS and name not in KEEP and params and "__length_" not in params[-1]:
+            # callback-typed / overloaded / typed-rest: keep the real parameters, only the last one's name carries Node's
+            # `.length` (`cb__length_3`, `...args__length_0`), so overload resolution and callback lowering are untouched
+            bad.append((mods[0], name, d, n))
+            last = re.match(r"^(\.\.\.)?([\w$]+)(\??:.*)$", params[-1], re.S)
+            edits.append((a, b, ", ".join(params[:-1] + [f"{last.group(1) or ''}{last.group(2)}__length_{n}{last.group(3)}"])))
+        elif name in KEEP or "assert" in mods[0] or any("=>" in p or "JsValue" in p or "argsArray" in p or p.startswith("...") for p in params):
             # callback-typed signatures are lowered natively (typed server/fs paths); an extra parameter breaks that
             # lowering (http.createServer), so these are only reported
             SKIPPED.append((mods[0], name, d, n, "callback/JsValue/dynamic-typed or assert"))
@@ -164,6 +178,8 @@ def process_extra(m):
 # factories whose typed lowering/overload resolution is known (or not proven) to survive an extra optional parameter
 KEEP = {"createInterface", "fork", "createSecretKey", "createHmac", "createSign", "createVerify", "sign", "verify",
         "monitorEventLoopDelay", "createHistogram"}
+# modules where a typed signature may carry a trailing `...__length_N` marker (verified against their callback lowering)
+MARKER_MODS = {"fs", "fs/promises", "util", "module", "v8", "process", "path"}
 FIX = [False]
 bad_extra = []
 SKIPPED = []
@@ -185,6 +201,8 @@ def main():
     # per-module extras appended in resolve_builtin: `"fs" => "<dts>",`
     text = re.compile(r'(?m)^( {16}"[\w/]+" => )"((?:[^"\\]|\\.)*)",$').sub(
         lambda m: m.group(1) + '"' + process_extra(m) + '",', text)
+    text, glist = gen_lists(text, fix)
+    bad.extend(glist)
     bad.extend(bad_extra)
     for mod, name, d, n in bad:
         print(f"{mod}.{name}: declared {d}, node {n}")

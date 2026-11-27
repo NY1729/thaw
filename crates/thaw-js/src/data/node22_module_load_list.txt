@@ -1,0 +1,149 @@
+Internal Binding builtins
+Internal Binding module_wrap
+Internal Binding errors
+NativeModule internal/assert
+Internal Binding util
+NativeModule internal/errors
+Internal Binding config
+Internal Binding timers
+Internal Binding async_wrap
+Internal Binding task_queue
+Internal Binding symbols
+NativeModule internal/async_hooks
+Internal Binding constants
+Internal Binding types
+Internal Binding options
+NativeModule internal/options
+Internal Binding string_decoder
+NativeModule internal/util
+NativeModule internal/util/types
+NativeModule internal/validators
+NativeModule internal/linkedlist
+NativeModule internal/priority_queue
+Internal Binding icu
+NativeModule internal/util/inspect
+NativeModule internal/constants
+Internal Binding trace_events
+NativeModule internal/util/debuglog
+Internal Binding async_context_frame
+NativeModule internal/async_context_frame
+NativeModule internal/timers
+NativeModule internal/events/abort_listener
+NativeModule events
+Internal Binding buffer
+NativeModule internal/buffer
+NativeModule buffer
+NativeModule internal/webidl
+Internal Binding messaging
+NativeModule internal/worker/js_transferable
+NativeModule diagnostics_channel
+Internal Binding process_methods
+NativeModule internal/process/per_thread
+Internal Binding credentials
+NativeModule internal/process/promises
+NativeModule internal/fixed_queue
+NativeModule async_hooks
+NativeModule internal/process/task_queues
+NativeModule timers
+NativeModule path
+NativeModule internal/querystring
+NativeModule internal/mime
+NativeModule internal/data_url
+NativeModule querystring
+Internal Binding url
+NativeModule internal/url
+NativeModule internal/modules/typescript
+Internal Binding contextify
+NativeModule internal/vm
+NativeModule internal/process/execution
+NativeModule internal/process/warning
+Internal Binding fs
+Internal Binding blob
+Internal Binding encoding_binding
+NativeModule internal/encoding
+NativeModule internal/streams/utils
+NativeModule util
+NativeModule internal/webstreams/util
+NativeModule internal/webstreams/queuingstrategies
+NativeModule internal/blob
+NativeModule internal/fs/utils
+Internal Binding permission
+NativeModule internal/process/permission
+NativeModule fs
+NativeModule internal/source_map/source_map_cache
+Internal Binding modules
+NativeModule internal/modules/helpers
+NativeModule internal/console/constructor
+NativeModule internal/console/global
+NativeModule internal/util/inspector
+Internal Binding inspector
+Internal Binding performance
+NativeModule internal/perf/utils
+NativeModule internal/event_target
+Internal Binding wasm_web_api
+Internal Binding mksnapshot
+NativeModule internal/v8/startup_snapshot
+NativeModule internal/process/signal
+NativeModule url
+NativeModule internal/modules/customization_hooks
+NativeModule internal/modules/package_json_reader
+NativeModule internal/modules/cjs/loader
+NativeModule internal/process/pre_execution
+NativeModule internal/modules/esm/utils
+NativeModule internal/inspector_async_hook
+Internal Binding worker
+NativeModule internal/modules/run_main
+NativeModule internal/net
+NativeModule internal/dns/utils
+NativeModule internal/modules/esm/assert
+NativeModule internal/modules/esm/loader
+NativeModule internal/modules/esm/module_map
+NativeModule internal/modules/esm/translators
+NativeModule internal/modules/esm/formats
+NativeModule internal/modules/esm/get_format
+NativeModule internal/modules/esm/resolve
+NativeModule internal/modules/esm/load
+NativeModule internal/deps/amaro/dist/index
+NativeModule internal/modules/esm/module_job
+NativeModule process
+NativeModule internal/process/finalization
+NativeModule internal/abort_controller
+NativeModule internal/streams/end-of-stream
+NativeModule internal/streams/destroy
+NativeModule internal/streams/legacy
+NativeModule internal/streams/add-abort-signal
+NativeModule internal/streams/state
+NativeModule string_decoder
+NativeModule internal/streams/from
+NativeModule internal/streams/readable
+NativeModule internal/streams/writable
+NativeModule internal/streams/duplex
+NativeModule internal/streams/pipeline
+NativeModule internal/streams/compose
+NativeModule internal/streams/operators
+NativeModule stream/promises
+NativeModule internal/streams/transform
+NativeModule internal/streams/passthrough
+NativeModule internal/streams/duplexpair
+NativeModule stream
+Internal Binding uv
+Internal Binding cares_wrap
+Internal Binding stream_wrap
+Internal Binding tcp_wrap
+Internal Binding pipe_wrap
+NativeModule internal/stream_base_commons
+NativeModule internal/perf/performance_entry
+NativeModule internal/perf/observe
+NativeModule net
+Internal Binding fs_dir
+NativeModule internal/fs/dir
+Internal Binding fs_event_wrap
+NativeModule internal/fs/watchers
+NativeModule internal/fs/recursive_watch
+NativeModule internal/readline/utils
+NativeModule internal/readline/callbacks
+NativeModule internal/readline/interface
+NativeModule internal/fs/promises
+NativeModule internal/fs/streams
+NativeModule internal/fs/sync_write_stream
+Internal Binding report
