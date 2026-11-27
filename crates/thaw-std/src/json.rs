@@ -6955,7 +6955,9 @@ pub extern "C" fn thaw_json_console_string(value: *mut Value) -> *const c_char {
                 .map(|owned| to_str(unsafe { thaw_error_console_inspect(owned.as_ptr()) }))
                 .unwrap_or_else(|| text.clone())
         }
-        Value::String(value) if is_symbol_key_wire(value.as_bytes()) => symbol_text(value.as_bytes()),
+        Value::String(value) if is_symbol_key_wire(value.as_bytes()) => {
+            symbol_text(value.as_bytes())
+        }
         Value::String(value) => value.clone(),
         Value::Wtf8(bytes) => wtf8_to_string(bytes),
         other => inspect_json(other),
