@@ -5470,6 +5470,11 @@
       "name": "r133 http ClientRequest.setTimeout and Agent options",
       "expect": "matched",
       "source": "import * as http from 'node:http';\nimport * as net from 'node:net';\nasync function main(): Promise<void> {\n  const s = net.createServer((sock: any) => { sock.on('data', () => {}); });\n  await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));\n  const port = (s.address() as any).port;\n  await new Promise<void>((resolve) => {\n    const req: any = (http as any).request({ host: '127.0.0.1', port, agent: false });\n    req.setTimeout(50, () => { console.log('timeout fired'); req.destroy(); });\n    req.on('error', () => {}); req.on('close', () => { console.log('closed'); resolve(); });\n    req.end();\n  });\n  const a: any = new (http as any).Agent({ keepAlive: true, maxSockets: 2, maxFreeSockets: 3, timeout: 50, scheduling: 'fifo' });\n  console.log(a.maxSockets, a.maxFreeSockets, a.keepAlive, a.options.timeout, a.scheduling, a.defaultPort, a.protocol);\n  s.close();\n  \n}\n"
-    }
+    },
+  {
+    "name": "dynamic member calls on any keep this and callbacks in any restore as functions",
+    "expect": "matched",
+    "source": "import http from 'http';\nfunction mk(): any { return function (...a: any[]) { return a.length; }; }\nfunction main(): void {\n  const d: any = { n: 7, fn: (x: number) => x * 2, g: function (x: number) { return x + 1; } };\n  const keys = Object.keys(d);\n  console.log(d[keys[1]](4), d[keys[2]](4));\n  const name = keys[1];\n  console.log(d[name](3), typeof d.g, d.g.name);\n  const run = (cb: any) => cb(10);\n  console.log(run(d.g));\n  const s = http.createServer(mk());\n  s.listen(0, function () { console.log(typeof this.address().port); s.close(); });\n}\n"
+  }
   ]
 }
