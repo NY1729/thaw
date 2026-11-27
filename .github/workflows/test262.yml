@@ -1,14 +1,30 @@
 name: test262
 
-# Gating (on labelled PRs) test262 conformance ratchet for thaw-js-node (tools/test262). Runs on demand, or on a pull request
-# that carries the `thaw-js-measure` label. Each shard runs a slice of test262 (tools/test262/shards.json), then
-# compares against the committed baseline (tools/test262/baseline.json + failing.txt.gz): a test that passes in the
-# baseline and fails now is a regression and fails the shard; the `ratchet` job aggregates them (make it a required
-# check). The workflow only runs on PRs carrying `thaw-js-measure` (or on dispatch).
+# Gating test262 conformance ratchet for thaw-js-node (tools/test262). Runs on demand, and on every pull request that
+# touches the engine or the crates it builds from (see `paths` below). Each shard runs a slice of test262
+# (tools/test262/shards.json), then compares against the committed baseline (tools/test262/baseline.json +
+# failing.txt.gz): a test that passes in the baseline and fails now is a regression and fails the shard; the `ratchet`
+# job aggregates them. The merge gate requires the `test262 ratchet` check to succeed whenever it ran.
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
+    # Runs on every pull request that can change thaw-js-node (the crate and the crates it builds from).
+    paths:
+      - 'crates/thaw-js/**'
+      - 'crates/thaw-node-builtins/**'
+      - 'crates/thaw-parser/**'
+      - 'crates/thaw-arena/**'
+      - 'crates/thaw-hir/**'
+      - 'crates/thaw-std/**'
+      - 'crates/thaw-runtime/**'
+      - 'crates/thaw-intl/**'
+      - 'crates/thaw-wasm/**'
+      - 'crates/thaw-sqlite/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tools/test262/**'
+      - '.github/workflows/test262.yml'
   workflow_dispatch:
 
 permissions:
@@ -24,7 +40,6 @@ env:
 jobs:
   build:
     name: build thaw-js-node
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
@@ -94,7 +109,7 @@ jobs:
   ratchet:
     name: test262 ratchet
     needs: shard
-    if: always() && (github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'thaw-js-measure'))
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ needs.shard.result }}" = success

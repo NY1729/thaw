@@ -5144,11 +5144,17 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Await(await_expr) => {
                 // `fetch` is the native body-text fetch; a `Response`-typed (opaque) result needs the realm's.
+                // `await fetch(url, { body: req })` with a native request: send its (fully read) body.
+                let request_body_rewritten = match await_expr.arg.as_ref() {
+                    Expr::Call(call) if !self.scope.contains_key("fetch") => self.fetch_call_with_request_body(call),
+                    _ => None,
+                };
+                let await_arg = request_body_rewritten.as_ref().unwrap_or(&await_expr.arg);
                 let realm_fetch = (self.expected_return_hint == Some(HirType::JsValue))
-                    .then(|| Self::realm_fetch_call(&await_expr.arg))
+                    .then(|| Self::realm_fetch_call(await_arg))
                     .flatten()
                     .filter(|_| !self.scope.contains_key("fetch"));
-                let value = self.lower_expr(realm_fetch.as_ref().unwrap_or(&await_expr.arg))?;
+                let value = self.lower_expr(realm_fetch.as_ref().unwrap_or(await_arg))?;
                 let value_type = self.infer_expr_type(&value)?;
                 if value_type == HirType::JsValue {
                     Ok(HirExpr::Call(

@@ -617,8 +617,21 @@ impl<'a> FnLowerer<'a> {
             members: HashSet<Symbol>,
             awaited: HashSet<Symbol>,
             called: HashSet<Symbol>,
+            member_assignments: HashSet<(Symbol, Symbol)>,
         }
         impl Visit for BindingConsumers {
+            fn visit_assign_expr(&mut self, assign: &swc_ecma_ast::AssignExpr) {
+                if let Some(swc_ecma_ast::SimpleAssignTarget::Member(member)) = assign.left.as_simple() {
+                    if let (Expr::Ident(receiver), swc_ecma_ast::MemberProp::Ident(prop)) =
+                        (member.obj.as_ref(), &member.prop)
+                    {
+                        self.member_assignments
+                            .insert((receiver.sym.to_string(), prop.sym.to_string()));
+                    }
+                }
+                assign.visit_children_with(self);
+            }
+
             fn visit_member_expr(&mut self, member: &MemberExpr) {
                 if let Expr::Ident(receiver) = member.obj.as_ref() {
                     self.members.insert(receiver.sym.to_string());
@@ -649,6 +662,7 @@ impl<'a> FnLowerer<'a> {
         self.member_receiver_bindings.extend(consumers.members);
         self.awaited_bindings.extend(consumers.awaited);
         self.called_bindings.extend(consumers.called);
+        self.member_assignments.extend(consumers.member_assignments);
 
         let mut out = Vec::new();
         let mut using_disposals: Vec<HirStmt> = Vec::new();

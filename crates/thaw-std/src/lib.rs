@@ -12,4 +12,5 @@ mod inspect {
     pub use thaw_inspect::inspect::*;
 }
 mod json;
+pub(crate) use json::http_glue;
 mod json_parse_error;
