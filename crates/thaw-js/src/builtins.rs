@@ -2322,8 +2322,10 @@ impl Interp {
                 Ok(Value::Str(n)) => n.to_string(),
                 _ => String::new(),
             };
+            // HasOwnProperty(target, "length") first: an inherited `length` does not count
+            let own_length = it.has_own_property(&target0, &Value::str("length"))?;
             let length = match it.get(&target0, "length") {
-                Ok(Value::Number(n)) => (n - bound_count as f64).max(0.0),
+                Ok(Value::Number(n)) if own_length => (n - bound_count as f64).max(0.0),
                 _ => 0.0,
             };
             let bound_fn = it.native(move |it, _, call_args| {
