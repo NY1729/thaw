@@ -6247,3 +6247,18 @@ fn conditional_joining_a_live_any_call_with_a_record_union_becomes_any() {
     crate::set_implicit_any(false);
     result.expect("conditional lowers");
 }
+
+#[test]
+fn escaping_record_binding_becomes_an_any_reference_in_js_programs() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { const mw = [(c, n) => { c.t.push(1); return n(); }]; const ctx = { t: [] }; \
+         console.log(mw[0](ctx, () => 1)); }",
+    )
+    .expect("parse error");
+    crate::set_implicit_any(true);
+    let program = lower_module(&module);
+    crate::set_implicit_any(false);
+    let program = program.expect("lowers");
+    let main = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
+    assert!(main.contains("Let(\"ctx\", Json"), "{main}");
+}
