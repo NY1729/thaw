@@ -187,6 +187,9 @@ fn class_names_referenced_as_values(
 thread_local! {
     /// Definition sites recorded while lowering, moved into `HirProgram::fn_locs` at the end.
     static FN_LOCS: RefCell<HashMap<Symbol, SourceLoc>> = RefCell::new(HashMap::new());
+    /// Function literals passed straight to a builtin that calls them (`[].map(x => ..)`), by start
+    /// position: the builtin's name, which Node shows as a frame (`at Array.map`) under the callback.
+    static CALLBACK_VIA: RefCell<HashMap<swc_common::BytePos, String>> = RefCell::new(HashMap::new());
 }
 
 /// Notes that the function lowered as `name` starts at `span` (ignored for synthetic spans).
@@ -219,6 +222,7 @@ fn lower_module_once(module: &Module) -> Result<HirProgram, String> {
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
     PROGRAM_DELETES_STACK.with(|flag| flag.set(module_deletes_stack(module)));
     FN_LOCS.with(|locs| locs.borrow_mut().clear());
+    CALLBACK_VIA.with(|via| via.borrow_mut().clear());
     let mut normalized = normalize_module_for_lowering(module)?;
     delay_top_level_closures(&mut normalized);
     let mut program = lower_normalized_module(&normalized)?;

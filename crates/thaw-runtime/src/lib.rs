@@ -965,7 +965,14 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
     let settles = continuation.subscription.hook_settles;
     async_hook_emit(1, hook_key, 0);
     count_poll(true);
+    let resuming = RESUMING.with(|slot| {
+        slot.replace((
+            continuation.subscription.resume as usize,
+            continuation.subscription.frame as usize,
+        ))
+    });
     (continuation.subscription.resume)(continuation.subscription.frame, continuation.result);
+    RESUMING.with(|slot| slot.set(resuming));
     if settles {
         async_hook_emit(3, hook_key, 0);
     }

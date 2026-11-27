@@ -847,7 +847,8 @@ fn lowers_typed_arrow_functions_and_restores_the_outer_scope() {
     );
     assert!(matches!(
         lambda_body.as_ref(),
-        HirExpr::BinOp(_, left, _) if matches!(left.as_ref(), HirExpr::Var(name) if name == "value__thaw_local_0")
+        HirExpr::EvalThen(_, body) if matches!(body.as_ref(),
+            HirExpr::BinOp(_, left, _) if matches!(left.as_ref(), HirExpr::Var(name) if name == "value__thaw_local_0"))
     ));
     assert!(format!("{:?}", body[2]).contains("Var(\"value\")"));
 }
@@ -870,7 +871,7 @@ fn lowers_a_typed_arrow_block_body() {
     assert!(matches!(
         lambda_body.as_ref(),
         HirExpr::Block(stmts)
-            if matches!(&stmts[0], HirStmt::Return(Some(HirExpr::Var(name))) if name == "path")
+            if matches!(&stmts[1], HirStmt::Return(Some(HirExpr::Var(name))) if name == "path")
     ));
 }
 

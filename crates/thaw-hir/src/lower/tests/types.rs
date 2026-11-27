@@ -5973,11 +5973,11 @@ fn existing_native_spread_staging_mode_false_is_unchanged() {
         assert_eq!(bindings[0].1, number_fn);
         assert_eq!(bindings[0].2, HirExpr::Lambda(Vec::new(), vec![HirParam {
             name: "n".into(), ty: HirType::F64,
-        }], HirType::F64, Box::new(HirExpr::Var("n".into()))));
+        }], HirType::F64, Box::new(HirExpr::EvalThen(Box::new(HirExpr::Lit(HirLit::Str(format!("{}\u{1}0\u{1}0\u{1}\u{1}\u{1}", crate::USER_FN_MARK)))), Box::new(HirExpr::Var("n".into()))))));
         assert_eq!(bindings[1].1, string_fn);
         assert_eq!(bindings[1].2, HirExpr::Lambda(Vec::new(), vec![HirParam {
             name: "s".into(), ty: HirType::Str,
-        }], HirType::Str, Box::new(HirExpr::Var("s".into()))));
+        }], HirType::Str, Box::new(HirExpr::EvalThen(Box::new(HirExpr::Lit(HirLit::Str(format!("{}\u{1}0\u{1}0\u{1}\u{1}\u{1}", crate::USER_FN_MARK)))), Box::new(HirExpr::Var("s".into()))))));
         assert_eq!(values[0], HirExpr::Var(bindings[0].0.clone()));
         assert_eq!(values[1], HirExpr::Var(bindings[1].0.clone()));
         assert_error_argument_staging_fresh_vars(lowerer, &values, &bindings);

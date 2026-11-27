@@ -1680,6 +1680,8 @@ struct FnInfo {
     file: Option<String>,
     line: u32,
     col: u32,
+    /// A builtin frame Node shows right below this one (`Array.map`), from a static callback site.
+    via: Option<String>,
 }
 
 #[repr(C)]
@@ -1690,6 +1692,8 @@ pub struct FnEntry {
     file: *const c_char,
     line: u32,
     col: u32,
+    /// Null when no builtin sits under the function.
+    via: *const c_char,
 }
 
 /// Registers the compiled functions' names; called once at process start by generated code.
@@ -1718,6 +1722,7 @@ pub unsafe extern "C" fn thaw_register_fn_table(
                 file: (!entry.file.is_null()).then(|| text(entry.file)),
                 line: entry.line,
                 col: entry.col,
+                via: (!entry.via.is_null()).then(|| text(entry.via)),
             }
         })
         .collect();
@@ -1800,13 +1805,50 @@ fn caller_pcs(frame: usize, ra: usize, limit: usize) -> Vec<usize> {
     pcs
 }
 
+thread_local! {
+    /// `(resume function, frame)` of the async continuation the event loop is running, else `(0, 0)`.
+    static RESUMING: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+}
+
+/// Bit set on a recorded pc that stands for an `async` caller frame (see `async_caller_pcs`).
+const ASYNC_FRAME_TAG: usize = 1 << 63;
+
+/// Frame layout of a compiled async function (`ASYNC_COMPLETION_OFFSET` in thaw-llvm): its
+/// completion Promise comes first.
+///
+/// The awaiting callers of the async continuation now running, innermost first, tagged with
+/// `ASYNC_FRAME_TAG`: Node's `at async f` lines. The real stack ends at the event loop, so the chain
+/// follows each completion Promise's first subscriber (the awaiting function's resume and frame).
+fn async_caller_pcs() -> Vec<usize> {
+    let Some(table) = FN_TABLE.get() else {
+        return Vec::new();
+    };
+    let compiled = |pc: usize| pc >= table.lo && pc < table.hi;
+    let mut out = Vec::new();
+    let (mut resume, mut frame) = RESUMING.with(Cell::get);
+    while compiled(resume) && frame != 0 && out.len() < 64 {
+        // SAFETY: a resume function inside the compiled-function section only ever receives an async
+        // frame, whose first word is its completion Promise.
+        let promise = unsafe { *(frame as *const *const ThawPromise) };
+        let Some(subscription) = (unsafe { promise.as_ref() }).and_then(|promise| promise.subscribers.first()) else {
+            break;
+        };
+        (resume, frame) = (subscription.resume as usize, subscription.frame as usize);
+        if compiled(resume) {
+            out.push(resume | ASYNC_FRAME_TAG);
+        }
+    }
+    out
+}
+
 /// Records the call stack at `error`'s construction for `err.stack`.
 fn capture_frames(error: *const c_char, frame: usize, ra: usize) {
     let limit = thaw_error_stack_trace_limit();
     if error.is_null() || limit < 1.0 || FN_TABLE.get().is_none() {
         return;
     }
-    let pcs = caller_pcs(frame, ra, (limit as usize).min(200));
+    let mut pcs = caller_pcs(frame, ra, (limit as usize).min(200));
+    pcs.extend(async_caller_pcs());
     thaw_arena::register_metadata_reset_hook(prune_error_extras);
     let key = extras_key(error);
     ERROR_EXTRAS.with(|table| extras_entry(&mut table.borrow_mut(), key).frames = pcs);
@@ -1820,10 +1862,14 @@ fn render_frames(pcs: &[usize], limit: usize) -> String {
     };
     let mut out = String::new();
     let mut shown = 0;
-    for &pc in pcs {
+    for &tagged in pcs {
         if shown == limit {
             break;
         }
+        let (pc, prefix) = match tagged & ASYNC_FRAME_TAG {
+            0 => (tagged, ""),
+            _ => (tagged & !ASYNC_FRAME_TAG, "async "),
+        };
         if pc < table.lo || pc >= table.hi {
             continue;
         }
@@ -1838,19 +1884,23 @@ fn render_frames(pcs: &[usize], limit: usize) -> String {
         let file = info.file.as_deref().unwrap_or(&table.file);
         let _ = if info.line == 0 {
             if info.name.is_empty() {
-                write!(out, "\n    at {file}")
+                write!(out, "\n    at {prefix}{file}")
             } else {
-                write!(out, "\n    at {} ({file})", info.name)
+                write!(out, "\n    at {prefix}{} ({file})", info.name)
             }
         } else if info.name.is_empty() {
-            write!(out, "\n    at {file}:{}:{}", info.line, info.col)
+            write!(out, "\n    at {prefix}{file}:{}:{}", info.line, info.col)
         } else {
             write!(
                 out,
-                "\n    at {} ({file}:{}:{})",
+                "\n    at {prefix}{} ({file}:{}:{})",
                 info.name, info.line, info.col
             )
         };
+        if let (Some(via), "") = (&info.via, prefix) {
+            shown += 1;
+            let _ = write!(out, "\n    at {via} (<anonymous>)");
+        }
     }
     out
 }
