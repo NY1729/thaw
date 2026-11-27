@@ -1,0 +1,5 @@
+{
+  "name": "syntaxgaps this alias in method",
+  "expect": "matched",
+  "source": "class R {\n  n = 0;\n  mk() { const self = this; const o = { next() { self.n++; return { done: self.n > 2, value: self.n }; } }; return o; }\n}\nfunction main(): void {\n  const it = new R().mk();\n  console.log(JSON.stringify(it.next()), JSON.stringify(it.next()), JSON.stringify(it.next()));\n}\n"
+}

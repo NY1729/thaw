@@ -1,0 +1,5 @@
+{
+  "name": "a Record aliased to any stays valid and shares writes",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const d: Record<string, number> = { a: 1 };\n  const dv: any = d;\n  console.log(d.a, dv.a);\n  dv.a = 7;\n  dv.c = 5;\n  console.log(d.a, JSON.stringify(d), JSON.stringify(dv));\n  const e: Record<string, any> = { a: 1 };\n  const ev: any = e;\n  ev.a = { x: 1 };\n  ev.b = [2];\n  console.log(JSON.stringify(e), e.a === ev.a);\n}\n"
+}

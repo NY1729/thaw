@@ -1,0 +1,5 @@
+{
+  "name": "methods in objects inside any array literals keep their receiver",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const m: any = [{ v: 1, inc() { this.v++; return this.v; } }];\n  console.log(m[0].inc(), m[0].v);\n  const n: any = [{ k: 2, dbl: function () { this.k *= 2; return this.k; } }, { k: 3, tri() { return this.k * 3; } }];\n  console.log(n[0].dbl(), n[0].k, n[1].tri());\n  const p: any = { rows: [{ c: 0, bump() { this.c += 5; return this.c; } }] };\n  console.log(p.rows[0].bump(), p.rows[0].c);\n  const q: any = [[{ z: 1, up() { this.z++; return this.z; } }]];\n  console.log(q[0][0].up(), q[0][0].z);\n}\n"
+}

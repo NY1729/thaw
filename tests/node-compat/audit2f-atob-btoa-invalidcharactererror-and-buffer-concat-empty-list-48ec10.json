@@ -1,0 +1,5 @@
+{
+  "name": "audit2f atob btoa InvalidCharacterError and Buffer.concat empty list",
+  "expect": "matched",
+  "source": "function main(): void { const t = (f: () => unknown) => { try { console.log(f()); } catch (e: any) { console.log(e.name, e.code, e instanceof Error); } }; t(() => atob(\"***\")); t(() => atob(\"aGVsbG8\")); t(() => atob(\" aGVs bG8= \")); t(() => btoa(\"€\")); t(() => btoa(\"é\")); console.log(Buffer.concat([]).length, Buffer.concat([], 3).length); }"
+}

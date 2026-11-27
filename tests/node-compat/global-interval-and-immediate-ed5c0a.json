@@ -1,0 +1,5 @@
+{
+  "name": "global interval and immediate",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> { let count: number = 0; await new Promise<void>((resolve) => { const handle = setInterval(() => { count += 1; if (count === 2) { clearInterval(handle); resolve(); } }, 1); }); await new Promise<void>((resolve) => setImmediate(resolve)); console.log(count); }"
+}

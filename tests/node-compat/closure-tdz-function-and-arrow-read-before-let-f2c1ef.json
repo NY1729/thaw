@@ -1,0 +1,5 @@
+{
+  "name": "closure TDZ: function and arrow read before let",
+  "expect": "matched",
+  "source": "function main(): void {\n  const g = () => k;\n  let k = 3;\n  console.log(g());\n  function early(): number { return z + 1; }\n  try { early(); } catch (e) { console.log((e as Error).message); }\n  let z = 1;\n  console.log(early());\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "lim3 new property on a caught class instance",
+  "expect": "matched",
+  "source": "class C { a: number = 1; } function main(): void { try { throw new C(); } catch (e: any) { e.extra = 5; console.log(e.extra, Object.keys(e)); } const r: any = new C(); r.more = 6; r.a = 9; console.log(r.more, r.a, Object.keys(r)); }"
+}

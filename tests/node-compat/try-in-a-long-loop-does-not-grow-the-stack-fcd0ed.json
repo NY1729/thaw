@@ -1,0 +1,5 @@
+{
+  "name": "try in a long loop does not grow the stack",
+  "expect": "matched",
+  "source": "function main(): void { let n = 0; for (let i = 0; i < 2000000; i++) { try { n += i % 3; } catch (e: any) { n = -1; } } console.log(n); }"
+}

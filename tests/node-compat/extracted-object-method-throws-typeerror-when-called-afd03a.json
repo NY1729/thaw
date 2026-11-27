@@ -1,0 +1,5 @@
+{
+  "name": "extracted object method throws TypeError when called",
+  "expect": "matched",
+  "source": "const o = { n: 1, inc() { this.n++; return this.n; }, pure() { return 7; } };\nasync function main(): Promise<void> {\n  const g = o.pure;\n  console.log(g());\n  const f = o.inc;\n  console.log(\"extracted\", typeof f);\n  try { f(); console.log(\"called\"); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(o.n, o.inc());\n}\n"
+}

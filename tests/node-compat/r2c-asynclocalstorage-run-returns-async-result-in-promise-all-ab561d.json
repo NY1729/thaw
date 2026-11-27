@@ -1,0 +1,5 @@
+{
+  "name": "r2c AsyncLocalStorage run returns async result in Promise.all",
+  "expect": "matched",
+  "source": "import { AsyncLocalStorage } from \"node:async_hooks\";\nconst als = new AsyncLocalStorage<{ id: number }>();\nasync function inner(n: number) { await new Promise((r) => setTimeout(r, 1)); return n * 10; }\nasync function run() {\n  const rs = await Promise.all([als.run({ id: 1 }, inner, 1), als.run({ id: 2 }, inner, 2)]);\n  console.log(rs, als.getStore()?.id, als.run({ id: 3 }, () => als.getStore()?.id), als.exit(() => als.getStore()));\n}\nfunction main(): void { run(); }"
+}

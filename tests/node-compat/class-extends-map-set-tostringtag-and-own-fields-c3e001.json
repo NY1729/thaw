@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: toStringTag and own fields",
+  "expect": "matched",
+  "source": "class Counter extends Map<string, number> {\n  total = 0;\n  inc(k: string): void { this.set(k, (this.get(k) ?? 0) + 1); this.total++; }\n}\nclass Tags extends Set<string> { label = \"x\"; }\nclass Reg extends Map<string, number> {}\nclass Bag extends Set<number> {}\nfunction main(): void {\n  const c = new Counter(); c.inc(\"a\"); c.inc(\"a\");\n  console.log(String(c), Object.prototype.toString.call(c), `${c}`);\n  console.log(c);\n  const t = new Tags(); t.add(\"q\");\n  console.log(String(t), Object.prototype.toString.call(t));\n  console.log(t);\n  console.log(Object.keys(c), JSON.stringify(c), JSON.stringify(t));\n  const r = new Reg([[\"a\", 1], [\"b\", 2]]);\n  console.log(r.size, r);\n  const b = new Bag([1, 2, 2, 3]);\n  console.log(b.size, b);\n  console.log(c.total);\n}\n"
+}

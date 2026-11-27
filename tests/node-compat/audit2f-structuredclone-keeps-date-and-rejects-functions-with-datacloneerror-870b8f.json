@@ -1,0 +1,5 @@
+{
+  "name": "audit2f structuredClone keeps Date and rejects functions with DataCloneError",
+  "expect": "matched",
+  "source": "function main(): void { const t = (f: () => unknown) => { try { console.log(f()); } catch (e: any) { console.log(e.name, e.code, e instanceof Error); } }; const c = structuredClone({ d: new Date(5), n: 1 }); console.log(c, c.d instanceof Date, c.d.getTime()); t(() => structuredClone(() => 1)); t(() => structuredClone({ f: () => 1 })); }"
+}

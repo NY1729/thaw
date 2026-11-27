@@ -1,0 +1,5 @@
+{
+  "name": "icu Date toLocaleString default fields per locale",
+  "expect": "matched",
+  "source": "function main(): void { const d = new Date(Date.UTC(2024, 0, 15, 13, 5, 9)); console.log(d.toLocaleString(\"en-US\", { timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"en-US\", { timeZone: \"UTC\" })); console.log(d.toLocaleTimeString(\"en-US\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"en-GB\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"de-DE\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"fr-FR\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"ja-JP\", { timeZone: \"UTC\" })); console.log(d.toLocaleString(\"es-ES\", { timeZone: \"UTC\" })); console.log(d.toLocaleDateString(\"ko-KR\", { timeZone: \"UTC\" })); console.log(d.toLocaleTimeString(\"de-DE\", { timeZone: \"UTC\" })); }"
+}

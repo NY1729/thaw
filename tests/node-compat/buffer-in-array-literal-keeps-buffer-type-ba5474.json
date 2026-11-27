@@ -1,0 +1,5 @@
+{
+  "name": "buffer in array literal keeps Buffer type",
+  "expect": "matched",
+  "source": "function main(): void {\n  const b = Buffer.from(\"hello\");\n  const arr = [b, b];\n  arr[0][0] = 72;\n  console.log(arr[1].toString(), arr[0].toString(\"hex\"), arr.length);\n  const c = Buffer.from(\"xy\");\n  const mixed = [b, c];\n  console.log(Buffer.concat(mixed).toString());\n  console.log(Buffer.concat([b, c]).toString());\n  console.log(Buffer.isBuffer(mixed[1]), mixed[1].readUInt8(0));\n  const nums: number[][] = [b];\n  console.log(nums[0].length, nums[0][0]);\n}\n"
+}

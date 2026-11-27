@@ -1,0 +1,5 @@
+{
+  "name": "r2a object valueOf in arithmetic",
+  "expect": "matched",
+  "source": "function main(): void { const o = { v: 1, valueOf() { return 7; } }; console.log(o + 1, o > 6); const t = { toString() { return \"T\"; } }; console.log(`${t}`, t + \"!\"); }"
+}

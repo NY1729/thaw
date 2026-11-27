@@ -1,0 +1,5 @@
+{
+  "name": "r2a delete optional property of typed object",
+  "expect": "matched",
+  "source": "interface O { a: number; b?: number } function main(): void { const o: O = { a: 1, b: 2 }; console.log(delete o.b, o, o.b); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "r2a function name and length",
+  "expect": "matched",
+  "source": "function add(a: number, b = 2) { return a + b; } const arrow = (x: number) => x; function main(): void { console.log(add.name, add.length, arrow.name, arrow.length); }"
+}

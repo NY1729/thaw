@@ -1,0 +1,5 @@
+{
+  "name": "nd6 map and set keep reference identity of stored containers",
+  "expect": "matched",
+  "source": "function main(): void {\n  const m = new Map<string, any>();\n  m.set(\"m\", m);\n  console.log(m.get(\"m\") === m);\n  const s = new Set<any>();\n  s.add(s);\n  console.log(s.has(s));\n  const arr: any[] = [];\n  const m2 = new Map<string, any>();\n  m2.set(\"a\", arr);\n  arr.push(1);\n  console.log(m2.get(\"a\") === arr, m2.get(\"a\").length);\n}\n"
+}

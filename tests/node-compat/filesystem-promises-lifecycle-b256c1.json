@@ -1,0 +1,5 @@
+{
+  "name": "filesystem promises lifecycle",
+  "expect": "matched",
+  "source": "import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'; async function main(): Promise<void> { const dir: string = '/tmp/thaw-node-fsp-compat'; await rm(dir, { recursive: true, force: true }); await mkdir(dir); await writeFile(dir + '/a.txt', 'hello'); console.log(await readFile(dir + '/a.txt', 'utf8'), (await readdir(dir)).join(',')); await rm(dir, { recursive: true }); }"
+}

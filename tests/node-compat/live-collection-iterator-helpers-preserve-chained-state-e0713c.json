@@ -1,0 +1,5 @@
+{
+  "name": "live collection iterator helpers preserve chained state",
+  "expect": "matched",
+  "source": "function main():void { const m = new Map<string,number>(); m.set(\"a\",1); m.set(\"b\",2); const a:any=m; console.log([...a.keys()].join(\",\"), [...a.values()].join(\",\"), [...a].length); const i:any=a.keys().map((x:any)=>x+\"!\"); console.log(i.next().value, [...i].join(\",\")); }"
+}

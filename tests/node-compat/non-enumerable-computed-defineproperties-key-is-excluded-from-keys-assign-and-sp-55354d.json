@@ -1,0 +1,5 @@
+{
+  "name": "non-enumerable computed defineProperties key is excluded from keys, assign and spread",
+  "expect": "matched",
+  "source": "function main(): void {\n  const k = 'hid' + 'den';\n  const o: any = Object.defineProperties({ a: 1 }, { [k]: { value: 5, enumerable: false, writable: true, configurable: true }, ['vis' + 'ible']: { value: 6, enumerable: true, writable: true, configurable: true } });\n  console.log(Object.keys(o).join(), o.hidden, o.visible);\n  const c: any = Object.assign({}, o);\n  console.log(Object.keys(c).join());\n  const sp: any = { ...o };\n  console.log(Object.keys(sp).join());\n  const { a, ...rest }: any = o;\n  console.log(a, Object.keys(rest).join());\n}"
+}

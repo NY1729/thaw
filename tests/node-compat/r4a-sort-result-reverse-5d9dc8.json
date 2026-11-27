@@ -1,0 +1,5 @@
+{
+  "name": "r4a sort result reverse",
+  "expect": "matched",
+  "source": "function main(): void { console.log([3, 1, 2].sort().reverse().join(\",\")); console.log([\"b\", \"a\"].sort().reverse().join(\",\")); console.log([3, 1, 2].toSorted().reverse().join(\",\")); }"
+}

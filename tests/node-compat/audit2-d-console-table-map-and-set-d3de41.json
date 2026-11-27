@@ -1,0 +1,5 @@
+{
+  "name": "audit2 D console.table Map and Set",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.table(new Map<string, number>([[\"k\", 1], [\"j\", 2]]));\n  console.table(new Set<number>([1, 2]));\n}"
+}

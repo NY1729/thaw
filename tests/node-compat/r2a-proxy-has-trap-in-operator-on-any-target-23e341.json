@@ -1,0 +1,5 @@
+{
+  "name": "r2a proxy has trap in operator on any target",
+  "expect": "matched",
+  "source": "function main(): void { const p = new Proxy({ a: 1 } as any, { has(t, k) { return k in t; } }); console.log(\"a\" in p, \"b\" in p); }"
+}

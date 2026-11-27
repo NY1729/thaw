@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage class annotation retains plain runtime value",
+  "expect": "matched",
+  "source": "class C { value = 1; method(): number { return this.value; } } function main(): void { const plain: any = {value: 7}; const value: C = plain; console.log(value === plain, value instanceof C, typeof value.method); }"
+}

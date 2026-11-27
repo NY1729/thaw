@@ -1,0 +1,5 @@
+{
+  "name": "r2b Symbol.species getter returning Array on a subclass map",
+  "expect": "matched",
+  "source": "class MyA extends Array<number> { static get [Symbol.species]() { return Array; } } function main(): void { const m = new MyA(1, 2, 3); console.log(m.map(x => x) instanceof MyA, m instanceof MyA); }"
+}

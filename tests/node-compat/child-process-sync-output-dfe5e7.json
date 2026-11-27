@@ -1,0 +1,5 @@
+{
+  "name": "child process sync output",
+  "expect": "matched",
+  "source": "import { execFileSync } from 'node:child_process'; function main(): void { console.log(execFileSync('printf', ['child']).toString()); }"
+}

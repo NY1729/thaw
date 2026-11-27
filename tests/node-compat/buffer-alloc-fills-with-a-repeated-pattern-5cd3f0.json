@@ -1,0 +1,5 @@
+{
+  "name": "buffer alloc fills with a repeated pattern",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = Buffer.alloc(5, 'ab');\n  const b = Buffer.alloc(4, 7);\n  const c = Buffer.alloc(6, Buffer.from('xyz'));\n  const d = Buffer.alloc(4, 'aGk=', 'base64');\n  const e = Buffer.alloc(3, 'ff', 'hex');\n  const f = Buffer.alloc(3);\n  console.log(a.toString(), b.join(','), c.toString(), d.toString('hex'), e.toString('hex'), f.join(','));\n}\n"
+}

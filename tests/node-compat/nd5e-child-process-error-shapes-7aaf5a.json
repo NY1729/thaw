@@ -1,0 +1,5 @@
+{
+  "name": "nd5e child_process error shapes",
+  "expect": "matched",
+  "source": "import cp from \"node:child_process\";\nfunction main(): void {\n  const r = cp.spawnSync(\"sh\", [\"-c\", \"exit 3\"]);\n  console.log(Object.keys(r), r.status, r.signal);\n  const r2 = cp.spawnSync(\"nonexistent-cmd-xyz\") as any;\n  console.log(Object.keys(r2), r2.status, r2.error.code, r2.error.errno, r2.error.syscall, r2.error.path, r2.error.spawnargs, r2.error.message, Object.keys(r2.error));\n  try { cp.execSync(\"exit 2\", { stdio: \"pipe\" }); } catch (e: any) { console.log(e.status, e.message, Object.keys(e)); }\n  try { cp.execSync(\"echo bad >&2; exit 2\", { stdio: \"pipe\" }); } catch (e: any) { console.log(e.message); }\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "stack header on Error subclass instances",
+  "expect": "matched",
+  "source": "class MyErr extends Error {\n  constructor(msg: string) {\n    super(msg);\n    this.name = \"MyErr\";\n    Error.captureStackTrace(this, MyErr);\n  }\n}\nclass Quiet extends Error {\n  constructor(msg: string) { super(msg); }\n}\nclass Named extends TypeError {\n  constructor(msg: string) { super(msg); this.name = \"Named\"; }\n}\nfunction main(): void {\n  const e = new MyErr(\"boom\");\n  console.log(typeof e.stack, e.stack.split(\"\\n\")[0]);\n  console.log(String(e), e.message, e.name, e instanceof MyErr, e instanceof Error);\n  const q = new Quiet(\"calm\");\n  console.log(q.stack.split(\"\\n\")[0]);\n  q.name = \"Renamed\";\n  console.log(q.stack.split(\"\\n\")[0], String(q));\n  const n = new Named(\"lazy\");\n  console.log(n.stack.split(\"\\n\")[0]);\n  n.message = \"changed\";\n  console.log(n.stack.split(\"\\n\")[0]);\n  Error.captureStackTrace(n);\n  console.log(n.stack.split(\"\\n\")[0]);\n  const s = new Quiet(\"custom\");\n  s.stack = \"replaced\";\n  console.log(s.stack);\n}\n"
+}

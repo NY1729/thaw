@@ -1,0 +1,5 @@
+{
+  "name": "lim4 spread of class instance is plain",
+  "expect": "matched",
+  "source": "class P { a: number = 1; b: string = \"x\"; }\nfunction main(): void {\n  const p = new P();\n  const s = { ...p };\n  console.log(s);\n  const t = { z: 0, ...p };\n  console.log(t);\n  console.log({ ...p, c: 3 });\n  console.log(p);\n  console.log(s instanceof P, p instanceof P);\n}\n"
+}

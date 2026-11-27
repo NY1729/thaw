@@ -1,0 +1,5 @@
+{
+  "name": "bigint followups: division shift bitwise and pow on large values",
+  "expect": "matched",
+  "source": "function main(): void {\n  const x = 10n ** 30n;\n  console.log(x / 7n, x % 7n, -x / 7n, -x % 7n, x / -7n, x % -7n, x / x, x % x);\n  console.log(x >> 10n, x << 10n, x >> 200n, -x >> 200n, x << 0n, x >> 0n, 1n << 100n >> 100n);\n  console.log(x & (x - 1n), x | 1n, x ^ x, ~x, -x & 0xffn, -x | 0xffn, -x ^ 0xffn);\n  console.log(x ** 2n, 2n ** 200n, (-2n) ** 201n, 0n ** 5n, 5n ** 0n);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "filesystem constants",
+  "expect": "matched",
+  "source": "import { F_OK, O_RDONLY, O_RDWR, O_WRONLY, R_OK, W_OK, X_OK } from 'node:constants'; function main(): void { console.log(F_OK === 0, R_OK > 0, W_OK > 0, X_OK > 0, O_RDONLY === 0, O_WRONLY > 0, O_RDWR > O_WRONLY); }"
+}

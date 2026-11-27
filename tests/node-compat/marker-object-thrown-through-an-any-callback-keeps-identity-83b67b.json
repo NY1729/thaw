@@ -1,0 +1,5 @@
+{
+  "name": "marker object thrown through an any callback keeps identity",
+  "expect": "matched",
+  "source": "function main(): void {\n  const marker: any = { value: 1 };\n  const invoke: any = (callback: any): any => callback();\n  try {\n    invoke(() => { throw marker; });\n  } catch (error: any) {\n    const e: any = error;\n    console.log(e === marker, e.value);\n  }\n}\n"
+}

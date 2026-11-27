@@ -1,0 +1,5 @@
+{
+  "name": "r2c util.inspect line breaking compact and breakLength options",
+  "expect": "matched",
+  "source": "import * as util from \"node:util\";\nfunction main(): void {\n  const o = { alpha: \"aaaaaaaaaaaaaaaaaaaa\", beta: \"bbbbbbbbbbbbbbbbbbbb\", gamma: \"cccccccccccccccccccc\", delta: [1, 2, 3] };\n  console.log(util.inspect(o));\n  console.log(util.inspect(o, { breakLength: Infinity }));\n  console.log(util.inspect({ a: 1, b: { c: 2 } }, { compact: false }));\n  console.log(util.inspect({ a: 1, b: { c: 2 } }, { compact: true }));\n  console.log(util.inspect({ aaaaaaaaaa: 1, bbbbbbbbbb: 2, cccccccccc: 3 }, { breakLength: 20 }));\n  console.log(util.inspect({ a: { b: { c: {} } } }, { compact: 1 }));\n  console.log(util.inspect([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]));\n  console.log(util.inspect({ list: [\"alpha\", \"beta\", \"gamma\", \"delta\", \"epsilon\", \"zeta\", \"eta\", \"theta\"], m: new Map([[1, { a: 1 }]]), s: new Set([1, 2]) }));\n  console.log(util.inspect([[]], { depth: 0 }), util.inspect({ x: {} }, { depth: 0 }));\n}"
+}

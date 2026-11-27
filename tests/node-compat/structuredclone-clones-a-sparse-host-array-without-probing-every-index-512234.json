@@ -1,0 +1,5 @@
+{
+  "name": "structuredClone clones a sparse host array without probing every index",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const a: any = new Array(50000);\n  a[5] = \"x\";\n  a[49999] = { k: 1 };\n  const c: any = structuredClone({ a });\n  console.log(c.a.length, 0 in c.a, 5 in c.a, c.a[5], c.a[49999].k, c.a[49999] !== a[49999]);\n  const b: any = [1, , 3, undefined];\n  const bc: any = structuredClone(b);\n  console.log(bc.length, 1 in bc, 3 in bc, bc[3], bc[2]);\n}\n"
+}

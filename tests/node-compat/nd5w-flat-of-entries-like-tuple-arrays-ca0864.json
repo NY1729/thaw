@@ -1,0 +1,5 @@
+{
+  "name": "nd5w flat of entries-like tuple arrays",
+  "expect": "matched",
+  "source": "function main(): void { console.log(Object.entries({ a: 1 }).flat(), [[1, 2], [3]].flat()); const t: [string, number][] = [[\"a\", 1], [\"b\", 2]]; console.log(t.flat(), t.flat().length); }"
+}

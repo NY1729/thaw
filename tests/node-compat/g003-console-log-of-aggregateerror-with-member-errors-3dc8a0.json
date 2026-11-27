@@ -1,0 +1,5 @@
+{
+  "name": "g003 console.log of AggregateError with member errors",
+  "expect": "matched",
+  "source": "function main(): void { const a = new Error(\"a1\") as any; a.stack = \"Error: a1\"; const b = new TypeError(\"b1\") as any; b.stack = \"TypeError: b1\"; const agg = new AggregateError([a, b], \"agg\") as any; agg.stack = \"AggregateError: agg\"; console.log(agg); console.log({ agg }); }"
+}

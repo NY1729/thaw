@@ -1,0 +1,5 @@
+{
+  "name": "r2a async generator return with annotation",
+  "expect": "matched",
+  "source": "async function* g(): AsyncGenerator<number, number, unknown> { try { yield 1; yield 2; return 5; } finally { console.log(\"fin\"); } } function main(): void { (async () => { const it = g(); await it.next(); console.log(await it.return(9)); console.log(await it.next()); })(); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure object field write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const o = { buf: Buffer.from(\"ab\") };\n  o.buf[0] = 65;\n  console.log(o.buf.toString(), o.buf[1]);\n}\n"
+}

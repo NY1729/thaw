@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite run() result shape and lastInsertRowid",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  db.exec('CREATE TABLE t (v TEXT)');\n  const ins = db.prepare('INSERT INTO t (v) VALUES (?)');\n  console.log(JSON.stringify(ins.run('a')));\n  console.log(JSON.stringify(ins.run('b')));\n  const r = ins.run('c');\n  console.log(r.lastInsertRowid, r.changes, Object.keys(r).join(','));\n  console.log(db.prepare('UPDATE t SET v = v || ?').run('!').changes);\n  db.close();\n}"
+}

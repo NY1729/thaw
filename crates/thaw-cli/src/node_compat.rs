@@ -1,6 +1,6 @@
 fn run_node_compat(args: &[String]) -> Result<(), String> {
     if args.len() > 1 {
-        return Err("usage: thaw node-compat [manifest.json]".into());
+        return Err("usage: thaw node-compat [manifest.json|directory]".into());
     }
     let path = Path::new(
         args.first()
@@ -62,17 +62,56 @@ fn node_compat_jobs() -> Result<usize, String> {
     }
 }
 
+/// Reads a manifest: a single JSON file with a `cases` array, or a directory whose direct
+/// `*.json` children are one case each (read in file-name order; duplicate names are an
+/// error). A missing `X.json` falls back to the directory `X/` so `tests/node-compat.json`
+/// keeps working after the manifest was split into `tests/node-compat/`.
+fn load_node_compat_manifest(path: &Path) -> Result<serde_json::Value, String> {
+    let directory = if path.is_dir() {
+        Some(path.to_path_buf())
+    } else if !path.exists() && path.extension().is_some_and(|ext| ext == "json") {
+        Some(path.with_extension("")).filter(|dir| dir.is_dir())
+    } else {
+        None
+    };
+    let parse = |file: &Path| -> Result<serde_json::Value, String> {
+        serde_json::from_slice(
+            &std::fs::read(file)
+                .map_err(|error| format!("failed to read `{}`: {error}", file.display()))?,
+        )
+        .map_err(|error| format!("invalid Node compatibility manifest `{}`: {error}", file.display()))
+    };
+    let Some(directory) = directory else {
+        return parse(path);
+    };
+    let mut files: Vec<_> = std::fs::read_dir(&directory)
+        .map_err(|error| format!("failed to read `{}`: {error}", directory.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|file| file.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    let mut names = std::collections::HashSet::new();
+    let mut cases = Vec::with_capacity(files.len());
+    for file in files {
+        let case = parse(&file)?;
+        let name = case["name"]
+            .as_str()
+            .ok_or_else(|| format!("`{}` has no string `name`", file.display()))?;
+        if !names.insert(name.to_owned()) {
+            return Err(format!("duplicate Node compatibility case name `{name}`"));
+        }
+        cases.push(case);
+    }
+    Ok(serde_json::json!({ "cases": cases }))
+}
+
 /// Runs a Node compatibility manifest (building and executing each case
 /// against both `node` and a compiled Thaw binary) and returns its JSON
 /// report -- the same document `thaw node-compat` prints, shared with
 /// `thaw completeness`. Cases run on `node_compat_jobs()` threads; results are
 /// stored by index, so the report is the same as a serial run.
 fn node_compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
-    let document: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(path)
-            .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?,
-    )
-    .map_err(|error| format!("invalid Node compatibility manifest: {error}"))?;
+    let document = load_node_compat_manifest(path)?;
     let cases = document["cases"]
         .as_array()
         .ok_or("Node compatibility manifest must contain a `cases` array")?;

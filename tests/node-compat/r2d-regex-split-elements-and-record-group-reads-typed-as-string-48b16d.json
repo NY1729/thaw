@@ -1,0 +1,5 @@
+{
+  "name": "r2d regex split elements and Record/group reads typed as string",
+  "expect": "matched",
+  "source": "function main(): void {\n  let line = \"\";\n  for (const w of \"a b  c\".split(/\\s+/)) {\n    line = w;\n  }\n  console.log(line);\n  const parts = \"a1b\".split(/\\d/);\n  const first: string = parts[0];\n  console.log(first);\n  const m = /^(?<name>[a-z]+)=(?<v>\\d+)$/.exec(\"ab=12\");\n  if (m?.groups) {\n    const o: Record<string, string> = {};\n    o[m.groups.name] = m.groups.v;\n    console.log(o);\n  }\n  const e = { \"&\": \"&amp;\", \"<\": \"&lt;\" } as Record<string, string>;\n  console.log(\"a&<\".replace(/[&<]/g, (c) => e[c]));\n  const c = \"&\";\n  const x: string = e[c] as string;\n  console.log(x);\n}\n"
+}

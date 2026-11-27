@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure promise then return bytes",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve(b).then((q) => q).then((r) => { r[0] = 67; console.log(b.toString(), r.toString(\"hex\")); });\n}\n"
+}

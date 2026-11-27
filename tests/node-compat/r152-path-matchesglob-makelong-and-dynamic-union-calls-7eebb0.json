@@ -1,0 +1,5 @@
+{
+  "name": "r152 path matchesGlob, _makeLong and dynamic-union calls",
+  "expect": "matched",
+  "source": "import * as path from \"node:path\";\nfunction main(): void {\n  const p: any = path;\n  console.log(p.matchesGlob(\"a/b/c.js\", \"a/**/*.js\"), p.matchesGlob(\"a/b/c.js\", \"**/*.ts\"), p.matchesGlob(\".hidden\", \"*\"), p.matchesGlob(\"a\", \"a/**\"), p.matchesGlob(\"x.md\", \"*.{txt,md}\"), p.matchesGlob(\"file1\", \"file[0-9]\"), p.matchesGlob(\"ab\", \"@(ab|cd)\"));\n  console.log(p.posix.matchesGlob(\"src/x/y.js\", \"src/**/y.js\"), p.win32.matchesGlob(\"a\\\\b\\\\c.js\", \"a/**/*.js\"), p.win32.matchesGlob(\"a\\\\b\", \"a/b\"));\n  console.log(p._makeLong(\"/tmp/x\"), p.matchesGlob.length, p._makeLong.length);\n  const f: any = p.dirname;\n  const g: any = p.extname;\n  let r = \"\";\n  try { f(); } catch (e: any) { r = e.code; }\n  try { g(); } catch (e: any) { r += \" \" + e.code; }\n  console.log(r);\n  try { p.matchesGlob(1, \"a\"); } catch (e: any) { console.log(e.code); }\n}\n"
+}

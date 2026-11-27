@@ -1,0 +1,5 @@
+{
+  "name": "plain string equality stays content based next to caught Errors",
+  "expect": "matched",
+  "source": "function main(): void {\n    const s: any = \"x\";\n    console.log(s === \"x\", s === \"y\");\n    const t: any = new Error(\"q\");\n    console.log(t === \"q\", t.name);\n}\n"
+}

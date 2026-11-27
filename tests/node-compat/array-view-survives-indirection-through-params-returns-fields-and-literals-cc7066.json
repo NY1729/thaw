@@ -1,0 +1,5 @@
+{
+  "name": "array view survives indirection through params returns fields and literals",
+  "expect": "matched",
+  "source": "class Box { items: any = null; }\nfunction addOne(x: any): void { x.push(1); }\nfunction lenOf(x: any): number { return x.length; }\nfunction make(a: number[]): any { return a; }\nasync function main(): Promise<void> {\n  const arr: number[] = [5];\n  addOne(arr);\n  console.log(arr.length, lenOf(arr));\n  const m = make(arr);\n  m.push(2);\n  console.log(arr.length);\n  const b = new Box();\n  b.items = arr;\n  b.items.push(3);\n  console.log(arr.length);\n  const o: any = { list: arr };\n  o.list.push(4);\n  console.log(arr.length);\n  const holder: any[] = [arr];\n  holder[0].push(5);\n  console.log(arr.length);\n}\n"
+}

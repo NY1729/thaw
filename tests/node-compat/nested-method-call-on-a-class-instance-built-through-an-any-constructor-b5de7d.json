@@ -1,0 +1,5 @@
+{
+  "name": "nested method call on a class instance built through an any constructor",
+  "expect": "matched",
+  "source": "class Counter {\n    count: number = 0;\n    increment(): void { this.count = this.count + 1; }\n    touch(): void { this.increment(); }\n}\nfunction main(): void {\n    const value: any = new (Counter as any)();\n    value.touch();\n    value.touch();\n    console.log(value.count);\n}\n"
+}

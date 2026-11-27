@@ -1,0 +1,5 @@
+{
+  "name": "os common helpers",
+  "expect": "matched",
+  "source": "import { EOL, arch, availableParallelism, homedir, platform, tmpdir, type } from 'node:os'; function main(): void { console.log(typeof platform(), typeof arch(), typeof type(), tmpdir().length > 0, homedir().length > 0, availableParallelism() >= 1, EOL === '\\n' || EOL === '\\r\\n'); }"
+}

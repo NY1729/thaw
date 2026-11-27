@@ -1,0 +1,5 @@
+{
+  "name": "class with a method returning its own type can be used as an instanceof operand",
+  "expect": "matched",
+  "source": "class E { n: number = 0; add(): E { this.n++; return this; } }\nclass S extends E {}\nfunction main(): void { const s = new S(); s.add(); console.log(s.n, s instanceof E, s instanceof S); }"
+}

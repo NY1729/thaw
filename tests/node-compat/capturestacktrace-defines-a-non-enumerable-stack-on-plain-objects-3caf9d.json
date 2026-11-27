@@ -1,0 +1,5 @@
+{
+  "name": "captureStackTrace defines a non-enumerable stack on plain objects",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: any = {};\n  Error.captureStackTrace(o);\n  console.log(typeof o.stack, o.stack.split(\"\\n\")[0], Object.keys(o), JSON.stringify(o));\n  const p: any = { a: 1, name: \"N\", message: \"msg\" };\n  Error.captureStackTrace(p);\n  console.log(p.stack.split(\"\\n\")[0], Object.keys(p), Object.getOwnPropertyNames(p), JSON.stringify(p));\n  console.log(p);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "catch binding capture leaves later comparison intact",
+  "expect": "matched",
+  "source": "function main(): void { const a = 'x'; const b = 'y'; try {} catch (e: any) { console.log(e === b); } console.log(a === b); try {} catch (e: any) { const f = () => b; console.log(f()); } console.log(a === b, b); }"
+}

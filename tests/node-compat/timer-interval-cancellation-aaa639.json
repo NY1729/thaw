@@ -1,0 +1,5 @@
+{
+  "name": "timer interval cancellation",
+  "expect": "matched",
+  "source": "import { setInterval, clearInterval } from 'node:timers'; function main(): void { let count: number = 0; const timer = setInterval((): void => { count += 1; console.log(count); if (count === 2) clearInterval(timer); }, 1); }"
+}

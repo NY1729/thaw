@@ -1,0 +1,5 @@
+{
+  "name": "assert strictEqual and deepStrictEqual append the diff to a custom message",
+  "expect": "matched",
+  "source": "import assert from 'node:assert'; function main(): void {   const t = (n: string, f: () => void): void => { try { f(); console.log(n, 'nothrow'); } catch (e) { console.log(n, JSON.stringify((e as Error).message)); } };   t('se', () => assert.strictEqual(1, 2, 'different'));   t('ses', () => assert.strictEqual('a', 'b', 'different'));   t('nse', () => assert.notStrictEqual(1, 1, 'different'));   t('dse', () => assert.deepStrictEqual({ a: 1 }, { a: 2 }, 'different'));   t('de', () => assert.deepEqual({ a: 1 }, { a: 2 }, 'different'));   t('eq', () => assert.equal(1, 2, 'different'));   t('ok', () => assert.ok(false, 'different')); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure tuple write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const t: [Buffer, number] = [b, 1];\n  t[0][0] = 65;\n  console.log(b.toString(), t[1]);\n}\n"
+}

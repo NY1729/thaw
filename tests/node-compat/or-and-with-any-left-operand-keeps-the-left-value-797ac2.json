@@ -1,0 +1,5 @@
+{
+  "name": "or and with any left operand keeps the left value",
+  "expect": "matched",
+  "source": "function f(v: any): void { console.log(v || 5); console.log(v && 5); console.log(v || \"x\"); console.log(v && \"y\"); console.log(v || {a: 1}); console.log(v || null); console.log(v || true); console.log(v && false); }\nfunction main(): void { f(\"abc\"); f(0); f(null); f(undefined); f(false); f(7); }\n"
+}

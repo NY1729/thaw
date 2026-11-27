@@ -1,0 +1,5 @@
+{
+  "name": "r2d new Promise that only rejects needs no type argument",
+  "expect": "matched",
+  "source": "function main(): void {\n  new Promise((_, rej) => rej(new Error(\"boom\"))).catch((e) => console.log((e as Error).message));\n}\n"
+}

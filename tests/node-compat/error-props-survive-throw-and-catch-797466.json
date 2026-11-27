@@ -1,0 +1,5 @@
+{
+  "name": "error props survive throw and catch",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { const x: any = new Error(\"x\"); x.foo = {a:1}; throw x; } catch (c: any) { console.log(c.foo, c.message); }\n}\n"
+}

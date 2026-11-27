@@ -1,0 +1,5 @@
+{
+  "name": "bare node:http namespace used as a value exposes STATUS_CODES",
+  "expect": "matched",
+  "source": "import * as http from 'node:http';\nconst h: any = http;\nfunction main(): void {\n  console.log(typeof h.createServer, typeof h.STATUS_CODES, typeof h.default);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "bigint followups: join sort valueOf format and RangeError text",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = 2n ** 70n;\n  console.log([a, 3n, -a].join(), [a, 3n].join(\"|\"), String([a, 3n]), `${[a, 1n]}`, [a] + \"\");\n  console.log([a, 3n, 10n, -a, 2n].sort(), [10n, 9n, 1n].toSorted(), [a].valueOf(), a.valueOf() === a);\n  console.log(\"%d %i %s\", a, a, a);\n  for (const bad of [1.5, NaN, Infinity, -0.5, 1e21 + 0.5]) {\n    try { BigInt(bad); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  }\n}\n"
+}

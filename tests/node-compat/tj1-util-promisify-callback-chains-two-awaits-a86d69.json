@@ -1,0 +1,5 @@
+{
+  "name": "tj1 util promisify callback chains two awaits",
+  "expect": "matched",
+  "source": "import { promisify } from 'node:util'; function add(left: number, right: number, callback: (error: unknown, value: number) => void): void { callback(null, left + right); } async function main(): Promise<void> { const sum = promisify(add); console.log(await sum(1, 2), await sum(10, 20)); }"
+}

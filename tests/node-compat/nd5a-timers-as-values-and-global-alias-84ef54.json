@@ -1,0 +1,5 @@
+{
+  "name": "nd5a timers as values and global alias",
+  "expect": "matched",
+  "source": "function main(): void {\n  const t = setTimeout;\n  t(() => console.log(\"t\"), 1);\n  const si = setImmediate;\n  si(() => console.log(\"si\"));\n  console.log(global === globalThis);\n}\n"
+}

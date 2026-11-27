@@ -1,0 +1,5 @@
+{
+  "name": "declgaps mutually recursive local arrows",
+  "expect": "matched",
+  "source": "function main(): void { const even = (n: number): boolean => n === 0 ? true : odd(n - 1); const odd = (n: number): boolean => n === 0 ? false : even(n - 1); console.log(even(10), odd(7), even(3)); }"
+}

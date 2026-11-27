@@ -1,0 +1,5 @@
+{
+  "name": "audit2 cyclic recursive instances print circular refs",
+  "expect": "matched",
+  "source": "class N { next: N | null = null; v = 1; }\nclass P { kids: P[] = []; up: P | null = null; name: string; constructor(n: string) { this.name = n; } }\nfunction main(): void {\n  const a = new N(); a.next = a; console.log(a);\n  console.log(a.next === a);\n  try { console.log(JSON.stringify(a)); } catch (e) { console.log((e as Error).name); }\n  const r = new P(\"r\"); const c = new P(\"c\"); c.up = r; r.kids.push(c); console.log(r);\n  const x = new N(); x.next = new N(); x.next.next = x; console.log(x);\n}"
+}

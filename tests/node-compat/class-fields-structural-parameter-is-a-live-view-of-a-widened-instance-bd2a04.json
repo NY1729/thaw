@@ -1,0 +1,5 @@
+{
+  "name": "class fields: structural parameter is a live view of a widened instance",
+  "expect": "matched",
+  "source": "class P { n!: number; t: string = \"t\"; set(): void { this.n = 5; } }\nfunction bump(v: { n: number }): void { v.n = v.n + 1; v.n += 10; }\nfunction put(v: { n: number }): void { v.n = 42; }\nfunction rd(v: { n: number }): number { return v.n; }\nfunction main(): void {\n  const p = new P();\n  console.log(typeof p.n);\n  put(p);\n  console.log(p.n, p);\n  const q = new P(); q.set();\n  bump(q);\n  console.log(q.n, q);\n  const r = new P();\n  bump(r);\n  console.log(r.n);\n  const lit: { n: number } = p;\n  lit.n = 9; console.log(p.n);\n  p.n = 11; console.log(lit.n);\n}\n"
+}

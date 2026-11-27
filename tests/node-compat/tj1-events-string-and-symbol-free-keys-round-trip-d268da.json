@@ -1,0 +1,5 @@
+{
+  "name": "tj1 events string and symbol-free keys round trip",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events'; function main(): void { const e = new EventEmitter(); const seen: string[] = []; e.on('x', (v: string) => { seen.push(v); }); e.on('y', (v: string) => { seen.push(v + '!'); }); e.emit('x', 'one'); e.emit('y', 'two'); console.log(seen.join(','), e.eventNames().join('|')); }"
+}

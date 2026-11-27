@@ -1,0 +1,5 @@
+{
+  "name": "r6a bytes member read on call receiver",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(Buffer.from(\"xy\").byteLength);\n  console.log(Buffer.alloc(3).buffer.byteLength > 0);\n  console.log(new ArrayBuffer(8).slice(2).byteLength);\n  console.log(new DataView(new ArrayBuffer(4)).byteLength);\n}"
+}

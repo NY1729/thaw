@@ -1,0 +1,5 @@
+{
+  "name": "typinggaps catch any property assign",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { throw new TypeError(\"boom\"); } catch (e: any) { e.k = 2; e.code = \"E1\"; console.log(e.k, e.code, e.message, e.name); }\n  try { throw { a: 1 }; } catch (e: any) { e.k = 2; console.log(e.k, e.a); }\n  try { throw new Error(\"rethrow\"); } catch (e: any) { e.k = 1; try { throw e; } catch (e2: any) { console.log(e2.k, e2.message); } }\n}\n"
+}
