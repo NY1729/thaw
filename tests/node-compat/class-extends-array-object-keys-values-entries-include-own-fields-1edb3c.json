@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: Object.keys/values/entries include own fields",
+  "expect": "matched",
+  "source": "class Rows extends Array<number> {\n  label = \"rows\";\n  note: string;\n  constructor() { super(); this.note = \"n\"; }\n  sum(): number { let t = 0; for (const x of this) t += x; return t; }\n}\nclass Plain extends Array<number> {}\nfunction main(): void {\n  const r = new Rows(); r.push(3); r.push(4);\n  console.log(Object.keys(r), Object.values(r), Object.entries(r));\n  console.log(Object.getOwnPropertyNames(r), Reflect.ownKeys(r));\n  for (const k in r) console.log(k);\n  console.log(JSON.stringify(r), r.sum());\n  const p = new Plain(); p.push(1); p.push(2);\n  console.log(Object.keys(p), Object.values(p), Object.entries(p), Object.getOwnPropertyNames(p));\n  for (const k in p) console.log(\"p\", k);\n  for (const [k, v] of Object.entries(r)) console.log(k, v);\n  console.log(Object.values(r).length, Object.keys(r).length);\n  console.log(r instanceof Object, p instanceof Object, Object.prototype.hasOwnProperty.call(r, \"label\"));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "filesystem stats",
+  "expect": "matched",
+  "source": "import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs'; function main(): void { const path: string = '/tmp/thaw-node-compat-stat.txt'; writeFileSync(path, 'abc'); const stat = statSync(path); console.log(existsSync(path), stat.isFile(), stat.size); unlinkSync(path); }"
+}

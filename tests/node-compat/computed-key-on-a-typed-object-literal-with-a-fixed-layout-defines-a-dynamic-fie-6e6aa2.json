@@ -1,0 +1,5 @@
+{
+  "name": "computed key on a typed object literal with a fixed layout defines a dynamic field",
+  "expect": "matched",
+  "source": "function main(): void {\n  const q: { a: number } = { a: 1 };\n  Object.defineProperties(q, { ['b' + 'c']: { value: 2, enumerable: true, writable: true, configurable: true } });\n  console.log((q as any).bc, Object.keys(q).join());\n}"
+}

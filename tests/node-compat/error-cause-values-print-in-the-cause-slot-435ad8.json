@@ -1,0 +1,5 @@
+{
+  "name": "error cause values print in the cause slot",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: any = { code: 5 };\n  const e2 = new Error(\"o2\", { cause: o }) as any;\n  e2.stack = \"Error: o2\\n    at c (x:3:1)\";\n  console.log(e2);\n  const e3 = new Error(\"o3\", { cause: \"str\" }) as any;\n  e3.stack = \"Error: o3\\n    at c (x:3:1)\";\n  console.log(e3);\n  const e4 = new Error(\"o4\", { cause: 42 }) as any;\n  e4.stack = \"Error: o4\\n    at c (x:3:1)\";\n  console.log([e4]);\n  const e5 = new TypeError(\"o5\", { cause: true }) as any;\n  e5.stack = \"TypeError: o5\\n    at c (x:3:1)\";\n  console.log(e5);\n  const e6 = new Error(\"o6\", { cause: null }) as any;\n  e6.stack = \"Error: o6\\n    at c (x:3:1)\";\n  console.log(e6);\n  const e7 = new Error(\"o7\", { cause: [1, \"x\"] }) as any;\n  e7.stack = \"Error: o7\\n    at c (x:3:1)\";\n  console.log(e7);\n  const e8 = new Error(\"o8\", { cause: { a: { b: [1, 2] } } as any }) as any;\n  e8.stack = \"Error: o8\\n    at c (x:3:1)\";\n  console.log(e8);\n}\n"
+}

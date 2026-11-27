@@ -2,10 +2,13 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "buffer" => Some(
             "function byteLength(value, encoding) { return globalThis.Buffer.byteLength(value, encoding); }\n\
-             function isUtf8(value) { try { new TextDecoder('utf-8', { fatal: true }).decode(value); return true; } catch (_) { return false; } }\n\
-             function isAscii(value) { var bytes; if (value instanceof ArrayBuffer) bytes = new Uint8Array(value); else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength); else { var typeError = new TypeError('The input argument must be an instance of ArrayBuffer, Buffer or TypedArray'); typeError.code = 'ERR_INVALID_ARG_TYPE'; throw typeError; } return bytes.every(function(byte) { return byte <= 127; }); }\n\
+             function describeReceived(v) { if (v == null) return ' Received ' + v; if (typeof v === 'function') return ' Received function ' + v.name; if (typeof v === 'object') return v.constructor && v.constructor.name ? ' Received an instance of ' + v.constructor.name : ' Received ' + Object.prototype.toString.call(v); var shown = typeof v === 'string' ? \"'\" + (v.length > 25 ? v.slice(0, 25) + '...' : v) + \"'\" : String(v); return ' Received type ' + typeof v + ' (' + shown + ')'; }\n\
+             function inputBytes(value) { if (value instanceof ArrayBuffer) return new Uint8Array(value); if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength); var typeError = new TypeError('The \"input\" argument must be an instance of ArrayBuffer, Buffer, or TypedArray.' + describeReceived(value)); typeError.code = 'ERR_INVALID_ARG_TYPE'; throw typeError; }\n\
+             function isUtf8(input) { var bytes = inputBytes(input); try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); return true; } catch (_) { return false; } }\n\
+             function isAscii(input) { return inputBytes(input).every(function(byte) { return byte <= 127; }); }\n\
+             function resolveObjectURL(id) { return undefined; }\n\
              function transcode(value, fromEncoding, toEncoding) { return globalThis.Buffer.from(globalThis.Buffer.from(value).toString(fromEncoding), toEncoding); }\n\
-             module.exports = { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer, byteLength: byteLength, isUtf8: isUtf8, isAscii: isAscii, transcode: transcode, atob: globalThis.atob, btoa: globalThis.btoa, Blob: globalThis.Blob, File: globalThis.File, constants: { MAX_LENGTH: 4294967296, MAX_STRING_LENGTH: 536870888 }, kMaxLength: 9007199254740991, INSPECT_MAX_BYTES: 50 };\n\
+             module.exports = { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer, byteLength: byteLength, isUtf8: isUtf8, isAscii: isAscii, resolveObjectURL: resolveObjectURL, transcode: transcode, atob: globalThis.atob, btoa: globalThis.btoa, Blob: globalThis.Blob, File: globalThis.File, constants: { MAX_LENGTH: 4294967296, MAX_STRING_LENGTH: 536870888 }, kMaxLength: 9007199254740991, INSPECT_MAX_BYTES: 50 };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),

@@ -1,0 +1,5 @@
+{
+  "name": "r2b well-known symbols print and describe like Node",
+  "expect": "matched",
+  "source": "function main(): void { console.log(String(Symbol.iterator), Symbol.asyncIterator.toString(), Symbol.hasInstance.description, Symbol.iterator); }"
+}

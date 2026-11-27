@@ -1,0 +1,5 @@
+{
+  "name": "audit-silent fs.readSync into top-level Buffer",
+  "expect": "matched",
+  "source": "import fs from \"node:fs\";\nconst path = \"/tmp/thaw-audit-silent-1-readsync.txt\";\nfs.writeFileSync(path, \"hello\");\nconst fd = fs.openSync(path, \"r\");\nconst b = Buffer.alloc(3);\nconst n = fs.readSync(fd, b, 0, 3, 1);\nfs.closeSync(fd);\nfs.unlinkSync(path);\nconsole.log(n, b.toString(), b);\nfunction main(): void {}\n"
+}

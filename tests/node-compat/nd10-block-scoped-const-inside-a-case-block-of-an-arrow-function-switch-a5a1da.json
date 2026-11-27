@@ -1,0 +1,5 @@
+{
+  "name": "nd10 block-scoped const inside a case block of an arrow function switch",
+  "expect": "matched",
+  "source": "const f = (n: number) => { switch (n) { case 3: { const x = \"three\"; return x; } default: return \"other\"; } };\nfunction g(n: number) { switch (n) { case 1: { const y = n * 10; return y; } default: return -1; } }\nfunction main(): void { console.log(f(3), f(1), g(1), g(2)); }\n"
+}

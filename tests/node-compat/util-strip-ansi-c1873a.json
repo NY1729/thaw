@@ -1,0 +1,5 @@
+{
+  "name": "util strip ansi",
+  "expect": "matched",
+  "source": "import { stripVTControlCharacters } from 'node:util'; function main(): void { console.log(stripVTControlCharacters('\u001b[31mred\u001b[0m')); }"
+}

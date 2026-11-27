@@ -1,0 +1,5 @@
+{
+  "name": "lim3 class field inference and JSON.stringify of a function",
+  "expect": "matched",
+  "source": "class X { x = new Uint8Array(2); y = function () {}; } function f(): void {} function main(): void { const o = new X(); console.log(o.x.length, typeof o.y, o.y()); console.log(JSON.stringify(f), JSON.stringify(function () {})); }"
+}

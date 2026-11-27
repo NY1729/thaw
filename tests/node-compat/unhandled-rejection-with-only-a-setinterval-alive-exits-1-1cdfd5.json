@@ -1,0 +1,6 @@
+{
+  "name": "unhandled rejection with only a setInterval alive exits 1",
+  "expect": "matched",
+  "exitCode": 1,
+  "source": "function main(): void {\n  setInterval((): void => {}, 1000);\n  Promise.reject(new Error('x'));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "buffer floating point io",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; function main(): void { const value = Buffer.alloc(16); value.writeFloatLE(1.5, 0); value.writeDoubleBE(-2.25, 4); console.log(value.readFloatLE(0), value.readDoubleBE(4)); }"
+}

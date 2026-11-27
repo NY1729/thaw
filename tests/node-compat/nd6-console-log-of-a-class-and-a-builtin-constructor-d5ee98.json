@@ -1,0 +1,5 @@
+{
+  "name": "nd6 console.log of a class and a builtin constructor",
+  "expect": "matched",
+  "source": "class A { static x = 1; y = 2; z() { return 1; } }\nfunction main(): void {\n  console.log(A);\n  console.log(Number);\n  console.log(String, Boolean);\n}\n"
+}

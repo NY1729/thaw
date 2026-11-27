@@ -1,0 +1,5 @@
+{
+  "name": "r3a named function expression recursion",
+  "expect": "matched",
+  "source": "const f = function fact(n: number): number { return n <= 1 ? 1 : n * fact(n - 1); }; function main(): void { console.log(f(5)); }"
+}

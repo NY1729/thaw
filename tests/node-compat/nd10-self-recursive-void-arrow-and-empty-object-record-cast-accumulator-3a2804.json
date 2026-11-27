@@ -1,0 +1,5 @@
+{
+  "name": "nd10 self-recursive void arrow and empty-object Record cast accumulator",
+  "expect": "matched",
+  "source": "function main(): void {\n  const deps: Record<string, string[]> = { a: [\"b\"], b: [] };\n  const seen = new Set<string>();\n  const order: string[] = [];\n  const visit = (n: string) => {\n    if (seen.has(n)) return;\n    seen.add(n);\n    for (const d of deps[n] ?? []) visit(d);\n    order.push(n);\n  };\n  Object.keys(deps).forEach(visit);\n  console.log(order);\n  const hist = [\"a\", \"b\", \"a\"];\n  const counts = hist.reduce((a, s) => { a[s] = (a[s] ?? 0) + 1; return a; }, {} as Record<string, number>);\n  console.log(counts);\n}\n"
+}

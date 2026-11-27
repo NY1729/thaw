@@ -1,0 +1,5 @@
+{
+  "name": "crypto random bytes and timing safe equality",
+  "expect": "matched",
+  "source": "import { randomBytes, timingSafeEqual } from 'node:crypto'; import { Buffer } from 'node:buffer'; function main(): void { const value = randomBytes(8); console.log(value.length, timingSafeEqual(Buffer.from('same'), Buffer.from('same')), timingSafeEqual(Buffer.from('same'), Buffer.from('diff'))); }"
+}

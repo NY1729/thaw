@@ -1,0 +1,5 @@
+{
+  "name": "string decoder split sequence",
+  "expect": "matched",
+  "source": "import { StringDecoder } from 'node:string_decoder'; import { Buffer } from 'node:buffer'; function main(): void { const decoder = new StringDecoder('utf8'); console.log(decoder.write(Buffer.from([0xe9, 0x9b])), decoder.end(Buffer.from([0xaa]))); }"
+}

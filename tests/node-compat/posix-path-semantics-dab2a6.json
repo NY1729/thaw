@@ -1,0 +1,5 @@
+{
+  "name": "posix path semantics",
+  "expect": "matched",
+  "source": "import posix from 'node:path/posix'; function main(): void { console.log(posix.join('/a', 'b', '..', 'c'), posix.basename('/a/file.txt', '.txt')); }"
+}

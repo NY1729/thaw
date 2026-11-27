@@ -1,0 +1,5 @@
+{
+  "name": "vm many contexts are created and released",
+  "expect": "matched",
+  "source": "import { createContext, runInContext } from 'node:vm'; function main(): void { let total = 0; for (let index = 0; index < 300; index++) { const context: any = createContext({ index }); total += runInContext('var square = index * index; square', context); } console.log(total); }"
+}

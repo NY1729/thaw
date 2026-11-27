@@ -1,0 +1,5 @@
+{
+  "name": "r6b URL and URLSearchParams console inspect",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(new URL(\"https://user:pw@example.com:8080/p/a/t/h?query=string&a=1&a=2#hash\"));\n  console.log(new URLSearchParams(\"a=1&b=2\"), new URLSearchParams(\"\"));\n}\n"
+}

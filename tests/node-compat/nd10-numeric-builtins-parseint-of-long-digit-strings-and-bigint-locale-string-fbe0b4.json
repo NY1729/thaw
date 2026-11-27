@@ -1,0 +1,5 @@
+{
+  "name": "nd10 numeric builtins parseInt of long digit strings and BigInt locale string",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(parseInt(\"9\".repeat(25)), parseInt(\"123456789012345678901234567890\"), parseInt(\"-12345678901234567890123\"), parseInt(\"42px\"), parseInt(\"x\"));\n  console.log((123456789n).toLocaleString(\"en-US\"), (1234n).toLocaleString());\n  console.log(typeof Symbol.iterator, typeof Symbol.asyncIterator, typeof Symbol(\"a\"));\n}\n"
+}

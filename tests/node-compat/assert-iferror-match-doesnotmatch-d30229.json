@@ -1,0 +1,5 @@
+{
+  "name": "assert ifError match doesNotMatch",
+  "expect": "matched",
+  "source": "import assert from \"node:assert\";\n\nfunction attempt(label: string, run: () => void): void {\n  try {\n    run();\n    console.log(label, \"ok\");\n  } catch (e: any) {\n    console.log(label, e.name, e.code, e.operator, JSON.stringify(e.message));\n  }\n}\n\nfunction main(): void {\n  attempt(\"ifError null\", () => assert.ifError(null));\n  attempt(\"ifError undefined\", () => assert.ifError(undefined));\n  attempt(\"ifError error\", () => assert.ifError(new Error(\"boom\")));\n  attempt(\"ifError string\", () => assert.ifError(\"str\"));\n  attempt(\"ifError zero\", () => assert.ifError(0));\n  attempt(\"match ok\", () => assert.match(\"abc\", /b/));\n  attempt(\"match fail\", () => assert.match(\"abc\", /x/));\n  attempt(\"match custom\", () => assert.match(\"abc\", /x/, \"custom\"));\n  attempt(\"match number\", () => assert.match(5 as any, /x/));\n  attempt(\"doesNotMatch ok\", () => assert.doesNotMatch(\"abc\", /x/));\n  attempt(\"doesNotMatch fail\", () => assert.doesNotMatch(\"abc\", /b/));\n}\n"
+}

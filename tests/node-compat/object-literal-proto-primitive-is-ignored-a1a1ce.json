@@ -1,0 +1,5 @@
+{
+  "name": "object literal __proto__ primitive is ignored",
+  "expect": "matched",
+  "source": "function main(): void { const o: any = { __proto__: 5 }; console.log(o.toString === Object.prototype.toString, Object.getPrototypeOf(o) === Object.prototype); }"
+}

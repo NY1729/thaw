@@ -1,0 +1,5 @@
+{
+  "name": "structuredClone rebuilds a host Map and Set as independent collections",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const m: any = new Map([[1, 2]]);\n  const mc: any = structuredClone(m);\n  console.log(mc === m, mc instanceof Map, mc.get(1), mc.size);\n  m.set(3, 4);\n  mc.set(9, 9);\n  console.log(mc.size, m.size, mc.has(9), m.has(9));\n  const s: any = new Set([1, 2]);\n  const sc: any = structuredClone(s);\n  sc.add(7);\n  console.log(sc instanceof Set, sc.size, s.size, sc.has(7), s.has(7));\n  const nested: any = new Map([[{ k: 1 }, [1, 2]]]);\n  const nc: any = structuredClone(nested);\n  let kk: any = null;\n  let vv: any = null;\n  nc.forEach((v: any, k: any) => { kk = k; vv = v; });\n  console.log(kk.k, vv.length, vv !== nested.get([...nested.keys()][0]));\n}\n"
+}

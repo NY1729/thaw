@@ -1,0 +1,5 @@
+{
+  "name": "stack overflow is a catchable RangeError",
+  "expect": "matched",
+  "source": "function r(n: number): number { return r(n + 1) + 1; } function depth(n: number): number { return n === 0 ? 0 : depth(n - 1) + 1; } function main(): void { try { r(0); console.log('no'); } catch (e: any) { console.log('caught', e instanceof RangeError, e.message); } console.log(depth(5000)); try { r(0); } catch (e: any) { console.log(String(e)); } }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "computed key on a class instance with a fixed layout defines a dynamic field",
+  "expect": "matched",
+  "source": "class P { x = 1; }\nfunction main(): void {\n  const p: any = new P();\n  Object.defineProperties(p, { ['y' + 'z']: { value: 2, enumerable: true, writable: true, configurable: true } });\n  console.log(p.x, p.yz, Object.keys(p).join());\n}"
+}

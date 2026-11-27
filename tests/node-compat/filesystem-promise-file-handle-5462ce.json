@@ -1,0 +1,5 @@
+{
+  "name": "filesystem promise file handle",
+  "expect": "matched",
+  "source": "import { open, rm } from 'node:fs/promises'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-handle.txt'; await rm(path, { force: true }); const output = await open(path, 'w'); await output.writeFile('hello'); const stat = await output.stat(); await output.close(); const input = await open(path, 'r'); const value = await input.readFile({ encoding: 'utf8' }); console.log(stat.size, value); await input.close(); await rm(path); }"
+}

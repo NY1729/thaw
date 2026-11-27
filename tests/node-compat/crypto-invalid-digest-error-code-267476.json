@@ -1,0 +1,5 @@
+{
+  "name": "crypto invalid digest error code",
+  "expect": "matched",
+  "source": "import { createHash } from 'node:crypto'; function main(): void { try { createHash('thaw-invalid-digest'); } catch (error) { console.log(error.name, error.code); } }"
+}

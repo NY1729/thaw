@@ -1,0 +1,5 @@
+{
+  "name": "r9c class alias resolves to the class for new",
+  "expect": "matched",
+  "source": "class D { q = 1 }\nconst E = D;\nfunction main(): void { const L = D; console.log(new E(), new L().q); }"
+}

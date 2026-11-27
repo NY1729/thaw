@@ -1,0 +1,5 @@
+{
+  "name": "nd7 util inspect options strings numbers colors and defaults",
+  "expect": "matched",
+  "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.inspect([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], { maxArrayLength: 3 }));\n  console.log(util.inspect({ b: 1, a: 2 }, { sorted: true }));\n  console.log(util.inspect(\"x\".repeat(30), { maxStringLength: 5 }));\n  console.log(util.inspect(123456789.123, { numericSeparator: true }));\n  console.log(util.inspect({ a: 1, b: { c: \"s\" } }, { colors: true }));\n  console.log(util.inspect(\"a'b\"), util.inspect(\"a\\\"b'c\"), util.inspect(\"a\\nb\"));\n  console.log(util.inspect({ \"a-b\": 1, ok: [1, [2, [3, [4]]]] }));\n  console.log(util.inspect.defaultOptions.depth, typeof util.inspect.custom);\n}\n"
+}

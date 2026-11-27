@@ -1,0 +1,5 @@
+{
+  "name": "filesystem watch change event",
+  "expect": "matched",
+  "source": "import { rmSync, watch, writeFileSync } from 'node:fs'; async function main(): Promise<void> { const path = '/tmp/thaw-node-fs-watch.txt'; rmSync(path, { force: true }); writeFileSync(path, 'before'); await new Promise<void>((resolve, reject) => { const watcher = watch(path, (eventType: string, filename: string): void => { console.log(eventType === 'change', filename === 'thaw-node-fs-watch.txt'); watcher.close(); rmSync(path, { force: true }); resolve(); }); watcher.on('error', reject); setTimeout((): void => writeFileSync(path, 'after'), 10); }); }"
+}

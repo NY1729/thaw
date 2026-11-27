@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite constructor and call argument errors",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  try { new (DatabaseSync as any)(); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new (DatabaseSync as any)(':memory:', 5); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new DatabaseSync(':memory:', { readOnly: 'yes' } as any); } catch (e: any) { console.log(e.name, e.code, e.message); }\n  try { new DatabaseSync(':memory:').exec(42 as any); } catch (e: any) { console.log(e.name, e.code, e.message); }\n}"
+}

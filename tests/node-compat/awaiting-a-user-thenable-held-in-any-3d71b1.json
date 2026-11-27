@@ -1,0 +1,5 @@
+{
+  "name": "awaiting a user thenable held in any",
+  "expect": "matched",
+  "source": "const thenable: any = { then(res: (v: number) => void) { res(42); } };\nconst failing: any = { then(res: any, rej: any) { rej(new Error('boom')); } };\nasync function viaAsync(): Promise<any> { return thenable; }\nasync function main(): Promise<void> {\n  console.log(await thenable);\n  console.log(await viaAsync());\n  console.log(await Promise.resolve(thenable));\n  try { await failing; } catch (e: any) { console.log('caught', e.message); }\n  const plain: any = { a: 1 };\n  const same = await plain;\n  same.a = 2;\n  console.log(plain.a);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "path family one value across path, node:path/posix and path/win32",
+  "expect": "matched",
+  "source": "import path from 'path'; import { posix } from 'node:path/posix'; import win from 'path/win32'; function main(): void { console.log(JSON.stringify([path === posix, path.posix === posix, path.win32 === win, posix.win32 === win, win.posix === posix, win.win32 === win])); }"
+}

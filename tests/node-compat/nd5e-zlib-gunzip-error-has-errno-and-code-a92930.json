@@ -1,0 +1,5 @@
+{
+  "name": "nd5e zlib gunzip error has errno and code",
+  "expect": "matched",
+  "source": "import z from \"node:zlib\";\nfunction main(): void {\n  try { z.gunzipSync(Buffer.from(\"notgzip\")); } catch (e: any) { console.log(e.code, e.errno, e.message); }\n  try { z.inflateSync(Buffer.from(\"xx\")); } catch (e: any) { console.log(e.code, e.errno, e.message); }\n}\n"
+}

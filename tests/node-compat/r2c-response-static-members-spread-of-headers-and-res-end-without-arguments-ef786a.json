@@ -1,0 +1,5 @@
+{
+  "name": "r2c Response static members spread of Headers and res.end without arguments",
+  "expect": "matched",
+  "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => { res.statusCode = 404; res.end(); });\nfunction main(): void {\n  const a = Response.json({ a: 1 });\n  console.log(a.headers.get(\"content-type\"), a.status);\n  const b = Response.redirect(\"http://a.test/\", 301);\n  console.log(b.status, b.headers.get(\"location\"));\n  console.log(Response.error().type);\n  const h = new Headers({ a: \"1\", b: \"2\" });\n  console.log([...h]);\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const c = await fetch(`http://127.0.0.1:${(srv.address() as any).port}/`);\n    console.log(c.status, c.ok);\n    srv.close();\n  });\n}"
+}

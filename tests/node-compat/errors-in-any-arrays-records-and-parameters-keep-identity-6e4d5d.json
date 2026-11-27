@@ -1,0 +1,5 @@
+{
+  "name": "errors in any arrays, records and parameters keep identity",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = new Error(\"a\") as any;\n  const b = new Error(\"a\") as any;\n  const arr: any[] = [a, b];\n  arr[1].tag = \"second\";\n  console.log(a.tag, b.tag, arr[0] === a, arr[1] === a, arr[1] === b, arr.indexOf(b), arr.lastIndexOf(a));\n  const nested: any = { a: { list: [a] } };\n  nested.a.list[0].deep = 1;\n  console.log(a.deep, nested.a.list[0] === a, Object.keys(a));\n  const rec: Record<string, any> = {};\n  rec[\"k\"] = b;\n  rec[\"k\"].viaRec = true;\n  console.log(b.viaRec, rec[\"k\"] === b, Object.values(rec)[0] === b, Object.values(rec)[0] === a);\n  const typed: Error[] = [new Error(\"x\"), new Error(\"y\")];\n  const view: any = typed;\n  view[0].tag = \"X\";\n  console.log((typed[0] as any).tag, view[0] === typed[0], view[1] === typed[0]);\n  function touch(x: any) { x.viaParam = 1; return x; }\n  const r = touch(a);\n  console.log(a.viaParam, r === a, r === b);\n  const back: Error = view[0] as Error;\n  console.log(back === typed[0], back.message, `${view[1]}` + String(view[0]));\n}\n"
+}

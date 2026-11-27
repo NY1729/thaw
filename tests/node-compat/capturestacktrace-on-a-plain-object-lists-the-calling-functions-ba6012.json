@@ -1,0 +1,5 @@
+{
+  "name": "captureStackTrace on a plain object lists the calling functions",
+  "expect": "matched",
+  "source": "function mk(): any {\n  const o: any = { name: \"X\", message: \"hi\" };\n  Error.captureStackTrace(o);\n  return o.stack;\n}\nfunction wrap(): any { return mk(); }\nfunction main(): void {\n  const lines = wrap().split(\"\\n\");\n  console.log(lines[0], lines[1].includes(\"at mk \"), lines[2].includes(\"at wrap \"));\n}\n"
+}

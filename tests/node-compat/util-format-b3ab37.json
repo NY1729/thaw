@@ -1,0 +1,5 @@
+{
+  "name": "util format",
+  "expect": "matched",
+  "source": "import { format } from 'node:util'; function main(): void { console.log(format('%s:%d:%j', 'value', 2, { ok: true })); }"
+}

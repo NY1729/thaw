@@ -1,0 +1,5 @@
+{
+  "name": "events once promise",
+  "expect": "matched",
+  "source": "import { EventEmitter, once } from 'node:events'; async function main(): Promise<void> { const emitter = new EventEmitter(); const pending = once(emitter, 'ready'); emitter.emit('ready', 42, 'ok'); const values = await pending; console.log(values[0], values[1]); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dynamic storage follows aliases fields captures and calls",
+  "expect": "matched",
+  "source": "function identity(xs: {x: number}[]): {x: number}[] { return xs; } function main(): void { const xs: {x: number}[] = []; const holder = {xs: identity(xs)}; const read = () => holder.xs; const a: any = read(); const original: any = new Function(\"return {x: 1}\")(); a[0] = original; original.x = 5; console.log(xs[0] === original, holder.xs[0] === original, read()[0].x); }"
+}

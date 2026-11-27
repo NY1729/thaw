@@ -1,0 +1,5 @@
+{
+  "name": "r133 http server listening and timeout members",
+  "expect": "matched",
+  "source": "import * as http from 'node:http';\nfunction main(): void {\n  const s = http.createServer((req: any, res: any) => { res.end('ok'); });\n  console.log(s.listening, typeof s.timeout, s.headersTimeout, s.requestTimeout, s.keepAliveTimeout, s.maxRequestsPerSocket);\n  s.listen(0, '127.0.0.1', () => {\n    console.log('listening', s.listening);\n    s.close(() => { console.log('closed', s.listening); });\n    console.log('after close call', s.listening);\n  });\n}\n"
+}

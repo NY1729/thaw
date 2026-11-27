@@ -1,0 +1,5 @@
+{
+  "name": "infer net server and socket callback params",
+  "expect": "matched",
+  "source": "import net from \"node:net\";\nfunction main(): void {\n  const s = net.createServer((c) => { c.on(\"data\", (d) => c.end(\"echo:\" + d)); });\n  s.listen(0, \"127.0.0.1\", () => { const c = net.connect((s.address() as any).port, \"127.0.0.1\", () => c.write(\"hey\")); let r = \"\"; c.on(\"data\", (d) => (r += d)); c.on(\"close\", () => { console.log(r); s.close(); }); });\n}"
+}

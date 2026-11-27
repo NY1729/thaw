@@ -1,0 +1,5 @@
+{
+  "name": "nd10 index signature with a narrower fixed property and RegExpExecArray",
+  "expect": "matched",
+  "source": "interface Dict { [k: string]: number | undefined; fixed: number }\nfunction main(): void {\n  const d: Dict = { fixed: 1, other: 2 };\n  d.more = 3;\n  console.log(d, d.fixed);\n  const re = /(\\d)/g;\n  let m: RegExpExecArray | null;\n  while ((m = re.exec(\"a1b2\")) !== null) { console.log(m[1], m.index); }\n}\n"
+}

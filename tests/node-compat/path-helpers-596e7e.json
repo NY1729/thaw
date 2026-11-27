@@ -1,0 +1,5 @@
+{
+  "name": "path helpers",
+  "expect": "matched",
+  "source": "import { dirname, extname, isAbsolute, relative } from 'node:path'; function main(): void { console.log(dirname('/a/b.txt'), extname('/a/b.txt'), isAbsolute('/a'), relative('/a/b', '/a/c')); }"
+}

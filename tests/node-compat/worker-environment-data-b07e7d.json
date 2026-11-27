@@ -1,0 +1,5 @@
+{
+  "name": "worker environment data",
+  "expect": "matched",
+  "source": "import { getEnvironmentData, setEnvironmentData } from 'node:worker_threads'; function main(): void { setEnvironmentData('thaw.test', { value: 42 }); const stored = getEnvironmentData('thaw.test'); console.log(stored.value); }"
+}

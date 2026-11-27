@@ -1,0 +1,5 @@
+{
+  "name": "r2b array destructuring from a custom iterable closes it",
+  "expect": "matched",
+  "source": "function main(): void { const it = { [Symbol.iterator]() { let i = 5; return { next() { return i < 8 ? { value: i++, done: false } : { value: undefined, done: true }; }, return() { console.log('closed'); return { done: true }; } }; } }; const [p, q] = it as Iterable<number>; console.log(p, q); const [r, s, t, u] = it as Iterable<number>; console.log(r, s, t, u); const [, , ...rest] = it as Iterable<number>; console.log(rest); }"
+}

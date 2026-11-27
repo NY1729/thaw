@@ -1,0 +1,5 @@
+{
+  "name": "buffer byte swapping",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; function main(): void { const value = Buffer.from([0, 1, 2, 3]); console.log(value.swap16().toString('hex')); }"
+}

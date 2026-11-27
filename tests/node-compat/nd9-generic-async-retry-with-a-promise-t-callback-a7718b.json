@@ -1,0 +1,5 @@
+{
+  "name": "nd9 generic async retry with a Promise<T> callback",
+  "expect": "matched",
+  "source": "async function retry<T>(fn: (i: number) => Promise<T>): Promise<T> { return await fn(1); }\nasync function f(n: number): Promise<string> { return \"ok\" + n; }\nasync function main(): Promise<void> { console.log(await retry(f)); }\n"
+}

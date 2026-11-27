@@ -1,0 +1,5 @@
+{
+  "name": "filesystem symbolic link and chmod",
+  "expect": "matched",
+  "source": "import { chmodSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'; function main(): void { const root = '/tmp/thaw-node-fs-link'; const target = root + '/target.txt'; const link = root + '/link.txt'; rmSync(root, { recursive: true, force: true }); mkdirSync(root); writeFileSync(target, 'linked'); chmodSync(target, 0o640); symlinkSync('target.txt', link); console.log(lstatSync(link).isSymbolicLink(), readlinkSync(link), readFileSync(link, 'utf8'), (lstatSync(target).mode & 0o777).toString(8)); rmSync(root, { recursive: true }); }"
+}

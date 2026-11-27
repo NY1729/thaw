@@ -1,0 +1,5 @@
+{
+  "name": "audit2 D util.format matches node",
+  "expect": "matched",
+  "source": "import * as util from \"node:util\";\nfunction main(): void {\n  console.log(util.format(\"%s\", -0), util.format(\"%d\", -0), util.format(\"%i\", \"0x10\"));\n  console.log(util.format(\"%s\", { a: 1 }), util.format(\"%s\", [1, 2]));\n  console.log(util.format(\"%x\", 1), util.format(\"%s\"), util.format(1, 2), util.format(\"%c styled\", \"css\"), util.format(\"%d\", \"x\"), util.format(\"%s\", 5n), util.format(\"%d\", 5n));\n  console.log(util.format(\"%o\", [1]), util.format(\"%O\", { a: { b: { c: { d: 1 } } } }), util.format(\"%j\", { a: 1 }), util.format(\"%s:%s\", \"a\"));\n  console.log(util.format(\"%s\", null, undefined), util.format(\"%s\", \"a\", { b: 1 }, [2]), util.format(\"%%s\"), util.format(\"%s%%\", 1));\n}"
+}

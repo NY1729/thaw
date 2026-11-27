@@ -1,0 +1,5 @@
+{
+  "name": "eval object literal, completion value, and SyntaxError",
+  "expect": "matched",
+  "source": "function main(): void { const v: any = eval('({ a: 1, b: [2, 3], c: \"x\" })'); console.log(JSON.stringify(v), eval('var q = 5; q * 2')); try { eval('1 +'); } catch (e: any) { console.log(e instanceof SyntaxError, e.name); } }"
+}

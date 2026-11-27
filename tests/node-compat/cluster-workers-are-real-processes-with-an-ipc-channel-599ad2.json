@@ -1,0 +1,5 @@
+{
+  "name": "cluster workers are real processes with an IPC channel",
+  "expect": "matched",
+  "source": "import cluster from 'node:cluster'; import process from 'node:process'; function main(): void { if (cluster.isPrimary) { const worker = cluster.fork(); const log: string[] = []; worker.on('online', () => { log.push('online'); worker.send({ hello: 1 }); }); worker.on('message', (message: any) => { log.push('message ' + JSON.stringify(message)); log.push('connected ' + worker.isConnected()); worker.kill(); }); worker.on('disconnect', () => { log.push('disconnect'); }); worker.on('exit', (code: any, signal: any) => { log.push('exit ' + signal + ' dead ' + worker.isDead() + ' after ' + worker.exitedAfterDisconnect); console.log(log.join('|')); }); } else { process.on('message', (message: any) => { process.send!({ echo: message, worker: cluster.worker!.id }); }); } }"
+}

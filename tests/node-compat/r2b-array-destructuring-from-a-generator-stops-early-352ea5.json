@@ -1,0 +1,5 @@
+{
+  "name": "r2b array destructuring from a generator stops early",
+  "expect": "matched",
+  "source": "function* g(): Generator<number> { let i = 0; try { while (true) yield i++; } finally { console.log('fin'); } } function main(): void { const [a, b] = g(); console.log(a, b); }"
+}

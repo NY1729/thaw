@@ -1,0 +1,5 @@
+{
+  "name": "nd5e object literal accessors print named functions",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o = { get x() { return 1; }, set y(v: number) {} };\n  console.log(Object.getOwnPropertyDescriptor(o, \"x\")!.get, Object.getOwnPropertyDescriptor(o, \"y\")!.set);\n  console.log(Object.getOwnPropertyDescriptor(o, \"x\"));\n}\n"
+}

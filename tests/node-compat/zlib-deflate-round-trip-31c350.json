@@ -1,0 +1,5 @@
+{
+  "name": "zlib deflate round trip",
+  "expect": "matched",
+  "source": "import { deflateSync, inflateSync } from 'node:zlib'; function main(): void { const compressed = deflateSync('hello deflate'); console.log(inflateSync(compressed).toString(), compressed.length > 0); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "crypto scrypt sync",
+  "expect": "matched",
+  "source": "import { scryptSync } from 'node:crypto'; function main(): void { console.log(scryptSync('password', 'salt', 16, { N: 16 }).length); }"
+}

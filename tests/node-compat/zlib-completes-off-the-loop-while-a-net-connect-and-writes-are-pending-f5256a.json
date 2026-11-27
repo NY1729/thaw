@@ -1,0 +1,5 @@
+{
+  "name": "zlib completes off the loop while a net connect and writes are pending",
+  "expect": "matched",
+  "source": "import net from 'node:net'; import zlib from 'node:zlib';\nfunction main(): void {\n  const server = net.createServer((_socket: any) => {});\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const client = net.connect({ host: '127.0.0.1', port });\n    client.on('error', () => {});\n    let ticks = 0;\n    const timer = setInterval(() => { ticks++; }, 2);\n    const input = Buffer.alloc(4 * 1024 * 1024); input.fill(97);\n    zlib.gzip(input, (e: any, packed: Buffer) => {\n      const gzipOk = e === null;\n      zlib.gunzip(packed, (e2: any, plain: Buffer) => {\n        const gunzipOk = e2 === null;\n        client.write('x', () => {\n          console.log('zlib', gzipOk, gunzipOk, plain.length === input.length);\n          console.log('timer ran during zlib', ticks > 0);\n          console.log('connected', client.remotePort === port);\n          clearInterval(timer); client.destroy(); server.close();\n        });\n      });\n    });\n  });\n}"
+}

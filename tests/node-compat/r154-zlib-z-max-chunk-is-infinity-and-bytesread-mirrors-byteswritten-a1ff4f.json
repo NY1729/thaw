@@ -1,0 +1,5 @@
+{
+  "name": "r154 zlib Z_MAX_CHUNK is Infinity and bytesRead mirrors bytesWritten",
+  "expect": "matched",
+  "source": "import * as zlib from 'node:zlib';\nfunction main(): void {\n  const z: any = zlib;\n  console.log(z.constants.Z_MAX_CHUNK, typeof z.constants.Z_MAX_CHUNK, z.constants.Z_DEFAULT_CHUNK);\n  const g: any = z.createGzip();\n  g.write('hello');\n  console.log(g.bytesWritten, g.bytesRead);\n  g.destroy();\n}\n"
+}

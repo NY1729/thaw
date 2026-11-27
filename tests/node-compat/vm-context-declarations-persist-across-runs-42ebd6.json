@@ -1,0 +1,5 @@
+{
+  "name": "vm context declarations persist across runs",
+  "expect": "matched",
+  "source": "import { createContext, runInContext } from 'node:vm'; function main(): void { const context: any = createContext({ a: 1 }); runInContext('var x = 10; let y = 20; const z = 30; function g() { return x + y + z; }', context); console.log(runInContext('g() + a + typeof y', context), context.x, typeof context.y, typeof context.g); }"
+}

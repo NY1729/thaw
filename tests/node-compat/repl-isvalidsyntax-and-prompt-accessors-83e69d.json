@@ -1,0 +1,5 @@
+{
+  "name": "repl isValidSyntax and prompt accessors",
+  "expect": "matched",
+  "source": "import * as repl from 'node:repl'; import { PassThrough, Writable } from 'node:stream'; function main(): void { console.log(repl.isValidSyntax('1 + 1'), repl.isValidSyntax('1 +'), repl.start.length, repl.writer.length, repl.isValidSyntax.length); const out: any = new PassThrough(); const input: any = new PassThrough(); const s: any = new repl.REPLServer({ input, output: out, prompt: 'x> ' }); console.log(s.getPrompt(), typeof s.prompt, typeof s.question, s.line === '', s.terminal, s.useGlobal, typeof s.completer, s.crlfDelay, s.tabSize, s.historySize); s.setPrompt('y> '); console.log(s.getPrompt()); s.close(); }"
+}

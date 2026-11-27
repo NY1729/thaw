@@ -1,0 +1,5 @@
+{
+  "name": "a native callback storing its Json parameter in a native array",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const store: any[] = [];\n  const f = (j: any, k: any): void => { store[0] = j; store.push(k); };\n  const g: any = f;\n  g({ a: 1 }, [2]);\n  await new Promise<void>((resolve) => setTimeout(() => resolve(), 5));\n  g({ b: 3 }, { c: 4 });\n  await new Promise<void>((resolve) => setTimeout(() => resolve(), 5));\n  console.log(JSON.stringify(store), store.length);\n  const seeded: any[] = [1];\n  const h = (j: any): void => { seeded[0] = j; };\n  const hg: any = h;\n  hg({ z: 9 });\n  console.log(JSON.stringify(seeded));\n}\n"
+}

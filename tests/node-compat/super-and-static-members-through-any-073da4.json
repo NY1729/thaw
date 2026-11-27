@@ -1,0 +1,5 @@
+{
+  "name": "super and static members through any",
+  "expect": "matched",
+  "source": "class Base {\n  static count = 0;\n  id: number;\n  constructor() { this.id = ++Base.count; }\n  who(): string { return \"b\"; }\n}\nclass Der extends Base {\n  who(): string { return \"d\" + super.who(); }\n}\nfunction main(): void {\n  const D: any = Der;\n  console.log(new D().id, D.count);\n  const list: Base[] = [new Base(), new Der()];\n  const view: any = list;\n  console.log(view.map((x: Base) => x.who()).join());\n}"
+}
