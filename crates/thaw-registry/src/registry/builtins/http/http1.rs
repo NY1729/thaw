@@ -119,6 +119,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                if (this.destroyed || this.aborted) return this;
                if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
                else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+               this._priorWrites = this._chunks.length;
                if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
                if (this.writableEnded) return this;
                this.finished = this.writableEnded = true;
@@ -128,11 +129,15 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              ClientRequest.prototype._dispatch = function(callback, streaming) {
                this._dispatched = true;
                var request = this, body = streaming ? Buffer.alloc(0) : Buffer.concat(this._chunks);
-               if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length));
-               if (streaming && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding') && ['GET', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT'].indexOf(String(this.method).toUpperCase()) < 0) this.setHeader('Transfer-Encoding', 'chunked');
-               this._chunked = streaming && /chunked/i.test(String(this.getHeader('transfer-encoding') || ''));
+               var framed = !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding'), framing = '', bodyless = ['GET', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT'].indexOf(String(this.method).toUpperCase()) >= 0;
+               if (!streaming && framed && this._priorWrites > 0 && !bodyless) {
+                 framing = 'Transfer-Encoding: chunked\r\n';
+                 body = Buffer.concat(this._chunks.map(function(piece) { return piece.length ? Buffer.concat([Buffer.from(piece.length.toString(16) + '\r\n'), piece, Buffer.from('\r\n')]) : Buffer.alloc(0); }).concat([Buffer.from('0\r\n\r\n')]));
+               } else if (body.length && framed) framing = 'Content-Length: ' + body.length + '\r\n';
+               else if (streaming && framed && !bodyless) framing = 'Transfer-Encoding: chunked\r\n';
+               this._chunked = streaming && (framing !== '' ? true : /chunked/i.test(String(this.getHeader('transfer-encoding') || '')));
                if (!this.hasHeader('connection')) this.setHeader('Connection', 'close');
-               var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n';
+               var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { var value = request._headers[key], name = request._headerNames[key]; return Array.isArray(value) ? value.map(function(item) { return name + ': ' + item; }).join('\r\n') : name + ': ' + value; }).join('\r\n') + '\r\n' + framing + '\r\n';
                var pending = Buffer.alloc(0), response = null, remaining = null, chunkSize = null, ended = false, upgraded = false, failed = false, inputEnded = false;
                function closeRequest() { request.destroyed = true; if (response) { response._bodyResume = null; response._bodyReadGate = null; } request._queueClose(); }
                function failResponse(error) {
