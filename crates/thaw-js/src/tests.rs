@@ -8544,7 +8544,7 @@ fn not_callable_error_names_the_constructor_of_an_object() {
 /// How long a test waits for an event loop that should end ("a platform job or timer leaked" otherwise): a
 /// debug build run in parallel with the rest of the suite, a CI runner (`CI`) or `THAW_TEST_SLOW=1` get three
 /// times `base_secs`. The bound stays finite, so a loop that really never ends still fails.
-fn slow_test_deadline(base_secs: u64) -> std::time::Duration {
+pub(crate) fn slow_test_deadline(base_secs: u64) -> std::time::Duration {
     let slow = cfg!(debug_assertions)
         || std::env::var_os("CI").is_some()
         || std::env::var_os("THAW_TEST_SLOW").is_some();
