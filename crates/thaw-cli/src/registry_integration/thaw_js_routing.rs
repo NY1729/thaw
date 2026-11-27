@@ -1518,3 +1518,18 @@ fn eval_worker_builtins_need_a_worker_mention_and_skip_worker_threads() {
     assert_eq!(found.into_iter().collect::<Vec<_>>(), ["node:events"]);
     assert!(eval_worker_builtin_bundles(&["require('node:events')"], None).is_empty());
 }
+
+#[test]
+fn file_worker_bodies_are_scanned_relative_to_the_program() {
+    let dir = std::env::temp_dir().join(format!("thaw-file-worker-scan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("w.js"),
+        "const { Readable } = require('node:stream'); const os = require(\"os\");",
+    )
+    .unwrap();
+    let program = "new Worker('./w.js'); new Worker('./missing.js'); new Worker(computed);";
+    let found = eval_worker_builtin_bundles(&[program], Some(&dir));
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(found.into_iter().collect::<Vec<_>>(), ["node:os", "node:stream"]);
+}
