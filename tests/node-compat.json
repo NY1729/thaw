@@ -5515,6 +5515,11 @@
       "name": "r152 fs callback and promises argument validation like Node",
       "expect": "matched",
       "source": "import * as fs from \"node:fs\";\nimport * as fsp from \"node:fs/promises\";\nasync function main(): Promise<void> {\n  const f: any = fs;\n  const p: any = fsp;\n  const show = (name: string, fn: () => any): void => {\n    try { fn(); console.log(name, \"ok\"); } catch (e: any) { console.log(name, e.name, e.code, e.message); }\n  };\n  show(\"stat\", () => f.stat(\"/\"));\n  show(\"readFile\", () => f.readFile(\"/\"));\n  show(\"read\", () => f.read(0, Buffer.alloc(1)));\n  show(\"write\", () => f.write(1, \"a\"));\n  show(\"readv\", () => f.readv(0, [Buffer.alloc(1)], null));\n  show(\"glob\", () => f.glob(\"*\"));\n  show(\"cp\", () => f.cp(\"/a\", \"/b\"));\n  show(\"mkdir\", () => f.mkdir(\"/tmp/r152-never\"));\n  show(\"statNumber\", () => f.stat(\"/\", {}, 5));\n  const r = p.appendFile();\n  console.log(typeof r.then);\n  try { await r; } catch (e: any) { console.log(e.code); }\n  try { await p.copyFile(); } catch (e: any) { console.log(e.code); }\n  try { await p.mkdtemp(); } catch (e: any) { console.log(e.code); }\n}\n"
-    }
+    },
+  {
+    "name": "createServer handler wrapped through any: res.end() with omitted or undefined chunk",
+    "expect": "matched",
+    "source": "import http from 'http';\ntype Fn = (...a: any[]) => any;\nfunction wrap(fn: Fn): any { return function (...a: any[]) { return fn(...a); }; }\nasync function main(): Promise<void> {\n  const srv = http.createServer(wrap((req: any, res: any) => {\n    if (req.url === '/a') { res.end(); } else if (req.url === '/b') { res.end(undefined); } else { res.end('x'); }\n  }));\n  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));\n  const port = (srv.address() as any).port;\n  const out: string[] = [];\n  for (const p of ['/a', '/b', '/c']) {\n    const r = await fetch('http://127.0.0.1:' + port + p);\n    out.push(p + ':' + r.status + ':' + JSON.stringify(await r.text()));\n  }\n  console.log(out.join(','));\n  srv.close();\n}\n"
+  }
   ]
 }
