@@ -1410,3 +1410,15 @@ const run = (label, f) => { try { const r = f(); console.log(label + ' => OK ' +
         ]
     );
 }
+
+#[test]
+fn rsa_md5_and_sha224_signatures_verify() {
+    // an md5WithRSA SPKAC made by openssl (md5 signatures verify in Node builds that allow them)
+    let spkac = "MIIBPzCBqTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA5QOumLWNzeBxNTrz6sZ/744g8/T4L9gvDLaqvbBCJHknjAodt9gTV/wepphSGI/lqADc+xIaNkFKSydIJA0jNzL/2oZ4E//trmN2RP3sqFxSaHFz3N5Ox+Dw+f1S7WX7JTb7vR+ZTAckyABsNIEtoiNapBNBtgVqE9xIqLTqb+sCAwEAARYFaGVsbG8wDQYJKoZIhvcNAQEEBQADgYEA2C++mzdr22dT3ALJ9kukk7ixe4ALEKD+HAwnfO6kmaonLzcEddWqcwgSFWB54q4lHycojeS2beB9zMZCl9p0wROkaXMuDEBexh+yC70LXfC7DyGhq4SpGxcionl8PSSsmeIWSF63yjAJbqdUiWy3JroitDGcWLIkdSsdCFmgaCQ=";
+    assert_eq!(
+        run(&format!(
+            "var m = globalThis.__thaw_crypto_module; console.log(m.Certificate.verifySpkac('{spkac}'), m.Certificate.exportChallenge('{spkac}').toString());"
+        )),
+        "true hello"
+    );
+}
