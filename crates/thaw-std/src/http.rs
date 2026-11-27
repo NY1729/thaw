@@ -2074,9 +2074,10 @@ fn context_is_bodyless(context: &RequestContext) -> bool {
 fn stream_head_and_chunk(context: &mut RequestContext, payload: &[u8]) -> Vec<u8> {
     let mut outbound = Vec::new();
     let http10 = unsafe { (*context.connection).http10 };
+    let raw = unframed_body(http10, &context.state.headers);
     // HTTP/1.0 has no chunked encoding: the body is written raw and ends when the connection closes.
     let frame = |bytes: &[u8]| {
-        if http10 {
+        if raw {
             bytes.to_vec()
         } else {
             frame_chunk(bytes)
@@ -2093,7 +2094,7 @@ fn stream_head_and_chunk(context: &mut RequestContext, payload: &[u8]) -> Vec<u8
             reason_of(context).as_deref(),
             &context.state.headers,
             keep_alive,
-            http10,
+            raw,
         ));
         let pending = std::mem::take(&mut context.state.body);
         if !pending.is_empty() {
@@ -2135,7 +2136,10 @@ fn stream_or_buffer_end(context: &mut RequestContext, tail: Vec<u8>) {
         return;
     }
     let mut outbound = stream_head_and_chunk(context, &tail);
-    if !unsafe { (*context.connection).http10 } {
+    if !unframed_body(
+        unsafe { (*context.connection).http10 },
+        &context.state.headers,
+    ) {
         outbound.extend_from_slice(CHUNKED_TERMINATOR);
     }
     context.state.ended = true;
@@ -2182,10 +2186,10 @@ fn park_pending_context(
         } else {
             keep_alive
         },
-        connection.http10,
+        unframed_body(connection.http10, &context.state.headers),
     );
     let body = std::mem::take(&mut context.state.body);
-    if connection.http10 {
+    if unframed_body(connection.http10, &context.state.headers) {
         head.extend(body);
     } else {
         head.extend(frame_chunk(&body));
@@ -2220,7 +2224,9 @@ fn finish_response(context: &mut RequestContext) {
     let bodyless = context_is_bodyless(context);
     let auto_chunked = !bodyless
         && context.state.wrote
-        && !headers.iter().any(|(name, _)| is_transfer_encoding(name));
+        && !headers.iter().any(|(name, _)| {
+            is_transfer_encoding(name) || name.eq_ignore_ascii_case("Content-Length")
+        });
     let spec = ResponseSpec {
         status: normalize_status(context.response.status_code),
         headers,
@@ -2422,7 +2428,9 @@ fn run_server_callback(
         let auto_chunked = !bodyless
             && context.state.wrote
             && !connection.is_null()
-            && !headers.iter().any(|(name, _)| is_transfer_encoding(name));
+            && !headers.iter().any(|(name, _)| {
+                is_transfer_encoding(name) || name.eq_ignore_ascii_case("Content-Length")
+            });
         // `finish`/`close` listeners read `res.*` through the context pointer: run them while it is alive.
         deliver_pending_response_events();
         CallbackOutcome::Ready(ResponseSpec {
@@ -3179,6 +3187,14 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
 /// body bytes are still sitting in the stream would desync every
 /// request after this one, which is worse than just not reusing it.
 /// Node keeps an HTTP/1.0 connection alive only when the response carries a caller-set `Content-Length`.
+/// The body goes out as-is, without chunk framing: an HTTP/1.0 client, or a caller-set `Content-Length`.
+fn unframed_body(http10: bool, headers: &[(String, String)]) -> bool {
+    http10
+        || headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+}
+
 fn http10_keep_alive(connection: &mut ConnectionState, headers: &[(String, String)]) {
     if connection.http10
         && !headers
