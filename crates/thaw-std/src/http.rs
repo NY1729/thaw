@@ -3892,7 +3892,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
     )));
     let extra = |function: *const c_void| {
         let closure = Box::into_raw(Box::new(NativeClosure::new(function, state.cast())));
-        unsafe { thaw_arena::replace_reference(closure as usize, 0, state as usize) };
+        thaw_arena::replace_reference(closure as usize, 0, state as usize);
         closure as *const NativeClosure
     };
     let close_all_connections = extra(server_close_all_connections as *const c_void);
