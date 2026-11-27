@@ -1,0 +1,653 @@
+{
+ "module": "node:assert",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "Assert",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [],
+   "proto": [
+    {
+     "name": "deepEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "deepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "doesNotMatch",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "doesNotReject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "doesNotThrow",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "equal",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "fail",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 5
+    },
+    {
+     "name": "ifError",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "match",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notDeepEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notDeepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "ok",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "partialDeepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "rejects",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "strictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "throws",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "ok",
+   "instance": [
+    {
+     "name": "AssertionError",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    }
+   ]
+  },
+  {
+   "name": "AssertionError",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 1,
+   "static": [
+    {
+     "name": "captureStackTrace",
+     "from": "Error",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "prepareStackTrace",
+     "from": "Error",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 2
+    },
+    {
+     "name": "stackTraceLimit",
+     "from": "Error",
+     "typeof": "number",
+     "kind": "value",
+     "arity": null
+    }
+   ],
+   "proto": [
+    {
+     "name": "message",
+     "from": "Error",
+     "typeof": "string",
+     "kind": "value",
+     "arity": null
+    },
+    {
+     "name": "toString",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "throws"
+  },
+  {
+   "name": "CallTracker",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "calls",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "getCalls",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "report",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "reset",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "verify",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    }
+   ],
+   "construct": "ok",
+   "instance": []
+  },
+  {
+   "name": "deepEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "deepStrictEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "doesNotMatch",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "doesNotReject",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "doesNotThrow",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "equal",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "fail",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 5,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "ifError",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "length",
+   "typeof": "number",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "match",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "name",
+   "typeof": "string",
+   "kind": "value",
+   "arity": null
+  },
+  {
+   "name": "notDeepEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "notDeepStrictEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "notEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "notStrictEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "ok",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [
+    {
+     "name": "Assert",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "AssertionError",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "CallTracker",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 0
+    },
+    {
+     "name": "deepEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "deepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "doesNotMatch",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "doesNotReject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "doesNotThrow",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "equal",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "fail",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 5
+    },
+    {
+     "name": "ifError",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "match",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notDeepEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notDeepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "ok",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "partialDeepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "rejects",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "strict",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "strictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "throws",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "partialDeepStrictEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "prototype",
+   "typeof": "object",
+   "kind": "object",
+   "arity": null,
+   "props": []
+  },
+  {
+   "name": "rejects",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": []
+  },
+  {
+   "name": "strict",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 0,
+   "static": [
+    {
+     "name": "Assert",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "AssertionError",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 1
+    },
+    {
+     "name": "CallTracker",
+     "typeof": "function",
+     "kind": "class",
+     "arity": 0
+    },
+    {
+     "name": "deepEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "deepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "doesNotMatch",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "doesNotReject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "doesNotThrow",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "equal",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "fail",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 5
+    },
+    {
+     "name": "ifError",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "match",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notDeepEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notDeepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "notStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "ok",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "partialDeepStrictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "rejects",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "strict",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "strictEqual",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 3
+    },
+    {
+     "name": "throws",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "proto": []
+  },
+  {
+   "name": "strictEqual",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 3,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "throws",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

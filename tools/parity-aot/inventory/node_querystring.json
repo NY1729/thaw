@@ -1,0 +1,62 @@
+{
+ "module": "node:querystring",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "decode",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "encode",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "escape",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 1,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "parse",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "stringify",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 4,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "unescape",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  },
+  {
+   "name": "unescapeBuffer",
+   "typeof": "function",
+   "kind": "function",
+   "arity": 2,
+   "static": [],
+   "proto": []
+  }
+ ]
+}

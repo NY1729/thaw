@@ -1253,6 +1253,46 @@ impl<'ctx> HirCompiler<'ctx> {
         json: BasicValueEnum<'ctx>,
         element: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // A `Bytes` source decoding into a byte buffer aliases the view record (`__thaw_json_as_bytes`).
+        if !std::mem::take(&mut self.json_array_as_bytes) {
+            return self.compile_json_to_native_array_elements(json, element);
+        }
+        let record = self
+            .builder
+            .build_call(self.module.get_function("thaw_json_bytes_record").unwrap(), &[json.into()], "json_bytes_record")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_bytes_record returned no value")?
+            .into_pointer_value();
+        let function = self.current_function();
+        let alias = self.context.append_basic_block(function, "json_bytes_alias");
+        let general = self.context.append_basic_block(function, "json_bytes_general");
+        let done = self.context.append_basic_block(function, "json_bytes_done");
+        let present = self.builder.build_is_not_null(record, "json_bytes_present").map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(present, alias, general).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(alias);
+        let aliased = self.compile_array_wrap(record)?;
+        let alias_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(general);
+        let copied = self.compile_json_to_native_array_elements(json, element)?;
+        let general_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        let phi = self
+            .builder
+            .build_phi(self.context.ptr_type(AddressSpace::default()), "json_bytes_array")
+            .map_err(|error| error.to_string())?;
+        phi.add_incoming(&[(&aliased, alias_end), (&copied, general_end)]);
+        Ok(phi.as_basic_value())
+    }
+
+    fn compile_json_to_native_array_elements(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         self.compile_validate_native_argument(json, &HirType::Array(Box::new(element.clone())))?;
         // A native array view passed through a dynamic callback still carries its original owner.
         // Recover it so typed callback arguments keep the same array handle instead of decoding a copy.

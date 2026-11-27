@@ -406,6 +406,8 @@ impl<'a> FnLowerer<'a> {
             &HirType::Array(Box::new(HirType::F64)),
             HirExpr::JsonGet(Box::new(json.clone()), "data".to_string()),
         )?;
+        // A `Bytes` wrapper aliases its view; a legacy Buffer-shaped object is copied.
+        let data = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_as_bytes".into())), vec![data]);
         let bytes = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_array".into())), vec![data]);
         let result = if matches!(typed_type, HirType::Void | HirType::Undefined) {
             let undefined = HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());

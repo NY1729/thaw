@@ -1,0 +1,34 @@
+{
+ "module": "node:wasi",
+ "node": "v22.23.1",
+ "exports": [
+  {
+   "name": "WASI",
+   "typeof": "function",
+   "kind": "class",
+   "arity": 0,
+   "static": [],
+   "proto": [
+    {
+     "name": "getImportObject",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 0
+    },
+    {
+     "name": "initialize",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    },
+    {
+     "name": "start",
+     "typeof": "function",
+     "kind": "function",
+     "arity": 1
+    }
+   ],
+   "construct": "throws"
+  }
+ ]
+}
