@@ -3582,8 +3582,12 @@ impl<'a> FnLowerer<'a> {
                         self.dictionary_read_observing_absence(member.span, obj, key, element.as_ref())
                     }
                     HirType::Json => {
-                        let key = self.lower_expr(&computed.expr)?;
+                        let mut key = self.lower_expr(&computed.expr)?;
                         let mut key_type = self.infer_expr_type(&key)?;
+                        if key_type == HirType::JsValue {
+                            key = self.coerce_to_declared(&HirType::Json, key)?;
+                            key_type = HirType::Json;
+                        }
                         // An `any` key is a property key by ToPropertyKey: its string form.
                         let key = if key_type == HirType::Json {
                             key_type = HirType::Str;

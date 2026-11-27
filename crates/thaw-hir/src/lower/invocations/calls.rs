@@ -540,7 +540,45 @@ impl<'a> FnLowerer<'a> {
         Ok(lowered)
     }
 
+    /// `fns[i](args)` on an array of callables: the element is read once into a binding and called
+    /// like any local closure.
+    fn lower_array_element_call(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else { return Ok(None) };
+        let Expr::Member(member) = callee.as_ref() else { return Ok(None) };
+        let (Expr::Ident(owner), MemberProp::Computed(_)) = (member.obj.as_ref(), &member.prop) else {
+            return Ok(None);
+        };
+        let _ = owner;
+        let owner_value = self.lower_expr(&member.obj)?;
+        let element = match self.infer_expr_type(&owner_value) {
+            Ok(HirType::Array(element)) => *element,
+            Ok(HirType::Json) => HirType::Json,
+            _ => return Ok(None),
+        };
+        if !matches!(
+            element,
+            HirType::Function(..) | HirType::CallableFunction(..) | HirType::Json | HirType::JsValue
+        ) {
+            return Ok(None);
+        }
+        let value = self.lower_expr(callee)?;
+        let ty = self.infer_expr_type(&value)?;
+        let name = format!("__thaw_element_callee_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let mut routed = call.clone();
+        routed.callee = Callee::Expr(Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+            name.as_str().into(),
+            member.span,
+        ))));
+        let lowered = self.lower_call_unread(&routed)?;
+        Ok(Some(self.wrap_call_argument_bindings(lowered, &[(name, ty, value)])?))
+    }
+
     fn lower_call_unread(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        if let Some(lowered) = self.lower_array_element_call(call)? {
+            return Ok(lowered);
+        }
         // `(await x).m(..)`: bind the awaited receiver first so the async frame planner sees a
         // plain `let` await and the call lowers against an ordinary identifier receiver.
         if let Some(spilled) = self.lower_awaited_receiver_call(call)? {
