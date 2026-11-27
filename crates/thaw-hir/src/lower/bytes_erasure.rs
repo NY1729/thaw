@@ -356,8 +356,10 @@ fn erase_json_as_native(expr: &mut HirExpr) {
     let narrow = *ty == HirType::Bytes;
     erase_ty(ty);
     if narrow {
+        // A `Bytes` source aliases its view (`__thaw_json_as_bytes`); anything else is decoded and narrowed.
         let decoded = std::mem::replace(expr, HirExpr::Lit(HirLit::Undefined));
-        *expr = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_array".into())), vec![decoded]);
+        let aliased = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_as_bytes".into())), vec![decoded]);
+        *expr = HirExpr::Call(Box::new(HirExpr::Var("__thaw_bytes_from_array".into())), vec![aliased]);
     }
 }
 

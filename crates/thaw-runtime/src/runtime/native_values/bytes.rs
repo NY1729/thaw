@@ -1311,6 +1311,16 @@ pub unsafe extern "C" fn thaw_bytes_console_info(buffer: *const u8, field: f64) 
 }
 
 #[no_mangle]
+/// First byte of a view record (null for a null record). Layout-independent access for other archives.
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_data(buffer: *const u8) -> *mut u8 {
+    unsafe { coerce_view(buffer).as_ref() }.map_or(std::ptr::null_mut(), |view| view.base)
+}
+
+#[no_mangle]
 /// Console support: the bytes to list for `buffer` (a `DataView` shows its whole store).
 ///
 /// # Safety

@@ -2980,6 +2980,9 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        for name in ["thaw_json_from_bytes", "thaw_json_bytes_record"] {
+            self.module.add_function(name, i8_ptr.fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
         self.module.add_function(
             "thaw_json_clone",
             i8_ptr.fn_type(&[i8_ptr.into()], false),

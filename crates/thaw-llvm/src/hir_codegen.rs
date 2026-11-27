@@ -564,6 +564,8 @@ pub struct HirCompiler<'ctx> {
     /// formatting, a `Dictionary` literal, an N-API call).
     compiling_js_dynamic_arguments: bool,
     validating_native_argument: bool,
+    /// Set by `__thaw_json_as_bytes` for the next array decode (see `compile_json_to_native_array`).
+    json_array_as_bytes: bool,
     /// Fresh native scalar handles and projection ledgers owned by active typed
     /// dynamic-call argument scopes.
     fresh_event_key_argument_scopes: Vec<FreshEventKeyArgumentScope<'ctx>>,
@@ -896,6 +898,7 @@ impl<'ctx> HirCompiler<'ctx> {
             stack_guard: false,
             compiling_js_dynamic_arguments: false,
             validating_native_argument: false,
+            json_array_as_bytes: false,
             fresh_event_key_argument_scopes: Vec::new(),
             live_native_projection: None,
             owned_json_discard_frames: Vec::new(),

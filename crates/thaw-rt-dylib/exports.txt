@@ -275,6 +275,7 @@ thaw_json_brand_wrapper
 thaw_json_brand_wrapper_if
 thaw_json_buffer_inspect
 thaw_json_buffer_sync
+thaw_json_bytes_record
 thaw_json_callback_error
 thaw_json_callback_error_tuple
 thaw_json_callback_origin_acquire
@@ -293,6 +294,7 @@ thaw_json_error_stack
 thaw_json_error_to_string
 thaw_json_for_in_keys
 thaw_json_from_borrowed_handle
+thaw_json_from_bytes
 thaw_json_from_number_array
 thaw_json_function_sentinel
 thaw_json_get
