@@ -363,7 +363,7 @@ fn normalize_module_for_lowering(module: &Module) -> Result<Module, String> {
     let normalized = annotate_untyped_default_parameters(&normalized);
     let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = if crate::lower::implicit_any() {
-        annotate_escaping_record_bindings(&hoist_top_level_const_arrows(&normalized))
+        annotate_escaping_record_bindings(&hoist_top_level_const_arrows(&widen_empty_object_fields(&normalized)))
     } else {
         normalized
     };

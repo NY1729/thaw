@@ -16568,6 +16568,32 @@ mod tests {
     }
 
     #[test]
+    fn array_prototype_record_answers_named_property_reads() {
+        let array = parse("[\"a12\",\"12\"]");
+        let prototype = parse(r#"{"groups":{"id":"12"},"index":1,"input":"a12"}"#);
+        unsafe { thaw_json_set_prototype(array, prototype) };
+        assert_eq!(thaw_json_take_prototype_error(), 0);
+        assert_eq!(
+            read_c_string(thaw_json_stringify(thaw_json_get(
+                array,
+                c"groups".as_ptr()
+            ))),
+            r#"{"id":"12"}"#
+        );
+        assert_eq!(
+            read_c_string(thaw_json_stringify(thaw_json_get(array, c"index".as_ptr()))),
+            "1"
+        );
+        assert_eq!(
+            read_c_string(thaw_json_stringify(thaw_json_get(
+                array,
+                c"length".as_ptr()
+            ))),
+            "2"
+        );
+    }
+
+    #[test]
     fn prototype_cycle_is_rejected_and_metadata_lives_until_last_alias() {
         let object = parse("{}");
         let alias = leak(unsafe { &*object }.clone());

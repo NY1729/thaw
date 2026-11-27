@@ -1542,7 +1542,7 @@ fn node_util_bundle_text_is_pinned() {
 fn node_events_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:events"),
-        "d2daceeec75a4a7621f8960b66abeaab57c96418d4bb36b53af40e7d51c1a4ed",
+        "dc90a5ecc6c00dbb5b7d753059c3ff8630b613650f361d0ee512d264453c8ca9",
         "node:events bundle sha256"
     );
 }

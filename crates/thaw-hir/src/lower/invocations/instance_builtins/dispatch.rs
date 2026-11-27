@@ -331,15 +331,31 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::JsonAsNative(Box::new(json), HirType::JsValue)),
             HirType::JsValue,
         );
-        let result = self.lower_dynamic_value_method_call(
-            &Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(live_name.clone().into(), span)),
-            name,
-            args,
-            None,
-        )?;
+        let result = if name == "exec" && args.len() == 1 && args[0].spread.is_none() {
+            // Keep the raw live result so `.groups` / `.index` / `.input` can be read off it.
+            let argument = self.lower_expr(&args[0].expr)?;
+            let arguments = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![argument]))?;
+            HirExpr::Call(
+                Box::new(HirExpr::Var("callDynamicMethodHandle".into())),
+                vec![
+                    HirExpr::Var(live_name.clone()),
+                    HirExpr::Lit(HirLit::Str(name.to_string())),
+                    arguments,
+                ],
+            )
+        } else {
+            self.lower_dynamic_value_method_call(
+                &Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(live_name.clone().into(), span)),
+                name,
+                args,
+                None,
+            )?
+        };
         let result = if self.infer_expr_type(&result)? == HirType::Void {
             let undefined = HirExpr::Call(Box::new(HirExpr::Var(crate::compiler_helpers::JSON_UNDEFINED.into())), Vec::new());
             HirExpr::EvalThen(Box::new(result), Box::new(undefined))
+        } else if name == "exec" && self.infer_expr_type(&result)? == HirType::JsValue {
+            self.live_exec_result_with_metadata(result)?
         } else {
             self.coerce_to_declared(&HirType::Json, result)?
         };
@@ -827,7 +843,11 @@ impl<'a> FnLowerer<'a> {
         };
         let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?;
         if matches!(name, "keys" | "values" | "entries" | "exec") {
-            let native = self.coerce_to_declared(&HirType::Json, native)?;
+            let native = if name == "exec" {
+                self.json_exec_result_with_metadata(native)?
+            } else {
+                self.coerce_to_declared(&HirType::Json, native)?
+            };
             let has_handle = Self::strict_has_handle(Self::strict_json_handle(HirExpr::Var(receiver_name.clone())));
             let result = HirExpr::Conditional(Box::new(has_handle), Box::new(live), Box::new(native), HirType::Json);
             return Ok(Some(self.wrap_call_argument_bindings(result, &[(receiver_name, HirType::Json, receiver)])?));
@@ -843,6 +863,79 @@ impl<'a> FnLowerer<'a> {
         let has_handle = Self::strict_has_handle(Self::strict_json_handle(HirExpr::Var(receiver_name.clone())));
         let result = HirExpr::Conditional(Box::new(has_handle), Box::new(live), Box::new(native), native_type);
         Ok(Some(self.wrap_call_argument_bindings(result, &[(receiver_name, HirType::Json, receiver)])?))
+    }
+
+    /// A live (engine) `exec` result as a Json array that keeps `.groups` / `.index` / `.input`
+    /// on its prototype record (a copied Json array has no named properties).
+    fn live_exec_result_with_metadata(&mut self, live: HirExpr) -> Result<HirExpr, String> {
+        let name = format!("__thaw_live_exec_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::JsValue);
+        let mut fields = Vec::new();
+        for key in ["groups", "index", "input"] {
+            let read = HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicProperty".into())),
+                vec![HirExpr::Var(name.clone()), HirExpr::Lit(HirLit::Str(key.into()))],
+            );
+            fields.push((key.to_string(), self.coerce_to_declared(&HirType::Json, read)?));
+        }
+        let json_name = format!("__thaw_live_exec_json_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(json_name.clone(), HirType::Json);
+        let with_metadata = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_set_prototype".into())),
+            vec![HirExpr::Var(json_name.clone()), HirExpr::JsonObjectLit(fields, HirType::Json)],
+        );
+        let is_null = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+            vec![HirExpr::Var(json_name.clone())],
+        );
+        let selected = HirExpr::Conditional(
+            Box::new(is_null),
+            Box::new(HirExpr::Var(json_name.clone())),
+            Box::new(with_metadata),
+            HirType::Json,
+        );
+        let json = self.coerce_to_declared(&HirType::Json, HirExpr::Var(name.clone()))?;
+        let selected = self.wrap_call_argument_bindings(selected, &[(json_name, HirType::Json, json)])?;
+        self.wrap_call_argument_bindings(selected, &[(name, HirType::JsValue, live)])
+    }
+
+    /// A native `exec` result as a Json array that also answers `.groups` / `.index` / `.input`: the
+    /// Json array cannot hold named properties, so they sit on its prototype record.
+    fn json_exec_result_with_metadata(&mut self, native: HirExpr) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&native)?;
+        let HirType::Nullable(payload) = &ty else {
+            return self.coerce_to_declared(&HirType::Json, native);
+        };
+        let payload = payload.as_ref().clone();
+        let name = format!("__thaw_exec_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        let array = || HirExpr::NullableValue(Box::new(HirExpr::Var(name.clone())), payload.clone());
+        let helper = |function: &str| HirExpr::Call(Box::new(HirExpr::Var(function.into())), vec![array()]);
+        let mut fields = Vec::new();
+        for (key, function) in [
+            ("groups", "__thaw_regex_exec_groups"),
+            ("index", "__thaw_regex_exec_index"),
+            ("input", "__thaw_regex_exec_input"),
+        ] {
+            fields.push((key.to_string(), self.coerce_to_declared(&HirType::Json, helper(function))?));
+        }
+        let prototype = HirExpr::JsonObjectLit(fields, HirType::Json);
+        let json_array = self.coerce_to_declared(&HirType::Json, array())?;
+        let with_metadata = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_set_prototype".into())),
+            vec![json_array, prototype],
+        );
+        let null = self.coerce_to_declared(&HirType::Json, HirExpr::Lit(HirLit::Null))?;
+        let result = HirExpr::Conditional(
+            Box::new(HirExpr::NullableIsNone(Box::new(HirExpr::Var(name.clone())), payload)),
+            Box::new(null),
+            Box::new(with_metadata),
+            HirType::Json,
+        );
+        self.wrap_call_argument_bindings(result, &[(name, ty, native)])
     }
 
     fn lower_native_instance_builtin_unchecked(
