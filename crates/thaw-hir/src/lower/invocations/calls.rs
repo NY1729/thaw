@@ -6487,14 +6487,27 @@ fn bind_listener_receiver(call: &CallExpr) -> Option<CallExpr> {
     }
     let mut routed = call.clone();
     let mut changed = false;
-    for argument in &mut routed.args {
-        let Expr::Fn(function) = argument.expr.as_mut() else { continue };
-        let Some(body) = function.function.body.as_mut() else { continue };
+    let mut bind = |function: &mut swc_ecma_ast::FnExpr| {
+        let Some(body) = function.function.body.as_mut() else { return };
         let mut finder = UsesThis(false);
         body.visit_with(&mut finder);
         if finder.0 {
             body.visit_mut_with(&mut Replace(member.obj.clone()));
             changed = true;
+        }
+    };
+    for argument in &mut routed.args {
+        match argument.expr.as_mut() {
+            Expr::Fn(function) => bind(function),
+            // `common.mustCall(function () { this })`: a forwarding wrapper keeps the callback's `this`.
+            Expr::Call(wrapper) => {
+                for inner in &mut wrapper.args {
+                    if let Expr::Fn(function) = inner.expr.as_mut() {
+                        bind(function);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     changed.then_some(routed)
