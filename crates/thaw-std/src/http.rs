@@ -1439,13 +1439,16 @@ fn deliver_request_body_events(context: &mut RequestContext) {
     }
     context.body_events_delivered = true;
     let end_listeners = std::mem::take(&mut context.request_end_listeners);
+    // The listener is typed `(chunk: Bytes) => void` like a data listener: a JS callback adapter reads that
+    // argument, so pass an empty chunk rather than nothing (an ignoring native closure never looks at it).
+    let empty_chunk = native_bytes_from_slice(&[]);
     for listener in end_listeners {
         let callback = listener.callback as *const c_void;
         unsafe {
-            type Callback = unsafe extern "C" fn(*const c_void);
+            type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
             let code = *(callback as *const *const c_void);
             let callback_fn: Callback = std::mem::transmute(code);
-            callback_fn(callback);
+            callback_fn(callback, empty_chunk);
         }
     }
 }
@@ -1500,6 +1503,8 @@ fn sync_request_body_buffer(connection: &mut ConnectionState, context: &mut Requ
                 // doesn't distinguish "genuinely finished" from "gave up"
                 // -- both correctly force a close here).
                 None => {
+                    // llhttp errors the request: no `data`/`end` listener ever fires for it.
+                    context.abandoned = true;
                     if connection.response.is_empty() && !context.headers_sent {
                         if let Some(stream) = connection.stream.as_mut() {
                             let _ = stream.write_all(&rejection_bytes(&Reject::BadRequest));
@@ -1546,6 +1551,9 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
             unsafe { (*self.0).delivery_depth -= 1 };
         }
     }
+    if unsafe { (*context_ptr).abandoned } {
+        return;
+    }
     unsafe { (*context_ptr).delivery_depth += 1 };
     let _delivery_lease = DeliveryLease(context_ptr);
     let (new_bytes, data_listeners) = unsafe {
@@ -1570,13 +1578,14 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
         unsafe { (*context_ptr).request.complete = 1 };
         // Data callbacks may register an end listener for this same body.
         let end_listeners = unsafe { std::mem::take(&mut (*context_ptr).request_end_listeners) };
+        let empty_chunk = native_bytes_from_slice(&[]);
         for listener in end_listeners {
             let callback = listener.callback as *const c_void;
             unsafe {
-                type Callback = unsafe extern "C" fn(*const c_void);
+                type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
                 let code = *(callback as *const *const c_void);
                 let callback_fn: Callback = std::mem::transmute(code);
-                callback_fn(callback);
+                callback_fn(callback, empty_chunk);
             }
         }
     }
