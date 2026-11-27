@@ -1,0 +1,5 @@
+{
+  "name": "for await over a stream while another stream promise is held",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r = new Readable({ read() {} });\n  const held: any = r.toArray();\n  const r2: any = new Readable({ read() {} });\n  setTimeout(() => { r.push('a'); r.push(null); r2.push('x'); r2.push('y'); r2.push(null); }, 5);\n  for await (const c of r2) console.log(String(c));\n  console.log(String((await held)[0]));\n}\n"
+}
