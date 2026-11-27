@@ -833,7 +833,10 @@ pub(crate) fn crypto_import_key_json(bytes_hex: &str, is_der: bool, passphrase: 
 }
 
 fn digest_size_matches(digest_algorithm: &str) -> Result<(), String> {
-    if matches!(digest_algorithm, "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512") {
+    if matches!(
+        digest_algorithm,
+        "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512"
+    ) {
         Ok(())
     } else {
         Err(format!("unsupported digest algorithm: {digest_algorithm}"))
