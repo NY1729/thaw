@@ -1,0 +1,5 @@
+{
+  "name": "nd6 constructor and builtin errors use the right classes",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { const r = new RegExp(\"(\"); console.log(\"no throw\", r.source); } catch (e) { console.log((e as Error).name); }\n  try { const r = new RegExp(\"a\", \"gg\"); console.log(\"no throw\", r.flags); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new Array(-1); console.log(\"no throw\"); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { new Date(NaN).toISOString(); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".repeat(-1); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".repeat(Infinity); } catch (e) { console.log((e as Error).name, (e as Error).message); }\n  try { \"a\".replaceAll(/a/, \"b\"); } catch (e) { console.log((e as Error).name); }\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "inspector promise runtime evaluation",
+  "expect": "matched",
+  "source": "import { Session } from 'node:inspector/promises'; async function main(): Promise<void> { const session = new Session(); session.connect(); const result = await session.post('Runtime.evaluate', { expression: '6 * 7', returnByValue: true }); console.log(result.result.value); session.disconnect(); }"
+}

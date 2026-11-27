@@ -1,0 +1,5 @@
+{
+  "name": "events module surface: static arities, EventEmitter.init, _eventsCount",
+  "expect": "matched",
+  "source": "import * as M from \"node:events\";\nfunction main(): void {\n  const e: any = new M.EventEmitter();\n  console.log(M.on.length, M.once.length, M.listenerCount.length, M.setMaxListeners.length, M.addAbortListener.length);\n  console.log(typeof M.EventEmitter.init, Object.keys(e).join(\",\"), e._eventsCount);\n  e.on(\"a\", () => {});\n  e.on(\"b\", () => {});\n  console.log(e._eventsCount, M.listenerCount(e, \"a\"));\n}\n"
+}

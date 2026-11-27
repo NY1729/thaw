@@ -1,0 +1,5 @@
+{
+  "name": "child process async output",
+  "expect": "matched",
+  "source": "import { execFile } from 'node:child_process'; async function main(): Promise<void> { await new Promise<void>((resolve, reject) => { execFile('printf', ['child'], (error, stdout) => { if (error) { reject(error); return; } console.log(String(stdout)); resolve(); }); }); }"
+}

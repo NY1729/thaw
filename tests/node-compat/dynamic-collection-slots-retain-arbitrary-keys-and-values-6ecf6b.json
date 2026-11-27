@@ -1,0 +1,5 @@
+{
+  "name": "dynamic collection slots retain arbitrary keys and values",
+  "expect": "matched",
+  "source": "function main(): void { const map = new Map<number, number>(); const set = new Set<number>(); const m: any = map; const s: any = set; const original: any = new Function(\"return {x: 7}\")(); m.set(\"key\", original); s.add(original); console.log(map.size, m.get(\"key\") === original, s.has(original), set.size); original.x = 9; console.log(m.get(\"key\").x); }"
+}

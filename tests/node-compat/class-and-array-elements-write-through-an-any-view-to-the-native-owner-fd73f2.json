@@ -1,0 +1,5 @@
+{
+  "name": "class and array elements write through an any view to the native owner",
+  "expect": "matched",
+  "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const nat: C[] = [new C()];\n  const v: any = nat;\n  const e = new C();\n  v[1] = e;\n  e.bump();\n  console.log(v.length, nat.length, nat[1] === e, nat[1].n, v[1] === e, v[1].n);\n  v.push(new C());\n  console.log(nat.length, nat[2].n);\n  const d = new C();\n  const x: any = d;\n  const y: any = [d];\n  console.log(x === d, d === x, y[0] === d, y[0] === x, x !== d);\n  const grid: number[][] = [[1]];\n  const gv: any = grid;\n  const inner = [5, 6];\n  gv[0] = inner;\n  inner.push(7);\n  console.log(grid[0].length, inner.length, grid[0] === inner, gv[0] === inner);\n  gv.push([9]);\n  console.log(grid.length, grid[1][0]);\n  const ref: any = nat;\n  console.log(ref === nat, nat === ref);\n}\n"
+}

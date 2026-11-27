@@ -1,0 +1,5 @@
+{
+  "name": "for await closes the iterator on break and propagates errors",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const gen: any = new Function('return (async function* () { try { yield 1; yield 2; yield 3; } finally { console.log(\"cleanup\"); } })()')();\n  for await (const x of gen) { console.log('x', x); if (x === 2) break; }\n  console.log('after break');\n  const bad: any = new Function('return { [Symbol.asyncIterator]() { return { next() { return Promise.reject(new Error(\"boom\")); } }; } }')();\n  try { for await (const q of bad) { console.log('q'); } } catch (e: any) { console.log('caught', e.message); }\n  const notIt: any = 5;\n  try { for await (const z of notIt) { console.log('z'); } } catch (e: any) { console.log('caught2', e instanceof TypeError); }\n}\n"
+}

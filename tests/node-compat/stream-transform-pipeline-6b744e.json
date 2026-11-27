@@ -1,0 +1,5 @@
+{
+  "name": "stream transform pipeline",
+  "expect": "matched",
+  "source": "import { Readable, Transform } from 'node:stream'; import { once } from 'node:events'; async function main(): Promise<void> { const output: string[] = []; const marker = new Transform({ transform(_chunk, _encoding, callback): void { callback(null, 'X'); } }); marker.on('data', (chunk): void => { output.push(chunk.toString()); }); Readable.from(['ab', 'cd']).pipe(marker); await once(marker, 'end'); console.log(output.join('')); }"
+}

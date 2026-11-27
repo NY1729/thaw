@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite parameter styles ?, ?N, $n, :n, @n",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  console.log(JSON.stringify(db.prepare('SELECT ?1 AS a, ?2 AS b').get(1, 'two')));\n  console.log(JSON.stringify(db.prepare('SELECT $n AS n').get({ n: 3 })));\n  console.log(JSON.stringify(db.prepare('SELECT :x AS x, @y AS y').get({ x: 'p', y: 'q' })));\n  console.log(JSON.stringify(db.prepare('SELECT ? AS a, ? AS b').get(1, null)));\n  db.close();\n}"
+}

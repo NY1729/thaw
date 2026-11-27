@@ -1,0 +1,5 @@
+{
+  "name": "generator as any return value identity and printing",
+  "expect": "matched",
+  "source": "function* gen() { yield 1; yield 2; return 3; }\nfunction main(): void {\n  const g: any = gen();\n  g.next();\n  console.log(g.return(9), g.next());\n  console.log(g, String(g), typeof g, typeof g[Symbol.iterator], g[Symbol.iterator]() === g);\n}"
+}

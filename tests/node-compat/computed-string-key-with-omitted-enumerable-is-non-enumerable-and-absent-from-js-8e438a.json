@@ -1,0 +1,5 @@
+{
+  "name": "computed string key with omitted enumerable is non-enumerable and absent from JSON",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { ['a' + 'b']: { value: 7, writable: true, configurable: true } });\n  console.log(o.ab, Object.prototype.propertyIsEnumerable.call(o, 'ab'), Object.keys(o).join());\n  console.log(JSON.stringify(o));\n}"
+}

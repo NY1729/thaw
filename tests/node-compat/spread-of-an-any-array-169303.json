@@ -1,0 +1,5 @@
+{
+  "name": "spread of an any array",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const a: any = [1, 2, 3];\n  const sp = [...a];\n  console.log(sp.length, sp[2]);\n  const nums: number[] = [4, 5];\n  const an: any = nums;\n  const sp2 = [0, ...an];\n  console.log(sp2.length, sp2.join(\",\"));\n}\n"
+}

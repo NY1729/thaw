@@ -1,0 +1,5 @@
+{
+  "name": "in operator on primitive union member throws TypeError",
+  "expect": "matched",
+  "source": "function probe(v: number | { x: number }): void { try { console.log(\"x\" in v); } catch (e) { console.log((e as Error).message); } } function main(): void { probe({ x: 1 }); probe(5); }"
+}

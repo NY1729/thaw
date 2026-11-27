@@ -1,0 +1,5 @@
+{
+  "name": "for await over a Node Readable",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r = Readable.from(['a', 'b', 'c']);\n  for await (const chunk of r) { console.log('chunk', chunk); }\n  console.log('done');\n}\n"
+}

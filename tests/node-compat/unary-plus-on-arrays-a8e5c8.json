@@ -1,0 +1,5 @@
+{
+  "name": "unary plus on arrays",
+  "expect": "matched",
+  "source": "function main(): void { console.log(+[], +[5], +[1,2], +['7']); }"
+}

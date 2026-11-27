@@ -1,0 +1,5 @@
+{
+  "name": "console.log of a caught Error starts with name and message",
+  "expect": "matched",
+  "source": "import { inspect } from 'node:util'; function main(): void {   try { throw new TypeError('msg'); } catch (e) { console.log(inspect(e).split('\\n')[0]); console.log(String((e as Error).stack).split('\\n')[0]); }   try { throw new Error('boom'); } catch (err) { console.log(String((err as Error).stack).split('\\n')[0]); } }"
+}

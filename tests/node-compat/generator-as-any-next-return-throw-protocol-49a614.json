@@ -1,0 +1,5 @@
+{
+  "name": "generator as any next return throw protocol",
+  "expect": "matched",
+  "source": "function* gen() { yield 1; yield 2; return 3; }\nfunction main(): void {\n  const g: any = gen();\n  console.log(g.next(), g.next(), g.next(), g.next());\n}"
+}

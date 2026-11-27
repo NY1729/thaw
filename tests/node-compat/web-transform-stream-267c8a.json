@@ -1,0 +1,5 @@
+{
+  "name": "web transform stream",
+  "expect": "matched",
+  "source": "import { TransformStream } from 'node:stream/web'; async function main(): Promise<void> { const stream = new TransformStream({ transform(chunk, controller) { controller.enqueue(String(chunk).toUpperCase()); } }); const writer = stream.writable.getWriter(); const reader = stream.readable.getReader(); const pending = reader.read(); await writer.write('hello'); const value = await pending; await writer.close(); console.log(value.value, value.done); }"
+}

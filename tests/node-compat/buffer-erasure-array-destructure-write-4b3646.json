@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure array destructure write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const [x] = [b];\n  x[0] = 65;\n  console.log(b.toString(), x[1]);\n}\n"
+}

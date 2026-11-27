@@ -1,0 +1,5 @@
+{
+  "name": "bare node:events namespace used as a value",
+  "expect": "matched",
+  "source": "import * as ev from 'node:events';\nconst E: any = ev;\nfunction main(): void {\n  console.log(typeof E.default, typeof E.EventEmitter, typeof E.once, typeof E.default.defaultMaxListeners);\n}"
+}

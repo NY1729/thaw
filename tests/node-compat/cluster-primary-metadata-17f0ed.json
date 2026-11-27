@@ -1,0 +1,5 @@
+{
+  "name": "cluster primary metadata",
+  "expect": "matched",
+  "source": "import { isPrimary, isMaster, isWorker, SCHED_NONE, SCHED_RR } from 'node:cluster'; function main(): void { console.log(isPrimary, isMaster, isWorker, SCHED_NONE, SCHED_RR); }"
+}

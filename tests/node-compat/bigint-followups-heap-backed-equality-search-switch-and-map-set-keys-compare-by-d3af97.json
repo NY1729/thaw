@@ -1,0 +1,5 @@
+{
+  "name": "bigint followups: heap-backed equality search switch and Map/Set keys compare by value",
+  "expect": "matched",
+  "source": "function main(): void {\n  const a = 2n ** 70n;\n  const b = 2n ** 70n;\n  console.log(a === b, a !== b, a == b, a != b);\n  const arr: bigint[] = [a, 3n, 2n ** 80n];\n  console.log(arr.includes(b), arr.indexOf(b), arr.lastIndexOf(b), arr.includes(2n ** 80n), arr.indexOf(5n), arr.includes(3n));\n  switch (b) { case 1n: console.log(\"one\"); break; case a: console.log(\"a\"); break; default: console.log(\"def\"); }\n  console.log(Object.is(a, b), Object.is(a, a + 1n));\n  const s = new Set<bigint>([a, b, 2n ** 71n, 2n ** 71n]);\n  console.log(s.size, s.has(2n ** 70n), s.has(2n ** 72n));\n  const m = new Map<bigint, string>();\n  m.set(a, \"x\"); m.set(b, \"y\"); m.set(5n, \"z\");\n  console.log(m.size, m.get(2n ** 70n), m.has(2n ** 70n), m.get(5n));\n  m.delete(2n ** 70n);\n  console.log(m.size);\n}\n"
+}

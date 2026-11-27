@@ -1,0 +1,5 @@
+{
+  "name": "Map/Set array destructuring",
+  "expect": "matched",
+  "source": "class Base<K, V> { m: Map<K, V> = new Map<K, V>(); }\nclass Child extends Base<string, number> {}\nfunction main(): void {\n  const m = new Map<string, number>([[\"a\", 1], [\"b\", 2]]);\n  const [first] = m;\n  console.log(first);\n  const st = new Set<number>([1, 2]);\n  const [x, y] = st;\n  console.log(x, y);\n}\n"
+}

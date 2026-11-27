@@ -1,0 +1,5 @@
+{
+  "name": "crypto pbkdf2 sync",
+  "expect": "matched",
+  "source": "import { pbkdf2Sync } from 'node:crypto'; function main(): void { console.log(pbkdf2Sync('password', 'salt', 2, 16, 'sha256').toString('hex')); }"
+}

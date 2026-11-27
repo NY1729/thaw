@@ -1,0 +1,5 @@
+{
+  "name": "event emitter once method",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events'; function main(): void { const emitter = new EventEmitter(); let count: number = 0; emitter.once('tick', (): void => { count += 1; }); emitter.emit('tick'); emitter.emit('tick'); console.log(count, emitter.listenerCount('tick')); }"
+}

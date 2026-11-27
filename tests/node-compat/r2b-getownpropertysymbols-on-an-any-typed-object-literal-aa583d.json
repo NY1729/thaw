@@ -1,0 +1,5 @@
+{
+  "name": "r2b getOwnPropertySymbols on an any-typed object literal",
+  "expect": "matched",
+  "source": "function main(): void { const s = Symbol('s'); const w: any = { [s]: 1, x: 2 }; console.log(Object.getOwnPropertySymbols(w).length, Object.keys(w)); const w2: any = {}; w2[s] = 3; console.log(Object.getOwnPropertySymbols(w2).length); }"
+}

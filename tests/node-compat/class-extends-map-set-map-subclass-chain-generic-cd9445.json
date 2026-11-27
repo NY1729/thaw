@@ -1,0 +1,5 @@
+{
+  "name": "class extends Map/Set: map subclass chain generic",
+  "expect": "matched",
+  "source": "class Base<K, V> extends Map<K, V> { count(): number { return this.size; } }\nclass Leaf extends Base<string, number> {}\nclass Q<T> extends Set<T> { first(): T | undefined { for (const x of this) return x; return undefined; } }\nfunction main(): void {\n  const l = new Leaf(); l.set(\"a\", 1);\n  const q = new Q<number>(); q.add(7);\n  console.log(l.count(), l instanceof Map, l instanceof Leaf, q.first(), q instanceof Set);\n}\n"
+}

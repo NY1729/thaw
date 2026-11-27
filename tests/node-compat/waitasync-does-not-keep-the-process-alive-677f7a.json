@@ -1,0 +1,5 @@
+{
+  "name": "waitAsync does not keep the process alive",
+  "expect": "matched",
+  "source": "function main(): void {\n  const ia = new Int32Array(new SharedArrayBuffer(8));\n  Atomics.waitAsync(ia, 0, 0, 200).value.then((v: any) => console.log('fired', v));\n  Atomics.waitAsync(ia, 0, 0).value.then((v: any) => console.log('fired inf', v));\n  console.log('end');\n}"
+}

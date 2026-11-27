@@ -1,0 +1,5 @@
+{
+  "name": "error stack header is fixed on first read",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"s\") as any;\n  console.log(e.stack.split(\"\\n\")[0]);\n  e.message = \"late\";\n  console.log(e.stack.split(\"\\n\")[0], String(e));\n  e.stack = \"custom stack\";\n  console.log(e.stack, Object.keys(e));\n}\n"
+}

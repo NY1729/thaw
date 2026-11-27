@@ -1,0 +1,5 @@
+{
+  "name": "crypto hmac",
+  "expect": "matched",
+  "source": "import { createHmac } from 'node:crypto'; function main(): void { console.log(JSON.stringify(createHmac('sha256', 'key').update('thaw').digest('hex'))); }"
+}

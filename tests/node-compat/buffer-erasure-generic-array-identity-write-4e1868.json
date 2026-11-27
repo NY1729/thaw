@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure generic array identity write",
+  "expect": "matched",
+  "source": "function idArr<T>(xs: T[]): T[] { return xs; }\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  const xs = idArr([b]);\n  xs[0][0] = 65;\n  console.log(b.toString(), xs.length);\n}\n"
+}

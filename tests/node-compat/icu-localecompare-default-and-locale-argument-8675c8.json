@@ -1,0 +1,5 @@
+{
+  "name": "icu localeCompare default and locale argument",
+  "expect": "matched",
+  "source": "function main(): void { console.log(\"a\".localeCompare(\"B\"), \"B\".localeCompare(\"a\"), \"a\".localeCompare(\"a\"), \"ä\".localeCompare(\"z\", \"de\"), \"ä\".localeCompare(\"z\", \"sv\"), \"résumé\".localeCompare(\"resume\", \"fr\")); console.log([\"b\",\"A\",\"a\",\"B\",\"ä\",\"z\",\"Z\"].sort((x, y) => x.localeCompare(y, \"en\")).join(\",\")); }"
+}

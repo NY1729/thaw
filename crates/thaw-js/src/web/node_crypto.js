@@ -647,7 +647,81 @@ const verify = (algorithm, data, key, signature) => {
     }
   }
   const createECDH = curveName => new ECDH(curveName);
-Object.assign(cryptoModule, { KeyObject: KeyObject, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
+// crypto.ECDH.convertKey: re-encode an EC public point (compressed/uncompressed/hybrid) with BigInt field math.
+// ponytail: the five curves node:crypto's ECDH offers by default; others throw ERR_CRYPTO_INVALID_CURVE.
+var P256 = (1n << 256n) - (1n << 224n) + (1n << 192n) + (1n << 96n) - 1n, P384 = (1n << 384n) - (1n << 128n) - (1n << 96n) + (1n << 32n) - 1n, P521 = (1n << 521n) - 1n, K256 = (1n << 256n) - (1n << 32n) - 977n;
+var ecCurves = {
+  prime256v1: { p: P256, a: P256 - 3n, b: 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bn, size: 32 },
+  secp384r1: { p: P384, a: P384 - 3n, b: 0xb3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aefn, size: 48 },
+  secp521r1: { p: P521, a: P521 - 3n, b: 0x0051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00n, size: 66 },
+  secp256k1: { p: K256, a: 0n, b: 7n, size: 32 }
+};
+ecCurves.secp256r1 = ecCurves.prime256v1;
+function powMod(base, exp, mod) { var r = 1n; base %= mod; while (exp > 0n) { if (exp & 1n) r = r * base % mod; base = base * base % mod; exp >>= 1n; } return r; }
+function convertEcKey(key, curve, inputEncoding, outputEncoding, format) {
+  requireArg(typeof key === 'string' || key instanceof ArrayBuffer || isView(key), 'key', 'of type string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView', key);
+  var c = ecCurves[String(curve)];
+  if (!c) throw cryptoError(TypeError, 'ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
+  if (format === undefined) format = 'uncompressed';
+  if (format !== 'uncompressed' && format !== 'compressed' && format !== 'hybrid') throw cryptoError(TypeError, 'ERR_CRYPTO_ECDH_INVALID_FORMAT', 'Invalid ECDH format: ' + format);
+  var raw = typeof key === 'string' ? Buffer.from(key, inputEncoding) : Buffer.from(key instanceof ArrayBuffer ? new Uint8Array(key) : new Uint8Array(key.buffer, key.byteOffset, key.byteLength));
+  var bad = function () { return cryptoError(Error, 'ERR_CRYPTO_OPERATION_FAILED', 'Failed to convert Buffer to EC_POINT'); };
+  var n = c.size, hex = function (b) { return BigInt('0x' + (b.length ? b.toString('hex') : '0')); }, x, y;
+  if ((raw[0] === 2 || raw[0] === 3) && raw.length === n + 1) {
+    x = hex(raw.subarray(1));
+    if (x >= c.p) throw bad();
+    var rhs = (x * x * x + c.a * x + c.b) % c.p; y = powMod(rhs, (c.p + 1n) / 4n, c.p);
+    if (y * y % c.p !== rhs) throw bad();
+    if ((y & 1n) !== BigInt(raw[0] & 1)) y = c.p - y;
+  } else if ((raw[0] === 4 || raw[0] === 6 || raw[0] === 7) && raw.length === 2 * n + 1) {
+    x = hex(raw.subarray(1, n + 1)); y = hex(raw.subarray(n + 1));
+    if (raw[0] !== 4 && (y & 1n) !== BigInt(raw[0] & 1)) throw bad();
+  } else throw bad();
+  if (x >= c.p || y >= c.p || (y * y - (x * x * x + c.a * x + c.b)) % c.p !== 0n) throw bad();
+  var pad = function (v) { return Buffer.from(v.toString(16).padStart(2 * n, '0'), 'hex'); };
+  var out = format === 'compressed' ? Buffer.concat([Buffer.from([2 + Number(y & 1n)]), pad(x)])
+    : Buffer.concat([Buffer.from([format === 'hybrid' ? 6 + Number(y & 1n) : 4]), pad(x), pad(y)]);
+  return outputEncoding ? out.toString(outputEncoding) : out;
+}
+def(ECDH, 'convertKey', function convertKey(key, curve, inputEncoding, outputEncoding, format) { return convertEcKey(key, curve, inputEncoding, outputEncoding, format); });
+// crypto.KeyObject.from(cryptoKey): only secret CryptoKeys exist in thaw (web/crypto.js).
+def(KeyObject, 'from', function from(key) {
+  if (!(typeof CryptoKey === 'function' && key instanceof CryptoKey)) throw argTypeError('key', 'an instance of CryptoKey', key);
+  var bytes = globalThis.__thaw_cryptokey_secret(key);
+  if (bytes === undefined) throw cryptoError(TypeError, 'ERR_INVALID_ARG_VALUE', "The argument 'key' is not a supported CryptoKey");
+  return new KeyObject('secret', Buffer.from(bytes));
+});
+// crypto.Certificate: SPKAC (signed public key and challenge) helpers over a minimal DER reader.
+function derRead(buf, off) {
+  var tag = buf[off], len = buf[off + 1], at = off + 2;
+  if (len & 0x80) { var count = len & 0x7f; len = 0; for (var i = 0; i < count; i++) len = len * 256 + buf[at++]; }
+  if (tag === undefined || at + len > buf.length) throw new Error('bad DER');
+  return { tag: tag, start: off, body: at, end: at + len };
+}
+function spkacParts(spkac, encoding) {
+  requireArg(typeof spkac === 'string' || spkac instanceof ArrayBuffer || isView(spkac), 'spkac', TYPE_DATA, spkac);
+  var text = typeof spkac === 'string' ? Buffer.from(spkac, encoding) : Buffer.from(spkac instanceof ArrayBuffer ? new Uint8Array(spkac) : new Uint8Array(spkac.buffer, spkac.byteOffset, spkac.byteLength));
+  try {
+    var der = Buffer.from(text.toString('latin1').trim(), 'base64');
+    var outer = derRead(der, 0), pkac = derRead(der, outer.body), spki = derRead(der, pkac.body), challenge = derRead(der, spki.end);
+    var alg = derRead(der, pkac.end), oid = derRead(der, alg.body), sig = derRead(der, alg.end);
+    return { der: der, pkac: der.subarray(pkac.start, pkac.end), spki: der.subarray(spki.start, spki.end), challenge: der.subarray(challenge.body, challenge.end), oid: der.subarray(oid.body, oid.end).toString('hex'), sig: der.subarray(sig.body + 1, sig.end) };
+  } catch (_) { return null; }
+}
+var spkacHash = { '2a864886f70d010104': 'md5', '2a864886f70d010105': 'sha1', '2a864886f70d01010b': 'sha256', '2a864886f70d01010c': 'sha384', '2a864886f70d01010d': 'sha512' };
+function Certificate() { if (!(this instanceof Certificate)) return new Certificate(); }
+def(Certificate, 'exportChallenge', function exportChallenge(spkac, encoding) { var p = spkacParts(spkac, encoding); return p ? Buffer.from(p.challenge) : Buffer.alloc(0); });
+def(Certificate, 'exportPublicKey', function exportPublicKey(spkac, encoding) {
+  var p = spkacParts(spkac, encoding); if (!p) return Buffer.alloc(0);
+  var b64 = p.spki.toString('base64').replace(/(.{64})/g, '$1\n').replace(/\n$/, '');
+  return Buffer.from('-----BEGIN PUBLIC KEY-----\n' + b64 + '\n-----END PUBLIC KEY-----\n');
+});
+def(Certificate, 'verifySpkac', function verifySpkac(spkac, encoding) {
+  var p = spkacParts(spkac, encoding); if (!p || !spkacHash[p.oid]) return false;
+  try { return new Verify(spkacHash[p.oid]).update(p.pkac).verify(Certificate.exportPublicKey(spkac, encoding), p.sig); } catch (_) { return false; }
+});
+for (var certMethod of ['exportChallenge', 'exportPublicKey', 'verifySpkac']) def(Certificate.prototype, certMethod, Certificate[certMethod]);
+Object.assign(cryptoModule, { KeyObject: KeyObject, Certificate: Certificate, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
   Sign: Sign, Verify: Verify, createSign: createSign, createVerify: createVerify, sign: sign, verify: verify,
   publicEncrypt: publicEncrypt, privateDecrypt: privateDecrypt, privateEncrypt: privateEncrypt, publicDecrypt: publicDecrypt,
   generateKeyPairSync: generateKeyPairSync, generateKeyPair: generateKeyPair, diffieHellman: diffieHellman, ECDH: ECDH, createECDH: createECDH,

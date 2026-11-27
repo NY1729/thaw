@@ -1,0 +1,5 @@
+{
+  "name": "declgaps uninitialized scalar lets",
+  "expect": "matched",
+  "source": "let gs: string;\nlet gn: number;\nfunction setup(): void { gs = 'g'; gn = 2; }\nfunction main(): void { setup(); let p: string; let n: number; p = 'hi'; n = 4; console.log(p, n + 1, gs, gn); }"
+}

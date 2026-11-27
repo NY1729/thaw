@@ -1,0 +1,5 @@
+{
+  "name": "collections limits: species multi param optional and chains",
+  "expect": "matched",
+  "source": "class Pair extends Array<number> {\n  label: any;\n  note: any;\n  constructor(label: string, note: string) { super(); this.label = label; this.note = note; console.log(\"pair\", typeof label, label, typeof note, note); }\n}\nclass OptTag extends Array<number> {\n  tag: string;\n  constructor(tag?: string) { super(); this.tag = tag === undefined ? \"none\" : String(tag); }\n}\nclass Base extends Array<number> {\n  who: any;\n  constructor(who: string) { super(); this.who = who; }\n}\nclass Leaf extends Base {}\nfunction main(): void {\n  const p = new Pair(\"a\", \"b\"); p.push(1, 2, 3);\n  console.log(p.filter(x => x > 1));\n  console.log(p.flat());\n  const o = new OptTag(\"t\"); o.push(4, 5);\n  const om = o.map(x => x + 1);\n  console.log(om, om instanceof OptTag);\n  const l = new Leaf(\"leaf\"); l.push(9);\n  const lf = l.slice(0);\n  console.log(lf, lf instanceof Leaf, lf instanceof Base);\n  console.log(Leaf.from([1, 2]), Leaf.of(3));\n  console.log(l.flatMap(x => [x, x]));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "buffer erasure promise then write",
+  "expect": "matched",
+  "source": "\nfunction main(): void {\n  const b = Buffer.from(\"ab\");\n  Promise.resolve(b).then((q) => { q[0] = 65; });\n  setTimeout(() => console.log(b.toString(), b.length), 0);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "native inherited views retain real ancestor accessors",
+  "expect": "matched",
+  "source": "class Base {n=2;get value():number{return this.n;}set value(v:number){this.n=v;}}\nclass Derived extends Base {ping():number{return 1;}}\nfunction main():void { let seen=0;const ctor:any=Base;Object.defineProperty(ctor.prototype,\"value\",{get:()=>100,set:(v:number)=>{seen=v;},configurable:true});const x=new Derived();const a:any=x;console.log(a.value);a.value=4;console.log(x.n,a.value,a.ping(),seen); }"
+}

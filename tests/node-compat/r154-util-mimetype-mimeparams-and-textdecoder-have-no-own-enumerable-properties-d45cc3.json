@@ -1,0 +1,5 @@
+{
+  "name": "r154 util MIMEType MIMEParams and TextDecoder have no own enumerable properties",
+  "expect": "matched",
+  "source": "import * as util from 'node:util';\nfunction main(): void {\n  const u: any = util;\n  const t: any = new u.MIMEType('text/html; charset=utf-8');\n  console.log(Object.keys(t), Object.keys(t.params), Object.keys(new TextDecoder()), Object.keys(new u.MIMEParams()));\n  console.log(t.essence, t.params.get('charset'), new TextDecoder('utf-8', { fatal: true }).fatal);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "worker stdin end lets the worker exit",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); let text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (c) => { text += c; }); process.stdin.on('end', () => { parentPort.postMessage('got ' + text); });`, { eval: true, stdin: true });\n  const log: string[] = [];\n  worker.on('message', (v: any) => { log.push(String(v)); });\n  worker.stdin!.write('abc');\n  worker.stdin!.end('def');\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  log.push('exit ' + code);\n  console.log(log.join('|'));\n}"
+}

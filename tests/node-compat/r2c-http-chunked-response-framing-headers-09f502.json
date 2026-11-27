@@ -1,0 +1,5 @@
+{
+  "name": "r2c http chunked response framing headers",
+  "expect": "matched",
+  "source": "import * as http from \"node:http\";\nconst srv = http.createServer((req, res) => {\n  if (req.url === \"/stream\") { res.writeHead(200, { \"Content-Type\": \"text/plain\" }); res.write(\"a\"); res.write(\"b\"); res.end(\"c\"); return; }\n  res.writeHead(200, { \"Transfer-Encoding\": \"chunked\" }); res.end(\"x\");\n});\nfunction main(): void {\n  srv.listen(0, \"127.0.0.1\", async () => {\n    const base = `http://127.0.0.1:${(srv.address() as any).port}`;\n    const a = await fetch(base + \"/\");\n    console.log(a.headers.get(\"transfer-encoding\"), a.headers.get(\"content-length\"), a.headers.has(\"date\"), await a.text());\n    const b = await fetch(base + \"/stream\");\n    console.log(b.headers.get(\"transfer-encoding\"), b.headers.get(\"content-length\"), b.headers.has(\"date\"), await b.text());\n    srv.close();\n  });\n}"
+}

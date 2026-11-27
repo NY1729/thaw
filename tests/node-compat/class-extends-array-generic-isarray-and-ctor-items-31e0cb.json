@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: generic isArray and ctor items",
+  "expect": "matched",
+  "source": "class Q<T> extends Array<T> { second(): T | undefined { return this[1]; } }\nfunction kind(x: number[] | string): string { return Array.isArray(x) ? \"arr\" : \"str\"; }\nclass Num extends Array<number> {}\nfunction main(): void {\n  const q = new Q<string>(); q.push(\"a\", \"b\");\n  const n = new Num(); n.push(1);\n  console.log(q.second(), kind(n), kind(\"x\"), n instanceof Array);\n  const m = new Num(4, 5, 6);\n  console.log(m.length, m, Object.prototype.toString.call(m));\n}\n"
+}

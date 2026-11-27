@@ -1,0 +1,5 @@
+{
+  "name": "method call on an indexed any element",
+  "expect": "matched",
+  "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } m() { return 1; } }\nasync function main(): Promise<void> {\n  const arr: number[][] = [[1], [2]];\n  const l: any = arr;\n  l[0].push(5);\n  console.log(JSON.stringify(arr));\n  const cs: C[] = [new C()];\n  const lc: any = cs;\n  console.log(lc[0].bump(), cs[0].n, lc[0].m());\n  const o: any = { list: [1, 2] };\n  o.list.push(3);\n  console.log(o.list.length, JSON.stringify(o));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: iteration and coercion",
+  "expect": "matched",
+  "source": "class Bag extends Array<string> {}\nfunction addOne(xs: string[]): void { xs.push(\"z\"); }\nfunction main(): void {\n  const b = new Bag(); b.push(\"a\", \"b\");\n  for (const x of b) console.log(x);\n  const [h, ...rest] = b; console.log(h, rest);\n  console.log([...b, \"c\"], b.concat([\"q\"]).length, Array.from(b).length);\n  addOne(b); console.log(b.length, `${b}`, String(b));\n  console.log(JSON.stringify(b), Object.keys(b));\n}\n"
+}

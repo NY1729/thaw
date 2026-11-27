@@ -1,0 +1,5 @@
+{
+  "name": "r2a abstract class used as a value",
+  "expect": "matched",
+  "source": "abstract class Shape { abstract area(): number; describe(): string { return \"\" + this.area(); } } class Sq extends Shape { area(): number { return 3; } } function main(): void { console.log(new Sq().describe()); const S: any = Shape; try { new S(); } catch (e) { console.log(\"threw\"); } }"
+}

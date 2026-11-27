@@ -1,0 +1,5 @@
+{
+  "name": "path positional arguments",
+  "expect": "matched",
+  "source": "import { basename, join } from 'node:path'; function main(): void { console.log(join('a', 'b'), basename('/tmp/file.txt')); }"
+}

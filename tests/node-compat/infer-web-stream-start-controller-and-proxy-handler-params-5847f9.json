@@ -1,0 +1,5 @@
+{
+  "name": "infer web stream start controller and proxy handler params",
+  "expect": "matched",
+  "source": "async function main(): Promise<void> {\n  const p = new Proxy({ a: 1 } as Record<string, any>, { get: (t, k: string) => (k in t ? t[k] : \"dflt\"), has: () => true });\n  console.log(p.a, p.q, \"zz\" in p);\n  const px = new Proxy({ a: 1 } as any, { ownKeys: () => [\"a\", \"z\"], getOwnPropertyDescriptor: (t, k) => ({ value: t[k] ?? \"zz\", enumerable: true, configurable: true }) });\n  console.log(Object.keys(px), { ...px });\n  const rs = new ReadableStream({ start(c) { c.enqueue(\"w1\"); c.enqueue(\"w2\"); c.close(); } });\n  const rd = rs.getReader();\n  console.log(await rd.read(), await rd.read(), await rd.read());\n}"
+}

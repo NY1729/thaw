@@ -1,0 +1,5 @@
+{
+  "name": "nd6 regex exec groups without named groups is undefined",
+  "expect": "matched",
+  "source": "function main(): void {\n  const m = /(a)(b)?/.exec(\"ac\")!;\n  console.log(m.groups);\n  console.log(m.groups === undefined);\n  console.log(m.groups?.x);\n  const n = /(?<x>a)/.exec(\"ac\")!;\n  console.log(n.groups!.x);\n  console.log(\"ab\".match(/a/)!.groups);\n}\n"
+}

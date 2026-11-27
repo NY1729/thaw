@@ -1,0 +1,5 @@
+{
+  "name": "class extends Array: override super and length",
+  "expect": "matched",
+  "source": "class Logged extends Array<number> {\n  pushed = 0;\n  push(...xs: number[]): number { this.pushed += xs.length; return super.push(...xs); }\n  last(): number | undefined { return this.at(-1); }\n}\nfunction main(): void {\n  const a = new Logged(); a.push(1, 2); a.push(3);\n  console.log(a.length, a.pushed, a.last(), a.indexOf(2), a.join(\"-\"));\n  a.length = 1; console.log(a.length, a[0], a[1]);\n  a[1] = 9; console.log(a.length);\n}\n"
+}

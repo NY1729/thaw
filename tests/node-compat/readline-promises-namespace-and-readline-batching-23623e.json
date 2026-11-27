@@ -1,0 +1,5 @@
+{
+  "name": "readline promises namespace and Readline batching",
+  "expect": "matched",
+  "source": "import * as rl from 'node:readline'; import { Writable } from 'node:stream'; function main(): void { const p: any = (rl as any).promises; console.log(typeof p, typeof p.Interface, typeof p.Readline, typeof p.createInterface); let text = ''; const stream: any = new Writable({ write: (chunk: any, _e: any, cb: any) => { text += chunk.toString(); cb(); } }); const r = new p.Readline(stream); r.cursorTo(2, 3).moveCursor(-1, 1).clearLine(0); console.log(JSON.stringify(text)); r.commit().then(() => console.log(JSON.stringify(text))); }"
+}

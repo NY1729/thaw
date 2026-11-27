@@ -1,0 +1,5 @@
+{
+  "name": "declgaps any then callback beside typed",
+  "expect": "matched",
+  "source": "async function g(): Promise<number> { return 7; }\nconst p = g();\np.then((v: number) => console.log('a', v));\np.then((v: any) => console.log('b', v));\nfunction main(): void {}"
+}

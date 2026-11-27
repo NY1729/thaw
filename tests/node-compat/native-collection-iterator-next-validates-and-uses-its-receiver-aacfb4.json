@@ -1,0 +1,5 @@
+{
+  "name": "native collection iterator next validates and uses its receiver",
+  "expect": "matched",
+  "source": "function main():void { const m=new Map<string,number>(); m.set(\"a\",1); const a:any=m; const it:any=a.keys(); const next:any=it.next; try { next(); console.log(\"accepted\"); } catch(e:any) { console.log(e instanceof TypeError); } console.log(it.next().value); const other:any=a.keys(); console.log(next.call(other).value); const real:any=new Map([[\"x\",1]]); const ri:any=real.keys(); console.log(next.call(ri).value); }"
+}

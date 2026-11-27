@@ -1,0 +1,5 @@
+{
+  "name": "Error.stackTraceLimit controls the frame lines",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(typeof Error.stackTraceLimit, Error.stackTraceLimit);\n  Error.stackTraceLimit = 0;\n  const zero = new Error(\"zero\");\n  console.log(JSON.stringify(zero.stack));\n  Error.stackTraceLimit = 1;\n  const one = new Error(\"one\");\n  console.log(one.stack!.split(\"\\n\").length);\n  Error.stackTraceLimit = 10;\n  console.log(Error.stackTraceLimit, new Error(\"ten\").stack!.split(\"\\n\").length > 1);\n}\n"
+}

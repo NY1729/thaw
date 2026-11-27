@@ -1,0 +1,5 @@
+{
+  "name": "yield delegate forwards a thrown string to the inner generator",
+  "expect": "matched",
+  "source": "function* inner(): Generator<number> {\n  try { yield 1; }\n  catch (error) { console.log(error); yield 2; }\n}\nfunction* outer(): Generator<number> {\n  yield* inner();\n  yield 3;\n}\nfunction main(): void {\n  const iterator = outer();\n  console.log(iterator.next().value);\n  console.log(iterator.throw(\"boom\").value);\n  console.log(iterator.next().value);\n  console.log(iterator.next().done);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "catch binding property writes and deletes",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { throw new Error(\"boom\"); } catch (e: any) {\n    e.code = \"E1\";\n    e.extra = { a: 1 };\n    console.log(e.code, e.extra, Object.keys(e), e.message);\n    console.log(JSON.stringify(e));\n    e.code = \"E2\";\n    console.log(e.code, e instanceof Error, e.message);\n    delete e.extra;\n    console.log(\"extra\" in e, e.extra, Object.keys(e));\n  }\n  try { throw new TypeError(\"t\"); } catch (e) {\n    (e as any).status = 404;\n    console.log((e as any).status, e instanceof TypeError, (e as Error).message);\n  }\n  try { throw new Error(\"boom\"); } catch (e: any) {\n    e.message = \"changed\";\n    e.name = \"Custom\";\n    console.log(String(e), e.message, e.name, Object.keys(e));\n    e.stack = \"my stack\";\n    console.log(e.stack);\n  }\n}\n"
+}

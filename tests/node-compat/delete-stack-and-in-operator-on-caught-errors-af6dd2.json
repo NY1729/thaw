@@ -1,0 +1,5 @@
+{
+  "name": "delete stack and in operator on caught errors",
+  "expect": "matched",
+  "source": "function main(): void {\n  try { throw new Error(\"boom\"); } catch (e: any) {\n    console.log(\"stack\" in e, \"message\" in e, \"zzz\" in e);\n    delete e.stack;\n    console.log(e.stack, \"stack\" in e, Object.getOwnPropertyNames(e));\n  }\n  const f: any = new Error(\"x\");\n  delete f.message;\n  console.log(f.message === \"\", String(f));\n}\n"
+}

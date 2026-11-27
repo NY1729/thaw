@@ -2257,12 +2257,50 @@ fn intl_host_detection_only_enables_intl_users() {
 }
 
 #[test]
-fn node_compat_manifest_covers_each_public_builtin_family() {
-    let manifest = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/node-compat.json"
-    ))
+fn node_compat_manifest_directory_loads_sorted_and_rejects_duplicates() {
+    let dir = std::env::temp_dir().join(format!("thaw-nc-dir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("b.json"),
+        r#"{"name":"b","expect":"matched","source":"1"}"#,
+    )
     .unwrap();
+    std::fs::write(
+        dir.join("a.json"),
+        r#"{"name":"a","expect":"matched","source":"2"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("note.txt"), "ignored").unwrap();
+    let loaded = load_node_compat_manifest(&dir).unwrap();
+    let names: Vec<_> = loaded["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["a", "b"]);
+    // a missing `X.json` falls back to the directory `X/`
+    let sibling = dir.with_extension("json");
+    assert_eq!(load_node_compat_manifest(&sibling).unwrap(), loaded);
+    std::fs::write(
+        dir.join("c.json"),
+        r#"{"name":"a","expect":"matched","source":"3"}"#,
+    )
+    .unwrap();
+    assert!(load_node_compat_manifest(&dir)
+        .unwrap_err()
+        .contains("duplicate"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn node_compat_manifest_covers_each_public_builtin_family() {
+    let manifest = load_node_compat_manifest(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/node-compat"
+    )))
+    .unwrap()
+    .to_string();
     for builtin in [
         "assert",
         "async_hooks",

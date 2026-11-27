@@ -1,0 +1,5 @@
+{
+  "name": "buffer nested in console.log containers",
+  "expect": "matched",
+  "source": "function main(): void {\n  const b = Buffer.from(\"hi\");\n  console.log({ b });\n  console.log({ b: Buffer.from(\"hi\") });\n  console.log([b, Buffer.from(\"yo\")]);\n  console.log({ list: [b], n: 1 });\n  const o = { b };\n  o.b[0] = 72;\n  console.log(b.toString(), o.b.length, Buffer.isBuffer(o.b));\n}\n"
+}

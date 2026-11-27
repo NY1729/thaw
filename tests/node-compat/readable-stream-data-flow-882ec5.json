@@ -1,0 +1,5 @@
+{
+  "name": "readable stream data flow",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream'; function main(): void { const values: string[] = []; const stream = Readable.from(['a', 'b']); stream.on('data', (chunk: string): void => values.push(String(chunk))); stream.on('end', (): void => console.log(values.join(','))); }"
+}

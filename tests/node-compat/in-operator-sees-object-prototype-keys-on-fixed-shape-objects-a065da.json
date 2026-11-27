@@ -1,0 +1,5 @@
+{
+  "name": "in operator sees Object.prototype keys on fixed-shape objects",
+  "expect": "matched",
+  "source": "function main(): void { console.log(\"toString\" in {a: 1}); console.log(\"hasOwnProperty\" in {a: 1}); console.log(\"__proto__\" in {a: 1}); console.log(\"a\" in {a: 1}); console.log(\"zz\" in {a: 1}); }\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "URL mutation",
+  "expect": "matched",
+  "source": "import { URL } from 'node:url'; function main(): void { const value = new URL('/a', 'https://example.com'); value.pathname = '/b'; value.searchParams.set('q', 'x'); console.log(value.hostname, value.pathname, value.searchParams.get('q')); }"
+}

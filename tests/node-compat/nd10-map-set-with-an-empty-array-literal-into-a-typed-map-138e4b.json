@@ -1,0 +1,5 @@
+{
+  "name": "nd10 Map.set with an empty array literal into a typed map",
+  "expect": "matched",
+  "source": "function main(): void {\n  const g = new Map<string, { to: string }[]>();\n  g.set(\"a\", []);\n  g.get(\"a\")!.push({ to: \"b\" });\n  const h = new Map<string, number[]>();\n  h.set(\"k\", []);\n  h.get(\"k\")!.push(1);\n  console.log(g, h);\n}\n"
+}
