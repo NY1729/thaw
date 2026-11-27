@@ -310,6 +310,21 @@ impl<'a> FnLowerer<'a> {
         value: &HirExpr,
         fields: &[(Symbol, HirType)],
     ) -> Result<Option<HirExpr>, String> {
+        let Some(text) = self.error_owner_props_text(value, fields)? else {
+            return Ok(None);
+        };
+        Ok(Some(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_register_owner_props".into())),
+            vec![value.clone(), text],
+        )))
+    }
+
+    /// The JSON text of a thrown Error-family record's own props (see `error_owner_props_call`).
+    fn error_owner_props_text(
+        &mut self,
+        value: &HirExpr,
+        fields: &[(Symbol, HirType)],
+    ) -> Result<Option<HirExpr>, String> {
         let Some(default_name) = Self::error_family_default_name(fields) else {
             return Ok(None);
         };
@@ -343,11 +358,7 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::JsonObjectLit(with_name, HirType::Json)),
             HirType::Json,
         );
-        let text = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![object]);
-        Ok(Some(HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_error_register_owner_props".into())),
-            vec![value.clone(), text],
-        )))
+        Ok(Some(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_encode".into())), vec![object])))
     }
 
     /// Build the tagged, owned provenance tuple for a source throw or
@@ -573,7 +584,12 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![left, right]);
                 // Framed like a thrown Error (`\u{1}Name\u{1}message`) so reporters print it as one.
                 let framed = concat(HirExpr::Lit(HirLit::Str("\u{1}".into())), field("name"));
-                Ok(concat(concat(framed, HirExpr::Lit(HirLit::Str("\u{1}".into()))), field("message")))
+                let text = concat(concat(framed, HirExpr::Lit(HirLit::Str("\u{1}".into()))), field("message"));
+                // Own props ride in the frame's `\u{5}` bag so the uncaught report prints them like Node.
+                match self.error_owner_props_text(&value, fields)? {
+                    Some(props) => Ok(concat(text, concat(HirExpr::Lit(HirLit::Str("\u{5}".into())), props))),
+                    None => Ok(text),
+                }
             }
             // Plain (non-Error) aggregates print like console.log, from the
             // materialized Json copy made at throw time.
