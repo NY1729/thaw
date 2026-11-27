@@ -314,7 +314,8 @@ class Cipheriv {
   }
 }
 function createCipheriv(algorithm, key, iv, options) { return new Cipheriv(algorithm, key, iv, false, options); }
-function createDecipheriv(algorithm, key, iv, options) { return new Cipheriv(algorithm, key, iv, true, options); }
+class Decipheriv extends Cipheriv { constructor(algorithm, key, iv, options) { super(algorithm, key, iv, true, options); } }
+function createDecipheriv(algorithm, key, iv, options) { return new Decipheriv(algorithm, key, iv, options); }
 // timingSafeEqual: Node's messages and codes (the check is a plain XOR loop, as in retired-engine).
 function timingSafeBytes(value, name) {
   // thaw-js's DataView is not an ArrayBuffer view (ArrayBuffer.isView is false for it), so test it explicitly.
@@ -329,7 +330,7 @@ function timingSafeEqual(left, right) {
   for (var i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
   return difference === 0;
 }
-Object.assign(cryptoModule, { createCipheriv: createCipheriv, createDecipheriv: createDecipheriv, Cipheriv: Cipheriv, timingSafeEqual: timingSafeEqual });
+Object.assign(cryptoModule, { createCipheriv: createCipheriv, createDecipheriv: createDecipheriv, Cipheriv: Cipheriv, Decipheriv: Decipheriv, timingSafeEqual: timingSafeEqual });
 // Asymmetric keys and signatures (natives in node_crypto/asym.rs).
 // Sign/Verify side of node:crypto (lifted from buffer_crypto.js, with the same natives).
 // Digest names are checked by the natives: sha1/sha256/sha384/sha512 only (RSA), ECDSA uses its curve's digest.
@@ -721,7 +722,309 @@ def(Certificate, 'verifySpkac', function verifySpkac(spkac, encoding) {
   try { return new Verify(spkacHash[p.oid]).update(p.pkac).verify(Certificate.exportPublicKey(spkac, encoding), p.sig); } catch (_) { return false; }
 });
 for (var certMethod of ['exportChallenge', 'exportPublicKey', 'verifySpkac']) def(Certificate.prototype, certMethod, Certificate[certMethod]);
-Object.assign(cryptoModule, { KeyObject: KeyObject, Certificate: Certificate, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
+// crypto.checkPrime / generatePrime / DiffieHellman / getCipherInfo / generateKey, on BigInt (Miller-Rabin).
+// ponytail: generatePrime/createDiffieHellman(bits) search with Miller-Rabin in JS; fine for the sizes tests use (<= ~1024 bits), slow beyond.
+var MODP_PRIMES = {"modp1":"ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a63a3620ffffffffffffffff","modp2":"ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece65381ffffffffffffffff","modp5":"ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca237327ffffffffffffffff","modp14":"ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aacaa68ffffffffffffffff","modp15":"ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aaac42dad33170d04507a33a85521abdf1cba64ecfb850458dbef0a8aea71575d060c7db3970f85a6e1e4c7abf5ae8cdb0933d71e8c94e04a25619dcee3d2261ad2ee6bf12ffa06d98a0864d87602733ec86a64521f2b18177b200cbbe117577a615d6c770988c0bad946e208e24fa074e5ab3143db5bfce0fd108e4b82d120a93ad2caffffffffffffffff","modp16":"ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aaac42dad33170d04507a33a85521abdf1cba64ecfb850458dbef0a8aea71575d060c7db3970f85a6e1e4c7abf5ae8cdb0933d71e8c94e04a25619dcee3d2261ad2ee6bf12ffa06d98a0864d87602733ec86a64521f2b18177b200cbbe117577a615d6c770988c0bad946e208e24fa074e5ab3143db5bfce0fd108e4b82d120a92108011a723c12a787e6d788719a10bdba5b2699c327186af4e23c1a946834b6150bda2583e9ca2ad44ce8dbbbc2db04de8ef92e8efc141fbecaa6287c59474e6bc05d99b2964fa090c3a2233ba186515be7ed1f612970cee2d7afb81bdd762170481cd0069127d5b05aa993b4ea988d8fddc186ffb7dc90a6c08f4df435c934063199ffffffffffffffff","modp17":"ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aaac42dad33170d04507a33a85521abdf1cba64ecfb850458dbef0a8aea71575d060c7db3970f85a6e1e4c7abf5ae8cdb0933d71e8c94e04a25619dcee3d2261ad2ee6bf12ffa06d98a0864d87602733ec86a64521f2b18177b200cbbe117577a615d6c770988c0bad946e208e24fa074e5ab3143db5bfce0fd108e4b82d120a92108011a723c12a787e6d788719a10bdba5b2699c327186af4e23c1a946834b6150bda2583e9ca2ad44ce8dbbbc2db04de8ef92e8efc141fbecaa6287c59474e6bc05d99b2964fa090c3a2233ba186515be7ed1f612970cee2d7afb81bdd762170481cd0069127d5b05aa993b4ea988d8fddc186ffb7dc90a6c08f4df435c93402849236c3fab4d27c7026c1d4dcb2602646dec9751e763dba37bdf8ff9406ad9e530ee5db382f413001aeb06a53ed9027d831179727b0865a8918da3edbebcf9b14ed44ce6cbaced4bb1bdb7f1447e6cc254b332051512bd7af426fb8f401378cd2bf5983ca01c64b92ecf032ea15d1721d03f482d7ce6e74fef6d55e702f46980c82b5a84031900b1c9e59e7c97fbec7e8f323a97a7e36cc88be0f1d45b7ff585ac54bd407b22b4154aacc8f6d7ebf48e1d814cc5ed20f8037e0a79715eef29be32806a1d58bb7c5da76f550aa3d8a1fbff0eb19ccb1a313d55cda56c9ec2ef29632387fe8d76e3c0468043e8f663f4860ee12bf2d5b0b7474d6e694f91e6dcc4024ffffffffffffffff","modp18":"ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aaac42dad33170d04507a33a85521abdf1cba64ecfb850458dbef0a8aea71575d060c7db3970f85a6e1e4c7abf5ae8cdb0933d71e8c94e04a25619dcee3d2261ad2ee6bf12ffa06d98a0864d87602733ec86a64521f2b18177b200cbbe117577a615d6c770988c0bad946e208e24fa074e5ab3143db5bfce0fd108e4b82d120a92108011a723c12a787e6d788719a10bdba5b2699c327186af4e23c1a946834b6150bda2583e9ca2ad44ce8dbbbc2db04de8ef92e8efc141fbecaa6287c59474e6bc05d99b2964fa090c3a2233ba186515be7ed1f612970cee2d7afb81bdd762170481cd0069127d5b05aa993b4ea988d8fddc186ffb7dc90a6c08f4df435c93402849236c3fab4d27c7026c1d4dcb2602646dec9751e763dba37bdf8ff9406ad9e530ee5db382f413001aeb06a53ed9027d831179727b0865a8918da3edbebcf9b14ed44ce6cbaced4bb1bdb7f1447e6cc254b332051512bd7af426fb8f401378cd2bf5983ca01c64b92ecf032ea15d1721d03f482d7ce6e74fef6d55e702f46980c82b5a84031900b1c9e59e7c97fbec7e8f323a97a7e36cc88be0f1d45b7ff585ac54bd407b22b4154aacc8f6d7ebf48e1d814cc5ed20f8037e0a79715eef29be32806a1d58bb7c5da76f550aa3d8a1fbff0eb19ccb1a313d55cda56c9ec2ef29632387fe8d76e3c0468043e8f663f4860ee12bf2d5b0b7474d6e694f91e6dbe115974a3926f12fee5e438777cb6a932df8cd8bec4d073b931ba3bc832b68d9dd300741fa7bf8afc47ed2576f6936ba424663aab639c5ae4f5683423b4742bf1c978238f16cbe39d652de3fdb8befc848ad922222e04a4037c0713eb57a81a23f0c73473fc646cea306b4bcbc8862f8385ddfa9d4b7fa2c087e879683303ed5bdd3a062b3cf5b3a278a66d2a13f83f44f82ddf310ee074ab6a364597e899a0255dc164f31cc50846851df9ab48195ded7ea1b1d510bd7ee74d73faf36bc31ecfa268359046f4eb879f924009438b481c6cd7889a002ed5ee382bc9190da6fc026e479558e4475677e9aa9e3050e2765694dfc81f56e880b96e7160c980dd98edd3dfffffffffffffffff"};
+var CIPHER_INFO = {"aes-128-cbc":[419,"cbc",16,16,16,"aes-128-cbc"],"aes-128-cbc-hmac-sha1":[916,"cbc",16,16,16,"aes-128-cbc-hmac-sha1"],"aes-128-cbc-hmac-sha256":[948,"cbc",16,16,16,"aes-128-cbc-hmac-sha256"],"aes-128-ccm":[896,"ccm",1,12,16,"id-aes128-ccm"],"aes-128-cfb":[421,"cfb",1,16,16,"aes-128-cfb"],"aes-128-cfb1":[650,"cfb",1,16,16,"aes-128-cfb1"],"aes-128-cfb8":[653,"cfb",1,16,16,"aes-128-cfb8"],"aes-128-ctr":[904,"ctr",1,16,16,"aes-128-ctr"],"aes-128-ecb":[418,"ecb",16,null,16,"aes-128-ecb"],"aes-128-gcm":[895,"gcm",1,12,16,"id-aes128-gcm"],"aes-128-ocb":[958,"ocb",16,12,16,"aes-128-ocb"],"aes-128-ofb":[420,"ofb",1,16,16,"aes-128-ofb"],"aes-128-xts":[913,"xts",1,16,32,"aes-128-xts"],"aes-192-cbc":[423,"cbc",16,16,24,"aes-192-cbc"],"aes-192-ccm":[899,"ccm",1,12,24,"id-aes192-ccm"],"aes-192-cfb":[425,"cfb",1,16,24,"aes-192-cfb"],"aes-192-cfb1":[651,"cfb",1,16,24,"aes-192-cfb1"],"aes-192-cfb8":[654,"cfb",1,16,24,"aes-192-cfb8"],"aes-192-ctr":[905,"ctr",1,16,24,"aes-192-ctr"],"aes-192-ecb":[422,"ecb",16,null,24,"aes-192-ecb"],"aes-192-gcm":[898,"gcm",1,12,24,"id-aes192-gcm"],"aes-192-ocb":[959,"ocb",16,12,24,"aes-192-ocb"],"aes-192-ofb":[424,"ofb",1,16,24,"aes-192-ofb"],"aes-256-cbc":[427,"cbc",16,16,32,"aes-256-cbc"],"aes-256-cbc-hmac-sha1":[918,"cbc",16,16,32,"aes-256-cbc-hmac-sha1"],"aes-256-cbc-hmac-sha256":[950,"cbc",16,16,32,"aes-256-cbc-hmac-sha256"],"aes-256-ccm":[902,"ccm",1,12,32,"id-aes256-ccm"],"aes-256-cfb":[429,"cfb",1,16,32,"aes-256-cfb"],"aes-256-cfb1":[652,"cfb",1,16,32,"aes-256-cfb1"],"aes-256-cfb8":[655,"cfb",1,16,32,"aes-256-cfb8"],"aes-256-ctr":[906,"ctr",1,16,32,"aes-256-ctr"],"aes-256-ecb":[426,"ecb",16,null,32,"aes-256-ecb"],"aes-256-gcm":[901,"gcm",1,12,32,"id-aes256-gcm"],"aes-256-ocb":[960,"ocb",16,12,32,"aes-256-ocb"],"aes-256-ofb":[428,"ofb",1,16,32,"aes-256-ofb"],"aes-256-xts":[914,"xts",1,16,64,"aes-256-xts"],"aes128":[419,"cbc",16,16,16,"aes-128-cbc"],"aes128-wrap":[788,"wrap",8,8,16,"id-aes128-wrap"],"aes128-wrap-pad":[897,"wrap",8,4,16,"id-aes128-wrap-pad"],"aes192":[423,"cbc",16,16,24,"aes-192-cbc"],"aes192-wrap":[789,"wrap",8,8,24,"id-aes192-wrap"],"aes192-wrap-pad":[900,"wrap",8,4,24,"id-aes192-wrap-pad"],"aes256":[427,"cbc",16,16,32,"aes-256-cbc"],"aes256-wrap":[790,"wrap",8,8,32,"id-aes256-wrap"],"aes256-wrap-pad":[903,"wrap",8,4,32,"id-aes256-wrap-pad"],"aria-128-cbc":[1066,"cbc",16,16,16,"aria-128-cbc"],"aria-128-ccm":[1120,"ccm",1,12,16,"aria-128-ccm"],"aria-128-cfb":[1067,"cfb",1,16,16,"aria-128-cfb"],"aria-128-cfb1":[1080,"cfb",1,16,16,"aria-128-cfb1"],"aria-128-cfb8":[1083,"cfb",1,16,16,"aria-128-cfb8"],"aria-128-ctr":[1069,"ctr",1,16,16,"aria-128-ctr"],"aria-128-ecb":[1065,"ecb",16,null,16,"aria-128-ecb"],"aria-128-gcm":[1123,"gcm",1,12,16,"aria-128-gcm"],"aria-128-ofb":[1068,"ofb",1,16,16,"aria-128-ofb"],"aria-192-cbc":[1071,"cbc",16,16,24,"aria-192-cbc"],"aria-192-ccm":[1121,"ccm",1,12,24,"aria-192-ccm"],"aria-192-cfb":[1072,"cfb",1,16,24,"aria-192-cfb"],"aria-192-cfb1":[1081,"cfb",1,16,24,"aria-192-cfb1"],"aria-192-cfb8":[1084,"cfb",1,16,24,"aria-192-cfb8"],"aria-192-ctr":[1074,"ctr",1,16,24,"aria-192-ctr"],"aria-192-ecb":[1070,"ecb",16,null,24,"aria-192-ecb"],"aria-192-gcm":[1124,"gcm",1,12,24,"aria-192-gcm"],"aria-192-ofb":[1073,"ofb",1,16,24,"aria-192-ofb"],"aria-256-cbc":[1076,"cbc",16,16,32,"aria-256-cbc"],"aria-256-ccm":[1122,"ccm",1,12,32,"aria-256-ccm"],"aria-256-cfb":[1077,"cfb",1,16,32,"aria-256-cfb"],"aria-256-cfb1":[1082,"cfb",1,16,32,"aria-256-cfb1"],"aria-256-cfb8":[1085,"cfb",1,16,32,"aria-256-cfb8"],"aria-256-ctr":[1079,"ctr",1,16,32,"aria-256-ctr"],"aria-256-ecb":[1075,"ecb",16,null,32,"aria-256-ecb"],"aria-256-gcm":[1125,"gcm",1,12,32,"aria-256-gcm"],"aria-256-ofb":[1078,"ofb",1,16,32,"aria-256-ofb"],"aria128":[1066,"cbc",16,16,16,"aria-128-cbc"],"aria192":[1071,"cbc",16,16,24,"aria-192-cbc"],"aria256":[1076,"cbc",16,16,32,"aria-256-cbc"],"camellia-128-cbc":[751,"cbc",16,16,16,"camellia-128-cbc"],"camellia-128-cfb":[757,"cfb",1,16,16,"camellia-128-cfb"],"camellia-128-cfb1":[760,"cfb",1,16,16,"camellia-128-cfb1"],"camellia-128-cfb8":[763,"cfb",1,16,16,"camellia-128-cfb8"],"camellia-128-ctr":[963,"ctr",1,16,16,"camellia-128-ctr"],"camellia-128-ecb":[754,"ecb",16,null,16,"camellia-128-ecb"],"camellia-128-ofb":[766,"ofb",1,16,16,"camellia-128-ofb"],"camellia-192-cbc":[752,"cbc",16,16,24,"camellia-192-cbc"],"camellia-192-cfb":[758,"cfb",1,16,24,"camellia-192-cfb"],"camellia-192-cfb1":[761,"cfb",1,16,24,"camellia-192-cfb1"],"camellia-192-cfb8":[764,"cfb",1,16,24,"camellia-192-cfb8"],"camellia-192-ctr":[967,"ctr",1,16,24,"camellia-192-ctr"],"camellia-192-ecb":[755,"ecb",16,null,24,"camellia-192-ecb"],"camellia-192-ofb":[767,"ofb",1,16,24,"camellia-192-ofb"],"camellia-256-cbc":[753,"cbc",16,16,32,"camellia-256-cbc"],"camellia-256-cfb":[759,"cfb",1,16,32,"camellia-256-cfb"],"camellia-256-cfb1":[762,"cfb",1,16,32,"camellia-256-cfb1"],"camellia-256-cfb8":[765,"cfb",1,16,32,"camellia-256-cfb8"],"camellia-256-ctr":[971,"ctr",1,16,32,"camellia-256-ctr"],"camellia-256-ecb":[756,"ecb",16,null,32,"camellia-256-ecb"],"camellia-256-ofb":[768,"ofb",1,16,32,"camellia-256-ofb"],"camellia128":[751,"cbc",16,16,16,"camellia-128-cbc"],"camellia192":[752,"cbc",16,16,24,"camellia-192-cbc"],"camellia256":[753,"cbc",16,16,32,"camellia-256-cbc"],"chacha20":[1019,"stream",null,16,32,"chacha20"],"chacha20-poly1305":[1018,"stream",null,12,32,"chacha20-poly1305"],"des-ede":[32,"ecb",8,null,16,"des-ede"],"des-ede-cbc":[43,"cbc",8,8,16,"des-ede-cbc"],"des-ede-cfb":[60,"cfb",1,8,16,"des-ede-cfb"],"des-ede-ecb":[32,"ecb",8,null,16,"des-ede"],"des-ede-ofb":[62,"ofb",1,8,16,"des-ede-ofb"],"des-ede3":[33,"ecb",8,null,24,"des-ede3"],"des-ede3-cbc":[44,"cbc",8,8,24,"des-ede3-cbc"],"des-ede3-cfb":[61,"cfb",1,8,24,"des-ede3-cfb"],"des-ede3-cfb1":[658,"cfb",1,8,24,"des-ede3-cfb1"],"des-ede3-cfb8":[659,"cfb",1,8,24,"des-ede3-cfb8"],"des-ede3-ecb":[33,"ecb",8,null,24,"des-ede3"],"des-ede3-ofb":[63,"ofb",1,8,24,"des-ede3-ofb"],"des3":[44,"cbc",8,8,24,"des-ede3-cbc"],"des3-wrap":[246,"wrap",8,null,24,"id-smime-alg-cms3deswrap"],"id-aes128-CCM":[896,"ccm",1,12,16,"id-aes128-ccm"],"id-aes128-GCM":[895,"gcm",1,12,16,"id-aes128-gcm"],"id-aes128-wrap":[788,"wrap",8,8,16,"id-aes128-wrap"],"id-aes128-wrap-pad":[897,"wrap",8,4,16,"id-aes128-wrap-pad"],"id-aes192-CCM":[899,"ccm",1,12,24,"id-aes192-ccm"],"id-aes192-GCM":[898,"gcm",1,12,24,"id-aes192-gcm"],"id-aes192-wrap":[789,"wrap",8,8,24,"id-aes192-wrap"],"id-aes192-wrap-pad":[900,"wrap",8,4,24,"id-aes192-wrap-pad"],"id-aes256-CCM":[902,"ccm",1,12,32,"id-aes256-ccm"],"id-aes256-GCM":[901,"gcm",1,12,32,"id-aes256-gcm"],"id-aes256-wrap":[790,"wrap",8,8,32,"id-aes256-wrap"],"id-aes256-wrap-pad":[903,"wrap",8,4,32,"id-aes256-wrap-pad"],"id-smime-alg-CMS3DESwrap":[246,"wrap",8,null,24,"id-smime-alg-cms3deswrap"]};
+function bigFromBytes(bytes) { var hex = Buffer.from(bytes).toString('hex'); return hex ? BigInt('0x' + hex) : 0n; }
+function bigToBytes(n, size) { var hex = n.toString(16); if (hex.length % 2) hex = '0' + hex; var b = Buffer.from(hex, 'hex'); return size && b.length < size ? Buffer.concat([Buffer.alloc(size - b.length), b]) : b; }
+function bigToArrayBuffer(n) { var b = bigToBytes(n); return b.buffer.slice(b.byteOffset, b.byteOffset + b.length); }
+function bigBitLength(n) { return n === 0n ? 0 : n.toString(2).length; }
+function modPow(b, e, m) { var r = 1n; b %= m; while (e > 0n) { if (e & 1n) r = r * b % m; b = b * b % m; e >>= 1n; } return r; }
+function randomBig(bits) { var bytes = randomBytesSync(Math.ceil(bits / 8)); var n = bigFromBytes(bytes); return n & ((1n << BigInt(bits)) - 1n); }
+var SMALL_PRIMES = [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n, 41n, 43n, 47n, 53n, 59n, 61n, 67n, 71n, 73n, 79n, 83n, 89n, 97n];
+function isProbablePrime(n, rounds) {
+  if (n < 2n) return false;
+  for (var sp of SMALL_PRIMES) { if (n === sp) return true; if (n % sp === 0n) return false; }
+  var d = n - 1n, r = 0; while ((d & 1n) === 0n) { d >>= 1n; r++; }
+  var bits = bigBitLength(n);
+  for (var i = 0; i < rounds; i++) {
+    var a = i < SMALL_PRIMES.length ? SMALL_PRIMES[i] : 2n + randomBig(bits) % (n - 3n);
+    var x = modPow(a, d, n);
+    if (x === 1n || x === n - 1n) continue;
+    var composite = true;
+    for (var j = 1; j < r; j++) { x = x * x % n; if (x === n - 1n) { composite = false; break; } }
+    if (composite) return false;
+  }
+  return true;
+}
+function bigCandidate(candidate) {
+  if (typeof candidate === 'bigint') return candidate;
+  if (candidate instanceof ArrayBuffer) return bigFromBytes(new Uint8Array(candidate));
+  if (isView(candidate)) return bigFromBytes(new Uint8Array(candidate.buffer, candidate.byteOffset, candidate.byteLength));
+  throw argTypeError('candidate', 'of type bigint or an instance of ArrayBuffer, TypedArray, Buffer, or DataView', candidate);
+}
+function checkPrimeSync(candidate, options) {
+  var n = bigCandidate(candidate);
+  if (options !== undefined && (typeof options !== 'object' || options === null)) throw argTypeError('options', 'of type object', options);
+  var checks = options && options.checks !== undefined ? options.checks : 0;
+  if (typeof checks !== 'number') throw argTypeError('options.checks', 'of type number', checks);
+  if (!Number.isInteger(checks) || checks < 0 || checks > 2147483647) throw outOfRange('options.checks', checks);
+  return isProbablePrime(n, checks > 0 ? checks : 20);
+}
+function checkPrime(candidate, options, callback) {
+  if (typeof options === 'function') { callback = options; options = undefined; }
+  var n = bigCandidate(candidate);
+  requireArg(typeof callback === 'function', 'callback', TYPE_CALLBACK, callback);
+  var result = checkPrimeSync(n, options);
+  setImmediate(function () { callback(undefined, result); });
+}
+function generatePrimeSync(size, options) {
+  requireArg(typeof size === 'number', 'size', 'of type number', size);
+  if (!Number.isInteger(size) || size < 1 || size > 2147483647) throw cryptoError(RangeError, 'ERR_OUT_OF_RANGE', 'The value of "size" is out of range. It must be >= 1 && <= 2147483647. Received ' + size);
+  if (options !== undefined) requireArg(typeof options === 'object' && options !== null, 'options', 'of type object', options);
+  options = options || {};
+  var add = options.add === undefined ? null : bigCandidate(options.add), rem = options.rem === undefined ? null : bigCandidate(options.rem);
+  var safe = !!options.safe, wantBig = !!options.bigint;
+  if (add !== null && rem !== null && add <= rem) throw cryptoError(RangeError, 'ERR_OUT_OF_RANGE', 'The value of "options.rem" is out of range. It must be < options.add');
+  if (add !== null && bigBitLength(add) > size) throw cryptoError(RangeError, 'ERR_OUT_OF_RANGE', 'invalid options.add');
+  var top = 1n << BigInt(size - 1);
+  for (;;) {
+    var n = randomBig(size) | top | 1n;
+    if (add !== null) { var r = rem === null ? (safe ? 3n : 1n) : rem; n = n - n % add + r; if (bigBitLength(n) !== size) continue; }
+    if (size === 1) n = 2n;
+    if (!isProbablePrime(n, 20)) continue;
+    if (safe && !isProbablePrime((n - 1n) >> 1n, 20)) continue;
+    return wantBig ? n : bigToArrayBuffer(n);
+  }
+}
+function generatePrime(size, options, callback) {
+  if (typeof options === 'function') { callback = options; options = undefined; }
+  requireArg(typeof callback === 'function', 'callback', TYPE_CALLBACK, callback);
+  var result = generatePrimeSync(size, options);
+  setImmediate(function () { callback(undefined, result); });
+}
+function dhBytes(value, encoding, name) {
+  if (typeof value === 'string') return Buffer.from(value, encoding);
+  if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value));
+  if (isView(value)) return Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+  throw argTypeError(name, TYPE_DATA, value);
+}
+function dhOut(buf, encoding) { return encoding && encoding !== 'buffer' ? buf.toString(encoding) : buf; }
+function DiffieHellman(sizeOrKey, keyEncoding, generator, genEncoding, group) {
+  if (!(this instanceof DiffieHellman)) return new DiffieHellman(sizeOrKey, keyEncoding, generator, genEncoding);
+  Object.defineProperties(this, { _p: { value: 0n, writable: true }, _g: { value: 0n, writable: true } });
+  if (group) { this._p = BigInt('0x' + MODP_PRIMES[group]); this._g = 2n; }
+  else {
+    if (typeof keyEncoding !== 'string' && keyEncoding !== undefined && keyEncoding !== null) { genEncoding = generator; generator = keyEncoding; keyEncoding = undefined; }
+    if (typeof sizeOrKey === 'number') {
+      if (!Number.isInteger(sizeOrKey) || sizeOrKey < 2) throw cryptoError(RangeError, 'ERR_OUT_OF_RANGE', 'The value of "sizeOrKey" is out of range. Received ' + sizeOrKey);
+      this._p = generatePrimeSync(sizeOrKey, { safe: true, bigint: true });
+    } else this._p = bigFromBytes(dhBytes(sizeOrKey, keyEncoding, 'sizeOrKey'));
+    this._g = generator === undefined ? 2n : typeof generator === 'number' ? BigInt(generator) : bigFromBytes(dhBytes(generator, genEncoding, 'generator'));
+    if (this._g <= 1n) throw cryptoError(Error, 'ERR_OSSL_DH_BAD_GENERATOR', 'error:02800080:Diffie-Hellman routines::bad generator');
+  }
+  Object.defineProperty(this, '_priv', { value: null, writable: true });
+  Object.defineProperty(this, '_pub', { value: null, writable: true });
+  this.verifyError = group ? 0 : dhVerifyError(this._p, this._g);
+}
+function dhVerifyError(p, g) {
+  var flags = 0;
+  if (!isProbablePrime(p, 20)) flags |= 1; else if (!isProbablePrime((p - 1n) >> 1n, 20)) flags |= 2;
+  if (g <= 1n || g >= p - 1n) flags |= 8;
+  return flags;
+}
+var dhProto = {
+  generateKeys: function generateKeys(encoding) {
+    var bits = bigBitLength(this._p);
+    var x; do { x = randomBig(bits - 1); } while (x < 2n);
+    this._priv = x; this._pub = modPow(this._g, x, this._p);
+    return this.getPublicKey(encoding);
+  },
+  computeSecret: function computeSecret(other, inputEncoding, outputEncoding) {
+    if (this._priv === null) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation computeSecret');
+    var y = bigFromBytes(dhBytes(other, inputEncoding, 'otherPublicKey'));
+    if (y <= 1n || y >= this._p - 1n) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_KEYLEN', 'Supplied key is too small');
+    return dhOut(bigToBytes(modPow(y, this._priv, this._p), Math.ceil(bigBitLength(this._p) / 8)), outputEncoding);
+  },
+  getPrime: function getPrime(encoding) { return dhOut(bigToBytes(this._p), encoding); },
+  getGenerator: function getGenerator(encoding) { return dhOut(bigToBytes(this._g), encoding); },
+  getPublicKey: function getPublicKey(encoding) { if (this._pub === null) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'No public key - did you specify a key?'); return dhOut(bigToBytes(this._pub), encoding); },
+  getPrivateKey: function getPrivateKey(encoding) { if (this._priv === null) throw cryptoError(Error, 'ERR_CRYPTO_INVALID_STATE', 'No private key - did you specify a key?'); return dhOut(bigToBytes(this._priv), encoding); },
+  setPublicKey: function setPublicKey(key, encoding) { this._pub = bigFromBytes(dhBytes(key, encoding, 'publicKey')); return this; },
+  setPrivateKey: function setPrivateKey(key, encoding) { this._priv = bigFromBytes(dhBytes(key, encoding, 'privateKey')); this._pub = modPow(this._g, this._priv, this._p); return this; }
+};
+for (var dhName of Object.keys(dhProto)) def(DiffieHellman.prototype, dhName, dhProto[dhName]);
+function DiffieHellmanGroup(name) {
+  if (!(this instanceof DiffieHellmanGroup)) return new DiffieHellmanGroup(name);
+  requireArg(typeof name === 'string', 'name', 'of type string', name);
+  if (!Object.prototype.hasOwnProperty.call(MODP_PRIMES, name)) throw cryptoError(Error, 'ERR_CRYPTO_UNKNOWN_DH_GROUP', 'Unknown DH group');
+  DiffieHellman.call(this, 0, undefined, undefined, undefined, name);
+}
+DiffieHellmanGroup.prototype = Object.create(DiffieHellman.prototype, { constructor: { value: DiffieHellmanGroup, writable: true, configurable: true } });
+function createDiffieHellman(sizeOrKey, keyEncoding, generator, genEncoding) { return new DiffieHellman(sizeOrKey, keyEncoding, generator, genEncoding); }
+function createDiffieHellmanGroup(name) { return new DiffieHellmanGroup(name); }
+function getCipherInfo(nameOrNid, options) {
+  requireArg(typeof nameOrNid === 'string' || typeof nameOrNid === 'number', 'nameOrNid', 'of type string or number', nameOrNid);
+  if (options !== undefined) requireArg(typeof options === 'object' && options !== null, 'options', 'of type object', options);
+  var row = null;
+  if (typeof nameOrNid === 'string') row = CIPHER_INFO[nameOrNid.toLowerCase()] || null;
+  else for (var k of Object.keys(CIPHER_INFO)) if (CIPHER_INFO[k][0] === nameOrNid) { row = CIPHER_INFO[k]; break; }
+  if (!row) return undefined;
+  var info = { mode: row[1], name: row[5], nid: row[0] };
+  if (row[2] !== null) info.blockSize = row[2];
+  if (row[3] !== null) info.ivLength = row[3];
+  info.keyLength = row[4];
+  if (options && options.keyLength !== undefined && options.keyLength !== info.keyLength) return undefined;
+  if (options && options.ivLength !== undefined && options.ivLength !== info.ivLength) return undefined;
+  return info;
+}
+function generateKeySync(type, options) {
+  requireArg(typeof type === 'string', 'type', 'of type string', type);
+  requireArg(typeof options === 'object' && options !== null, 'options', 'of type object', options);
+  if (type !== 'hmac' && type !== 'aes') throw cryptoError(TypeError, 'ERR_INVALID_ARG_VALUE', "The argument 'type' must be one of: 'hmac', 'aes'. Received '" + type + "'");
+  var length = options.length;
+  requireArg(typeof length === 'number', 'options.length', 'of type number', length);
+  if (type === 'aes' ? length !== 128 && length !== 192 && length !== 256 : !Number.isInteger(length) || length < 8 || length > 2147483647) throw cryptoError(TypeError, 'ERR_INVALID_ARG_VALUE', "The property 'options.length' is invalid. Received " + length);
+  return new KeyObject('secret', randomBytesSync(length >> 3));
+}
+function generateKey(type, options, callback) {
+  requireArg(typeof callback === 'function', 'callback', TYPE_CALLBACK, callback);
+  var key = generateKeySync(type, options);
+  setImmediate(function () { callback(null, key); });
+}
+Object.defineProperty(KeyObject.prototype, 'symmetricKeySize', { get: function () { return this.type === 'secret' ? this._material.length : undefined; }, configurable: true });
+Object.assign(cryptoModule, { checkPrime: checkPrime, checkPrimeSync: checkPrimeSync, generatePrime: generatePrime, generatePrimeSync: generatePrimeSync,
+  DiffieHellman: DiffieHellman, DiffieHellmanGroup: DiffieHellmanGroup, createDiffieHellman: createDiffieHellman, createDiffieHellmanGroup: createDiffieHellmanGroup,
+  getDiffieHellman: createDiffieHellmanGroup, getCipherInfo: getCipherInfo, generateKeySync: generateKeySync, generateKey: generateKey });
+
+// crypto.X509Certificate: DER walk over the certificate (subject/issuer/validity/SAN/CA/fingerprints, verify via createVerify).
+// ponytail: keyUsage lists extended key usage OIDs, infoAccess/issuerCertificate/toLegacyObject are not implemented.
+var DN_NAMES = { '2.5.4.3': 'CN', '2.5.4.4': 'SN', '2.5.4.5': 'serialNumber', '2.5.4.6': 'C', '2.5.4.7': 'L', '2.5.4.8': 'ST', '2.5.4.9': 'street', '2.5.4.10': 'O', '2.5.4.11': 'OU', '2.5.4.12': 'title', '2.5.4.42': 'GN', '1.2.840.113549.1.9.1': 'emailAddress', '0.9.2342.19200300.100.1.25': 'DC', '0.9.2342.19200300.100.1.1': 'UID' };
+var X509_SIG_HASH = { '1.2.840.113549.1.1.4': 'md5', '1.2.840.113549.1.1.5': 'sha1', '1.2.840.113549.1.1.14': 'sha224', '1.2.840.113549.1.1.11': 'sha256', '1.2.840.113549.1.1.12': 'sha384', '1.2.840.113549.1.1.13': 'sha512', '1.2.840.10045.4.1': 'sha1', '1.2.840.10045.4.3.1': 'sha224', '1.2.840.10045.4.3.2': 'sha256', '1.2.840.10045.4.3.3': 'sha384', '1.2.840.10045.4.3.4': 'sha512' };
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function derOid(buf, tlv) {
+  var bytes = buf.subarray(tlv.body, tlv.end), parts = [Math.floor(bytes[0] / 40), bytes[0] % 40], n = 0;
+  for (var i = 1; i < bytes.length; i++) { n = n * 128 + (bytes[i] & 0x7f); if (!(bytes[i] & 0x80)) { parts.push(n); n = 0; } }
+  return parts.join('.');
+}
+function derChildren(buf, tlv) { var out = [], at = tlv.body; while (at < tlv.end) { var c = derRead(buf, at); out.push(c); at = c.end; } return out; }
+function derTime(buf, tlv) {
+  var t = buf.subarray(tlv.body, tlv.end).toString('latin1'), y, rest;
+  if (tlv.tag === 0x17) { y = Number(t.slice(0, 2)); y += y >= 50 ? 1900 : 2000; rest = t.slice(2); } else { y = Number(t.slice(0, 4)); rest = t.slice(4); }
+  return new Date(Date.UTC(y, Number(rest.slice(0, 2)) - 1, Number(rest.slice(2, 4)), Number(rest.slice(4, 6)), Number(rest.slice(6, 8)), Number(rest.slice(8, 10))));
+}
+function x509Name(buf, tlv) {
+  var lines = [];
+  for (var rdn of derChildren(buf, tlv)) for (var atv of derChildren(buf, rdn)) {
+    var kids = derChildren(buf, atv), oid = derOid(buf, kids[0]), raw = buf.subarray(kids[1].body, kids[1].end);
+    lines.push((DN_NAMES[oid] || oid) + '=' + (kids[1].tag === 0x1e ? raw.swap16 ? Buffer.from(raw).swap16().toString('utf16le') : raw.toString('latin1') : kids[1].tag === 0x0c ? raw.toString('utf8') : raw.toString('latin1')));
+  }
+  return lines.join('\n');
+}
+function x509Parse(der) {
+  var cert = derRead(der, 0), parts = derChildren(der, cert), tbs = parts[0], f = derChildren(der, tbs), i = 0;
+  if (f[0].tag === 0xa0) i++;
+  var out = { tbs: der.subarray(tbs.start, tbs.end), serial: der.subarray(f[i].body, f[i].end), sigOid: derOid(der, derChildren(der, parts[1])[0]), sig: der.subarray(parts[2].body + 1, parts[2].end), issuer: x509Name(der, f[i + 2]), subject: x509Name(der, f[i + 4]), spki: der.subarray(f[i + 5].start, f[i + 5].end), san: undefined, ca: false, eku: undefined };
+  var validity = derChildren(der, f[i + 3]); out.notBefore = derTime(der, validity[0]); out.notAfter = derTime(der, validity[1]);
+  var ext = f.find(function (t) { return t.tag === 0xa3; });
+  if (ext) for (var e of derChildren(der, derChildren(der, ext)[0])) {
+    var ek = derChildren(der, e), oid = derOid(der, ek[0]), val = ek[ek.length - 1], inner = derRead(der, val.body);
+    if (oid === '2.5.29.17') {
+      var names = [];
+      for (var g of derChildren(der, inner)) { var gv = der.subarray(g.body, g.end); if (g.tag === 0x82) names.push('DNS:' + gv.toString('latin1')); else if (g.tag === 0x81) names.push('email:' + gv.toString('latin1')); else if (g.tag === 0x86) names.push('URI:' + gv.toString('latin1')); else if (g.tag === 0x87) names.push('IP Address:' + (gv.length === 4 ? Array.from(gv).join('.') : gv.toString('hex').match(/.{4}/g).map(function (h) { return h.replace(/^0+(?=.)/, ''); }).join(':').toUpperCase())); }
+      out.san = names.join(', ');
+    } else if (oid === '2.5.29.19') { var bc = derChildren(der, inner); out.ca = bc.length > 0 && bc[0].tag === 0x01 && der[bc[0].body] !== 0; }
+    else if (oid === '2.5.29.15') out.noCertSign = !(der[inner.body + 1] & 0x04);
+    else if (oid === '1.3.6.1.5.5.7.1.1') {
+      out.aia = [];
+      for (var ad of derChildren(der, inner)) {
+        var adk = derChildren(der, ad), method = derOid(der, adk[0]), label = method === '1.3.6.1.5.5.7.48.1' ? 'OCSP' : method === '1.3.6.1.5.5.7.48.2' ? 'CA Issuers' : method;
+        out.aia.push([label + ' - ' + (adk[1].tag === 0x86 ? 'URI' : adk[1].tag === 0x82 ? 'DNS' : adk[1].tag === 0x81 ? 'email' : 'unknown'), der.subarray(adk[1].body, adk[1].end).toString('latin1')]);
+      }
+    }
+    else if (oid === '2.5.29.37') out.eku = derChildren(der, inner).map(function (o) { return derOid(der, o); });
+  }
+  return out;
+}
+function x509Date(d) { function p(n) { return String(n).padStart(2, '0'); } return MONTHS[d.getUTCMonth()] + ' ' + String(d.getUTCDate()).padStart(2, ' ') + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()) + ' ' + d.getUTCFullYear() + ' GMT'; }
+function x509Fingerprint(der, alg) { return cryptoModule.createHash(alg).update(der).digest('hex').toUpperCase().match(/../g).join(':'); }
+function x509HostMatch(pattern, host) {
+  pattern = pattern.toLowerCase(); host = host.toLowerCase();
+  if (pattern.indexOf('*.') === 0) { var dot = host.indexOf('.'); return dot > 0 && host.slice(dot + 1) === pattern.slice(2); }
+  return pattern === host;
+}
+class X509Certificate {
+  constructor(buffer) {
+    requireArg(typeof buffer === 'string' || isView(buffer) || buffer instanceof ArrayBuffer, 'buffer', 'of type string or an instance of Buffer, TypedArray, or DataView', buffer);
+    var raw = typeof buffer === 'string' ? Buffer.from(buffer) : Buffer.from(buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength));
+    var text = raw.toString('latin1'), m = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/.exec(text), der = m ? Buffer.from(m[1].replace(/\s+/g, ''), 'base64') : raw;
+    var parsed;
+    try { parsed = x509Parse(der); } catch (_) { throw cryptoError(Error, 'ERR_OSSL_PEM_NO_START_LINE', 'error:0480006C:PEM routines::no start line'); }
+    Object.defineProperties(this, { _der: { value: der }, _x: { value: parsed } });
+  }
+  get subject() { return this._x.subject; }
+  get issuer() { return this._x.issuer; }
+  get subjectAltName() { return this._x.san; }
+  get infoAccess() { var a = this._x.aia; return a ? a.map(function (e) { return e[0] + ':' + e[1]; }).join('\n') : undefined; }
+  get issuerCertificate() { return undefined; }
+  get validFrom() { return x509Date(this._x.notBefore); }
+  get validTo() { return x509Date(this._x.notAfter); }
+  get validFromDate() { return this._x.notBefore; }
+  get validToDate() { return this._x.notAfter; }
+  get fingerprint() { return x509Fingerprint(this._der, 'sha1'); }
+  get fingerprint256() { return x509Fingerprint(this._der, 'sha256'); }
+  get fingerprint512() { return x509Fingerprint(this._der, 'sha512'); }
+  get keyUsage() { return this._x.eku; }
+  get serialNumber() { var h = this._x.serial.toString('hex').toUpperCase().replace(/^(00)+(?=.)/, ''); return h; }
+  get raw() { return Buffer.from(this._der); }
+  get publicKey() { return createPublicKey(spkiPem(this._x.spki)); }
+  get ca() { return this._x.ca && !this._x.noCertSign; }
+  toLegacyObject() {
+    var x = this._x, obj = function (text) { var o = {}; for (var line of text.split('\n')) { var eq = line.indexOf('='), k = line.slice(0, eq), v = line.slice(eq + 1); o[k] = k in o ? [].concat(o[k], v) : v; } return o; };
+    var out = { subject: obj(x.subject), issuer: obj(x.issuer) };
+    if (x.san !== undefined) out.subjectaltname = x.san;
+    if (x.aia) { var info = {}; for (var e of x.aia) (info[e[0]] = info[e[0]] || []).push(e[1]); out.infoAccess = info; }
+    out.ca = this.ca;
+    var ecDone = false;
+    try {
+      var spki = derChildren(derBytes(x.spki), derRead(derBytes(x.spki), 0)), bits = derBytes(x.spki).subarray(spki[1].body + 1, spki[1].end), key = derRead(bits, 0), kids = derChildren(bits, key);
+      if (kids.length === 2 && kids[0].tag === 0x02) {
+        var n = bits.subarray(kids[0].body, kids[0].end), ex = bits.subarray(kids[1].body, kids[1].end);
+        while (n.length > 1 && n[0] === 0) n = n.subarray(1);
+        out.modulus = n.toString('hex').toUpperCase(); out.bits = (n.length - 1) * 8 + (32 - Math.clz32(n[0]));
+        out.exponent = '0x' + BigInt('0x' + ex.toString('hex')).toString(16);
+      }
+    } catch (_) {}
+    try {
+      var sp = derBytes(x.spki), top = derChildren(sp, derRead(sp, 0)), alg = derChildren(sp, top[0]);
+      if (derOid(sp, alg[0]) === '1.2.840.10045.2.1') {
+        var curveOid = derOid(sp, alg[1]), curves = { '1.2.840.10045.3.1.7': ['prime256v1', 'P-256', 256], '1.3.132.0.34': ['secp384r1', 'P-384', 384], '1.3.132.0.35': ['secp521r1', 'P-521', 521], '1.3.132.0.10': ['secp256k1', undefined, 256] }, info = curves[curveOid];
+        out.bits = info ? info[2] : undefined;
+        out.pubkey = Buffer.from(sp.subarray(top[1].body + 1, top[1].end));
+        if (info) { out.asn1Curve = info[0]; if (info[1]) out.nistCurve = info[1]; }
+        ecDone = true;
+      }
+    } catch (_) {}
+    if (!ecDone) out.pubkey = Buffer.from(x.spki);
+    out.valid_from = this.validFrom; out.valid_to = this.validTo;
+    out.fingerprint = this.fingerprint; out.fingerprint256 = this.fingerprint256; out.fingerprint512 = this.fingerprint512;
+    if (x.eku) out.ext_key_usage = x.eku;
+    out.serialNumber = this.serialNumber; out.raw = this.raw;
+    return out;
+  }
+  toString() { var b64 = this._der.toString('base64').replace(/(.{64})/g, '$1\n').replace(/\n$/, ''); return '-----BEGIN CERTIFICATE-----\n' + b64 + '\n-----END CERTIFICATE-----\n'; }
+  toJSON() { return this.toString(); }
+  checkHost(name) {
+    requireArg(typeof name === 'string', 'name', 'of type string', name);
+    var x = this._x, dns = x.san ? x.san.split(', ').filter(function (e) { return e.indexOf('DNS:') === 0; }).map(function (e) { return e.slice(4); }) : [];
+    if (!dns.length) { var cn = /(?:^|\n)CN=([^\n]*)/.exec(x.subject); if (cn) dns = [cn[1]]; }
+    for (var d of dns) if (x509HostMatch(d, name)) return d;
+    return undefined;
+  }
+  checkEmail(email) { requireArg(typeof email === 'string', 'email', 'of type string', email); var x = this._x, list = x.san ? x.san.split(', ').filter(function (e) { return e.indexOf('email:') === 0; }).map(function (e) { return e.slice(6); }) : []; if (!list.length) { var m = /(?:^|\n)emailAddress=([^\n]*)/.exec(x.subject); if (m) list = [m[1]]; } return list.indexOf(email) >= 0 ? email : undefined; }
+  checkIP(ip) { requireArg(typeof ip === 'string', 'ip', 'of type string', ip); var x = this._x; return x.san && x.san.split(', ').indexOf('IP Address:' + ip) >= 0 ? ip : undefined; }
+  checkIssued(other) { if (!(other instanceof X509Certificate)) throw argTypeError('otherCert', 'an instance of X509Certificate', other); return this._x.issuer === other._x.subject; }
+  checkPrivateKey(key) { var pub = key instanceof KeyObject ? createPublicKey(key) : createPublicKey(key); return pub.export({ type: 'spki', format: 'der' }).equals(this._x.spki); }
+  verify(key) {
+    if (!(key instanceof KeyObject)) throw argTypeError('publicKey', 'an instance of KeyObject', key);
+    var alg = X509_SIG_HASH[this._x.sigOid]; if (!alg) return false;
+    try { return new Verify(alg).update(this._x.tbs).verify(key, this._x.sig); } catch (_) { return false; }
+  }
+}
+function derBytes(b) { return b; }
+function spkiPem(spki) { return '-----BEGIN PUBLIC KEY-----\n' + spki.toString('base64').replace(/(.{64})/g, '$1\n').replace(/\n$/, '') + '\n-----END PUBLIC KEY-----\n'; }
+Object.assign(cryptoModule, { KeyObject: KeyObject, X509Certificate: X509Certificate, Certificate: Certificate, createSecretKey: createSecretKey, createPrivateKey: createPrivateKey, createPublicKey: createPublicKey,
   Sign: Sign, Verify: Verify, createSign: createSign, createVerify: createVerify, sign: sign, verify: verify,
   publicEncrypt: publicEncrypt, privateDecrypt: privateDecrypt, privateEncrypt: privateEncrypt, publicDecrypt: publicDecrypt,
   generateKeyPairSync: generateKeyPairSync, generateKeyPair: generateKeyPair, diffieHellman: diffieHellman, ECDH: ECDH, createECDH: createECDH,
