@@ -1117,6 +1117,24 @@ fn normalize_interface_merges(module: &Module) -> Result<Module, String> {
 /// before the first default-valued or rest parameter. TypeScript `?` markers
 /// are erased by SWC's pattern, so optional parameters still count.
 fn source_parameter_count(params: &[swc_ecma_ast::Param]) -> usize {
+    // Builtin declarations whose real signature is `(...rest)` report Node's
+    // arity through a rest parameter named `__length_N`; the call lowering
+    // still sees an ordinary rest parameter.
+    // A typed signature carries it in its last parameter's name (`callback__length_3`).
+    let marked = match params.last().map(|parameter| &parameter.pat) {
+        Some(swc_ecma_ast::Pat::Rest(rest)) => match rest.arg.as_ref() {
+            swc_ecma_ast::Pat::Ident(ident) => Some(ident.id.sym.as_ref()),
+            _ => None,
+        },
+        Some(swc_ecma_ast::Pat::Ident(ident)) => Some(ident.id.sym.as_ref()),
+        _ => None,
+    };
+    if let Some(count) = marked
+        .and_then(|name| name.rsplit_once("__length_"))
+        .and_then(|(_, count)| count.parse().ok())
+    {
+        return count;
+    }
     params
         .iter()
         .take_while(|parameter| {

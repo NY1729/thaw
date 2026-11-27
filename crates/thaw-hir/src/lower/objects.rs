@@ -3404,6 +3404,14 @@ impl<'a> FnLowerer<'a> {
                 match obj_ty {
                     HirType::Array(element) => {
                         let mut index = self.lower_expr(&computed.expr)?;
+                        // A canonical numeric string literal (`argv["0"]`) names the same element.
+                        if let HirExpr::Lit(HirLit::Str(text)) = &index {
+                            if let Ok(position) = text.parse::<u32>() {
+                                if position.to_string() == *text {
+                                    index = HirExpr::Lit(HirLit::F64(f64::from(position)));
+                                }
+                            }
+                        }
                         // An untyped (`any`) key such as a closure parameter: ToNumber it.
                         // ponytail: a non-numeric key (`a['length']`) reads `undefined` here.
                         if self.infer_expr_type(&index)? == HirType::Json {

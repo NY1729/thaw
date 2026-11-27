@@ -59,6 +59,36 @@ fn json_callback_result_wants_graph(result: &HirType) -> bool {
 }
 
 impl<'ctx> HirCompiler<'ctx> {
+    /// A `Str` argument a JS caller may omit: `null`/`undefined` becomes the empty string, anything else decodes as usual.
+    fn compile_json_str_or_empty(&mut self, argument: PointerValue<'ctx>) -> Result<BasicValueEnum<'ctx>, String> {
+        let nullish = self.builder.build_call(
+            self.module.get_function("thaw_json_is_nullish").unwrap(),
+            &[argument.into()], "optional_argument_nullish",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("JSON nullish check returned no value")?.into_int_value();
+        let absent = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, nullish, self.context.i8_type().const_zero(), "optional_argument_absent",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let empty_block = self.context.append_basic_block(function, "optional_argument_empty");
+        let value_block = self.context.append_basic_block(function, "optional_argument_value");
+        let done = self.context.append_basic_block(function, "optional_argument_done");
+        self.builder.build_conditional_branch(absent, empty_block, value_block).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(empty_block);
+        let empty = self.intern_string("", "optional_argument_default").map_err(|error| error.to_string())?
+            .as_pointer_value();
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(value_block);
+        let decoded = self.compile_json_value_to_native(argument.into(), &HirType::Str)?;
+        let value_end = self.builder.get_insert_block().ok_or("optional argument has no block")?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        let phi = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()), "optional_argument")
+            .map_err(|error| error.to_string())?;
+        phi.add_incoming(&[(&empty, empty_block), (&decoded.into_pointer_value(), value_end)]);
+        Ok(phi.as_basic_value())
+    }
+
     fn compile_js_callback_from_json(
         &mut self,
         json: BasicValueEnum<'ctx>,
@@ -1044,6 +1074,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ),
         String,
     > {
+        let optional_args = std::mem::take(&mut self.optional_native_args);
         let callback_name = format!("__thaw_napi_value_callback_{}", self.next_lambda);
         self.next_lambda += 1;
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -1293,6 +1324,8 @@ impl<'ctx> HirCompiler<'ctx> {
             } else if graph_mode && matches!(param, HirType::Object(fields)
                 if fields.first().is_some_and(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}"))) {
                 self.compile_json_to_native_object_argument(argument, param)
+            } else if optional_args.get(index).copied().unwrap_or(false) && *param == HirType::Str {
+                self.compile_json_str_or_empty(argument)
             } else {
                 self.compile_json_value_to_native(argument.into(), param)
             };
@@ -3050,6 +3083,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     | HirType::Bool
                     | HirType::Null
                     | HirType::Undefined
+                    | HirType::Json
                     | HirType::Object(_)
                     | HirType::Array(_)
                     | HirType::Tuple(_)
@@ -3133,6 +3167,8 @@ impl<'ctx> HirCompiler<'ctx> {
             let matches = match scalar {
                 HirType::Undefined => is_undefined,
                 HirType::Null => is_null,
+                // `Json` accepts any value: a union naming it matches here when no earlier member did.
+                HirType::Json => self.context.bool_type().const_int(1, false),
                 HirType::F64 => self.compile_typeof_matches(typeof_string, "number")?,
                 HirType::Str => self.compile_typeof_matches(typeof_string, "string")?,
                 HirType::Bool => self.compile_typeof_matches(typeof_string, "boolean")?,
@@ -3544,7 +3580,10 @@ impl<'ctx> HirCompiler<'ctx> {
             // ever calls it or not).
             HirType::Union(elements) => {
                 let value = self.compile_json_to_union_result(json, elements)?;
-                self.compile_destroy_decoded_owned_json(json, ty)?;
+                // ponytail: a `Json` member aliases the input box, so it is not destroyed (small leak); free per-member if it matters.
+                if !elements.contains(&HirType::Json) {
+                    self.compile_destroy_decoded_owned_json(json, ty)?;
+                }
                 Ok(value)
             },
             HirType::Optional(payload) => {
