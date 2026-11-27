@@ -1,0 +1,5 @@
+{
+  "name": "crypto random UUID shape",
+  "expect": "matched",
+  "source": "import { randomUUID } from 'node:crypto'; function main(): void { const value: string = String(randomUUID()); console.log(value.length, value.charAt(8), value.charAt(13), value.charAt(18), value.charAt(23)); }"
+}

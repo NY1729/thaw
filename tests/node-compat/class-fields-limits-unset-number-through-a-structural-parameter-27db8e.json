@@ -1,0 +1,5 @@
+{
+  "name": "class fields limits: unset number through a structural parameter",
+  "expect": "matched",
+  "source": "class P { n!: number; t: string = \"t\"; }\nfunction rd(v: { n: number }): number { return v.n; }\nfunction pr(v: { n: number }): void { console.log(v.n); }\nfunction pr2(v: { n: number }): void { console.log(v.n, typeof v.n, v.n === undefined); }\nfunction sum(v: { n: number }): number { return v.n + 1; }\nfunction put(v: { n: number }): void { v.n = 42; }\nfunction main(): void {\n  const p = new P();\n  console.log(rd(p));\n  pr(p);\n  pr2(p);\n  console.log(sum(p));\n  const q = new P(); q.n = 3;\n  console.log(rd(q)); pr(q); pr2(q);\n  put(p);\n  console.log(p.n, rd(p));\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "node:dns error codes and node:tls defaults match Node",
+  "expect": "matched",
+  "source": "import * as dns from 'node:dns';\nimport * as tls from 'node:tls';\nfunction main(): void {\n  console.log(dns.ALL, dns.V4MAPPED, dns.ADDRCONFIG, dns.BADFLAGS, typeof dns.Resolver);\n  console.log(tls.DEFAULT_ECDH_CURVE, tls.DEFAULT_MIN_VERSION, tls.CLIENT_RENEG_LIMIT, typeof tls.SecureContext);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "audit2e Buffer allocUnsafe",
+  "expect": "matched",
+  "source": "function main(): void { const b = Buffer.allocUnsafe(4).fill(7); console.log(b.length, b.toString(\"hex\"), Buffer.allocUnsafeSlow(2).length); }"
+}

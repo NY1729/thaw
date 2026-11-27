@@ -1,0 +1,5 @@
+{
+  "name": "cause undefined is an own property",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"m\", { cause: undefined }) as any;\n  console.log(\"cause\" in e, e.cause, Object.getOwnPropertyNames(e));\n  e.stack = \"Error: m\\n    at x (y:1:1)\";\n  console.log(e);\n  const t = new TypeError(\"t\", { cause: undefined });\n  console.log(Object.getOwnPropertyNames(t), \"cause\" in t);\n}\n"
+}

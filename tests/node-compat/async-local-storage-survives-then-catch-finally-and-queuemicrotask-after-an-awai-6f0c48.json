@@ -1,0 +1,5 @@
+{
+  "name": "async local storage survives then, catch, finally and queueMicrotask after an await",
+  "expect": "matched",
+  "source": "import { AsyncLocalStorage } from 'node:async_hooks';\nconst als = new AsyncLocalStorage<string>();\nfunction rec(tag: string): void { console.log(tag + '=' + String(als.getStore())); }\nfunction sleep(ms: number): Promise<number> { return new Promise<number>((r: (v: number) => void): void => { setTimeout((): void => { r(ms); }, ms); }); }\nasync function main(): Promise<void> {\n  await als.run('B', async (): Promise<void> => {\n    await sleep(1);\n    queueMicrotask((): void => { rec('microtask-after-await'); });\n    await sleep(1);\n    await Promise.resolve(1).then((): void => { rec('then-after-await'); });\n    await Promise.reject(new Error('x')).catch((): void => { rec('catch-after-await'); });\n    await Promise.resolve(1).finally((): void => { rec('finally-after-await'); });\n    await Promise.resolve(1).then((): void => { rec('then-after-await2'); });\n    rec('end');\n  });\n  rec('outside');\n}\n"
+}

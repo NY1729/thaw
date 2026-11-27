@@ -1,0 +1,5 @@
+{
+  "name": "audit inspect json circular",
+  "expect": "matched",
+  "source": "function show(v: any): void {\n  try {\n    JSON.stringify(v);\n  } catch (e) {\n    console.log((e as Error).name);\n    console.log((e as Error).message);\n  }\n}\nfunction main(): void {\n  const a: Record<string, any> = {};\n  a[\"self\"] = a;\n  show(a);\n  const b: any = { inner: { list: [1, { back: null }] } };\n  b.inner.list[1].back = b;\n  show(b);\n  const c: any[] = [1];\n  c.push({ c });\n  show(c);\n  const d: Record<string, any> = { x: { y: { z: { w: {} } } } };\n  d.x.y.z.w.loop = d.x;\n  show(d);\n  const o: any = {};\n  o.self = o;\n  show(o);\n}"
+}

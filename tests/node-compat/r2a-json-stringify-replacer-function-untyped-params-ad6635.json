@@ -1,0 +1,5 @@
+{
+  "name": "r2a JSON.stringify replacer function untyped params",
+  "expect": "matched",
+  "source": "function main(): void { console.log(JSON.stringify({ a: 1, b: \"x\" }, (k, v) => typeof v === \"number\" ? v + 1 : v)); }"
+}

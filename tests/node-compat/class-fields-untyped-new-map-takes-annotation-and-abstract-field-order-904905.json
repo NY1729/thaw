@@ -1,0 +1,5 @@
+{
+  "name": "class fields: untyped new Map takes annotation and abstract field order",
+  "expect": "matched",
+  "source": "abstract class Base { abstract a: number; abstract b: string; c: number = 1; }\nclass Impl extends Base { a: number = 2; b: string = \"x\"; d: number = 3; }\nfunction main(): void {\n  console.log(new Impl());\n  const m: Map<string, number> = new Map();\n  let m2: Map<string, number>;\n  m2 = new Map();\n  m2.set(\"a\", 1);\n  let s2: Set<number>;\n  s2 = new Set();\n  s2.add(1);\n  console.log(m, m2, s2);\n  class Z { m: Map<string, number> = new Map(); w!: Map<string, number>; init(): void { this.w = new Map(); this.w.set(\"k\", 2); } }\n  const z = new Z(); z.init(); console.log(z);\n}\n"
+}

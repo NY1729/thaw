@@ -1,0 +1,5 @@
+{
+  "name": "class definite-assignment fields read undefined before init",
+  "expect": "matched",
+  "source": "class P { n!: number; b!: boolean; o?: number; ready = false; init(): void { this.n = 5; this.b = true; } }\nclass Q { n: number; constructor(flag: boolean) { if (flag) this.n = 1; } }\nfunction main(): void {\n  const p = new P();\n  console.log(p.n, p.b, p.o, typeof p.n, p.n + 1, p.n === undefined);\n  console.log(p);\n  const q = new Q(false); console.log(q.n, q);\n  console.log((p.o as number) + 1, p.o! + 1);\n  p.init();\n  console.log(p.n + 1, p.b, p.n);\n}\n"
+}

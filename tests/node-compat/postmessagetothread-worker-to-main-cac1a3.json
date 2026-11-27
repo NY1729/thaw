@@ -1,0 +1,5 @@
+{
+  "name": "postMessageToThread worker to main",
+  "expect": "matched",
+  "source": "import * as wt from 'node:worker_threads';\n\nasync function main(): Promise<void> {\n  process.on('workerMessage', (value: any, src: any) => console.log('main workerMessage', JSON.stringify(value), src));\n  const sender = new wt.Worker(`\n    const wt = require('node:worker_threads');\n    const keep = setInterval(() => {}, 1000);\n    wt.parentPort.on('message', (go) => {\n      wt.postMessageToThread(0, { from: 'sender', go }).then((r) => { wt.parentPort.postMessage('sender resolved ' + r); }, (e) => { wt.parentPort.postMessage('sender ' + e.code); });\n    });\n    wt.parentPort.postMessage('ready');\n  `, { eval: true });\n  let message: any = undefined;\n  await new Promise<void>((resolve: () => void): void => { sender.once('message', (m: any) => { message = m; resolve(); }); });\n  sender.postMessage('go');\n  await new Promise<void>((resolve: () => void): void => { sender.once('message', (m: any) => { message = m; resolve(); }); });\n  console.log('from sender:', message);\n  await sender.terminate();\n  console.log('done');\n}"
+}

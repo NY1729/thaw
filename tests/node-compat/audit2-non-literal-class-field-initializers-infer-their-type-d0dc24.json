@@ -1,0 +1,5 @@
+{
+  "name": "audit2 non-literal class field initializers infer their type",
+  "expect": "matched",
+  "source": "class A { static x = 1; static y = A.x + 1; static f = (A.x, \"s\" + A.x); }\nclass C { static count = 0; id = ++C.count; label = \"n\" + this.id; }\nclass B0 { x = 1; }\nclass B extends B0 { y = this.x + 1; big = this.y > 1; }\nfunction main(): void {\n  console.log(A.y, A.f);\n  new C(); const c = new C();\n  console.log(c.id, c.label, new B().y, new B().big);\n}"
+}

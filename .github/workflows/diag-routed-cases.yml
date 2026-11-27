@@ -22,7 +22,7 @@ name: diag-routed-cases
 #   gh workflow run diag-routed-cases.yml -f ref=main -f lift_fetch_blocker=true -f ky_bisect=false \
 #     -f cases="fetch Response from a local http server|unannotated await fetch is a Response|r2c for await over http request body|r2c http chunked response framing headers|r2c Response static members spread of Headers and res.end without arguments"
 #   Read: the job summary (blockers per case) and the artifact diag-routed-cases, out/<slug>/run.stdout.
-#   Hang = run exit 124. Compare run.stdout with tests/node-compat.json expectations.
+#   Hang = run exit 124. Compare run.stdout with tests/node-compat/ expectations.
 
 on:
   workflow_dispatch:
@@ -32,7 +32,7 @@ on:
         type: string
         default: "cfc01bd1"
       cases:
-        description: node-compat case names from tests/node-compat.json, separated by "|" (empty skips the job)
+        description: node-compat case names from tests/node-compat/, separated by "|" (empty skips the job)
         type: string
         default: "node test dot reporter terminates output|nd7 perf_hooks mark detail and PerformanceObserver export"
       lift_fetch_blocker:
@@ -136,15 +136,15 @@ jobs:
           PY
       - name: Build thaw CLI (release)
         run: cargo build --release -p thaw-cli
-      - name: Extract the named cases from tests/node-compat.json
+      - name: Extract the named cases from tests/node-compat/
         run: |
           python3 -I - <<'PY'
           import json, os, pathlib
           d = pathlib.Path(os.environ["D"])
           (d / "cases").mkdir(parents=True, exist_ok=True)
-          data = json.load(open(os.path.join(os.environ["GITHUB_WORKSPACE"], "tests", "node-compat.json"), encoding="utf-8"))
           by_name = {}
-          for case in data["cases"]:
+          for f in sorted(pathlib.Path(os.environ["GITHUB_WORKSPACE"], "tests", "node-compat").glob("*.json")):
+              case = json.load(open(f, encoding="utf-8"))
               by_name.setdefault(case["name"], case)
           names = [n for n in os.environ["CASES"].split("|") if n.strip()]
           index = []
@@ -153,7 +153,7 @@ jobs:
               (d / "cases" / f"{slug}.name").write_text(name + "\n", encoding="utf-8")
               case = by_name.get(name)
               if case is None:
-                  (d / "cases" / f"{slug}.missing").write_text("not found in tests/node-compat.json\n", encoding="utf-8")
+                  (d / "cases" / f"{slug}.missing").write_text("not found in tests/node-compat/\n", encoding="utf-8")
               else:
                   (d / "cases" / f"{slug}.ts").write_text(case["source"], encoding="utf-8")
               index.append(f"{slug}\t{'missing' if case is None else 'ok'}\t{name}")

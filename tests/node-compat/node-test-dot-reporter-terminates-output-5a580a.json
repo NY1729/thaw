@@ -1,0 +1,5 @@
+{
+  "name": "node test dot reporter terminates output",
+  "expect": "matched",
+  "source": "import { dot } from 'node:test/reporters'; async function main(): Promise<void> { const reporter = dot([]); const result = await reporter.next(); console.log(result.done, JSON.stringify(result.value)); }"
+}

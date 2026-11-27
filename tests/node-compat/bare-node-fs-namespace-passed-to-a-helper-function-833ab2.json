@@ -1,0 +1,5 @@
+{
+  "name": "bare node:fs namespace passed to a helper function",
+  "expect": "matched",
+  "source": "import * as fs from 'node:fs';\nfunction use(m: any): boolean { return Object.keys(m).length > 10; }\nfunction main(): void {\n  console.log(use(fs), typeof (fs as any).default, typeof (fs as any).promises.readFile);\n}"
+}

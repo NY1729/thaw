@@ -1,0 +1,5 @@
+{
+  "name": "cluster Worker has no process key without one",
+  "expect": "matched",
+  "source": "import * as cl from 'node:cluster'; function main(): void { const w: any = new (cl as any).Worker(); console.log(Object.keys(w).join(','), w.id, w.state); }"
+}

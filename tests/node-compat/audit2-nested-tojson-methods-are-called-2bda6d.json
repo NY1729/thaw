@@ -1,0 +1,5 @@
+{
+  "name": "audit2 nested toJSON methods are called",
+  "expect": "matched",
+  "source": "class A { toJSON(): { t: number } { return { t: 1 }; } }\nfunction main(): void {\n  console.log(JSON.stringify(new A()), JSON.stringify([new A()]), JSON.stringify({ k: new A() }));\n  console.log(JSON.stringify({ toJSON(k: string) { return \"key:\" + k; } }), JSON.stringify({ a: { toJSON(k: string) { return \"key:\" + k; } } }));\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "error string conversion keeps name prefix",
+  "expect": "matched",
+  "source": "function main(): void { const t = new TypeError('t'); console.log(String(t), `${t}`, 'x: ' + t, t + ''); let s = 'a: '; s += t; console.log(s); try { throw new RangeError('r'); } catch (e: any) { console.log(String(e), `${e}`, 'c: ' + e); } console.log('plain ' + 'text', `${'plain'}`); }"
+}

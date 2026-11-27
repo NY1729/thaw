@@ -1,0 +1,5 @@
+{
+  "name": "r2c module const timer clears itself",
+  "expect": "matched",
+  "source": "const t = setInterval(() => { console.log(\"iv\"); clearInterval(t); }, 1);\nfunction main(): void {}"
+}

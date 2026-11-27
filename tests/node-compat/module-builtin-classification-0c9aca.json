@@ -1,0 +1,5 @@
+{
+  "name": "module builtin classification",
+  "expect": "matched",
+  "source": "import { isBuiltin } from 'node:module'; function main(): void { console.log(isBuiltin('node:fs'), isBuiltin('fs'), isBuiltin('not-a-module')); }"
+}

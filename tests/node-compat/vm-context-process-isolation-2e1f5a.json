@@ -1,0 +1,5 @@
+{
+  "name": "vm context process isolation",
+  "expect": "matched",
+  "source": "import { runInNewContext } from 'node:vm'; function main(): void { console.log(runInNewContext('typeof process')); }"
+}

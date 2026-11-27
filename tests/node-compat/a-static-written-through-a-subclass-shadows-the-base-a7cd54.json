@@ -1,0 +1,5 @@
+{
+  "name": "a static written through a subclass shadows the base",
+  "expect": "matched",
+  "source": "class A { static s: number = 1; static t: string = 'a'; }\nclass B extends A {}\nclass C extends B {}\nasync function main(): Promise<void> {\n  B.s = 10;\n  console.log(A.s, B.s, C.s);\n  C.s = 20;\n  console.log(A.s, B.s, C.s);\n  A.s = 5;\n  console.log(A.s, B.s, C.s);\n  B.t += 'x';\n  console.log(A.t, B.t, C.t);\n}\n"
+}

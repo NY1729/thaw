@@ -1,0 +1,5 @@
+{
+  "name": "audit2 leftovers Object.fromEntries of a number-keyed Map",
+  "expect": "matched",
+  "source": "function main(): void {\n  const m = new Map<number, string>([[1, \"a\"], [2, \"b\"]]);\n  console.log(Object.fromEntries(m));\n  const n = new Map<string, number>([[\"x\", 1]]);\n  console.log(Object.fromEntries(n));\n  console.log(Object.keys(Object.fromEntries(new Map<number, number>([[10, 1], [3, 2]]))));\n}"
+}

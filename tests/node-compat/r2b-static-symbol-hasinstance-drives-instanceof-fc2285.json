@@ -1,0 +1,5 @@
+{
+  "name": "r2b static Symbol.hasInstance drives instanceof",
+  "expect": "matched",
+  "source": "class Even { static [Symbol.hasInstance](n: any) { return n % 2 === 0; } } function main(): void { console.log(2 instanceof (Even as any), 3 instanceof (Even as any)); }"
+}

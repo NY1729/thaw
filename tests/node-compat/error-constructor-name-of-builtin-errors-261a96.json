@@ -1,0 +1,5 @@
+{
+  "name": "error constructor name of builtin errors",
+  "expect": "matched",
+  "source": "function main(): void { try { JSON.parse('{'); } catch (e: any) { console.log(e.constructor.name, e.constructor === SyntaxError, e instanceof SyntaxError); } try { throw new RangeError('r'); } catch (e: any) { console.log(e.constructor.name, e.constructor === RangeError, e.constructor === TypeError); } const o: any = JSON.parse('null'); try { o.x; } catch (e: any) { console.log(e.constructor.name, e.constructor === TypeError); } try { throw new Error('plain'); } catch (e: any) { console.log(e.constructor.name, e.constructor === Error); } const t = new TypeError('t'); console.log(t.constructor.name, t.constructor === TypeError); }"
+}

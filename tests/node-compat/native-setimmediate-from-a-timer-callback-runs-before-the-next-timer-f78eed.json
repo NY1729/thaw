@@ -1,0 +1,5 @@
+{
+  "name": "native setImmediate from a timer callback runs before the next timer",
+  "expect": "matched",
+  "source": "function main(): void {\n  setTimeout(() => {\n    console.log(\"timer\");\n    setImmediate(() => console.log(\"imm1\"));\n    setTimeout(() => console.log(\"timeout0\"), 0);\n    setImmediate(() => console.log(\"imm2\"));\n  }, 1);\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "declgaps loop bindings vs top-level consts",
+  "expect": "matched",
+  "source": "const o: any = { a: 1, b: 2 };\nfor (const k in o) { console.log(k); }\nconst k = 5;\nconsole.log(k);\nconst xs = [1, 2];\nfor (const s of xs) { const d = s * 2; console.log(d); }\nconst d = 9;\nconsole.log(d);\nfunction main(): void {}"
+}

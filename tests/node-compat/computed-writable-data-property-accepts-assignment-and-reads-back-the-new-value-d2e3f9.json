@@ -1,0 +1,5 @@
+{
+  "name": "computed writable data property accepts assignment and reads back the new value",
+  "expect": "matched",
+  "source": "function main(): void {\n  const o: any = Object.defineProperties({ a: 1 }, { ['w' + 'x']: { value: 1, enumerable: true, writable: true, configurable: true } });\n  o.wx = 5;\n  console.log(o.wx, Object.keys(o).join());\n}"
+}

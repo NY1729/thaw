@@ -1,0 +1,5 @@
+{
+  "name": "JSON.stringify of an Error",
+  "expect": "matched",
+  "source": "function main(): void {\n  const e = new Error(\"m\") as any; e.code = \"C\";\n  console.log(JSON.stringify(e), JSON.stringify(new Error(\"z\")));\n}\n"
+}

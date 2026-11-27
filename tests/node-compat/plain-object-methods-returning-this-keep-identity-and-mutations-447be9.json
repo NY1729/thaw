@@ -1,0 +1,5 @@
+{
+  "name": "plain object methods returning this keep identity and mutations",
+  "expect": "matched",
+  "source": "const o = {\n  n: 0,\n  inc() { this.n++; return this; },\n  dec() { this.n--; },\n  show() { return this.n; },\n};\nfunction main(): void {\n  console.log(o.inc() === o, o.n);\n  const r = o.inc();\n  r.inc();\n  console.log(o.n, r.n, o.inc().inc().n, o.n);\n  o.dec(); o.dec();\n  console.log(o.n, o.show());\n}\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "r3a class expressions in value position",
+  "expect": "matched",
+  "source": "function main(): void { const a = new (class Foo { x = 3; get(): number { return this.x; } })(); console.log(a.get(), typeof class {}); function mk() { return class { v = 1; }; } const C = mk(); console.log(new C().v); }"
+}

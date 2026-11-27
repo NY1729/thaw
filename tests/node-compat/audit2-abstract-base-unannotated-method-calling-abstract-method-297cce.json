@@ -1,0 +1,5 @@
+{
+  "name": "audit2 abstract base unannotated method calling abstract method",
+  "expect": "matched",
+  "source": "abstract class Base { abstract area(): number; d() { return this.area() + 1; } }\nclass Sq extends Base { area(): number { return 4; } }\nfunction main(): void { console.log(new Sq().d()); const b: Base = new Sq(); console.log(b.d(), b.area()); }"
+}

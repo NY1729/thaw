@@ -1,0 +1,5 @@
+{
+  "name": "audit2 C Promise catch void callback widens result",
+  "expect": "matched",
+  "source": "async function fail(): Promise<number> { throw new Error(\"x\"); }\nasync function main(): Promise<void> {\n  const ok: Promise<number> = Promise.resolve(1);\n  const swallowed = ok.catch(() => {});\n  const failed = fail().catch(() => {});\n  console.log(await swallowed, await failed);\n  const mapped = fail().catch((e: Error) => e.message.length);\n  console.log(await mapped);\n  const chain = Promise.resolve().catch(() => 5);\n  console.log(await chain);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "class fields: constructor-less bare fields read undefined",
+  "expect": "matched",
+  "source": "class A { x: number; s: string; b: boolean; }\nclass B extends A { y: number[]; }\nfunction main(): void {\n  const a = new A();\n  console.log(a.x, a.s, a.b, typeof a.x, a.x === undefined);\n  console.log(a);\n  const b = new B();\n  console.log(b);\n  a.x = 3; a.s = \"q\";\n  console.log(a, a.x + 1);\n  console.log(JSON.stringify(new A()));\n}\n"
+}

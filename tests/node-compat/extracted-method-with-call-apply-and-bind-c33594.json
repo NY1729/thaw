@@ -1,0 +1,5 @@
+{
+  "name": "extracted method with call, apply and bind",
+  "expect": "matched",
+  "source": "const o = { base: 10, inc(n: number): number { return this.base + n; } };\nasync function main(): Promise<void> {\n  const f = o.inc;\n  try { f(1); console.log(\"no throw\"); } catch (e) { console.log(\"threw\", (e as Error).name); }\n  console.log(f.call({ base: 5 }, 1));\n  console.log(f.apply({ base: 6 }, [1]));\n  const g = f.bind({ base: 7 });\n  console.log(g(1));\n  console.log(o.inc.call({ base: 100 }, 1));\n  const o2 = { base: 100, inc: o.inc };\n  console.log(o2.inc(1), o.inc(1));\n}\n"
+}

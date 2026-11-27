@@ -1,0 +1,5 @@
+{
+  "name": "process platform, arch and debugPort match Node",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(process.platform, process.arch, process.debugPort, typeof process.version);\n}"
+}

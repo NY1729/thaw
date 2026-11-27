@@ -1,0 +1,5 @@
+{
+  "name": "nd9 destructured parameter default empty array over optional array field",
+  "expect": "matched",
+  "source": "interface Cfg { host?: string; list?: string[] }\nfunction conn({ host = \"localhost\", list = [] }: Cfg = {}) { return `${host} n=${list.length}`; }\nfunction main(): void { console.log(conn(), conn({ list: [\"a\"] })); }\n"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "unref keeps a spawned child from holding the process open",
+  "expect": "matched",
+  "source": "import { spawn } from 'node:child_process'; function main(): void { const child = spawn('sleep', ['1.5'], { stdio: 'ignore' }); child.unref(); child.on('exit', () => { console.log('child exited'); }); console.log('started'); }"
+}

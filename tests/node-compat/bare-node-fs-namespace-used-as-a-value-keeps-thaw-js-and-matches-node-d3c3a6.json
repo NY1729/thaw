@@ -1,0 +1,5 @@
+{
+  "name": "bare node:fs namespace used as a value keeps thaw-js and matches Node",
+  "expect": "matched",
+  "source": "import * as fs from 'node:fs';\nconst f: any = fs;\nfunction main(): void {\n  console.log(typeof f.existsSync, f.existsSync('/nonexistent'), typeof f.promises, typeof f.constants);\n}"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "native unref ref hasRef and nested timers",
+  "expect": "matched",
+  "source": "function main(): void {\n  setTimeout(() => console.log(\"unref never\"), 500).unref();\n  const t = setTimeout(() => console.log(\"kept\"), 80);\n  console.log(t.hasRef());\n  t.unref();\n  console.log(t.hasRef());\n  t.ref();\n  console.log(t.hasRef());\n  setTimeout(() => {\n    console.log(\"outer\");\n    setTimeout(() => {\n      console.log(\"inner\");\n      setTimeout(() => console.log(\"innermost\"), 0);\n    }, 0);\n  }, 2);\n}\n"
+}

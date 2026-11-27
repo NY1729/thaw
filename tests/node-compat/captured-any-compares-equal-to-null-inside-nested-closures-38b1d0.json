@@ -1,0 +1,5 @@
+{
+  "name": "captured any compares equal to null inside nested closures",
+  "expect": "matched",
+  "source": "import zlib from 'node:zlib';\nfunction main(): void {\n  const input = Buffer.from('hello world hello world');\n  zlib.gzip(input, (e: any, packed: Buffer) => {\n    zlib.gunzip(packed, (e2: any, plain: Buffer) => {\n      setTimeout(() => {\n        console.log('deep', e === null, e2 === null, plain.length === input.length);\n      }, 1);\n    });\n    const direct = e === null;\n    setTimeout(() => { console.log('mid', e === null, direct); }, 1);\n  });\n}\n"
+}

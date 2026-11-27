@@ -1,0 +1,5 @@
+{
+  "name": "crypto hash copy",
+  "expect": "matched",
+  "source": "import { createHash } from 'node:crypto'; function main(): void { const base = createHash('sha256'); base.update('prefix'); const left = base.copy(); const right = base.copy(); console.log(left.update('a').digest('hex'), right.update('b').digest('hex')); }"
+}

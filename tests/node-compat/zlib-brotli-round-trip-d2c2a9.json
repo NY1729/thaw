@@ -1,0 +1,5 @@
+{
+  "name": "zlib brotli round trip",
+  "expect": "matched",
+  "source": "import { brotliCompressSync, brotliDecompressSync } from 'node:zlib'; function main(): void { const compressed = brotliCompressSync('brotli value'); console.log(brotliDecompressSync(compressed).toString()); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "g034 generators delegation throw",
+  "expect": "matched",
+  "source": "function* inner() { yield \"i\"; return \"ret\"; }\nfunction* d() { yield* [1, 2]; const r: string = yield* inner(); yield r; }\nfunction* g2() { try { yield 1; } catch (e) { console.log(\"caught\", e); yield \"after\"; } }\nfunction main(): void {\n  console.log([...d()]);\n  const gt = g2();\n  gt.next();\n  console.log(gt.throw(\"boom\"));\n  console.log(gt.next().done);\n}"
+}

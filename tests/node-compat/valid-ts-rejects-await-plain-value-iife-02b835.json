@@ -1,0 +1,5 @@
+{
+  "name": "valid ts rejects: await plain value iife",
+  "expect": "matched",
+  "source": "async function h(): Promise<void> { await null; console.log(\"h\"); }\nasync function main(): Promise<void> {\n  console.log(\"start\");\n  const pending = (async () => {\n    await null;\n    console.log(\"iife after null\");\n  })();\n  console.log(\"sync\");\n  await pending;\n  await h();\n  const x = await 5;\n  const s = await \"str\";\n  console.log(x, s);\n  const f = async () => { const y = await 7; console.log(y); };\n  await f();\n  const v = await (async () => { await Promise.resolve(1); return 5; })();\n  console.log(v);\n}"
+}

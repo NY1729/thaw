@@ -1,0 +1,5 @@
+{
+  "name": "bare node:path namespace has Node's Module shape: default key, toStringTag, no __esModule",
+  "expect": "matched",
+  "source": "import * as p from 'node:path';\nconst q: any = p;\nfunction main(): void {\n  console.log(Object.keys(q).includes('default'), Object.prototype.toString.call(q), typeof q.default.__esModule);\n}"
+}

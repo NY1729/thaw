@@ -1,0 +1,5 @@
+{
+  "name": "generator as any throw into any generator",
+  "expect": "matched",
+  "source": "function* gen() { try { yield 1; } catch (e: any) { console.log(\"caught\", e.message); yield 7; } }\nfunction main(): void {\n  const g: any = gen();\n  g.next();\n  console.log(g.throw(new Error(\"x\")));\n}"
+}

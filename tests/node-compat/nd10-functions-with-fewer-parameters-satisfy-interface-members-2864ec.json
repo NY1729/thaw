@@ -1,0 +1,5 @@
+{
+  "name": "nd10 functions with fewer parameters satisfy interface members",
+  "expect": "matched",
+  "source": "interface D { apply(t: number, extra: string[]): number }\nclass P implements D { apply(t: number) { return t * 2; } }\nclass Q implements D { apply(t: number): number { return t * 3; } }\ninterface Cb { run(a: number, b: string, c: boolean): string }\nfunction main(): void {\n  const d: D = new P();\n  const q: D = new Q();\n  const o: D = { apply: (t: number) => t * 4 };\n  const cb: Cb = { run(a) { return \"n\" + a; } };\n  console.log(d.apply(2, [\"x\"]), q.apply(2, [\"y\"]), o.apply(2, [\"z\"]), cb.run(1, \"b\", true));\n}\n"
+}

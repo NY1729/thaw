@@ -1,0 +1,5 @@
+{
+  "name": "r2b RegExp constructor source escapes slash and line terminators",
+  "expect": "matched",
+  "source": "function main(): void { console.log(RegExp('a/b').source, new RegExp('a/b').source, JSON.stringify(new RegExp('\\n').source), new RegExp('[/]').source, new RegExp('').source); }"
+}

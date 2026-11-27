@@ -1,0 +1,5 @@
+{
+  "name": "node:sqlite NULL, real, text and infinite values",
+  "expect": "matched",
+  "source": "import { DatabaseSync } from 'node:sqlite';\nfunction main(): void {\n  const db = new DatabaseSync(':memory:');\n  const row: any = db.prepare('SELECT ? AS n, ? AS r, ? AS t, ? AS i, ? AS inf').get(null, 1.5, 'hello', 7, Infinity);\n  console.log(row.n, row.r, row.t, row.i, row.inf);\n  console.log(JSON.stringify(db.prepare('SELECT typeof(?) AS a, typeof(?) AS b').get(2, 'x')));\n  db.close();\n}"
+}

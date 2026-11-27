@@ -1,0 +1,5 @@
+{
+  "name": "audit2 this in a plain function and arrow",
+  "expect": "matched",
+  "source": "function main(): void {\n  console.log(\"before\");\n  console.log((() => { return typeof this; })());\n  console.log(typeof this, \"after\");\n}"
+}

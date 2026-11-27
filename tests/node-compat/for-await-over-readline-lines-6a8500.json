@@ -1,0 +1,5 @@
+{
+  "name": "for await over readline lines",
+  "expect": "matched",
+  "source": "import readline from 'node:readline';\nimport { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const rl = readline.createInterface({ input: Readable.from(['x\\ny\\n']) });\n  for await (const line of rl) { console.log('line', line); }\n  console.log('done');\n}\n"
+}

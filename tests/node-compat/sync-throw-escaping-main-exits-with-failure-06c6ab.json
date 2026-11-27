@@ -1,0 +1,6 @@
+{
+  "name": "sync throw escaping main exits with failure",
+  "expect": "matched",
+  "exitCode": 1,
+  "source": "function main(): void { console.log('before'); throw new Error('sync fatal'); }"
+}

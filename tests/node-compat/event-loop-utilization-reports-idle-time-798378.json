@@ -1,0 +1,5 @@
+{
+  "name": "event loop utilization reports idle time",
+  "expect": "matched",
+  "source": "import { performance } from 'node:perf_hooks'; function main(): void { const before = performance.eventLoopUtilization(); console.log(before.idle === 0, before.active === 0, before.utilization === 0); setTimeout(() => { const first = performance.eventLoopUtilization(); setTimeout(() => { const delta = performance.eventLoopUtilization(first); console.log(delta.idle > 0, delta.active >= 0, delta.utilization >= 0 && delta.utilization < 1); const whole = performance.eventLoopUtilization(); console.log(whole.idle > 0, whole.active > 0, whole.idle + whole.active > 40); }, 60); }, 10); }"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "object create typed view write stays own",
+  "expect": "matched",
+  "source": "function main(): void {\n  const proto = { a: 1 };\n  const o = Object.create(proto) as { a: number; b?: number };\n  o.a = 5;\n  console.log(JSON.stringify(o), JSON.stringify(proto));\n}"
+}

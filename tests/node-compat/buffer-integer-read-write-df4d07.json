@@ -1,0 +1,5 @@
+{
+  "name": "buffer integer read write",
+  "expect": "matched",
+  "source": "import { Buffer } from 'node:buffer'; function main(): void { const value = Buffer.alloc(8); value.writeUInt16LE(0x1234, 0); value.writeInt32BE(-123456, 2); console.log(value.readUInt16LE(0), value.readInt32BE(2)); }"
+}

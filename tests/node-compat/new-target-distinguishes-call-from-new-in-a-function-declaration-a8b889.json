@@ -1,0 +1,5 @@
+{
+  "name": "new.target distinguishes call from new in a function declaration",
+  "expect": "matched",
+  "source": "function F(this: any): void { console.log(new.target === undefined, new.target === F); } function main(): void { F(); new F(); }"
+}

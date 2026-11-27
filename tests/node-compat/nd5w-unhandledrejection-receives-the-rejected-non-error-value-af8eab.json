@@ -1,0 +1,5 @@
+{
+  "name": "nd5w unhandledRejection receives the rejected non-Error value",
+  "expect": "matched",
+  "source": "function main(): void { process.on(\"unhandledRejection\", (r: any) => { console.log(\"UR:\", r instanceof Error ? \"Error \" + r.message : r, typeof r); }); Promise.reject(\"late\"); Promise.reject(new Error(\"boom\")); setTimeout(() => {}, 20); }"
+}

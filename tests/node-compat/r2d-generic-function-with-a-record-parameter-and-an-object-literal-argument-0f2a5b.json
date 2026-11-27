@@ -1,0 +1,5 @@
+{
+  "name": "r2d generic function with a Record parameter and an object literal argument",
+  "expect": "matched",
+  "source": "function count<T extends object>(t: T, s: Record<string, string>): number {\n  return Object.keys(s).length + Object.keys(t).length;\n}\nfunction main(): void {\n  console.log(count({ a: 1 }, { name: \"string\", id: \"number\" }));\n}\n"
+}

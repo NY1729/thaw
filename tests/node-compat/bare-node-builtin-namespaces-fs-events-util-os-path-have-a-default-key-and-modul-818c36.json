@@ -1,0 +1,5 @@
+{
+  "name": "bare node builtin namespaces fs/events/util/os/path have a default key and Module tag",
+  "expect": "matched",
+  "source": "import * as fs from 'node:fs';\nimport * as events from 'node:events';\nimport * as util from 'node:util';\nimport * as os from 'node:os';\nimport * as path from 'node:path';\nconst all: any = { fs, events, util, os, path };\nfunction main(): void {\n  for (const k of Object.keys(all)) console.log(k, typeof all[k].default, Object.keys(all[k]).includes('default'), Object.prototype.toString.call(all[k]));\n}"
+}

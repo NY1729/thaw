@@ -1,0 +1,6 @@
+{
+  "name": "unhandled rejection of a string exits 1",
+  "expect": "matched",
+  "exitCode": 1,
+  "source": "function main(): void { Promise.reject(\"plain reason\"); }"
+}

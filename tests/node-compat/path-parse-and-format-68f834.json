@@ -1,0 +1,5 @@
+{
+  "name": "path parse and format",
+  "expect": "matched",
+  "source": "import { format, parse } from 'node:path'; function main(): void { const value = parse('/tmp/demo.txt'); console.log(value.dir, value.name, value.ext, format(value)); }"
+}

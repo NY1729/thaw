@@ -1,0 +1,5 @@
+{
+  "name": "audit2 any[] cursor keeps nested links",
+  "expect": "matched",
+  "source": "function main(): void {\n  const root: any[] = []; let cur = root;\n  for (let i = 0; i < 3; i++) { const n: any[] = []; cur.push(n); cur = n; }\n  console.log(JSON.stringify(root));\n  const r: any[] = []; const n: any[] = []; r.push(n); n.push(1); console.log(JSON.stringify(r));\n}"
+}

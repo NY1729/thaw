@@ -1,0 +1,5 @@
+{
+  "name": "typed callback stored in a rest-any callback slot receives decoded arguments",
+  "expect": "matched",
+  "source": "function call(f: (...args: any[]) => void, ...args: any[]): void { f(...args); }\nfunction main(): void {\n  call((n: number) => console.log('a', n), 1);\n  call((a: number, b: string) => console.log('f', a, b), 1);\n  call((...r: any[]) => console.log('g', r), 1, 2);\n}"
+}

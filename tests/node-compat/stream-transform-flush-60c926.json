@@ -1,0 +1,5 @@
+{
+  "name": "stream transform flush",
+  "expect": "matched",
+  "source": "import { Readable, Transform } from 'node:stream'; import { once } from 'node:events'; async function main(): Promise<void> { const output: string[] = []; const stream = new Transform({ transform(_chunk, _encoding, callback): void { callback(null, 'x'); }, flush(callback): void { callback(null, 'z'); } }); stream.on('data', (chunk): void => { output.push(chunk.toString()); }); Readable.from(['a']).pipe(stream); await once(stream, 'end'); console.log(output.join('')); }"
+}

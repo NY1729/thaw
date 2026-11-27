@@ -1,0 +1,5 @@
+{
+  "name": "vm context timeout interrupts a runaway script",
+  "expect": "matched",
+  "source": "import { runInNewContext, runInContext, createContext } from 'node:vm'; function main(): void { const context = createContext({}); try { runInContext('while (true) {}', context, { timeout: 30 }); } catch (error: any) { console.log(error.code, error.message); } console.log(runInContext('1 + 1', context)); try { runInNewContext('for (;;) {}', {}, { timeout: 20 }); } catch (error: any) { console.log(error.code, error instanceof Error); } }"
+}

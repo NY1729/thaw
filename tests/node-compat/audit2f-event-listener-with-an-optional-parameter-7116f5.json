@@ -1,0 +1,5 @@
+{
+  "name": "audit2f event listener with an optional parameter",
+  "expect": "matched",
+  "source": "import { EventEmitter } from \"node:events\"; function main(): void { const e = new EventEmitter(); e.on(\"a\", (x: number, y?: string) => console.log(\"a\", x, y)); e.emit(\"a\", 1); e.emit(\"a\", 1, \"s\", \"extra\"); e.once(\"b\", (x: number) => console.log(\"b\", x)); e.emit(\"b\", 7); e.emit(\"b\", 8); console.log(e.listenerCount(\"b\"), e.eventNames()); }"
+}

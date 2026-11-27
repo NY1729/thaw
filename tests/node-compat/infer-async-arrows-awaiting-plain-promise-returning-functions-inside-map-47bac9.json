@@ -1,0 +1,5 @@
+{
+  "name": "infer async arrows awaiting plain promise-returning functions inside map",
+  "expect": "matched",
+  "source": "const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));\nfunction pause(ms: number): Promise<void> { return new Promise<void>((r) => setTimeout(r, ms)); }\nasync function main(): Promise<void> {\n  const rs = await Promise.all([1, 2, 3].map(async (x) => { await sleep(5 * (4 - x)); return x; }));\n  console.log(rs);\n  const g = async (x: number) => { await pause(1); return x * 2; };\n  console.log(await g(21));\n  let n = 0;\n  await Promise.all([1, 2].map(async (x) => { await pause(1); n += x; }));\n  console.log(n);\n}"
+}

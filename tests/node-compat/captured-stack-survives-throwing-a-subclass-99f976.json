@@ -1,0 +1,5 @@
+{
+  "name": "captured stack survives throwing a subclass",
+  "expect": "matched",
+  "source": "class MyErr extends Error {\n  constructor(msg: string) {\n    super(msg);\n    this.name = \"MyErr\";\n    Error.captureStackTrace(this, this.constructor);\n  }\n}\nfunction main(): void {\n  try { throw new MyErr(\"boom\"); } catch (x: any) {\n    console.log(String(x.stack).split(\"\\n\")[0], x.name, x instanceof MyErr);\n  }\n}\n"
+}
