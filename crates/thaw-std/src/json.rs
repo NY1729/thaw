@@ -1297,6 +1297,18 @@ fn bytes_wrapper(value: &Value) -> Option<Value> {
     )))
 }
 
+/// What `JSON.stringify` sees for a `Bytes` value: an `ArrayBuffer` / `DataView` has no own
+/// enumerable properties (`{}`), every other kind is the Buffer wrapper.
+fn bytes_stringify_form(value: &Value) -> Option<Value> {
+    // On the thaw-js wire the bytes must arrive (as the Buffer wrapper), not `{}`.
+    if !DATE_WIRE.with(Cell::get)
+        && matches!(value, Value::Bytes(bytes) if matches!(bytes.kind(), 1 | 2))
+    {
+        return Some(Value::shared_object(indexmap::IndexMap::new()));
+    }
+    bytes_wrapper(value)
+}
+
 fn bytes_to_json_text(bytes: &BytesRef, out: &mut Vec<u8>) {
     let data = bytes.bytes();
     let list = |out: &mut Vec<u8>| {
@@ -3145,7 +3157,7 @@ fn ordered_object_fields_shared(fields: &SharedObject) -> Vec<(&Vec<u8>, &Value)
 // `JSON.stringify(...)` call, precisely because it's reached *only*
 // from there -- see its own doc comment.
 fn ordered_json(value: &Value) -> Value {
-    if let Some(wrapper) = bytes_wrapper(value) {
+    if let Some(wrapper) = bytes_stringify_form(value) {
         return ordered_json(&wrapper);
     }
     let Some(_ancestor) = stringify_ancestor(value) else {
@@ -3293,7 +3305,7 @@ fn ordered_json(value: &Value) -> Value {
 /// before they ever reach here -- see `top_level_undefined_string`'s
 /// own doc comment.
 fn ordered_json_omitting_undefined(value: &Value) -> Value {
-    if let Some(wrapper) = bytes_wrapper(value) {
+    if let Some(wrapper) = bytes_stringify_form(value) {
         return ordered_json_omitting_undefined(&wrapper);
     }
     if non_finite_number(value).is_some() {

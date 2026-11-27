@@ -1,2 +1,7 @@
 [env]
 RUST_MIN_STACK = { value = "67108864", force = false }
+
+# Stack traces walk the frame-pointer chain; keeping it through Rust runtime/engine frames lets
+# `Error.stack` see compiled callers of callbacks the thaw-js engine invokes (see stack_fidelity_callbacks).
+[build]
+rustflags = ["-C", "force-frame-pointers=yes"]
