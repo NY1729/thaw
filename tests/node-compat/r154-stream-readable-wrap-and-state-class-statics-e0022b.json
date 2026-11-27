@@ -1,0 +1,5 @@
+{
+  "name": "r154 stream Readable.wrap and state class statics",
+  "expect": "matched",
+  "source": "import * as stream from 'node:stream';\nfunction main(): void {\n  const s: any = stream;\n  console.log(typeof s.Readable.wrap, typeof s.Readable.ReadableState, typeof s.Writable.WritableState);\n  const w: any = new s.Readable.ReadableState({ objectMode: true });\n  console.log(Object.keys(w), w.highWaterMark);\n  const src: any = s.Readable.from(['a', 'b']);\n  const wrapped: any = s.Readable.wrap(src);\n  const out: string[] = [];\n  wrapped.on('data', (c: any) => out.push(String(c)));\n  wrapped.on('end', () => console.log(out.join(',')));\n}\n"
+}

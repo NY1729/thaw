@@ -150,3 +150,45 @@ ok.fail = fail; ok.rejects = rejects; ok.doesNotReject = doesNotReject; ok.throw
 function strict(value, message) { if (!value) failure(value, true, message, '==', strict, arguments.length ? show(value) + ' == true' : 'No value argument passed to `assert.ok()`'); }
 Object.assign(strict, ok, { equal: strictEqual, notEqual: notStrictEqual, deepEqual: deepStrictEqual, notDeepEqual: notDeepStrictEqual }); strict.strict = strict; strict.default = strict; ok.strict = strict;
 
+function argError(code, Type, message) { var e = new Type(message); e.code = code; return e; }
+function Assert(options) {
+if (!(this instanceof Assert)) throw argError('ERR_CONSTRUCT_CALL_REQUIRED', TypeError, 'Class constructor Assert cannot be invoked without `new`');
+if (options !== undefined && options !== null && typeof options !== 'object') options = undefined;
+if (options && options.diff !== undefined && options.diff !== 'simple' && options.diff !== 'full') throw argError('ERR_INVALID_ARG_VALUE', TypeError, "The property 'options.diff' must be one of: 'simple', 'full'. Received " + show(options.diff));
+this.AssertionError = AssertionError;
+if (!options || options.strict !== false) { this.equal = strictEqual; this.deepEqual = deepStrictEqual; this.notEqual = notStrictEqual; this.notDeepEqual = notDeepStrictEqual; }
+}
+['fail', 'ok', 'equal', 'notEqual', 'deepEqual', 'notDeepEqual', 'deepStrictEqual', 'notDeepStrictEqual', 'strictEqual', 'notStrictEqual', 'throws', 'rejects', 'doesNotThrow', 'doesNotReject', 'ifError', 'match', 'doesNotMatch'].forEach(function(name) {
+var fn = ok[name]; Object.defineProperty(Assert.prototype, name, { value: function() { return fn.apply(undefined, arguments); }, writable: true, configurable: true });
+});
+ok.Assert = Assert;
+function CallTracker() { this._tracked = []; }
+CallTracker.prototype.calls = function(fn, expected) {
+if (typeof fn === 'number') { expected = fn; fn = undefined; }
+if (fn === undefined) fn = function() {};
+if (typeof fn !== 'function') throw argError('ERR_INVALID_ARG_TYPE', TypeError, 'The "fn" argument must be of type function. Received ' + received(fn));
+if (expected === undefined) expected = 1;
+if (typeof expected !== 'number') throw argError('ERR_INVALID_ARG_TYPE', TypeError, 'The "expected" argument must be of type number. Received ' + received(expected));
+if (!(expected >= 1 && expected <= 4294967295) || expected % 1 !== 0) throw argError('ERR_OUT_OF_RANGE', RangeError, 'The value of "expected" is out of range. It must be >= 1 && <= 4294967295. Received ' + expected);
+var entry = { fn: fn, expected: expected, calls: [] };
+var tracked = function() { entry.calls.push({ thisArg: this === globalThis ? undefined : this, arguments: Array.prototype.slice.call(arguments) }); return fn.apply(this, arguments); };
+entry.tracked = tracked; this._tracked.push(entry); return tracked;
+};
+CallTracker.prototype._find = function(tracked) {
+if (typeof tracked !== 'function') throw argError('ERR_INVALID_ARG_TYPE', TypeError, 'The "tracked" argument must be of type function. Received ' + received(tracked));
+for (var i = 0; i < this._tracked.length; i++) if (this._tracked[i].tracked === tracked) return this._tracked[i];
+throw argError('ERR_INVALID_ARG_VALUE', TypeError, "The argument 'tracked' is not a tracked function. Received " + show(tracked));
+};
+CallTracker.prototype.getCalls = function(tracked) { return this._find(tracked).calls.slice(); };
+CallTracker.prototype.reset = function(tracked) { if (tracked === undefined) this._tracked.forEach(function(e) { e.calls = []; }); else this._find(tracked).calls = []; };
+CallTracker.prototype.report = function() {
+return this._tracked.filter(function(e) { return e.calls.length !== e.expected; }).map(function(e) {
+return { message: 'Expected the ' + (e.fn.name || 'calls') + ' function to be executed ' + e.expected + ' time(s) but was executed ' + e.calls.length + ' time(s).', actual: e.calls.length, expected: e.expected, operator: e.fn.name || 'calls', stack: new Error() };
+});
+};
+CallTracker.prototype.verify = function() {
+var errors = this.report(); if (errors.length === 0) return;
+var message = errors.length === 1 ? errors[0].message : 'Functions were not called the expected number of times';
+throw new AssertionError({ message: message, stackStartFn: this.verify });
+};
+ok.CallTracker = CallTracker; strict.CallTracker = CallTracker; strict.Assert = Assert;
