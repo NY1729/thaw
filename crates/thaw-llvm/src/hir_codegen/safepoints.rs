@@ -61,12 +61,12 @@ impl<'ctx> HirCompiler<'ctx> {
             next = usage.get_next_use();
             let user = match usage.get_user() {
                 inkwell::values::AnyValueEnum::InstructionValue(user) => user,
-                // The `Error.stack` symbol table row `{ fn, name, file, line, column }` only reads the
+                // The `Error.stack` symbol table row `{ fn, name, file, line, column, via }` only reads the
                 // address. ponytail: matched by its printed form; any other constant user escapes.
                 inkwell::values::AnyValueEnum::StructValue(row)
                     if inkwell::values::AnyValue::print_to_string(&row)
                         .to_string()
-                        .starts_with("{ ptr, ptr, ptr, i32, i32 } { ptr @") =>
+                        .starts_with("{ ptr, ptr, ptr, i32, i32, ptr } { ptr @") =>
                 {
                     continue
                 }
