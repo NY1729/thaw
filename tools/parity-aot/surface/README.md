@@ -22,3 +22,13 @@ Committed inventory (all modules + globals, Node 22.23): `tools/parity-aot/inven
 Cache: `PARITY_AOT_CACHE` (default `$OUT/cache`), key = sha256(thaw binary, program text); a rerun with the same binary
 does no builds. Build-fail causes show the first diagnostic line; the probe id says which member.
 @types/node cross-check is not done (inventory is Node-only).
+
+Declaration drift (not probes, run against the committed inventory; no thaw build needed):
+- `arity_sync.py [--fix]`: declared `Function.length` of every registry d.ts function vs Node's (inventory). thaw's length is the
+  number of non-rest parameters of the first overload, so the d.ts parameter lists must be shaped to Node's. `--fix` rewrites
+  `resolution.rs`; callback-typed and overloaded signatures are only reported (an extra parameter breaks the native lowering /
+  overload resolution; `f(a)` + `f(a, b)` pairs with one return type are merged into `f(a, b?)`).
+- `gen_data.py [--check]`: Node's own constant tables (os/http2/zlib/perf_hooks/crypto/module constants, async_hooks.asyncWrapProviders,
+  dns codes, process.config) -> `crates/thaw-registry/src/registry/builtins/surface_data.rs`, merged into `module.exports` by
+  `builtins.rs`. Needs the pinned Node 22.23.
+- `unsupported.json`: what is deliberately not implemented, with the reason.
