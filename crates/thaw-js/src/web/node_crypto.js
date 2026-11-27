@@ -976,6 +976,7 @@ class X509Certificate {
     if (x.san !== undefined) out.subjectaltname = x.san;
     if (x.aia) { var info = {}; for (var e of x.aia) (info[e[0]] = info[e[0]] || []).push(e[1]); out.infoAccess = info; }
     out.ca = this.ca;
+    var ecDone = false;
     try {
       var spki = derChildren(derBytes(x.spki), derRead(derBytes(x.spki), 0)), bits = derBytes(x.spki).subarray(spki[1].body + 1, spki[1].end), key = derRead(bits, 0), kids = derChildren(bits, key);
       if (kids.length === 2 && kids[0].tag === 0x02) {
@@ -985,7 +986,17 @@ class X509Certificate {
         out.exponent = '0x' + BigInt('0x' + ex.toString('hex')).toString(16);
       }
     } catch (_) {}
-    out.pubkey = Buffer.from(x.spki).subarray(0); 
+    try {
+      var sp = derBytes(x.spki), top = derChildren(sp, derRead(sp, 0)), alg = derChildren(sp, top[0]);
+      if (derOid(sp, alg[0]) === '1.2.840.10045.2.1') {
+        var curveOid = derOid(sp, alg[1]), curves = { '1.2.840.10045.3.1.7': ['prime256v1', 'P-256', 256], '1.3.132.0.34': ['secp384r1', 'P-384', 384], '1.3.132.0.35': ['secp521r1', 'P-521', 521], '1.3.132.0.10': ['secp256k1', undefined, 256] }, info = curves[curveOid];
+        out.bits = info ? info[2] : undefined;
+        out.pubkey = Buffer.from(sp.subarray(top[1].body + 1, top[1].end));
+        if (info) { out.asn1Curve = info[0]; if (info[1]) out.nistCurve = info[1]; }
+        ecDone = true;
+      }
+    } catch (_) {}
+    if (!ecDone) out.pubkey = Buffer.from(x.spki);
     out.valid_from = this.validFrom; out.valid_to = this.validTo;
     out.fingerprint = this.fingerprint; out.fingerprint256 = this.fingerprint256; out.fingerprint512 = this.fingerprint512;
     if (x.eku) out.ext_key_usage = x.eku;
