@@ -1,0 +1,5 @@
+{
+  "name": "r154 buffer atob and btoa called through any without arguments",
+  "expect": "matched",
+  "source": "import * as M from 'node:buffer';\nfunction p(name: string, fn: () => any): void {\n  try { console.log(name, String(fn())); } catch (e: any) { console.log(name, 'THROW', e.name, e.code, e.message); }\n}\nfunction main(): void {\n  p('atob()', () => { const f: any = M.atob; return f(); });\n  p('btoa()', () => { const f: any = M.btoa; return f(); });\n  p('atob(x)', () => { const f: any = M.atob; return f('aGk='); });\n  p('btoa(x)', () => { const f: any = M.btoa; return f('hi'); });\n  console.log(M.atob('aGk='), M.btoa('hi'), M.atob.length, M.btoa.length);\n  try { M.atob('***'); } catch (e: any) { console.log(e.name); }\n}\n"
+}
