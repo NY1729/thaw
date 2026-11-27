@@ -799,6 +799,12 @@ fn generate_registry_shims_pass(
         if packages.len() < 2 {
             continue;
         }
+        // One FastPath owner keeps the bare native symbol; the Fallback packages are reached
+        // through their package-qualified aliases (`net.createServer` next to `http.createServer`).
+        // Only two native symbols with one name are a real clash.
+        if packages.iter().filter(|(_, is_fast_path)| *is_fast_path).count() < 2 {
+            continue;
+        }
         if let Some((fast_path_pkg, _)) = packages.iter().find(|(_, is_fast_path)| *is_fast_path) {
             let other_pkg = packages
                 .iter()
