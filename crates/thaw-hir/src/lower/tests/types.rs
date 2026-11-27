@@ -6157,3 +6157,17 @@ fn tagged_template_with_fixed_parameters_keeps_the_declared_count() {
     assert!(body.contains("Let(\"__thaw_template_arg_"), "{body}");
     assert!(body.contains("Var(\"__thaw_template_arg_"), "{body}");
 }
+
+#[test]
+fn top_level_const_arrow_params_are_inferred_from_call_sites_in_js_programs() {
+    let module = thaw_parser::parse_typescript(
+        "const sq = (x) => x * x; function main(): void { console.log(sq(4)); }",
+    )
+    .expect("parse error");
+    crate::set_implicit_any(true);
+    let result = lower_module(&module);
+    crate::set_implicit_any(false);
+    let program = result.expect("lowers");
+    let sq = program.functions.iter().find(|f| f.name == "sq").expect("sq is a function declaration");
+    assert_eq!(sq.params[0].ty, HirType::F64);
+}
