@@ -852,6 +852,32 @@ fn rsa_pkcs1v15_extra_prefix(digest_algorithm: &str) -> Option<(Vec<u8>, usize)>
     ))
 }
 
+/// ECDSA over the digest the caller named (`createSign('sha256')` on a P-384 key signs a SHA-256 digest, as OpenSSL
+/// does); a digest this module cannot compute falls back to the curve's own digest.
+macro_rules! ecdsa_sign_with_digest {
+    ($key:expr, $alg:expr, $data:expr) => {{
+        use signature::hazmat::PrehashSigner;
+        match super::digest::digest_bytes($alg, $data) {
+            Some(hashed) => $key
+                .sign_prehash(&hashed)
+                .map_err(|error| error.to_string())?,
+            None => $key.sign($data),
+        }
+    }};
+}
+
+macro_rules! ecdsa_verify_with_digest {
+    ($curve:ident, $key:expr, $alg:expr, $data:expr, $signature:expr) => {{
+        use signature::hazmat::PrehashVerifier;
+        $curve::ecdsa::Signature::from_der($signature).is_ok_and(|sig| {
+            match super::digest::digest_bytes($alg, $data) {
+                Some(hashed) => $key.verify_prehash(&hashed, &sig).is_ok(),
+                None => $key.verify($data, &sig).is_ok(),
+            }
+        })
+    }};
+}
+
 fn digest_size_matches(digest_algorithm: &str) -> Result<(), String> {
     if matches!(
         digest_algorithm,
@@ -882,15 +908,18 @@ pub(crate) fn crypto_asymmetric_sign_hex(
             sign_rsa_pkcs1v15(&key, digest_algorithm, data)
         }
         ParsedKey::EcPrivateP256(key) => {
-            let signature: p256::ecdsa::Signature = key.sign(data);
+            let signature: p256::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::EcPrivateP384(key) => {
-            let signature: p384::ecdsa::Signature = key.sign(data);
+            let signature: p384::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::EcPrivateP521(key) => {
-            let signature: p521::ecdsa::Signature = key.sign(data);
+            let signature: p521::ecdsa::Signature =
+                ecdsa_sign_with_digest!(key, digest_algorithm, data);
             Ok(signature.to_der().to_vec())
         }
         ParsedKey::Ed25519Private(key) => {
@@ -942,18 +971,12 @@ pub(crate) fn crypto_asymmetric_verify(
             digest_size_matches(digest_algorithm)?;
             verify_rsa_pkcs1v15(&key, digest_algorithm, data, signature)
         }
-        ParsedKey::EcPrivateP256(key) => p256::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP256(key) => p256::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
-        ParsedKey::EcPrivateP384(key) => p384::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP384(key) => p384::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
-        ParsedKey::EcPrivateP521(key) => p521::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| p521::ecdsa::VerifyingKey::from(&*key).verify(data, &sig).is_ok()),
-        ParsedKey::EcPublicP521(key) => p521::ecdsa::Signature::from_der(signature)
-            .is_ok_and(|sig| key.verify(data, &sig).is_ok()),
+        ParsedKey::EcPrivateP256(key) => ecdsa_verify_with_digest!(p256, key.verifying_key(), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP256(key) => ecdsa_verify_with_digest!(p256, &key, digest_algorithm, data, signature),
+        ParsedKey::EcPrivateP384(key) => ecdsa_verify_with_digest!(p384, key.verifying_key(), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP384(key) => ecdsa_verify_with_digest!(p384, &key, digest_algorithm, data, signature),
+        ParsedKey::EcPrivateP521(key) => ecdsa_verify_with_digest!(p521, &p521::ecdsa::VerifyingKey::from(&*key), digest_algorithm, data, signature),
+        ParsedKey::EcPublicP521(key) => ecdsa_verify_with_digest!(p521, &key, digest_algorithm, data, signature),
         ParsedKey::Ed25519Private(key) => ed25519_dalek::Signature::from_slice(signature)
             .is_ok_and(|sig| key.verifying_key().verify(data, &sig).is_ok()),
         ParsedKey::Ed25519Public(key) => ed25519_dalek::Signature::from_slice(signature)
