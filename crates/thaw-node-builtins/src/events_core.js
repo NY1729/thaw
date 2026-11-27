@@ -1,6 +1,6 @@
 EventEmitter.init = function(opts) {
 
-  if (this._events === undefined ||
+  if (this._events == null ||
       this._events === ObjectGetPrototypeOf(this)._events) {
     this._events = { __proto__: null };
     this._eventsCount = 0;
@@ -94,7 +94,7 @@ EventEmitter.prototype.emit = function emit(type, ...args) {
   let doError = (type === 'error');
 
   const events = this._events;
-  if (events !== undefined) {
+  if (events != null) {
     if (doError && events[errorMonitor] !== undefined)
       this.emit(errorMonitor, ...args);
     doError &&= events.error === undefined;
@@ -163,10 +163,11 @@ function _addListener(target, type, listener, prepend) {
   checkListener(listener);
 
   events = target._events;
-  if (events === undefined) {
+  if (events == null) {
     events = target._events = { __proto__: null };
     target._eventsCount = 0;
   } else {
+    if (typeof target._eventsCount !== 'number') target._eventsCount = Reflect.ownKeys(events).length; // instances that skipped the constructor (native addons)
     // To avoid recursion in the case that type === "newListener"! Before
     // adding it to the listeners, first emit "newListener".
     if (events.newListener !== undefined) {
@@ -292,7 +293,7 @@ EventEmitter.prototype.removeListener =
       checkListener(listener);
 
       const events = this._events;
-      if (events === undefined)
+      if (events == null)
         return this;
 
       const list = events[type];
@@ -353,7 +354,7 @@ EventEmitter.prototype.off = EventEmitter.prototype.removeListener;
 EventEmitter.prototype.removeAllListeners =
     function removeAllListeners(type) {
       const events = this._events;
-      if (events === undefined)
+      if (events == null)
         return this;
 
       // Not listening for removeListener, no need to emit
@@ -401,7 +402,7 @@ EventEmitter.prototype.removeAllListeners =
 function _listeners(target, type, unwrap) {
   const events = target._events;
 
-  if (events === undefined)
+  if (events == null)
     return [];
 
   const evlistener = events[type];
@@ -461,7 +462,7 @@ EventEmitter.listenerCount = function(emitter, type) {
 function listenerCount(type, listener) {
   const events = this._events;
 
-  if (events !== undefined) {
+  if (events != null) {
     const evlistener = events[type];
 
     if (typeof evlistener === 'function') {

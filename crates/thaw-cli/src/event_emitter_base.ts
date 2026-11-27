@@ -24,7 +24,7 @@ class EventEmitter {
     }
     let events: any = this._events;
     let existing: any = undefined;
-    if (events === undefined) { events = Object.create(null); this._events = events; this._eventsCount = 0; }
+    if (events == null) { events = Object.create(null); this._events = events; this._eventsCount = 0; }
     else {
       if (events.newListener !== undefined) { this.emit("newListener", type, listener.listener ? listener.listener : listener); events = this._events; }
       existing = events[String(type)];
@@ -67,7 +67,7 @@ class EventEmitter {
       throw __thawEventsCoded(new TypeError('The "listener" argument must be of type function.' + __thawEventsReceived(listener)), "ERR_INVALID_ARG_TYPE");
     }
     const events: any = this._events;
-    if (events === undefined) return this;
+    if (events == null) return this;
     const list: any = events[String(event)];
     if (list === undefined) return this;
     if (list === listener || list.listener === listener) {
@@ -91,7 +91,7 @@ class EventEmitter {
   }
   removeAllListeners(event?: string): EventEmitter {
     const events: any = this._events;
-    if (events === undefined) return this;
+    if (events == null) return this;
     if (events.removeListener === undefined) {
       if (event === undefined) { this._events = Object.create(null); this._eventsCount = 0; }
       else if (events[String(event)] !== undefined) {
@@ -120,11 +120,11 @@ class EventEmitter {
   }
   emit(event: string, ...args: any[]): boolean {
     const events: any = this._events;
-    if (events === undefined) {
+    if (events == null) {
       if (event !== "error") return false;
     }
     let doError = event === "error";
-    if (events !== undefined) doError = doError && events.error === undefined;
+    if (events != null) doError = doError && events.error === undefined;
     if (doError) {
       const error = args[0];
       if (error instanceof Error) throw error;
@@ -144,7 +144,7 @@ class EventEmitter {
   }
   listenerCount(event: string, listener?: any): number {
     const events: any = this._events;
-    if (events === undefined) return 0;
+    if (events == null) return 0;
     const handler: any = events[String(event)];
     if (handler === undefined) return 0;
     if (typeof handler === "function") {
@@ -160,7 +160,7 @@ class EventEmitter {
   }
   listeners(event: string): any[] {
     const events: any = this._events;
-    if (events === undefined) return [];
+    if (events == null) return [];
     const handler: any = events[String(event)];
     if (handler === undefined) return [];
     if (typeof handler === "function") return [handler.listener || handler];
@@ -168,7 +168,7 @@ class EventEmitter {
   }
   rawListeners(event: string): any[] {
     const events: any = this._events;
-    if (events === undefined) return [];
+    if (events == null) return [];
     const handler: any = events[String(event)];
     if (handler === undefined) return [];
     if (typeof handler === "function") return [handler];
