@@ -35,6 +35,14 @@ fn flag(a: &[Value], i: usize) -> bool {
     matches!(arg(a, i), Value::Bool(true))
 }
 
+/// An optional numeric argument (`saltLength`); anything else is `None`.
+fn salt_arg(a: &[Value], i: usize) -> Option<i32> {
+    match arg(a, i) {
+        Value::Number(n) => Some(n as i32),
+        _ => None,
+    }
+}
+
 /// Cipher errors cross as a `!reason` string, which the JS side turns into OpenSSL-style errors.
 fn cipher_result(result: Result<Vec<u8>, String>) -> Value {
     Value::str(&match result {
@@ -140,8 +148,12 @@ pub(crate) fn install(interp: &mut Interp) {
         }
     });
     let sign_pss = interp.native(|it, _, a| {
-        let result =
-            crypto_asymmetric_sign_pss_hex(&s(it, a, 0), &s(it, a, 1), &hex_decode(&s(it, a, 2)));
+        let result = crypto_asymmetric_sign_pss_hex(
+            &s(it, a, 0),
+            &s(it, a, 1),
+            &hex_decode(&s(it, a, 2)),
+            salt_arg(a, 3),
+        );
         match result {
             Ok(signature) => Ok(Value::str(&hex_encode(&signature))),
             Err(message) => it.throw_error("Error", &message),
@@ -166,6 +178,7 @@ pub(crate) fn install(interp: &mut Interp) {
             &s(it, a, 1),
             &hex_decode(&s(it, a, 2)),
             &hex_decode(&s(it, a, 3)),
+            salt_arg(a, 4),
         );
         match result {
             Ok(valid) => Ok(Value::Bool(valid)),
