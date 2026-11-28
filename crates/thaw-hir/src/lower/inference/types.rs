@@ -582,7 +582,7 @@ impl<'a> FnLowerer<'a> {
                     BinOp::EqEqEq => {
                         if left_ty != HirType::Dynamic
                             && right_ty != HirType::Dynamic
-                            && left_ty != right_ty
+                            && !left_ty.same_modulo_recursive(&right_ty)
                         {
                             return Err(format!(
                                 "strict equality compares incompatible types {left_ty:?} and {right_ty:?}"
