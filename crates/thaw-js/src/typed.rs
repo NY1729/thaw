@@ -811,7 +811,7 @@ impl Interp {
                 "ArrayBuffer"
             },
         )?;
-        let n = self.to_index(&arg(args, 0), "array buffer length")?;
+        let n = self.index_of(&arg(args, 0), "array buffer length")?;
         self.native_proto()?;
         if n > 2f64.powi(32) {
             return self.throw_error("RangeError", "Array buffer allocation failed");
@@ -921,7 +921,7 @@ impl Interp {
     }
 
     /// ToIndex: `undefined` is 0, NaN is 0, a negative or past-2^53-1 integer is a RangeError (`what` names it).
-    fn to_index(&mut self, v: &Value, what: &str) -> R<f64> {
+    fn index_of(&mut self, v: &Value, what: &str) -> R<f64> {
         if matches!(v, Value::Undefined) {
             return Ok(0.0);
         }
@@ -1003,7 +1003,7 @@ impl Interp {
                     );
                 }
             }
-            let n = self.to_index(&a0, "typed array length")?;
+            let n = self.index_of(&a0, "typed array length")?;
             if n > 2f64.powi(32) {
                 return self.throw_error(
                     "RangeError",
@@ -1016,8 +1016,8 @@ impl Interp {
             unreachable!()
         };
         if let Some(data) = Self::bytes_of_buffer(&a0) {
-            let off = self.to_index(&arg(args, 1), "offset")?;
-            if off as usize % ty.size() != 0 {
+            let off = self.index_of(&arg(args, 1), "offset")?;
+            if !(off as usize).is_multiple_of(ty.size()) {
                 return self.throw_error(
                     "RangeError",
                     &format!(
@@ -1030,7 +1030,7 @@ impl Interp {
             let off = off as usize;
             let new_len = match arg(args, 2) {
                 Value::Undefined => None,
-                v => Some(self.to_index(&v, "typed array length")?),
+                v => Some(self.index_of(&v, "typed array length")?),
             };
             if is_detached(&data) {
                 return self.throw_error(
@@ -1050,7 +1050,7 @@ impl Interp {
             let len = match new_len {
                 None if track => 0,
                 None => {
-                    if (total - off) % ty.size() != 0 {
+                    if !(total - off).is_multiple_of(ty.size()) {
                         return self.throw_error(
                             "RangeError",
                             &format!(
