@@ -577,7 +577,21 @@ impl Interp {
                 return Ok(true);
             }
         }
-        Ok(is_index || find_in_chain(o, key).is_some())
+        if is_index || find_in_chain(o, key).is_some() {
+            return Ok(true);
+        }
+        // an own property the chain search does not model (an array's `length`, a function's `name`) on a link
+        let kv = self.key_value(key);
+        let mut cur = o.proto.borrow().clone();
+        while let Some(link) = cur {
+            if !matches!(&*link.kind.borrow(), Kind::Plain | Kind::Proxy(_))
+                && self.has_own_property(&Value::Object(link.clone()), &kv)?
+            {
+                return Ok(true);
+            }
+            cur = link.proto.borrow().clone();
+        }
+        Ok(false)
     }
 
     /// `[[GetPrototypeOf]]` of a proxy: its trap's answer, else the target's prototype (`None`: not a proxy).

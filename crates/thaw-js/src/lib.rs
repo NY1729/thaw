@@ -4288,6 +4288,12 @@ impl Interp {
                 self.unpublish_global(name);
                 Some(true)
             }
+            // a builtin global that Node leaves configurable (`Map`, `Reflect`) is removed like any property
+            Origin::Decl if self.global_prop(name).is_some_and(|p| p.configurable) => {
+                g.vars.borrow_mut().remove(name);
+                self.unpublish_global(name);
+                Some(true)
+            }
             Origin::Decl | Origin::Lexical => None,
             Origin::Var | Origin::Attrs(_, false) => Some(false),
             Origin::Prop => {

@@ -2010,7 +2010,10 @@ impl Interp {
                 }
                 // an Array's `length` follows its indices and leads the named keys (V8 order)
                 if let Value::Object(o) = &t {
-                    if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                    if matches!(
+                        &*o.kind.borrow(),
+                        Kind::Array(_) | Kind::Wrapper(Value::Str(_))
+                    ) {
                         names.push(Value::str("length"));
                     }
                 }
@@ -2072,6 +2075,24 @@ impl Interp {
                 };
                 if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
                     return it.proxy_gopd(&o, &key);
+                }
+                // a String object's indices and `length` are non-writable, non-configurable data properties
+                let wrapped = match &*o.kind.borrow() {
+                    Kind::Wrapper(Value::Str(st)) if &*key == "length" => {
+                        Some((Value::Number(st.len16() as f64), false))
+                    }
+                    Kind::Wrapper(Value::Str(st)) => array_index(&key)
+                        .and_then(|i| st.unit_at(i))
+                        .map(|u| (Value::Str(units_str(&[u]).into()), true)),
+                    _ => None,
+                };
+                if let Some((v, enumerable)) = wrapped {
+                    let d = it.plain();
+                    put(&d, "value", v);
+                    put(&d, "writable", Value::Bool(false));
+                    put(&d, "enumerable", Value::Bool(enumerable));
+                    put(&d, "configurable", Value::Bool(false));
+                    return Ok(Value::Object(d));
                 }
                 // a typed array's element is a writable, enumerable, configurable data property
                 let element = match &*o.kind.borrow() {
