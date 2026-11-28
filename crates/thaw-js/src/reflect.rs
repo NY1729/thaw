@@ -189,6 +189,9 @@ pub(crate) fn set(
     // integer-indexed [[Set]]: a numeric key of a typed array never reaches the prototype or a define
     if let Some(valid) = crate::typed::typed_own_key(o, key) {
         if matches!(recv, Value::Object(r) if std::rc::Rc::ptr_eq(r, o)) {
+            if matches!(&*o.kind.borrow(), Kind::Typed(t) if crate::typed::is_immutable(&t.data)) {
+                return Ok(false);
+            }
             it.set(&Value::Object(o.clone()), key, v)?;
             return Ok(true);
         }

@@ -1312,6 +1312,30 @@ impl Interp {
         // a typed array's element takes only a plain data descriptor (no accessor, no false attribute)
         if let Some(valid) = crate::typed::typed_own_key(o, key) {
             let refused = |x: &Option<Value>| x.as_ref().is_some_and(|v| !v.truthy());
+            // an immutable buffer's element is fixed: only a descriptor equal to the current one is accepted
+            let frozen =
+                matches!(&*o.kind.borrow(), Kind::Typed(t) if crate::typed::is_immutable(&t.data));
+            if frozen && valid {
+                let cur = match &*o.kind.borrow() {
+                    Kind::Typed(t) => match t.key(key) {
+                        TypedKey::Index(i) => t.get_value(i),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let truthy_not = |x: &Option<Value>| x.as_ref().is_some_and(|v| v.truthy());
+                let same = match (&d.value, &cur) {
+                    (None, _) => true,
+                    (Some(a), Some(b)) => same_value(a, b),
+                    _ => false,
+                };
+                return Ok(same
+                    && d.get.is_none()
+                    && d.set.is_none()
+                    && !truthy_not(&d.writable)
+                    && !truthy_not(&d.configurable)
+                    && !refused(&d.enumerable));
+            }
             if !valid
                 || d.get.is_some()
                 || d.set.is_some()
@@ -2060,9 +2084,10 @@ impl Interp {
                 if let Some(v) = element {
                     let d = it.plain();
                     put(&d, "value", v);
-                    put(&d, "writable", Value::Bool(true));
+                    let frozen = matches!(&*o.kind.borrow(), Kind::Typed(t) if crate::typed::is_immutable(&t.data));
+                    put(&d, "writable", Value::Bool(!frozen));
                     put(&d, "enumerable", Value::Bool(true));
-                    put(&d, "configurable", Value::Bool(true));
+                    put(&d, "configurable", Value::Bool(!frozen));
                     return Ok(Value::Object(d));
                 }
                 o.force_key(&key);

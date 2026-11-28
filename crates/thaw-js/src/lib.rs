@@ -1373,6 +1373,20 @@ impl Scope {
     fn set_this(&self, value: Value) {
         *self.this_val.borrow_mut() = Some(value);
     }
+    /// Replaces the `this` of the nearest scope that has one (`super()` returned another object).
+    fn rebind_this(&self, value: Value) {
+        let mut cur: &Scope = self;
+        loop {
+            if cur.this_val.borrow().is_some() {
+                *cur.this_val.borrow_mut() = Some(value);
+                return;
+            }
+            match cur.parent.as_deref() {
+                Some(p) => cur = p,
+                None => return,
+            }
+        }
+    }
     /// A lexical binding (let/const/class and the block-level function forms).
     fn declare_rc(&self, name: Rc<str>, value: Value, mutable: bool) {
         self.declare_with(name, value, mutable, Origin::Lexical);
@@ -1656,6 +1670,17 @@ pub(crate) fn string_to_number(s: &str) -> f64 {
     }
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         return i64::from_str_radix(hex, 16).map_or(f64::NAN, |v| v as f64);
+    }
+    for (p, radix) in [("0b", 2), ("0B", 2), ("0o", 8), ("0O", 8)] {
+        if let Some(digits) = t.strip_prefix(p) {
+            return if !digits.is_empty() && digits.chars().all(|c| c.is_digit(radix)) {
+                digits.chars().fold(0.0, |a, c| {
+                    a * radix as f64 + c.to_digit(radix).unwrap() as f64
+                })
+            } else {
+                f64::NAN
+            };
+        }
     }
     match t {
         "Infinity" | "+Infinity" => f64::INFINITY,
@@ -3183,6 +3208,9 @@ impl Interp {
     // ----- property access -----
 
     pub fn get(&mut self, target: &Value, key: &str) -> R<Value> {
+        if key.starts_with("@@priv:") {
+            return self.private_get(target, key);
+        }
         let holder: Obj;
         let start: &ObjData = match target {
             Value::Undefined | Value::Hole | Value::Null => {
@@ -3386,6 +3414,9 @@ impl Interp {
         value: Value,
         strict: bool,
     ) -> R<()> {
+        if key.starts_with("@@priv:") {
+            return self.private_set(target, key, value);
+        }
         let Value::Object(o) = target else {
             if matches!(target, Value::Undefined | Value::Null) {
                 return self.throw_error(
@@ -3541,6 +3572,9 @@ impl Interp {
             _ => None,
         };
         if let Some(t) = typed {
+            if !matches!(t.key(key), TypedKey::Ordinary) && crate::typed::is_immutable(&t.data) {
+                return self.refuse_write(strict, o, key, Refusal::ReadOnly);
+            }
             match t.key(key) {
                 TypedKey::Index(i) => {
                     t.set_value(self, i, &value)?;
@@ -5748,7 +5782,7 @@ impl Interp {
                 let v = self.eval(&c.expr, scope)?;
                 Ok(Key::Owned(self.key_of(&v)))
             }
-            a::MemberProp::PrivateName(p) => Ok(Key::Owned(format!("@@priv:{}", &*p.name).into())),
+            a::MemberProp::PrivateName(p) => Ok(Key::Owned(self.private_key(&p.name, scope))),
         }
     }
 
@@ -6042,9 +6076,9 @@ impl Interp {
                     let a::Expr::PrivateName(p) = &*b.left else {
                         unreachable!()
                     };
-                    let key = format!("@@priv:{}", &*p.name);
+                    let key = self.private_key(&p.name, scope);
                     match self.eval(&b.right, scope)? {
-                        Value::Object(o) => Ok(Value::Bool(find_in_chain(&o, &key).is_some())),
+                        Value::Object(o) => Ok(Value::Bool(find_own(&o, &key).is_some())),
                         _ => self.throw_error("TypeError", "Cannot use 'in' operator to search for a private field in a non-object"),
                     }
                 }
