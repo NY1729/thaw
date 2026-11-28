@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use swc_ecma_visit::{VisitMut, VisitMutWith};
+use swc_ecma_visit::{VisitMut, VisitMutWith, VisitWith};
 use thaw_parser::ast as a;
 
 /// Separates the source name from the class suffix in a renamed private name.
@@ -24,6 +24,55 @@ pub(crate) fn source_name(name: &str) -> &str {
 #[derive(Default)]
 struct Uniquify {
     scopes: Vec<HashMap<String, String>>,
+    /// Names declared by more than one class of this parse unit; only these are renamed, so a single
+    /// declaration stays visible to `eval` code, which is parsed on its own.
+    shared: std::collections::HashSet<String>,
+}
+
+#[derive(Default)]
+struct CountDeclarations(HashMap<String, usize>);
+
+impl swc_ecma_visit::Visit for CountDeclarations {
+    fn visit_class(&mut self, class: &a::Class) {
+        let once: std::collections::HashSet<String> = declared(class).into_iter().collect();
+        for name in once {
+            *self.0.entry(name).or_default() += 1;
+        }
+        class.visit_children_with(self);
+    }
+}
+
+/// Whether `class` calls `eval(..)` directly: that code is parsed later, on its own, and must see the
+/// class's private names as written.
+fn has_direct_eval(class: &a::Class) -> bool {
+    #[derive(Default)]
+    struct Find(bool);
+    impl swc_ecma_visit::Visit for Find {
+        fn visit_call_expr(&mut self, call: &a::CallExpr) {
+            if matches!(&call.callee, a::Callee::Expr(e) if matches!(&**e, a::Expr::Ident(i) if &*i.sym == "eval"))
+            {
+                self.0 = true;
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let mut find = Find::default();
+    class.visit_with(&mut find);
+    find.0
+}
+
+fn uniquifier<N: swc_ecma_visit::VisitWith<CountDeclarations>>(node: &N) -> Uniquify {
+    let mut counts = CountDeclarations::default();
+    node.visit_with(&mut counts);
+    Uniquify {
+        scopes: Vec::new(),
+        shared: counts
+            .0
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(name, _)| name)
+            .collect(),
+    }
 }
 
 fn declared(class: &a::Class) -> Vec<String> {
@@ -48,7 +97,14 @@ impl VisitMut for Uniquify {
         if let Some(super_class) = &mut class.super_class {
             super_class.visit_mut_with(self);
         }
-        let names = declared(class);
+        let names: Vec<String> = if has_direct_eval(class) {
+            Vec::new()
+        } else {
+            declared(class)
+                .into_iter()
+                .filter(|name| self.shared.contains(name))
+                .collect()
+        };
         if names.is_empty() {
             let super_class = class.super_class.take();
             class.visit_mut_children_with(self);
@@ -85,11 +141,19 @@ impl VisitMut for Uniquify {
 }
 
 pub(crate) fn uniquify_module(module: &mut a::Module) {
-    module.visit_mut_with(&mut Uniquify::default());
+    let mut pass = uniquifier(&*module);
+    if pass.shared.is_empty() {
+        return;
+    }
+    module.visit_mut_with(&mut pass);
 }
 
 pub(crate) fn uniquify_function(function: &mut a::Function) {
-    function.visit_mut_with(&mut Uniquify::default());
+    let mut pass = uniquifier(&*function);
+    if pass.shared.is_empty() {
+        return;
+    }
+    function.visit_mut_with(&mut pass);
 }
 
 #[cfg(test)]
