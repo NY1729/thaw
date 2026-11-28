@@ -30,6 +30,18 @@ S = [  # (name, statement inside main(); `port` is in scope)
  ("connection-close", "http.request({ host: '127.0.0.1', port, path: '/', headers: { Connection: 'close' } }, cb).end();"),
  ("lower-method", "http.request({ host: '127.0.0.1', port, method: 'post', path: '/' }, cb).end('q');"),
  ("nonascii-body", "http.request({ host: '127.0.0.1', port, method: 'POST', path: '/' }, cb).end('h\\u00e9\\u2713');"),
+ ("seq-default", "http.get({ host: '127.0.0.1', port, path: '/1' }, (r) => { r.resume(); r.on('end', () => { http.get({ host: '127.0.0.1', port, path: '/2' }, (q) => { q.resume(); q.on('end', () => { console.log('done'); }); }); }); });"),
+ ("seq-agent-false", "http.get({ host: '127.0.0.1', port, path: '/1', agent: false }, (r) => { r.resume(); r.on('end', () => { http.get({ host: '127.0.0.1', port, path: '/2', agent: false }, (q) => { q.resume(); q.on('end', () => { console.log('done'); }); }); }); });"),
+ ("seq-keepalive-false", "const ag = new http.Agent({ keepAlive: false }); http.get({ host: '127.0.0.1', port, path: '/1', agent: ag }, (r) => { r.resume(); r.on('end', () => { http.get({ host: '127.0.0.1', port, path: '/2', agent: ag }, (q) => { q.resume(); q.on('end', () => { console.log('done'); }); }); }); });"),
+ ("conc-default", "let n = 0; const fin = () => { n++; if (n === 2) console.log('done'); }; http.get({ host: '127.0.0.1', port, path: '/1' }, (r) => { r.resume(); r.on('end', fin); }); http.get({ host: '127.0.0.1', port, path: '/2' }, (r) => { r.resume(); r.on('end', fin); });"),
+ ("conc-maxsockets-1", "const ag = new http.Agent({ keepAlive: true, maxSockets: 1 }); let n = 0; const fin = () => { n++; if (n === 2) console.log('done'); }; http.get({ host: '127.0.0.1', port, path: '/1', agent: ag }, (r) => { r.resume(); r.on('end', fin); }); http.get({ host: '127.0.0.1', port, path: '/2', agent: ag }, (r) => { r.resume(); r.on('end', fin); });"),
+ ("seq-maxfreesockets-0", "const ag = new http.Agent({ keepAlive: true, maxFreeSockets: 0 }); http.get({ host: '127.0.0.1', port, path: '/1', agent: ag }, (r) => { r.resume(); r.on('end', () => { http.get({ host: '127.0.0.1', port, path: '/2', agent: ag }, (q) => { q.resume(); q.on('end', () => { console.log('done'); }); }); }); });"),
+ ("seq-server-close", "http.get({ host: '127.0.0.1', port, path: '/close' }, (r) => { r.resume(); r.on('end', () => { setTimeout(() => { http.get({ host: '127.0.0.1', port, path: '/2' }, (q) => { q.resume(); q.on('end', () => { console.log('done'); }); }); }, 50); }); });"),
+ ("agent-destroy-then-request", "const ag = new http.Agent({ keepAlive: true }); http.get({ host: '127.0.0.1', port, path: '/1', agent: ag }, (r) => { r.resume(); r.on('end', () => { ag.destroy(); http.get({ host: '127.0.0.1', port, path: '/2', agent: ag }, (q) => { q.resume(); q.on('end', () => { console.log('done'); }); }); }); });"),
+ ("free-counts", "const ag = new http.Agent({ keepAlive: true }); http.get({ host: '127.0.0.1', port, path: '/1', agent: ag }, (r) => { r.resume(); r.on('end', () => { setTimeout(() => { console.log(Object.keys(ag.sockets).length, Object.keys(ag.freeSockets).length); }, 20); }); });"),
+ ("request-timeout", "const q = http.request({ host: '127.0.0.1', port, path: '/hang', timeout: 100 }, (r) => { r.resume(); }); q.on('timeout', () => { console.log('timeout'); q.destroy(); }); q.on('error', (e: any) => { console.log('error', e.code); }); q.end();"),
+ ("agent-scheduling-fifo", "const ag = new http.Agent({ keepAlive: true, scheduling: 'fifo' }); let n = 0; const next = () => { http.get({ host: '127.0.0.1', port, path: '/3', agent: ag }, (r) => { r.resume(); r.on('end', () => { console.log('done'); }); }); }; const fin = () => { n++; if (n === 2) setTimeout(next, 20); }; http.get({ host: '127.0.0.1', port, path: '/1', agent: ag }, (r) => { r.resume(); r.on('end', fin); }); http.get({ host: '127.0.0.1', port, path: '/2', agent: ag }, (r) => { r.resume(); r.on('end', fin); });"),
+ ("agent-scheduling-lifo", "const ag = new http.Agent({ keepAlive: true, scheduling: 'lifo' }); let n = 0; const next = () => { http.get({ host: '127.0.0.1', port, path: '/3', agent: ag }, (r) => { r.resume(); r.on('end', () => { console.log('done'); }); }); }; const fin = () => { n++; if (n === 2) setTimeout(next, 20); }; http.get({ host: '127.0.0.1', port, path: '/1', agent: ag }, (r) => { r.resume(); r.on('end', fin); }); http.get({ host: '127.0.0.1', port, path: '/2', agent: ag }, (r) => { r.resume(); r.on('end', fin); });"),
 ]
 
 def program():
@@ -40,32 +52,58 @@ def program():
     return "\n".join(out) + "\n}\n"
 
 def capture(cmd, scene):
-    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1); srv.settimeout(15); port = srv.getsockname()[1]
-    p = subprocess.Popen(cmd, env=dict(os.environ, WIRE_PORT=str(port), WIRE_SCENE=str(scene)), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    buf = b""
-    try:
-        c, _ = srv.accept(); c.settimeout(0.5)
+    """Runs the program against a small multi-connection server; the record is every connection's request bytes plus stdout."""
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(16); srv.settimeout(0.2); port = srv.getsockname()[1]
+    p = subprocess.Popen(cmd, env=dict(os.environ, WIRE_PORT=str(port), WIRE_SCENE=str(scene)), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    conns, bufs, lock = [], {}, threading.Lock()
+    def serve(c, idx):
+        c.settimeout(0.3); buf = b""; answered = 0
         while True:
             try:
                 d = c.recv(65536)
             except socket.timeout:
+                d = None
+            except OSError:
                 break
-            if not d: break
-            buf += d
-            if b"\r\n\r\n" in buf and b"Expect: 100" in buf and b"HTTP/1.1 100" not in buf:
-                c.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
-                buf += b"" ; continue
-            if b"\r\n\r\n" in buf: break
-        time.sleep(0.2)
+            if d == b"": break
+            if d: buf += d; bufs[idx] = buf
+            while True:  # answer every complete request head in the buffer
+                end = buf.find(b"\r\n\r\n", answered)
+                if end < 0: break
+                head = buf[answered:end]; start = answered
+                if b"Expect: 100" in head and not head.endswith(b"\0"):
+                    c.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+                path = head.split(b" ")[1] if b" " in head else b""
+                answered = end + 4
+                cl = 0
+                for line in head.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"): cl = int(line.split(b":")[1])
+                answered += cl
+                if b"transfer-encoding: chunked" in head.lower():
+                    stop = buf.find(b"0\r\n\r\n", answered)
+                    if stop < 0:
+                        answered = start  # the rest of the body has not arrived; look again later
+                        break
+                    answered = stop + 5
+                if path == b"/hang": continue
+                close = path == b"/close"
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n" + (b"Connection: close\r\n" if close else b"") + b"\r\nok")
+                if close:
+                    c.close(); return
+        c.close()
+    deadline = time.time() + 12; last = time.time() + 3; threads = []  # the program may need a few seconds to start
+    while time.time() < deadline and time.time() - last < 1.2:
         try:
-            c.settimeout(0.3); buf += c.recv(65536)
-        except Exception: pass
-        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"); c.close()
-    except socket.timeout:
-        buf = buf or None
-    finally:
-        p.kill(); p.wait(); srv.close()
-    return buf.replace(str(port).encode(), b"<port>") if buf else buf
+            c, _ = srv.accept(); idx = len(threads); threads.append(threading.Thread(target=serve, args=(c, idx), daemon=True)); threads[-1].start(); last = time.time()
+        except socket.timeout:
+            pass
+        for i in list(bufs): last = max(last, time.time() - 0.9) if False else last
+        if p.poll() is not None and time.time() - last > 0.6: break
+    exited = p.poll() is not None
+    p.kill(); out = p.stdout.read(); p.wait(); srv.close()
+    if not bufs and not threads: return None
+    rec = b"\n---conn---\n".join(bufs.get(i, b"") for i in range(len(threads))) + b"\n---stdout---\n" + out + (b"" if exited else b"\n---still running---")
+    return rec.replace(str(port).encode(), b"<port>")
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--write-baseline", action="store_true"); ap.add_argument("--label", default="thaw")

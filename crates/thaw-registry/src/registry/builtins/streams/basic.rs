@@ -59,9 +59,20 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20if (signal) signal.addEventListener('abort', aborted, { once: true });\n\
              \x20\x20});\n\
              }\n\
-             function setTimeoutPromise(delay, value, options) { return promiseTimer(globalThis.setTimeout, delay, value, options); }\n\
-             function setImmediatePromise(value, options) { return promiseTimer(globalThis.setImmediate, 0, value, options); }\n\
+             function timerReceived(value) { if (value == null) return ' Received ' + value; if (typeof value === 'function') return ' Received function ' + value.name; if (typeof value === 'object') return ' Received an instance of ' + (value.constructor && value.constructor.name ? value.constructor.name : 'Object'); var text = typeof value === 'string' ? \"'\" + value + \"'\" : String(value); if (text.length > 28) text = text.slice(0, 25) + '...'; return ' Received type ' + typeof value + ' (' + text + ')'; }\n\
+             function timerArgError(delay, options) {\n\
+             \x20\x20function make(what, kind, expected, value) { var error = new TypeError('The \"' + what + '\" ' + kind + ' must be ' + expected + '.' + timerReceived(value)); error.code = 'ERR_INVALID_ARG_TYPE'; return error; }\n\
+             \x20\x20if (delay !== undefined && typeof delay !== 'number') return make('delay', 'argument', 'of type number', delay);\n\
+             \x20\x20if (options === undefined) return undefined;\n\
+             \x20\x20if (options === null || typeof options !== 'object') return make('options', 'argument', 'of type object', options);\n\
+             \x20\x20if (options.signal !== undefined && !(options.signal && typeof options.signal.aborted === 'boolean' && typeof options.signal.addEventListener === 'function')) return make('options.signal', 'property', 'an instance of AbortSignal', options.signal);\n\
+             \x20\x20if (options.ref !== undefined && typeof options.ref !== 'boolean') return make('options.ref', 'property', 'of type boolean', options.ref);\n\
+             \x20\x20return undefined;\n\
+             }\n\
+             function setTimeoutPromise(delay, value, options) { var invalid = timerArgError(delay, options); if (invalid) return Promise.reject(invalid); return promiseTimer(globalThis.setTimeout, delay, value, options); }\n\
+             function setImmediatePromise(value, options) { var invalid = timerArgError(undefined, options); if (invalid) return Promise.reject(invalid); return promiseTimer(globalThis.setImmediate, 0, value, options); }\n\
              function setIntervalPromise(delay, value, options) {\n\
+             \x20\x20var invalid = timerArgError(delay, options); if (invalid) return { next: function() { return Promise.reject(invalid); }, return: function() { return Promise.resolve({ value: undefined, done: true }); }, [Symbol.asyncIterator]: function() { return this; } };\n\
              \x20\x20options = options || {}; var signal = options.signal, ref = options.ref; var values = []; var waiters = []; var done = false; var failed = false; var failure; var id = null; var started = false; var listenerRegistered = false;\n\
              \x20\x20function aborted() { stop(abortReason(signal)); }\n\
              \x20\x20function stop(error) { if (done) return; done = true; failed = arguments.length !== 0; failure = error; if (id !== null) { var timer = id; id = null; globalThis.clearInterval(timer); } values.length = 0; if (signal && listenerRegistered) { listenerRegistered = false; signal.removeEventListener('abort', aborted); } while (waiters.length) { var waiter = waiters.shift(); if (failed) waiter.reject(error); else waiter.resolve({ value: undefined, done: true }); } }\n\

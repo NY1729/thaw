@@ -1,0 +1,5 @@
+{
+  "name": "stream toArray promise kept pending and awaited after a later timer",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r = new Readable({ read() {} });\n  const p: any = r.toArray();\n  console.log(typeof p, p instanceof Promise);\n  setTimeout(() => { r.push('a'); r.push(null); }, 10);\n  console.log(await p);\n}\n"
+}

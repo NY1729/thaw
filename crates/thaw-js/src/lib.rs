@@ -1220,6 +1220,33 @@ fn is_symbol_object(v: &Value) -> bool {
     matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. }))
 }
 
+/// The first proxy on `o`'s prototype chain when no object before it owns `key` (and `o` does not).
+fn proxy_before_holder(o: &Obj, key: &str) -> Option<Obj> {
+    let mut cur = o.proto.borrow().clone();
+    let mut any = false;
+    while let Some(c) = cur.clone() {
+        if matches!(&*c.kind.borrow(), Kind::Proxy(_)) {
+            any = true;
+            break;
+        }
+        cur = c.proto.borrow().clone();
+    }
+    if !any || find_own(o, key).is_some() {
+        return None;
+    }
+    let mut cur = o.proto.borrow().clone();
+    while let Some(c) = cur {
+        if matches!(&*c.kind.borrow(), Kind::Proxy(_)) {
+            return Some(c);
+        }
+        if find_own(&c, key).is_some() {
+            return None;
+        }
+        cur = c.proto.borrow().clone();
+    }
+    None
+}
+
 /// Arithmetic and relational operators on two numbers, without `binary()`'s coercion chain.
 fn number_binop(op: a::BinaryOp, x: f64, y: f64) -> Option<Value> {
     use a::BinaryOp as B;
@@ -3345,7 +3372,7 @@ impl Interp {
             }
             return self.refuse_primitive_write(strict, target, key);
         };
-        if self.proxy_set(o, key, &value, target)? {
+        if self.proxy_set(o, key, &value, target, strict)? {
             return Ok(());
         }
         if matches!(&*o.kind.borrow(), Kind::Global) {
@@ -3499,6 +3526,10 @@ impl Interp {
         }
         if is_legacy_fn_key(o, key) {
             return self.refuse_write(strict, o, key, Refusal::ReadOnly);
+        }
+        // a proxy further up the prototype chain, before any holder of `key`, takes the write
+        if let Some(p) = proxy_before_holder(o, key) {
+            return self.proxy_set_chain(&p, key, &value, target, strict);
         }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
@@ -6616,14 +6647,25 @@ impl Interp {
                 &format!("Function has non-object prototype '{shown}' in instanceof check"),
             );
         };
-        let mut cur = o.proto.borrow().clone();
+        let mut cur = self.proto_step(o)?;
         while let Some(c) = cur {
             if Rc::ptr_eq(&c, p) {
                 return Ok(true);
             }
-            cur = c.proto.borrow().clone();
+            cur = self.proto_step(&c)?;
         }
         Ok(false)
+    }
+
+    /// `o.[[GetPrototypeOf]]()`, running a proxy's trap.
+    fn proto_step(&mut self, o: &Obj) -> R<Option<Obj>> {
+        if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+            return Ok(match self.proxy_get_prototype_of(o)? {
+                Some(Value::Object(p)) => Some(p),
+                _ => None,
+            });
+        }
+        Ok(o.proto.borrow().clone())
     }
 
     fn loose_equals(&mut self, l: &Value, r: &Value) -> bool {
