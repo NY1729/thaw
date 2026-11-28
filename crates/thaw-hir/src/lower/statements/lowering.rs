@@ -1695,6 +1695,21 @@ impl<'a> FnLowerer<'a> {
                         None
                     }
                 };
+                // `return await <JsValue>` (possibly coerced): the await suspends the frame, so it is bound to a
+                // temporary first, like `const t = await x; return t`, which the frame planner handles.
+                if let Some(value) = value {
+                    let name = format!("__thaw_return_await_{}", self.next_binding);
+                    let (hoisted, value) = hoist_js_await(value, &name);
+                    if let Some(awaited) = hoisted {
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::JsValue);
+                        return Ok(vec![
+                            HirStmt::Let(name.as_str().into(), HirType::JsValue, awaited),
+                            HirStmt::Return(Some(value)),
+                        ]);
+                    }
+                    return Ok(vec![HirStmt::Return(Some(value))]);
+                }
                 Ok(vec![HirStmt::Return(value)])
             }
             Stmt::Expr(expr_stmt) => {
@@ -3675,4 +3690,34 @@ fn redirect_returns(stmts: &mut Vec<HirStmt>, flag: &str, slot: Option<&str>) {
         }
     }
     *stmts = rewritten;
+}
+
+/// Moves the `await <JsValue>` of a returned expression (itself, or an argument of a coercion call) out as
+/// the returned `(await, rewritten expression)`; the rewritten expression reads it from `name`.
+fn hoist_js_await(value: HirExpr, name: &str) -> (Option<HirExpr>, HirExpr) {
+    fn is_js_await(inner: &HirExpr) -> bool {
+        matches!(inner, HirExpr::Call(callee, _)
+            if matches!(callee.as_ref(), HirExpr::Var(v) if v == "__thaw_js_await_handle"))
+    }
+    match value {
+        HirExpr::AwaitPromise(inner, HirType::JsValue) if is_js_await(&inner) => (
+            Some(HirExpr::AwaitPromise(inner, HirType::JsValue)),
+            HirExpr::Var(name.to_string()),
+        ),
+        HirExpr::Call(callee, args) => {
+            let mut hoisted = None;
+            let mut rewritten = Vec::with_capacity(args.len());
+            for arg in args {
+                if hoisted.is_none() {
+                    let (found, arg) = hoist_js_await(arg, name);
+                    hoisted = found;
+                    rewritten.push(arg);
+                } else {
+                    rewritten.push(arg);
+                }
+            }
+            (hoisted, HirExpr::Call(callee, rewritten))
+        }
+        other => (None, other),
+    }
 }
