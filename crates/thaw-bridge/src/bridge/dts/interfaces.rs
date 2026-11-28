@@ -482,6 +482,9 @@ fn resolve_interface(
     }
 
     in_progress.push(name.to_string());
+    RESOLVING_INTERFACES.with(|stack| {
+        stack.borrow_mut().push((name.to_string(), thaw_hir::new_recursive_key(name), false));
+    });
 
     // `extends`: same rule as thaw-hir's `resolve_interface` -- base
     // fields first (in `extends`-list, then declaration, order), then this
@@ -646,6 +649,9 @@ fn resolve_interface(
     }
 
     in_progress.pop();
+    let (_, recursive_key, self_referenced) = RESOLVING_INTERFACES
+        .with(|stack| stack.borrow_mut().pop())
+        .expect("resolving interface stack");
 
     let result = match failure {
         Some(reason) => DtsType::Unsupported(format!("interface `{name}` {reason}")),
@@ -681,6 +687,12 @@ fn resolve_interface(
             HirType::Dictionary(Box::new(element))
         })),
     };
+    // A member that named the interface itself holds `Recursive(key)`: give the key its layout.
+    if self_referenced {
+        if let DtsType::Native(layout @ HirType::Object(_)) = &result {
+            thaw_hir::register_recursive_layout(&recursive_key, layout.clone());
+        }
+    }
     resolved.insert(name.to_string(), result.clone());
     result
 }
