@@ -42,8 +42,7 @@
   "output-diff": 1
  },
  "events": {
-  "match": 57,
-  "output-diff": 20
+  "match": 57
  },
  "fs": {
   "match": 288,
@@ -93,6 +92,13 @@
  "process": {
   "match": 430
  },
+ "punycode": {
+  "match": 16
+ },
+ "querystring": {
+  "match": 19,
+  "output-diff": 2
+ },
  "readline": {
   "match": 17,
   "skipped": 26
@@ -104,12 +110,30 @@
   "match": 378,
   "output-diff": 8
  },
+ "stream_web": {
+  "match": 39,
+  "output-diff": 5,
+  "skipped": 41
+ },
+ "string_decoder": {
+  "match": 9
+ },
  "sys": {
   "match": 152,
   "skipped": 6
  },
+ "timers": {
+  "match": 21
+ },
+ "timers_promises": {
+  "match": 7
+ },
  "trace_events": {
   "match": 4
+ },
+ "url": {
+  "match": 69,
+  "skipped": 14
  },
  "util": {
   "match": 152,
