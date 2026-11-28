@@ -549,6 +549,31 @@ pub unsafe extern "C" fn thaw_bytes_clone(buffer: *const u8) -> *mut u8 {
 }
 
 #[no_mangle]
+/// `structuredClone` of a native view: a fresh copy of the same kind (an `ArrayBuffer` stays one, a
+/// `DataView` becomes a `DataView` over a copy of its range, a `Buffer` / `Uint8Array` stays that).
+///
+/// # Safety
+///
+/// `buffer` must be a byte view record.
+pub unsafe extern "C" fn thaw_bytes_clone_kind(buffer: *const u8) -> *mut u8 {
+    let Some(view) = (unsafe { coerce_view(buffer).as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    let flags = view_flags(view);
+    let bytes = unsafe { view_bytes(buffer) }.unwrap_or_default();
+    let dataview = flags & BYTE_VIEW_DATAVIEW != 0;
+    let kept = if dataview { BYTE_VIEW_ARRAY_BUFFER } else { flags & (BYTE_VIEW_BUFFER | BYTE_VIEW_ARRAY_BUFFER) };
+    let output = unsafe { alloc_byte_owner(bytes.len(), kept) };
+    if let Some(target) = unsafe { view_bytes_mut(output) } {
+        target.copy_from_slice(bytes);
+    }
+    if dataview {
+        return unsafe { thaw_dataview_new(output, f64::NAN, f64::NAN) };
+    }
+    output
+}
+
+#[no_mangle]
 /// `buf.subarray(start, end)` / Buffer `slice`: a new view over the same
 /// store. Indexes follow `relative_array_index` (negative counts from the
 /// end, clamped).

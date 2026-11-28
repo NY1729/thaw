@@ -64,6 +64,16 @@ impl GraphCloner {
     }
 
     fn intern(&mut self, source: &Value) -> Result<Value, ()> {
+        // A native byte view is copied (own store); the same view met twice clones once.
+        if let Value::Bytes(bytes) = source {
+            let key = bytes.record as usize;
+            if let Some(value) = self.memo.get(&key) {
+                return Ok(value.clone());
+            }
+            let clone = clone_bytes_value(bytes);
+            self.memo.insert(key, clone.clone());
+            return Ok(clone);
+        }
         let Some(identity) = object_identity_key(source) else {
             return Ok(source.clone());
         };
