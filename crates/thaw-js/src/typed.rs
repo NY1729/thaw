@@ -230,6 +230,44 @@ pub(crate) fn sab_store(block: Arc<SabBlock>) -> Bytes {
         sab: Some(block),
         charged: Cell::new(0),
         max,
+        external: RefCell::new(None),
+    })
+}
+
+/// An attached, fixed-length store over `len` bytes at `ptr` that another owner holds (a compiled program's
+/// byte store): reads and writes through it are the owner's bytes, no copy. `release` runs once, when the store
+/// drops or is detached, and lets the owner unpin the memory.
+///
+/// SAFETY (the caller): `ptr` is valid for `len` bytes, and stays valid and unmoved until `release` has run.
+/// The store never frees, reallocates or resizes that memory (SabBlock invariant 1; `Store::drop` forgets the
+/// alias, `detach_bytes` does the same, `resize_bytes` refuses). `ptr` may be dangling when `len` is 0.
+#[allow(dead_code)] // the wire decoders that use it come with the next stage
+pub(crate) unsafe fn new_external_bytes(
+    ptr: *mut u8,
+    len: usize,
+    release: Box<dyn FnOnce()>,
+) -> Bytes {
+    // SAFETY: see above; the Vec is never dropped, only forgotten.
+    let alias = unsafe {
+        Vec::from_raw_parts(
+            if len == 0 {
+                std::ptr::NonNull::dangling().as_ptr()
+            } else {
+                ptr
+            },
+            len,
+            len,
+        )
+    };
+    Rc::new(Store {
+        cell: RefCell::new(alias),
+        shared: None,
+        detached: Cell::new(false),
+        immutable: Cell::new(false),
+        sab: None,
+        charged: Cell::new(0),
+        max: None,
+        external: RefCell::new(Some(release)),
     })
 }
 
@@ -250,11 +288,19 @@ pub(crate) struct Store {
     charged: Cell<usize>,
     /// `maxByteLength` of a resizable ArrayBuffer (`resize_bytes` moves its length within it); None when fixed.
     max: Option<usize>,
+    /// Set for a store aliasing memory another owner holds (`new_external_bytes`): called once when the store
+    /// drops or is detached, so the owner can release what keeps that memory alive. `cell` then aliases it.
+    external: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl Drop for Store {
     fn drop(&mut self) {
         heap_limit::credit(self.charged.get());
+        if let Some(release) = self.external.get_mut().take() {
+            // invariant 1 (as for a SAB): the aliasing Vec never frees the owner's memory
+            std::mem::forget(std::mem::take(self.cell.get_mut()));
+            release();
+        }
         if self.sab.is_some() {
             // invariant 1: the alias must not free the block; `sab` then drops its Arc
             std::mem::forget(std::mem::take(self.cell.get_mut()));
@@ -304,6 +350,7 @@ pub(crate) fn new_bytes_max(v: Vec<u8>, max: Option<usize>) -> Bytes {
         sab: None,
         charged: Cell::new(charged),
         max,
+        external: RefCell::new(None),
     })
 }
 
@@ -312,7 +359,7 @@ pub(crate) fn new_bytes_max(v: Vec<u8>, max: Option<usize>) -> Bytes {
 /// had (the caller throws a RangeError).
 pub(crate) fn resize_bytes(b: &Bytes, n: usize) -> bool {
     debug_assert!(
-        b.sab.is_none() && b.max.is_some(),
+        b.sab.is_none() && b.max.is_some() && b.external.borrow().is_none(),
         "resize_bytes on a fixed or shared storage"
     );
     let mut v = b.cell.borrow_mut();
@@ -392,7 +439,11 @@ pub(crate) fn detach_bytes(b: &Bytes) {
         debug_assert!(false, "detach_bytes on a SharedArrayBuffer");
         return;
     }
-    if b.shared.is_none() {
+    if let Some(release) = b.external.borrow_mut().take() {
+        // the Vec aliases the owner's memory: forget it, then let the owner unpin
+        std::mem::forget(std::mem::take(&mut *b.cell.borrow_mut()));
+        release();
+    } else if b.shared.is_none() {
         *b.cell.borrow_mut() = Vec::new();
     }
     heap_limit::credit(b.charged.replace(0));
@@ -931,6 +982,21 @@ impl Interp {
     /// An `ArrayBuffer` owning `bytes`.
     pub(crate) fn array_buffer_from_vec(&self, bytes: Vec<u8>) -> Value {
         Value::Object(self.new_array_buffer(new_bytes(bytes)))
+    }
+
+    /// An `ArrayBuffer` over `len` bytes at `ptr` that the caller's program owns (no copy); see `new_external_bytes`.
+    ///
+    /// # Safety
+    ///
+    /// As `new_external_bytes`.
+    #[allow(dead_code)] // the wire decoders that use it come with the next stage
+    pub(crate) unsafe fn array_buffer_external(
+        &self,
+        ptr: *mut u8,
+        len: usize,
+        release: Box<dyn FnOnce()>,
+    ) -> Value {
+        Value::Object(self.new_array_buffer(unsafe { new_external_bytes(ptr, len, release) }))
     }
 
     /// A `Uint8Array` over a copy of `bytes`.

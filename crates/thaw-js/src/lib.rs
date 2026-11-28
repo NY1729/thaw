@@ -7632,6 +7632,8 @@ mod esm_private_tests;
 #[cfg(test)]
 mod eval_scoping_tests;
 #[cfg(test)]
+mod external_tests;
+#[cfg(test)]
 mod fetch_tests;
 #[cfg(all(test, unix))]
 mod fs_tests;
