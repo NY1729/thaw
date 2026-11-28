@@ -1756,10 +1756,11 @@ fn napi_export_args() -> [&'static str; 2] {
     ]
 }
 
-fn js_callback_export_args() -> [&'static str; 4] {
+fn js_callback_export_args() -> [&'static str; 5] {
     [
         "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
         "-Wl,--export-dynamic-symbol=thaw_runtime_set_js_job_hooks",
+        "-Wl,--export-dynamic-symbol=thaw_runtime_set_js_turn_hook",
         "-Wl,--export-dynamic-symbol=thaw_promise_state",
         "-Wl,--export-dynamic-symbol=thaw_promise_mark_handled",
     ]
@@ -1865,6 +1866,7 @@ fn legacy_engine_callbacks_export_only_their_runtime_poll_symbols() {
         [
             "-Wl,--export-dynamic-symbol=thaw_runtime_poll_one",
             "-Wl,--export-dynamic-symbol=thaw_runtime_set_js_job_hooks",
+            "-Wl,--export-dynamic-symbol=thaw_runtime_set_js_turn_hook",
             "-Wl,--export-dynamic-symbol=thaw_promise_state",
             "-Wl,--export-dynamic-symbol=thaw_promise_mark_handled",
         ]

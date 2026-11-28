@@ -6621,7 +6621,25 @@ fn register_js_job_hooks() {
             hooks,
             thaw_tjs_exception_report_text,
         );
+        let turn = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"thaw_runtime_set_js_turn_hook".as_ptr(),
+        );
+        if !turn.is_null() {
+            std::mem::transmute::<*mut c_void, extern "C" fn(extern "C" fn() -> u8)>(turn)(
+                js_turn_hook,
+            );
+        }
     }
+}
+
+/// One non-blocking pass over every realm for a native wait: settles watched Promises, turns each realm that has
+/// work, and answers 1 while any realm still has work.
+extern "C" fn js_turn_hook() -> u8 {
+    pump_watches();
+    let ran = drive_other_realms_once(std::ptr::null());
+    let watching = WATCHES.with(|w| !w.borrow().is_empty());
+    u8::from(ran || watching)
 }
 
 #[cfg(not(unix))]
@@ -7902,6 +7920,12 @@ pub(crate) fn other_packages_have_work() -> bool {
 /// delivers). The realm doing the waiting is skipped. Returns
 /// whether any such realm still has work, so the caller keeps waiting instead of declaring the promise unsettled.
 pub(crate) fn drive_other_realms_once(me: *const Interp) -> bool {
+    drive_realms_once(me, false)
+}
+
+/// As [`drive_other_realms_once`]; `force` turns every realm, idle or not (a native wait whose frame is suspended
+/// on a watched Promise polls the realms' platform events too).
+fn drive_realms_once(me: *const Interp, force: bool) -> bool {
     let count = PACKAGES.with(|ps| ps.borrow().len());
     let mut any_work = false;
     for handle in 0..count {
@@ -7919,10 +7943,10 @@ pub(crate) fn drive_other_realms_once(me: *const Interp) -> bool {
             }),
             None => true,
         });
-        if idle {
+        if idle && !force {
             continue;
         }
-        any_work = true;
+        any_work |= !idle;
         let _ = with_package(handle, |p| {
             match p.interp.drive_once() {
                 Ok(()) => {}
@@ -8486,6 +8510,7 @@ thread_local! {
 /// queued jobs of its package have drained (see `pump_watches`).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settle: SettleFn) {
+    ensure_js_job_hooks();
     // 0 is `undefined`, which is never a pending promise: it takes the failure path below.
     let entry = if handle == 0 {
         None
@@ -8515,6 +8540,8 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
 /// result is a new handle id as decimal text. The input handle stays the caller's.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_watch_handle(handle: i64, native: *mut c_void, settle: SettleFn) {
+    // a native wait must be able to turn this realm while the awaiting frame is suspended
+    ensure_js_job_hooks();
     let Some((package, value)) = (handle >= 0).then(|| slot(handle as u64)).flatten() else {
         settle_native(
             native,

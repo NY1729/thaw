@@ -471,6 +471,7 @@ fn thaw_js_link_args(
     for sym in [
         "thaw_runtime_poll_one",
         "thaw_runtime_set_js_job_hooks",
+        "thaw_runtime_set_js_turn_hook",
         "thaw_promise_state",
         "thaw_promise_mark_handled",
         "thaw_runtime_run_until_idle",
