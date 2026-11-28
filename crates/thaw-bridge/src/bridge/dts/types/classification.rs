@@ -40,7 +40,7 @@ thread_local! {
     /// The interfaces being resolved right now (innermost last) with the recursive-layout key a
     /// self-reference to them uses, and whether such a reference was made. See `resolve_interface`.
     pub(crate) static RESOLVING_INTERFACES: std::cell::RefCell<Vec<(String, String, bool)>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 thread_local! {
