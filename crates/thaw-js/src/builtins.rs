@@ -2046,18 +2046,24 @@ impl Interp {
                 let Value::Object(o) = arg(args, 0) else {
                     return Ok(Value::Undefined);
                 };
-                if let Some((target, handler, trap)) =
-                    it.proxy_trap(&o, "getOwnPropertyDescriptor")?
-                {
-                    let gopd = it
-                        .lookup(&it.global.clone(), "Object")
-                        .unwrap_or(Value::Undefined);
-                    let gopd = it.get(&gopd, "getOwnPropertyDescriptor")?;
-                    return if trap.is_callable() {
-                        it.call(&trap, &handler, &[target, arg(args, 1)])
-                    } else {
-                        it.call(&gopd, &Value::Undefined, &[target, arg(args, 1)])
-                    };
+                if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+                    return it.proxy_gopd(&o, &key);
+                }
+                // a typed array's element is a writable, enumerable, configurable data property
+                let element = match &*o.kind.borrow() {
+                    Kind::Typed(t) => match t.key(&key) {
+                        TypedKey::Index(i) => t.get_value(i),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(v) = element {
+                    let d = it.plain();
+                    put(&d, "value", v);
+                    put(&d, "writable", Value::Bool(true));
+                    put(&d, "enumerable", Value::Bool(true));
+                    put(&d, "configurable", Value::Bool(true));
+                    return Ok(Value::Object(d));
                 }
                 o.force_key(&key);
                 // a context's global: a descriptor of a sandbox property is the sandbox's
@@ -3676,12 +3682,12 @@ impl Interp {
     fn define_through_proxy(&mut self, target: &Value, key: &Value, desc: &Value) -> R<()> {
         let key_text = self.key_of(key);
         if let Value::Object(po) = target {
-            if let Some((inner, handler, trap)) = self.proxy_trap(po, "defineProperty")? {
-                self.prop_desc_of(desc)?;
-                if trap.is_callable() {
-                    self.call(&trap, &handler, &[inner, key.clone(), desc.clone()])?;
-                } else {
-                    self.define_through_proxy(&inner, key, desc)?;
+            if matches!(&*po.kind.borrow(), Kind::Proxy(_)) {
+                if !self.proxy_define(po, &key_text, desc)? {
+                    return self.throw_error(
+                        "TypeError",
+                        &format!("'defineProperty' on proxy: trap returned falsish for property '{key_text}'"),
+                    );
                 }
                 return Ok(());
             }

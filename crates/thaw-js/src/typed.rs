@@ -772,7 +772,7 @@ impl Interp {
         let new_len = match arg(a, 0) {
             Value::Undefined => cur,
             v => {
-                let n = self.num(&v);
+                let n = self.tonum(&v)?;
                 let n = if n.is_nan() { 0.0 } else { n.trunc() };
                 if n < 0.0 {
                     return self.throw_error("RangeError", "Invalid array buffer length");
@@ -802,10 +802,18 @@ impl Interp {
     }
 
     /// `new ArrayBuffer(n)` / `new SharedArrayBuffer(n)`: zero-filled, `n` truncated, NaN = 0.
-    fn alloc_buffer(&mut self, args: &[Value], shared: bool) -> R<Value> {
-        let n = self.num(&arg(args, 0));
-        let n = if n.is_nan() { 0.0 } else { n };
-        if !(0.0..=2f64.powi(32)).contains(&n) {
+    fn alloc_buffer(&mut self, this: &Value, args: &[Value], shared: bool) -> R<Value> {
+        self.require_new(
+            this,
+            if shared {
+                "SharedArrayBuffer"
+            } else {
+                "ArrayBuffer"
+            },
+        )?;
+        let n = self.index_of(&arg(args, 0), "array buffer length")?;
+        self.native_proto()?;
+        if n > 2f64.powi(32) {
             return self.throw_error("RangeError", "Array buffer allocation failed");
         }
         let max = self.ab_max_option(&arg(args, 1), n as usize)?;
@@ -912,106 +920,187 @@ impl Interp {
         Ok(())
     }
 
-    fn construct_typed(&mut self, ty: Ty, args: &[Value]) -> R<Value> {
+    /// ToIndex: `undefined` is 0, NaN is 0, a negative or past-2^53-1 integer is a RangeError (`what` names it).
+    fn index_of(&mut self, v: &Value, what: &str) -> R<f64> {
+        if matches!(v, Value::Undefined) {
+            return Ok(0.0);
+        }
+        let n = self.tonum(v)?;
+        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+        if !(0.0..=9007199254740991.0).contains(&n) {
+            return self.throw_error("RangeError", &format!("Invalid {what}"));
+        }
+        Ok(n + 0.0)
+    }
+
+    /// A constructor reached by a plain call (no `new`, no derived-class `this`) is a TypeError.
+    fn require_new(&mut self, this: &Value, name: &str) -> R<()> {
+        if !self.rt.constructing && !matches!(this, Value::Object(_)) {
+            return self.throw_error("TypeError", &format!("Constructor {name} requires 'new'"));
+        }
+        Ok(())
+    }
+
+    /// The values of `v` by its `@@iterator` (`None` when it has none). A non-callable, non-nullish method is a
+    /// TypeError; a plain array is read directly while the array iteration protocol is untouched.
+    fn typed_source_values(&mut self, v: &Value) -> R<Option<Vec<Value>>> {
+        let key = self.well_known_key("iterator");
+        let method = self.get(v, &key)?;
+        if matches!(method, Value::Undefined | Value::Null) {
+            return Ok(None);
+        }
+        if !method.is_callable() {
+            return self.throw_error("TypeError", "object is not iterable");
+        }
+        let is_array = matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
+        if is_array && self.array_iter_intact() {
+            let array = self.lookup(&self.global.clone(), "Array");
+            let values = match array {
+                Some(a) => {
+                    let p = self.get(&a, "prototype")?;
+                    self.get(&p, "values")?
+                }
+                None => Value::Undefined,
+            };
+            if matches!((&values, &method), (Value::Object(x), Value::Object(y)) if Rc::ptr_eq(x, y))
+            {
+                if let Some(items) = self.iter_items(v) {
+                    return Ok(Some(items));
+                }
+            }
+        }
+        let iter = self.call(&method, v, &[])?;
+        if !matches!(iter, Value::Object(_)) {
+            return self.throw_error(
+                "TypeError",
+                "Result of the Symbol.iterator method is not an object",
+            );
+        }
+        let next = self.get(&iter, "next")?;
+        let mut out = Vec::new();
+        loop {
+            let r = self.call(&next, &iter, &[])?;
+            if !matches!(r, Value::Object(_)) {
+                return self.throw_error("TypeError", "Iterator result is not an object");
+            }
+            if self.get(&r, "done")?.truthy() {
+                return Ok(Some(out));
+            }
+            out.push(self.get(&r, "value")?);
+        }
+    }
+
+    fn construct_typed(&mut self, ty: Ty, this: &Value, args: &[Value]) -> R<Value> {
+        self.require_new(this, ty.name())?;
         let a0 = arg(args, 0);
-        match &a0 {
-            Value::Undefined | Value::Null => Ok(self.typed_with_len(ty, 0)),
-            Value::Number(n) => {
-                if !(*n >= 0.0 && n.is_finite()) || *n > 2f64.powi(32) {
+        if !matches!(a0, Value::Object(_)) || is_symbol_object(&a0) {
+            // a primitive (or a Symbol, which throws here) is a ToIndex length
+            if let Value::Number(x) = a0 {
+                if x <= -1.0 || x.is_infinite() {
                     return self.throw_error(
                         "RangeError",
-                        &format!("Invalid typed array length: {}", number_to_string(*n)),
+                        &format!("Invalid typed array length: {}", number_to_string(x)),
                     );
                 }
-                Ok(self.typed_with_len(ty, *n as usize))
             }
-            Value::Object(o) => {
-                if let Some(data) = Self::bytes_of_buffer(&a0) {
-                    if is_detached(&data) {
-                        return self.throw_error(
-                            "TypeError",
-                            "Cannot perform Construct on a detached ArrayBuffer",
-                        );
-                    }
-                    let total = data.borrow().len();
-                    let off = match arg(args, 1) {
-                        Value::Undefined => 0,
-                        v => self.num(&v) as usize,
-                    };
-                    if off % ty.size() != 0 {
+            let n = self.index_of(&a0, "typed array length")?;
+            if n > 2f64.powi(32) {
+                return self.throw_error(
+                    "RangeError",
+                    &format!("Invalid typed array length: {}", number_to_string(n)),
+                );
+            }
+            return Ok(self.typed_with_len(ty, n as usize));
+        }
+        let Value::Object(o) = &a0 else {
+            unreachable!()
+        };
+        if let Some(data) = Self::bytes_of_buffer(&a0) {
+            let off = self.index_of(&arg(args, 1), "offset")?;
+            if !(off as usize).is_multiple_of(ty.size()) {
+                return self.throw_error(
+                    "RangeError",
+                    &format!(
+                        "start offset of {} should be a multiple of {}",
+                        ty.name(),
+                        ty.size()
+                    ),
+                );
+            }
+            let off = off as usize;
+            let new_len = match arg(args, 2) {
+                Value::Undefined => None,
+                v => Some(self.index_of(&v, "typed array length")?),
+            };
+            if is_detached(&data) {
+                return self.throw_error(
+                    "TypeError",
+                    "Cannot perform Construct on a detached ArrayBuffer",
+                );
+            }
+            let total = data.borrow().len();
+            if off > total && new_len.is_none() {
+                return self.throw_error(
+                    "RangeError",
+                    &format!("Start offset {off} is outside the bounds of the buffer"),
+                );
+            }
+            // a resizable buffer with no length gives a length-tracking view (spec: IsFixedLength false)
+            let track = data.max.is_some() && new_len.is_none();
+            let len = match new_len {
+                None if track => 0,
+                None => {
+                    if !(total - off).is_multiple_of(ty.size()) {
                         return self.throw_error(
                             "RangeError",
                             &format!(
-                                "start offset of {} should be a multiple of {}",
+                                "byte length of {} should be a multiple of {}",
                                 ty.name(),
                                 ty.size()
                             ),
                         );
                     }
-                    if off > total {
-                        return self.throw_error(
-                            "RangeError",
-                            &format!("Start offset {off} is outside the bounds of the buffer"),
-                        );
-                    }
-                    // a resizable buffer with no length gives a length-tracking view (spec: IsFixedLength false)
-                    let track = data.max.is_some() && matches!(arg(args, 2), Value::Undefined);
-                    let len = match arg(args, 2) {
-                        Value::Undefined if track => 0,
-                        Value::Undefined => {
-                            if (total - off) % ty.size() != 0 {
-                                return self.throw_error(
-                                    "RangeError",
-                                    &format!(
-                                        "byte length of {} should be a multiple of {}",
-                                        ty.name(),
-                                        ty.size()
-                                    ),
-                                );
-                            }
-                            (total - off) / ty.size()
-                        }
-                        v => self.num(&v) as usize,
-                    };
-                    if !track && off + len * ty.size() > total {
-                        return self.throw_error(
-                            "RangeError",
-                            &format!("Invalid typed array length: {len}"),
-                        );
-                    }
-                    return Ok(self.new_typed(ty, o.clone(), data, off, len, track));
+                    (total - off) / ty.size()
                 }
-                let items: Vec<Value> = if let Some(t) = Self::typed_of(&a0) {
-                    self.check_mix(t.ty, ty)?;
-                    t.to_values()
-                } else if let Some(items) = self.iter_protocol(&a0)? {
-                    items
-                } else {
-                    let n = self.get(&a0, "length")?;
-                    let n = self.num(&n);
-                    let n = if n.is_nan() { 0.0 } else { n };
-                    // the element buffer is allocated before any element is read: past the ceiling, RangeError
-                    if n >= crate::MAX_DENSE_ARRAY_LEN as f64 {
-                        return self.throw_error("RangeError", "Array buffer allocation failed");
-                    }
-                    let mut v = Vec::new();
-                    for i in 0..n as usize {
-                        v.push(self.get(&a0, &i.to_string())?);
-                    }
-                    v
-                };
-                let out = self.typed_with_len(ty, items.len());
-                let t = Self::typed_of(&out).unwrap();
-                for (i, v) in items.iter().enumerate() {
-                    t.set_value(self, i, v)?;
-                }
-                Ok(out)
+                Some(v) => v as usize,
+            };
+            if !track && off.saturating_add(len.saturating_mul(ty.size())) > total {
+                return self
+                    .throw_error("RangeError", &format!("Invalid typed array length: {len}"));
             }
-            other => {
-                let n = self.num(other);
-                Ok(self.typed_with_len(ty, if n.is_nan() { 0 } else { n as usize }))
-            }
+            return Ok(self.new_typed(ty, o.clone(), data, off, len, track));
         }
+        let items: Vec<Value> = if let Some(t) = Self::typed_of(&a0) {
+            if t.gone() {
+                return self.throw_error(
+                    "TypeError",
+                    "Cannot perform Construct on a detached ArrayBuffer",
+                );
+            }
+            self.check_mix(t.ty, ty)?;
+            t.to_values()
+        } else if let Some(items) = self.typed_source_values(&a0)? {
+            items
+        } else {
+            let n = self.get(&a0, "length")?;
+            let n = self.tonum(&n)?;
+            let n = if n.is_nan() { 0.0 } else { n.trunc().max(0.0) };
+            // the element buffer is allocated before any element is read: past the ceiling, RangeError
+            if n >= crate::MAX_DENSE_ARRAY_LEN as f64 {
+                return self.throw_error("RangeError", "Array buffer allocation failed");
+            }
+            let mut v = Vec::new();
+            for i in 0..n as usize {
+                v.push(self.get(&a0, &i.to_string())?);
+            }
+            v
+        };
+        let out = self.typed_with_len(ty, items.len());
+        let t = Self::typed_of(&out).unwrap();
+        for (i, v) in items.iter().enumerate() {
+            t.set_value(self, i, v)?;
+        }
+        Ok(out)
     }
 
     pub(crate) fn install_typed(&mut self) {
@@ -1019,7 +1108,7 @@ impl Interp {
         // ----- ArrayBuffer -----
         let ab_proto = self.plain();
         self.rt.arraybuffer_proto = Some(ab_proto.clone());
-        let ab = self.native(|it, _, args| it.alloc_buffer(args, false));
+        let ab = self.native(|it, this, args| it.alloc_buffer(this, args, false));
         if let Value::Object(c) = &ab {
             put_hidden(c, "prototype", Value::Object(ab_proto.clone()));
             put_hidden(&ab_proto, "constructor", ab.clone());
@@ -1077,7 +1166,7 @@ impl Interp {
         // the ArrayBuffer fast path in lib.rs, the prelude adds the brand-checked accessors -----
         let sab_proto = self.plain();
         self.rt.sharedarraybuffer_proto = Some(sab_proto.clone());
-        let sab = self.native(|it, _, args| it.alloc_buffer(args, true));
+        let sab = self.native(|it, this, args| it.alloc_buffer(this, args, true));
         if let Value::Object(c) = &sab {
             put_hidden(c, "prototype", Value::Object(sab_proto.clone()));
             put_hidden(&sab_proto, "constructor", sab.clone());
@@ -1245,7 +1334,7 @@ impl Interp {
         for ty in ALL {
             let proto = new_obj(Some(ta_proto.clone()), Kind::Plain);
             self.rt.typed_protos.push(proto.clone());
-            let ctor = self.native(move |it, _, args| it.construct_typed(ty, args));
+            let ctor = self.native(move |it, this, args| it.construct_typed(ty, this, args));
             if let Value::Object(c) = &ctor {
                 *c.proto.borrow_mut() = Some(ta_ctor.clone());
                 put_hidden(c, "prototype", Value::Object(proto.clone()));

@@ -187,3 +187,26 @@ console.log(view.toSorted((a, b) => b - a).join('|'), view.toReversed().join('|'
         "2,4,6,8 2,4,6,8 2,4,6,8 3|5|7|9 4|6|8 4|6|8|2|4|6|8 2|4|6|8 2|4|6|8|9 0|2|4|6|8 true|2 true 20 true true 6 2 8 0|2|4|6|8 2|2|4|4|6|6|8|8 8 [ 0, 2 ] 2+4+6+8 true|8|6|4|2 8|6|4|2 7|4|6|8 4|6|8 0 [2,4,6,8] 4"
     );
 }
+
+/// Trap invariants (ECMA-262 10.5) and non-callable traps are TypeErrors; a missing trap forwards the receiver.
+#[test]
+fn proxy_trap_invariants_and_receiver_forwarding() {
+    let source = r#"
+const t = {}; Object.defineProperty(t, 'k', { value: 1, configurable: false, writable: false });
+const bad = (f) => { try { f(); return 'no throw'; } catch (e) { return e.constructor.name; } };
+console.log(bad(() => new Proxy(t, { get() { return 2; } }).k));
+console.log(bad(() => 'k' in new Proxy(t, { has() { return false; } })));
+console.log(bad(() => delete new Proxy(t, { deleteProperty() { return true; } }).k));
+console.log(bad(() => Object.keys(new Proxy(t, { ownKeys() { return []; } }))));
+console.log(bad(() => new Proxy({}, { get: 1 }).x));
+console.log(bad(() => Object.getPrototypeOf(new Proxy({}, { getPrototypeOf() { return 1; } }))));
+console.log(bad(() => Reflect.get(Symbol(), 'x')));
+const getter = { get me() { return this; } }; const p = new Proxy(getter, {});
+console.log(Object.create(p).me !== p, new Proxy(getter, { get: null }).me !== undefined);
+"#;
+    assert_eq!(
+        one(source),
+        "TypeError\nTypeError\nTypeError\nTypeError\nTypeError\nTypeError\nTypeError\ntrue true"
+            .replace('\n', "|")
+    );
+}
