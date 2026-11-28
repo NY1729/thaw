@@ -648,9 +648,9 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   function DataView(buffer, byteOffset, byteLength) {
     if (new.target === undefined) throw new TypeError("Constructor DataView requires 'new'");
     if (!(buffer instanceof ArrayBuffer || buffer instanceof SharedArrayBuffer)) throw new TypeError('First argument to DataView constructor must be an ArrayBuffer');
-    var off = byteOffset === undefined ? 0 : (Math.trunc(byteOffset) || 0), total = buffer.byteLength;
+    var off = toIndex(byteOffset), total = buffer.byteLength;
     if (off < 0 || off > total) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
-    var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
+    var len = byteLength === undefined ? total - off : toIndex(byteLength);
     if (len < 0 || off + len > total) throw new RangeError('Invalid DataView length ' + len);
     if (buffer instanceof ArrayBuffer && detGet.call(buffer)) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
     // no length on a resizable buffer: the view tracks the buffer's end (spec: length-tracking)
@@ -672,8 +672,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     if (dv.__off > b.byteLength || (!dv.__track && dv.__off + dv.__len > b.byteLength)) throw new TypeError('Cannot perform ' + (oobWhat || what) + ' on a detached ArrayBuffer');
   }
   Object.defineProperty(DataView.prototype, 'buffer', { enumerable: false, configurable: true, get: function () { if (!Object.prototype.hasOwnProperty.call(this, '__buf')) throw new TypeError('Method get DataView.prototype.buffer called on incompatible receiver'); return this.__buf; } });
-  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { brand(this, 'get DataView.prototype.byteLength'); dvLive(this, 'get DataView.prototype.byteLength'); return dvLen(this); } });
-  Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { brand(this, 'get DataView.prototype.byteOffset'); dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
+  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { dvBrand(this, 'get DataView.prototype.byteLength'); dvLive(this, 'get DataView.prototype.byteLength'); return dvLen(this); } });
+  Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { dvBrand(this, 'get DataView.prototype.byteOffset'); dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
   var resizableGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'resizable').get;
   var scratch = new Uint8Array(8);
@@ -682,7 +682,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     Int32: [4, Int32Array], Uint32: [4, Uint32Array], Float16: [2, Float16Array], Float32: [4, Float32Array], Float64: [8, Float64Array]
   };
   var hasOwn = Object.prototype.hasOwnProperty;
-  function brand(dv, what) {
+  function dvBrand(dv, what) {
     if (typeof dv !== 'object' || dv === null || !hasOwn.call(dv, '__buf')) throw new TypeError('Method ' + what + ' called on incompatible receiver');
   }
   // ToIndex (RangeError for a negative or too large integer), before any detach / bounds check
@@ -698,23 +698,23 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   }
   Object.keys(kinds).forEach(function (name) {
     var size = kinds[name][0], View = kinds[name][1], view = new View(scratch.buffer, 0, 1);
-    def(DataView.prototype, 'get' + name, function (index, little) {
-      brand(this, 'DataView.prototype.get' + name);
+    def(DataView.prototype, 'get' + name, { ['get' + name](index, little) {
+      dvBrand(this, 'DataView.prototype.get' + name);
       index = toIndex(index);
       dvLive(this, 'DataView.prototype.get' + name);
       index = check(this, index, size);
       for (var i = 0; i < size; i++) scratch[little ? i : size - 1 - i] = this.__bytes[index + i];
       return view[0];
-    });
-    def(DataView.prototype, 'set' + name, function (index, value, little) {
-      brand(this, 'DataView.prototype.set' + name);
+    } }['get' + name]);
+    def(DataView.prototype, 'set' + name, { ['set' + name](index, value, little) {
+      dvBrand(this, 'DataView.prototype.set' + name);
       index = toIndex(index);
       value = +value;
       dvLive(this, 'DataView.prototype.set' + name, 'DataView.prototype.get' + name);
       index = check(this, index, size);
       view[0] = value;
       for (var i = 0; i < size; i++) this.__bytes[index + i] = scratch[little ? i : size - 1 - i];
-    });
+    } }['set' + name]);
   });
   ['get', 'set'].forEach(function (p) {
     var f = DataView.prototype[p + 'Float16'];
@@ -722,23 +722,23 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     Object.defineProperty(f, 'length', { value: p === 'get' ? 1 : 2, configurable: true });
   });
   [['BigInt64', true], ['BigUint64', false]].forEach(function (k) {
-    def(DataView.prototype, 'get' + k[0], function (index, little) {
-      brand(this, 'DataView.prototype.get' + k[0]);
+    def(DataView.prototype, 'get' + k[0], { ['get' + k[0]](index, little) {
+      dvBrand(this, 'DataView.prototype.get' + k[0]);
       index = toIndex(index);
       dvLive(this, 'DataView.prototype.get' + k[0]);
       index = check(this, index, 8);
       var v = 0n;
       for (var i = 0; i < 8; i++) v = (v << 8n) | BigInt(this.__bytes[index + (little ? 7 - i : i)]);
       return k[1] ? BigInt.asIntN(64, v) : v;
-    });
-    def(DataView.prototype, 'set' + k[0], function (index, value, little) {
-      brand(this, 'DataView.prototype.set' + k[0]);
+    } }['get' + k[0]]);
+    def(DataView.prototype, 'set' + k[0], { ['set' + k[0]](index, value, little) {
+      dvBrand(this, 'DataView.prototype.set' + k[0]);
       index = toIndex(index);
       var v = BigInt.asUintN(64, BigInt(value));
       dvLive(this, 'DataView.prototype.set' + k[0], 'DataView.prototype.get' + k[0]);
       index = check(this, index, 8);
       for (var i = 7; i >= 0; i--) { this.__bytes[index + (little ? 7 - i : i)] = Number(v & 255n); v >>= 8n; }
-    });
+    } }['set' + k[0]]);
   });
   def(DataView.prototype, Symbol.toStringTag, 'DataView');
   def(DataView.prototype, 'constructor', DataView);
@@ -1002,6 +1002,15 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     if (n !== n || (n = Math.trunc(n)) < 0) throw new RangeError(String(limit) + ' must be positive');
     return n;
   }
+  // `this` is an object; `validate()` checks the arguments and, when it throws, the receiver is closed
+  // (a close error is masked by the validation error) before GetIteratorDirect reads `next`.
+  function direct(self, name, validate) {
+    var it = requireObj(self, name);
+    if (validate) {
+      try { validate(); } catch (e) { try { closeIt(it); } catch (_) {} throw e; }
+    }
+    return it;
+  }
   function closeIt(it) {
     var r = it.return;
     if (r !== undefined && r !== null) r.call(it);
@@ -1044,7 +1053,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   }
   var DONE = { value: undefined, done: true };
   def(ITP, 'map', function map(fn) {
-    var it = requireObj(this, 'map'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'map', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     return helper(it, function () {
       var r = step();
@@ -1053,7 +1063,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'filter', function filter(fn) {
-    var it = requireObj(this, 'filter'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'filter', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     return helper(it, function () {
       for (;;) {
@@ -1066,7 +1077,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'take', function take(limit) {
-    var it = requireObj(this, 'take'), left = toLimit(limit), step = stepOf(it);
+    'use strict';
+    var left, it = direct(this, 'take', function () { left = toLimit(limit); }), step = stepOf(it);
     return helper(it, function () {
       if (left <= 0) { closeIt(it); return DONE; }
       left--;
@@ -1075,7 +1087,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'drop', function drop(limit) {
-    var it = requireObj(this, 'drop'), left = toLimit(limit), step = stepOf(it);
+    'use strict';
+    var left, it = direct(this, 'drop', function () { left = toLimit(limit); }), step = stepOf(it);
     return helper(it, function () {
       while (left > 0) { left--; if (step().done) return DONE; }
       var r = step();
@@ -1083,7 +1096,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'flatMap', function flatMap(fn) {
-    var it = requireObj(this, 'flatMap'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'flatMap', function () { requireFn(fn); });
     var step = stepOf(it), n = 0, inner = null;
     return helper(it, function () {
       for (;;) {
@@ -1107,7 +1121,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }, function () { return inner && inner.it; });
   });
   def(ITP, 'reduce', function reduce(fn) {
-    var it = requireObj(this, 'reduce'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'reduce', function () { requireFn(fn); });
     var step = stepOf(it), acc, c = 0;
     if (arguments.length < 2) {
       var first = step();
@@ -1121,6 +1136,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }
   });
   def(ITP, 'toArray', function toArray() {
+    'use strict';
     var step = stepOf(requireObj(this, 'toArray')), out = [];
     for (;;) {
       var r = step();
@@ -1129,7 +1145,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }
   });
   def(ITP, 'forEach', function forEach(fn) {
-    var it = requireObj(this, 'forEach'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'forEach', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     for (;;) {
       var r = step();
@@ -1139,7 +1156,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   });
   // some / every / find: stop at the first decisive value and close the iterator
   function search(self, name, fn, decide) {
-    var it = requireObj(self, name); requireFn(fn);
+    var it = direct(self, name, function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     for (;;) {
       var r = step();
@@ -1150,14 +1167,113 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }
   }
   def(ITP, 'some', function some(fn) {
+    'use strict';
     return search(this, 'some', fn, { on: true, none: false, hit: function () { return true; } });
   });
   def(ITP, 'every', function every(fn) {
+    'use strict';
     return search(this, 'every', fn, { on: false, none: true, hit: function () { return false; } });
   });
   def(ITP, 'find', function find(fn) {
+    'use strict';
     return search(this, 'find', fn, { on: true, none: undefined, hit: function (v) { return v; } });
   });
+
+  // ---- iterator-includes / iterator-join / iterator-chunking (windows, chunks) ----
+  var MAX_SAFE = 9007199254740991;
+  var meth = {
+    includes(value) {
+      'use strict';
+      var skipped = arguments[1];
+      var it = direct(this, 'includes', function () {
+        if (skipped === undefined) { skipped = 0; return; }
+        if (typeof skipped !== 'number' || skipped !== skipped) throw new TypeError('skippedElements must be an integral Number');
+        if (skipped === Infinity) return;
+        if (skipped === -Infinity) throw new RangeError('skippedElements must not be negative');
+        if (Math.trunc(skipped) !== skipped) throw new TypeError('skippedElements must be an integral Number');
+        if (skipped < 0 || skipped > MAX_SAFE) throw new RangeError('skippedElements is out of range');
+      });
+      var step = stepOf(it);
+      while (skipped > 0) { if (step().done) return false; skipped--; }
+      for (;;) {
+        var r = step();
+        if (r.done) return false;
+        var v = r.value;
+        if (v === value || (v !== v && value !== value)) { closeIt(it); return true; }
+      }
+    },
+    join(separator) {
+      'use strict';
+      var sep;
+      var it = direct(this, 'join', function () { sep = separator === undefined ? ',' : `${separator}`; });
+      var step = stepOf(it), out = '', first = true;
+      for (;;) {
+        var r = step();
+        if (r.done) return out;
+        var part = '';
+        if (r.value !== undefined && r.value !== null) {
+          try { part = `${r.value}`; } catch (e) { closeIt(it); throw e; }
+        }
+        out = first ? part : out + sep + part;
+        first = false;
+      }
+    },
+    chunks(chunkSize) {
+      'use strict';
+      var size = sizeArg(this, 'chunks', chunkSize, 'chunkSize');
+      var it = size.it, n = size.n, step = stepOf(it), ended = false;
+      return helper(it, function () {
+        if (ended) return DONE;
+        var buf = [];
+        while (buf.length < n) {
+          var r = step();
+          if (r.done) { ended = true; break; }
+          buf.push(r.value);
+        }
+        return buf.length === 0 ? DONE : { value: buf, done: false };
+      });
+    },
+    windows(windowSize) {
+      'use strict';
+      var mode = arguments[1], partial = false;
+      var size = sizeArg(this, 'windows', windowSize, 'windowSize', function () {
+        if (mode === undefined || mode === 'only-full') return;
+        if (mode === 'allow-partial') { partial = true; return; }
+        throw new TypeError('undersized must be "only-full" or "allow-partial"');
+      });
+      var it = size.it, n = size.n, step = stepOf(it), buf = [], ended = false;
+      return helper(it, function () {
+        if (ended) return DONE;
+        for (;;) {
+          var r = step();
+          if (r.done) {
+            ended = true;
+            if (partial && buf.length > 0 && buf.length < n) return { value: buf.slice(), done: false };
+            return DONE;
+          }
+          buf.push(r.value);
+          if (buf.length > n) buf.shift();
+          if (buf.length === n) return { value: buf.slice(), done: false };
+        }
+      });
+    },
+  };
+  function sizeArg(self, name, v, label, extra) {
+    var n;
+    var it = direct(self, name, function () {
+      if (typeof v !== 'number' || v !== v || v === Infinity || v === -Infinity || Math.trunc(v) !== v) {
+        throw new TypeError(label + ' must be an integral Number');
+      }
+      if (v < 1 || v > 4294967295) throw new RangeError(label + ' must be between 1 and 2^32 - 1');
+      n = v;
+      if (extra) extra();
+    });
+    return { it: it, n: n };
+  }
+  def(ITP, 'includes', meth.includes);
+  def(ITP, 'join', meth.join);
+  def(ITP, 'chunks', meth.chunks);
+  def(ITP, 'windows', meth.windows);
   def(Iterator, 'from', function from(o) {
     var it;
     if (typeof o === 'string' || isObj(o)) {

@@ -2117,6 +2117,35 @@ fn rejects_dynamic_length_call_spread() {
     assert!(error.contains("statically known tuple length"), "{error}");
 }
 
+/// A trailing spread of an unsized `any` array fills `any` parameters (`undefined` when short)
+/// and forwards the remainder to a rest parameter.
+#[test]
+fn lowers_unsized_any_call_spread_into_any_parameters() {
+    let program = lower(
+        r#"function pair(a: any, b: any): void {}
+        function rest(a: any, ...more: any[]): void {}
+        function main(values: any[]): void { pair(...values); rest(...values); }"#,
+    );
+    let body = format!("{program:#?}");
+    assert!(body.contains("__thaw_call_spread_"), "{body}");
+}
+
+/// A Symbol stored in an `any` slot lowers (as its wire text) instead of failing with
+/// "value has type Symbol, expected Json".
+#[test]
+fn symbol_in_an_any_slot_lowers() {
+    let program = lower(
+        r#"function main(): void {
+            const s = Symbol('s');
+            const a: any = s;
+            const list: any[] = [s, 1];
+            console.log(typeof a, a === s, list.length);
+        }"#,
+    );
+    let body = format!("{program:#?}");
+    assert!(body.contains("__thaw_symbol_key"), "{body}");
+}
+
 #[test]
 fn lowers_fixed_object_for_in_to_key_array_loop() {
     let program = lower(
@@ -3564,18 +3593,19 @@ fn symbol_key_in_a_json_slot_lowers_to_its_wire_key() {
     assert!(body.contains("retainEventKey"), "{body}");
 }
 
-/// A symbol key to a host-backed (`JsValue`) `Object.defineProperty` target is not covered
-/// by the property-key rule: it still fails with the old compile error, not a wire-text key.
+/// A symbol key to a host-backed (`JsValue`) `Object.defineProperty` target lowers to its
+/// wire-text key like any other `Json` key slot (it used to fail with "value has type Symbol,
+/// expected Json").
 #[test]
-fn symbol_key_to_a_host_backed_define_property_still_rejects() {
-    let module = thaw_parser::parse_typescript(r#"
+fn symbol_key_to_a_host_backed_define_property_lowers_to_its_wire_key() {
+    let program = lower(r#"
         function main(host: JsValue): void {
             const S = Symbol('s');
             Object.defineProperty(host, S, { value: 5, enumerable: true });
         }
-    "#).expect("parse error");
-    let error = lower_module(&module).expect_err("host-backed symbol key must not lower");
-    assert!(error.contains("value has type Symbol, expected Json"), "{error}");
+    "#);
+    let body = format!("{program:#?}");
+    assert!(body.contains("__thaw_symbol_key"), "{body}");
 }
 
 /// A computed (`[S]`) key of `Object.defineProperties` lowers through the dynamic-key

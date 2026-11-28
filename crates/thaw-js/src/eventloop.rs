@@ -171,6 +171,10 @@ pub(crate) struct Rt {
     pub(crate) bound_targets: crate::FxMap<usize, (std::rc::Weak<crate::ObjData>, Value)>,
     pub(crate) bound_sweep_at: usize,
     pub(crate) pending_nt: Option<Value>,
+    /// The new target of the native constructor being run by `construct_with`, and the `prototype` it already
+    /// read (a native that must read it before allocating takes both, see `Interp::native_proto`).
+    pub(crate) native_nt: Option<Value>,
+    pub(crate) native_proto: Option<Value>,
     pub(crate) bigint_proto: Option<Obj>,
     pub(crate) generator_proto: Option<Obj>,
     pub(crate) async_generator_proto: Option<Obj>,
@@ -3010,6 +3014,63 @@ const PROMISE_PRELUDE: &str = r#"
       if (--left === 0) rej(new AE(errs, 'All promises were rejected'));
     });
   });
+  // Promise.allKeyed / allSettledKeyed (await-dictionary): own enumerable keys (strings and symbols) in
+  // [[OwnPropertyKeys]] order; the result is a null-prototype object. Methods and arrows keep the spec
+  // shape: no `prototype`, not constructors, the element functions are anonymous with length 1.
+  var ownKeys = Reflect.ownKeys, gopd = Object.getOwnPropertyDescriptor, create = Object.create;
+  // NewPromiseCapability(C): the executor must be called, once, with two callables.
+  function capability(C, name) {
+    if (typeof C !== 'function') throw new TypeError('Promise.' + name + ' called on non-constructor');
+    var res, rej;
+    var promise = new C((a, b) => {
+      if (res !== undefined || rej !== undefined) throw new TypeError('Promise executor has already been invoked');
+      res = a;
+      rej = b;
+    });
+    if (typeof res !== 'function' || typeof rej !== 'function') throw new TypeError('Promise resolve or reject function is not callable');
+    return { promise: promise, res: res, rej: rej };
+  }
+  function keyed(C, name, promises, settled) {
+    var cap = capability(C, name), res = cap.res, rej = cap.rej;
+    try {
+      var resolve = resolver(C);
+      if (promises === null || (typeof promises !== 'object' && typeof promises !== 'function')) {
+        throw new TypeError('Promise.' + name + ' called on a non-object');
+      }
+      var keys = [], vals = [], left = 1;
+      var finish = function () {
+        var out = create(null);
+        for (var j = 0; j < keys.length; j++) {
+          Object.defineProperty(out, keys[j], { value: vals[j], writable: true, enumerable: true, configurable: true });
+        }
+        res(out);
+      };
+      var all = ownKeys(promises);
+      for (var n = 0; n < all.length; n++) {
+        let key = all[n], desc = gopd(promises, key);
+        if (desc === undefined || !desc.enumerable) continue;
+        let next = resolve(promises[key]), i = keys.length, done = false;
+        keys.push(key);
+        vals.push(undefined);
+        left++;
+        if (settled) {
+          next.then(
+            (v) => { if (done) return; done = true; vals[i] = { status: 'fulfilled', value: v }; if (--left === 0) finish(); },
+            (e) => { if (done) return; done = true; vals[i] = { status: 'rejected', reason: e }; if (--left === 0) finish(); });
+        } else {
+          next.then((v) => { if (done) return; done = true; vals[i] = v; if (--left === 0) finish(); }, rej);
+        }
+      }
+      if (--left === 0) finish();
+    } catch (e) { rej(e); }
+    return cap.promise;
+  }
+  var K = {
+    allKeyed(promises) { return keyed(this, 'allKeyed', promises, false); },
+    allSettledKeyed(promises) { return keyed(this, 'allSettledKeyed', promises, true); },
+  };
+  def(P, 'allKeyed', K.allKeyed);
+  def(P, 'allSettledKeyed', K.allSettledKeyed);
   def(P, 'withResolvers', function () {
     var r = {};
     r.promise = new P(function (a, b) { r.resolve = a; r.reject = b; });

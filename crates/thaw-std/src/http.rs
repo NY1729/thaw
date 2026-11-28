@@ -1,5 +1,5 @@
 use crate::json::Value;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::io::{Read, Write};
@@ -1439,13 +1439,16 @@ fn deliver_request_body_events(context: &mut RequestContext) {
     }
     context.body_events_delivered = true;
     let end_listeners = std::mem::take(&mut context.request_end_listeners);
+    // The listener is typed `(chunk: Bytes) => void` like a data listener: a JS callback adapter reads that
+    // argument, so pass an empty chunk rather than nothing (an ignoring native closure never looks at it).
+    let empty_chunk = native_bytes_from_slice(&[]);
     for listener in end_listeners {
         let callback = listener.callback as *const c_void;
         unsafe {
-            type Callback = unsafe extern "C" fn(*const c_void);
+            type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
             let code = *(callback as *const *const c_void);
             let callback_fn: Callback = std::mem::transmute(code);
-            callback_fn(callback);
+            callback_fn(callback, empty_chunk);
         }
     }
 }
@@ -1500,6 +1503,8 @@ fn sync_request_body_buffer(connection: &mut ConnectionState, context: &mut Requ
                 // doesn't distinguish "genuinely finished" from "gave up"
                 // -- both correctly force a close here).
                 None => {
+                    // llhttp errors the request: no `data`/`end` listener ever fires for it.
+                    context.abandoned = true;
                     if connection.response.is_empty() && !context.headers_sent {
                         if let Some(stream) = connection.stream.as_mut() {
                             let _ = stream.write_all(&rejection_bytes(&Reject::BadRequest));
@@ -1546,6 +1551,9 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
             unsafe { (*self.0).delivery_depth -= 1 };
         }
     }
+    if unsafe { (*context_ptr).abandoned } {
+        return;
+    }
     unsafe { (*context_ptr).delivery_depth += 1 };
     let _delivery_lease = DeliveryLease(context_ptr);
     let (new_bytes, data_listeners) = unsafe {
@@ -1570,13 +1578,14 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
         unsafe { (*context_ptr).request.complete = 1 };
         // Data callbacks may register an end listener for this same body.
         let end_listeners = unsafe { std::mem::take(&mut (*context_ptr).request_end_listeners) };
+        let empty_chunk = native_bytes_from_slice(&[]);
         for listener in end_listeners {
             let callback = listener.callback as *const c_void;
             unsafe {
-                type Callback = unsafe extern "C" fn(*const c_void);
+                type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
                 let code = *(callback as *const *const c_void);
                 let callback_fn: Callback = std::mem::transmute(code);
-                callback_fn(callback);
+                callback_fn(callback, empty_chunk);
             }
         }
     }
@@ -2444,6 +2453,7 @@ fn run_server_callback(
     // only be a *partial* delivery (more bytes can still arrive later,
     // fed by `connection_ready`); the one-shot helpers have no
     // connection and no body, so they just fire `end`.
+    HANDLER_ENDED_SYNC.with(|flag| flag.set(context.state.ended));
     if !context.abandoned {
         if connection.is_null() {
             deliver_request_body_events(&mut context);
@@ -3399,8 +3409,6 @@ enum Reject {
     HeaderTooLarge,
     /// An HTTP/1.1 request without `Host`.
     MissingHost,
-    /// An `Expect` other than `100-continue`.
-    ExpectationFailed,
     /// `CONNECT` without a `connect` listener: Node closes the socket without a response.
     CloseSilently,
 }
@@ -3458,7 +3466,6 @@ fn scan_head(buffer: &[u8]) -> Result<Option<usize>, Reject> {
     let mut has_host = false;
     let mut http11 = false;
     let mut connect = false;
-    let mut expect: Option<String> = None;
     loop {
         let Some(newline) = buffer[start..].iter().position(|&byte| byte == b'\n') else {
             return if buffer.len() > MAX_REQUEST_HEAD {
@@ -3503,12 +3510,6 @@ fn scan_head(buffer: &[u8]) -> Result<Option<usize>, Reject> {
             if http11 && !has_host {
                 return Err(Reject::MissingHost);
             }
-            if expect
-                .as_deref()
-                .is_some_and(|value| !value.eq_ignore_ascii_case("100-continue"))
-            {
-                return Err(Reject::ExpectationFailed);
-            }
             if connect {
                 return Err(Reject::CloseSilently);
             }
@@ -3549,7 +3550,6 @@ fn scan_head(buffer: &[u8]) -> Result<Option<usize>, Reject> {
                     .is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked"));
             }
             "host" => has_host = true,
-            "expect" => expect = Some(value),
             _ => {}
         }
     }
@@ -3565,11 +3565,6 @@ fn rejection_bytes(reject: &Reject) -> Vec<u8> {
         }
         Reject::MissingHost => format!(
             "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nDate: {}\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
-            http_date()
-        )
-        .into_bytes(),
-        Reject::ExpectationFailed => format!(
-            "HTTP/1.1 417 Expectation Failed\r\nDate: {}\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
             http_date()
         )
         .into_bytes(),
@@ -3696,6 +3691,50 @@ fn refresh_body_deadline(connection: &mut ConnectionState) {
     };
 }
 
+thread_local! {
+    /// Whether the handler finished its response before any request body listener ran (Node runs those later).
+    static HANDLER_ENDED_SYNC: Cell<bool> = const { Cell::new(true) };
+}
+
+/// Node's default for an `Expect` other than `100-continue`: `417` without running the handler; the connection stays open.
+fn respond_expectation_failed(connection_ptr: *mut ConnectionState) -> bool {
+    let connection = unsafe { &mut *connection_ptr };
+    let tail = &connection.request[connection.head_end..];
+    let (done, consumed) = match connection.body_plan {
+        BodyPlan::None => (true, 0),
+        BodyPlan::Fixed(length) => (tail.len() >= length, length),
+        BodyPlan::Chunked => match decode_chunked_body_incremental(tail, 0) {
+            Some((_, offset, true)) => (true, offset),
+            _ => (false, 0),
+        },
+    };
+    connection.body_complete = done;
+    if done {
+        connection.consumed = connection.head_end + consumed;
+    }
+    let spec = ResponseSpec {
+        status: 417,
+        headers: Vec::new(),
+        body: Vec::new(),
+        bodyless: false,
+        auto_chunked: true,
+        chunk_ends: Vec::new(),
+        reason: None,
+    };
+    connection.response = render_response_for(spec, connection.keep_alive, connection.http10);
+    true
+}
+
+/// Bytes after a request that said `Connection: close`: llhttp refuses them.
+fn request_has_leftover(connection: &ConnectionState) -> bool {
+    let tail = &connection.request[connection.head_end..];
+    match connection.body_plan {
+        BodyPlan::None => !tail.is_empty(),
+        BodyPlan::Fixed(length) => tail.len() > length,
+        BodyPlan::Chunked => false,
+    }
+}
+
 fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
     let _ready_lease = unsafe { ConnectionReadyLease::new(connection_ptr) };
     let (method, target, keep_alive, headers, callback) = {
@@ -3723,6 +3762,11 @@ fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
         connection.keep_alive = keep_alive;
         (method, target, keep_alive, headers, callback)
     };
+    if headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("expect") && !value.trim().eq_ignore_ascii_case("100-continue")
+    }) {
+        return respond_expectation_failed(connection_ptr);
+    }
     let outcome = run_server_callback(callback, &method, &target, &[], &headers, connection_ptr);
     if unsafe { (*connection_ptr).retired } {
         if let CallbackOutcome::Pending(context) = outcome {
@@ -3748,12 +3792,35 @@ fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
     }
     match outcome {
         CallbackOutcome::Ready(spec) => {
+            if !HANDLER_ENDED_SYNC.with(Cell::get)
+                && !connection.keep_alive
+                && request_has_leftover(connection)
+            {
+                // Node answers only after parsing the bytes that follow a `Connection: close` request, so a
+                // response finished from an `end` listener loses to the parser error.
+                if let Some(stream) = connection.stream.as_mut() {
+                    let _ = stream.write_all(&rejection_bytes(&Reject::BadRequest));
+                }
+                finish_connection(connection);
+                return false;
+            }
             http10_keep_alive(connection, &spec.headers);
             connection.response =
                 render_response_for(spec, connection.keep_alive, connection.http10);
             true
         }
-        CallbackOutcome::Pending(context) => park_pending_context(connection, context, keep_alive),
+        CallbackOutcome::Pending(context) => {
+            if !connection.keep_alive && request_has_leftover(connection) {
+                // The handler is still running, so Node's parser error wins: 400 and the handler's response is dropped.
+                if let Some(stream) = connection.stream.as_mut() {
+                    let _ = stream.write_all(&rejection_bytes(&Reject::BadRequest));
+                }
+                connection.response_ctx = context;
+                finish_connection(connection);
+                return false;
+            }
+            park_pending_context(connection, context, keep_alive)
+        }
     }
 }
 
@@ -5606,10 +5673,7 @@ mod tests {
             "a".repeat(20000)
         );
         assert_eq!(scan_head(big.as_bytes()), Err(Reject::HeaderTooLarge));
-        assert_eq!(
-            ok("POST / HTTP/1.1\r\nHost: x\r\nExpect: foo\r\n\r\n"),
-            Err(Reject::ExpectationFailed)
-        );
+        assert!(ok("POST / HTTP/1.1\r\nHost: x\r\nExpect: foo\r\n\r\n").is_ok());
     }
 
     #[test]

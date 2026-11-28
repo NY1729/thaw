@@ -4,7 +4,6 @@
 # must be listed. A row thaw-js gains must be removed from this file in the same change, and this list only shrinks.
 # Regenerate it with BUILTIN_TABLE_WRITE_MISSING=1 on the builtin_table_tests test, then run
 # node tools/parity/filter_builtin_table.js (the embed is this table minus these rows). Never edit by hand.
-%TypedArray%	@@species
 AbortController	@@kMakeTransferable
 AbortController.@@kMakeTransferable	length
 AbortController.@@kMakeTransferable	name
