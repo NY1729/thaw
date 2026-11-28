@@ -1,0 +1,5 @@
+{
+  "name": "a Buffer nested in an any array or object prints as <Buffer ..>",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const a: any = [Buffer.from('a')];\n  console.log(a);\n  console.log(a[0]);\n  const o: any = { b: Buffer.from('hi'), n: 1, nested: { c: Buffer.alloc(3) } };\n  console.log(o);\n  console.log([Buffer.alloc(52, 1)]);\n  const r = new Readable({ read() {} });\n  const p: any = r.toArray();\n  setTimeout(() => { r.push('z'); r.push(null); }, 5);\n  const v: any = await p;\n  console.log(v, v[0]);\n}\n"
+}

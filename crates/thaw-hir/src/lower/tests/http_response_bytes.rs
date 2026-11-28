@@ -79,3 +79,27 @@ function main(): void {
     let program = lower_module(&module).expect("writeHead with variable headers lowers");
     assert!(format!("{program:?}").contains("__thaw_writeHead"));
 }
+
+#[test]
+fn server_response_end_accepts_an_undefined_chunk_like_node() {
+    let cases = [
+        "res.end(undefined);",
+        "res.end(null as any);",
+        "res.end(void 0);",
+        "res.end(req.method === 'HEAD' ? undefined : 'x');",
+        "const v: string | undefined = undefined; res.end(v);",
+    ];
+    for body in cases {
+        let program = format!(
+            r#"interface ServerResponse {{ end: (chunk: string) => boolean; write: (chunk: string) => boolean; __thaw_endEncoded: (content: string, encoding: string) => boolean; __thaw_writeBytes: (chunk: Uint8Array) => boolean; __thaw_endBytes: (chunk: Uint8Array) => boolean; }}
+declare function createServer(callback: (request: {{ method: string }}, response: ServerResponse) => void): void;
+function main(): void {{
+  createServer((req, res) => {{ {body} }});
+}}"#
+        );
+        let module = thaw_parser::parse_typescript(&program).expect("parse error");
+        if let Err(error) = lower_module(&module) {
+            panic!("{body}: {error}");
+        }
+    }
+}

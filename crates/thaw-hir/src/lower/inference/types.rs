@@ -2878,7 +2878,7 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::BigInt);
                     }
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
-                    "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_native_iterator" | "__thaw_json_is_not_iterable"
+                    "__thaw_json_is_buffer_shape" | "__thaw_json_is_bigint" | "__thaw_json_is_live_iterable" | "__thaw_json_is_native_iterator" | "__thaw_json_is_not_iterable"
                     | "__thaw_json_is_primitive_operand" => return Ok(HirType::Bool),
                     "__thaw_is_unset_number" | "__thaw_live_add_guard" => return Ok(HirType::Bool),
                     "__thaw_native_subclass_mark" => {

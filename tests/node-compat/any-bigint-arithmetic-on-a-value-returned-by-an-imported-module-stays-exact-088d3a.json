@@ -1,0 +1,5 @@
+{
+  "name": "any BigInt arithmetic on a value returned by an imported module stays exact",
+  "expect": "matched",
+  "source": "import * as fs from 'node:fs';\nfunction main(): void {\n  const st: any = fs.statSync('/', { bigint: true } as any);\n  const s: any = st.size;\n  console.log(typeof s, s - s, s * 3n >= s, (s - s + 9007199254740993n) - 1n, -(s - s + 5n));\n}\n"
+}

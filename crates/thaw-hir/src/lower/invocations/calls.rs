@@ -738,7 +738,53 @@ impl<'a> FnLowerer<'a> {
                         // receiver makes the chunk dynamic, so its peeked type is `JsValue`/`Json`.
                         let first_is_bytes = first_type == Some(HirType::Bytes)
                             || call.args.first().is_some_and(|argument| self.is_bytes_expression(&argument.expr));
+                        // `res.end(undefined)` / `res.end(null)` / `res.end(void 0)` is `res.end()`; an optional chunk is `chunk ?? ''`.
+                        let empty_chunk = || Box::new(Expr::Lit(swc_ecma_ast::Lit::Str(swc_ecma_ast::Str {
+                            span: swc_common::DUMMY_SP,
+                            value: "".into(),
+                            raw: None,
+                        })));
+                        let chunk_is_nothing = method_name == "end"
+                            && call.args.len() == 1
+                            && {
+                                let mut chunk = call.args[0].expr.as_ref();
+                                while let Expr::TsAs(inner) = chunk {
+                                    chunk = inner.expr.as_ref();
+                                }
+                                while let Expr::Paren(inner) = chunk {
+                                    chunk = inner.expr.as_ref();
+                                }
+                                match chunk {
+                                    Expr::Ident(name) => name.sym == *"undefined",
+                                    Expr::Lit(swc_ecma_ast::Lit::Null(_)) => true,
+                                    Expr::Unary(unary) => unary.op == swc_ecma_ast::UnaryOp::Void,
+                                    _ => false,
+                                }
+                            };
+                        let chunk_may_be_nothing = method_name == "end"
+                            && call.args.len() == 1
+                            && match &first_type {
+                                Some(HirType::Optional(_)) | Some(HirType::Nullish(_)) | Some(HirType::Undefined) => true,
+                                Some(HirType::Union(elements)) => elements.contains(&HirType::Undefined),
+                                _ => false,
+                            };
                         let routed = match (method_name, call.args.len(), first_type) {
+                            ("end", 1, _) if chunk_is_nothing => {
+                                let mut routed = call.clone();
+                                routed.args = vec![swc_ecma_ast::ExprOrSpread { spread: None, expr: empty_chunk() }];
+                                Some(routed)
+                            }
+                            ("end", 1, _) if chunk_may_be_nothing => {
+                                let mut routed = call.clone();
+                                let chunk = routed.args[0].expr.clone();
+                                *routed.args[0].expr = Expr::Bin(swc_ecma_ast::BinExpr {
+                                    span: swc_common::DUMMY_SP,
+                                    op: swc_ecma_ast::BinaryOp::NullishCoalescing,
+                                    left: chunk,
+                                    right: empty_chunk(),
+                                });
+                                Some(routed)
+                            }
                             ("end", 0, _) => {
                                 let mut routed = call.clone();
                                 routed.args.push(swc_ecma_ast::ExprOrSpread {

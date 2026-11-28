@@ -6948,6 +6948,15 @@ pub extern "C" fn thaw_console_typed_or(
 fn typed_probe_node(probe: &str) -> Option<crate::inspect::Node> {
     let json = serde_json::from_str::<serde_json::Value>(probe).ok()?;
     let name = json.get("n")?.as_str()?.to_string();
+    if name == "Buffer" {
+        let bytes = json
+            .get("v")?
+            .as_array()?
+            .iter()
+            .map(|item| item.as_str()?.parse::<u8>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        return Some(crate::inspect::Node::Buffer(bytes));
+    }
     let items = json
         .get("v")?
         .as_array()?
@@ -9019,6 +9028,17 @@ fn is_native_iterator(value: &Value) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Whether `value` holds a BigInt (a cheap check for the `any` arithmetic dispatch).
+#[no_mangle]
+pub extern "C" fn thaw_json_is_bigint(value: *const Value) -> u8 {
+    u8::from(match unsafe { value.as_ref() } {
+        Some(Value::BigInt(_)) => true,
+        // A BigInt held by thaw-js.
+        Some(Value::Host(lease)) => host_query(lease, 0).as_deref() == Some("bigint"),
+        _ => false,
+    })
 }
 
 /// A dynamic value that `for...of` can never iterate: a number, boolean,
