@@ -5632,6 +5632,35 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &argument_bindings);
         }
 
+        // `performance.mark(..)` / `URL.revokeObjectURL(..)` / `ReadableStream.from(..)`: a method of a
+        // standard global (`platform_globals.rs`) that nothing above claims and inference would reject
+        // as an unknown function runs on the realm's real global by name.
+        if signature.is_none() && local_function.is_none() {
+            if let Expr::Member(member) = callee_expr.as_ref() {
+                if let (Expr::Ident(object), MemberProp::Ident(property)) = (member.obj.as_ref(), &member.prop) {
+                    let global = matches!(
+                        platform_global(object.sym.as_ref()),
+                        Some(crate::lower::platform_globals::GlobalKind::Namespace | crate::lower::platform_globals::GlobalKind::Ctor)
+                    );
+                    let bound = self.resolve_binding(object.sym.as_ref());
+                    if global
+                        && !self.scope.contains_key(&bound)
+                        && !self.signatures.contains_key(&bound)
+                        && self
+                            .infer_expr_type(&HirExpr::Call(Box::new(HirExpr::Var(callee_name.clone())), Vec::new()))
+                            .is_err_and(|error| error.starts_with("call to unknown function"))
+                    {
+                        return self.lower_dynamic_value_method_call(
+                            &member.obj,
+                            property.sym.as_ref(),
+                            &call.args,
+                            expected_return_hint.as_ref(),
+                        );
+                    }
+                }
+            }
+        }
+
         let lowered_name = self.specialize_generic_native_call(
             &callee_name,
             call,

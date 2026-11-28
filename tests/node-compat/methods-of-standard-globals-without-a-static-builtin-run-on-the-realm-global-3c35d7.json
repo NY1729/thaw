@@ -1,0 +1,5 @@
+{
+  "name": "methods of standard globals without a static builtin run on the realm global",
+  "expect": "matched",
+  "source": "async function main() {\n  performance.mark('a');\n  console.log(typeof performance.getEntriesByName('a'));\n  URL.revokeObjectURL(URL.createObjectURL(new Blob(['x'])));\n  const reader = ReadableStream.from([1, 2]).getReader();\n  const first = await reader.read();\n  console.log(first.value, first.done);\n}\n"
+}
