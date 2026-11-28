@@ -7986,8 +7986,11 @@ fn typed_array_handle_probe_reports_name_and_values() {
         probe_of("u8x").as_deref(),
         Some(r#"{"n":"Uint8Array","v":["1","2"],"e":[["x","n","3"]]}"#)
     );
-    // a Buffer prints itself, and a plain object is not a typed array
-    assert_eq!(probe_of("buf"), None);
+    // a Buffer answers its own name (the console prints `<Buffer ..>`), and a plain object is not a typed array
+    assert_eq!(
+        probe_of("buf").as_deref(),
+        Some(r#"{"n":"Buffer","v":["1"]}"#)
+    );
     assert_eq!(probe_of("obj"), None);
 }
 

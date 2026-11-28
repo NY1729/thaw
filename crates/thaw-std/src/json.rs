@@ -6935,6 +6935,15 @@ pub extern "C" fn thaw_console_typed_or(
 fn typed_probe_node(probe: &str) -> Option<crate::inspect::Node> {
     let json = serde_json::from_str::<serde_json::Value>(probe).ok()?;
     let name = json.get("n")?.as_str()?.to_string();
+    if name == "Buffer" {
+        let bytes = json
+            .get("v")?
+            .as_array()?
+            .iter()
+            .map(|item| item.as_str()?.parse::<u8>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        return Some(crate::inspect::Node::Buffer(bytes));
+    }
     let items = json
         .get("v")?
         .as_array()?
