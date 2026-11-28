@@ -409,6 +409,44 @@ pub fn recursive_key_for_layout(ty: &HirType) -> Option<Symbol> {
 }
 
 impl HirType {
+    /// Type equality that treats a `Recursive` back-edge and the layout it names as the same type
+    /// (`Server` and a `Server` whose `listen` result was unrolled one level are one type). Unrolling is
+    /// bounded: past the depth limit the two sides are taken as equal (they were equal down to it).
+    pub fn same_modulo_recursive(&self, other: &HirType) -> bool {
+        fn same(a: &HirType, b: &HirType, depth: u32) -> bool {
+            if a == b || depth > 6 {
+                return true;
+            }
+            match (a, b) {
+                (HirType::Recursive(_), _) => {
+                    let expanded = a.expand();
+                    expanded != *a && same(&expanded, b, depth + 1)
+                }
+                (_, HirType::Recursive(_)) => same(b, a, depth),
+                (HirType::Object(left), HirType::Object(right)) => {
+                    left.len() == right.len()
+                        && left
+                            .iter()
+                            .zip(right)
+                            .all(|((ln, lt), (rn, rt))| ln == rn && same(lt, rt, depth + 1))
+                }
+                (HirType::Function(lp, lr), HirType::Function(rp, rr)) => {
+                    lp.len() == rp.len()
+                        && lp.iter().zip(rp).all(|(l, r)| same(l, r, depth + 1))
+                        && same(lr, rr, depth + 1)
+                }
+                (HirType::Optional(l), HirType::Optional(r))
+                | (HirType::Nullable(l), HirType::Nullable(r))
+                | (HirType::Nullish(l), HirType::Nullish(r))
+                | (HirType::Array(l), HirType::Array(r))
+                | (HirType::Promise(l), HirType::Promise(r))
+                | (HirType::Dictionary(l), HirType::Dictionary(r)) => same(l, r, depth + 1),
+                _ => false,
+            }
+        }
+        same(self, other, 0)
+    }
+
     /// Replaces a `Recursive` back-edge reachable through value wrappers (nullable/optional/
     /// array/tuple/union/promise) by the layout it names. Never descends into an `Object`'s
     /// fields, so it always terminates. Types without a `Recursive` are returned unchanged.
