@@ -865,6 +865,19 @@ fn build_with_native_mode_routed(
         }
         fetch_transport_bundles
     };
+    // a worker realm only has the bundles the program carries: link the builtins its workers `require`
+    {
+        let sources = module_graph::graph_sources(input, &user_source)?;
+        let sources = sources.iter().map(String::as_str).collect::<Vec<_>>();
+        let names = eval_worker_builtin_bundles(&sources, input.parent());
+        force_worker_builtin_bundles(
+            &names,
+            &mut runtime_packages,
+            &mut static_packages,
+            &mut resolved_packages,
+            &mut forced_runtime_only,
+        );
+    }
     // thaw-js: the installed packages the bundles require by name are compiled in too (they are the served peers)
     let served_peers = add_implicit_peers(
         registry_dir,
