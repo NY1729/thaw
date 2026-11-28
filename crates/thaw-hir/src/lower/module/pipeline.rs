@@ -3205,10 +3205,7 @@ fn module_uses_bigint(module: &Module) -> bool {
     struct Finder(bool);
     impl Finder {
         fn name(&mut self, sym: &str) {
-            if sym.contains("BigInt") || sym.contains("BigUint") || matches!(sym, "bigint" | "eval" | "Function") {
-                if !self.0 && std::env::var_os("THAW_DEBUG_BIGINT").is_some() {
-                    eprintln!("bigint trigger: {sym}");
-                }
+            if sym.contains("BigInt") || sym.contains("BigUint") || matches!(sym, "bigint" | "eval" | "Function") || sym.starts_with("__thaw_typed_") {
                 self.0 = true;
             }
         }
