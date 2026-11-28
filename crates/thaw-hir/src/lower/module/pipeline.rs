@@ -1552,7 +1552,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         source_omittable: if is_extern {
                             HirOptionalMask::default()
                         } else {
-                            source_omission_mask(
+                            declared_function_omission_mask(
                                 &func.params.iter().map(|parameter| parameter.pat.clone()).collect::<Vec<_>>(),
                                 usize::from(func.this_param.is_some()),
                             )
