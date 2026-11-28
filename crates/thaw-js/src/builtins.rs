@@ -4020,6 +4020,13 @@ impl Interp {
             return Ok(true);
         }
         Ok(match target {
+            // a String wrapper's own index and `length` properties
+            Value::Object(o)
+                if matches!(&*o.kind.borrow(), Kind::Wrapper(Value::Str(s))
+                    if *key == *"length" || array_index(&key).is_some_and(|i| i < str_len(s))) =>
+            {
+                true
+            }
             Value::Object(o) => {
                 crate::typed::typed_own_key(o, &key).unwrap_or_else(|| find_own(o, &key).is_some()
                     || synth_fn_own(o, &key).is_some()
