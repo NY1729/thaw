@@ -3416,11 +3416,10 @@ fn typed_probe_text(it: &mut Interp, v: &Value) -> String {
     let Value::Object(o) = v else {
         return String::new();
     };
-    if is_buffer_value(v) {
-        return String::new();
-    }
+    // a Buffer answers its own name, so the console prints `<Buffer 61>` for one nested in a value
+    let buffer = is_buffer_value(v);
     let (name, len) = match &*o.kind.borrow() {
-        Kind::Typed(t) => (t.ty.name(), t.cur_len()),
+        Kind::Typed(t) => (if buffer { "Buffer" } else { t.ty.name() }, t.cur_len()),
         _ => return String::new(),
     };
     let mut items = Vec::with_capacity(len);
