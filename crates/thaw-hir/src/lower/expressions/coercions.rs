@@ -4198,9 +4198,6 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_as_bigint_i64".into())), vec![value.clone()])
             } else if Self::is_number_or_bigint(ty) {
                 HirExpr::UnionValue(Box::new(value.clone()), 1, members.clone())
-            } else if matches!(ty, HirType::F64) {
-                // Never evaluated: the BigInt branch runs only when both operands are BigInts.
-                HirExpr::Lit(HirLit::BigInt("0".into()))
             } else {
                 value.clone()
             }
