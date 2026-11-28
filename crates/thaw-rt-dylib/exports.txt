@@ -315,6 +315,7 @@ thaw_json_index_get_mut
 thaw_json_index_set
 thaw_json_inspect
 thaw_json_is_array
+thaw_json_is_bigint
 thaw_json_is_buffer
 thaw_json_is_buffer_shape
 thaw_json_is_date_shape

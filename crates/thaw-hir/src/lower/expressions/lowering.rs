@@ -2175,7 +2175,7 @@ impl<'a> FnLowerer<'a> {
                                 // instanceof_json_sentinel` entry, since
                                 // that helper's single-key check doesn't
                                 // fit this two-field shape.
-                                if class.sym == *"Uint8Array" {
+                                if matches!(class.sym.as_ref(), "Uint8Array" | "ArrayBuffer" | "DataView") {
                                     // A real Buffer/Uint8Array crossing
                                     // into `any` via a *statically*-typed
                                     // (`HirType::Bytes`) source is caught
@@ -2241,13 +2241,25 @@ impl<'a> FnLowerer<'a> {
                                         HirExpr::Var(temp.clone()),
                                     )?;
                                     let live_check =
-                                        self.dynamic_value_check_by_name("Uint8Array", resolved)?;
-                                    let buffer_shape_check = HirExpr::Call(
-                                        Box::new(HirExpr::Var(
-                                            "__thaw_json_is_buffer_shape".to_string(),
-                                        )),
-                                        vec![HirExpr::Var(temp.clone())],
-                                    );
+                                        self.dynamic_value_check_by_name(class.sym.as_ref(), resolved)?;
+                                    // A native view held in `any` is a `Value::Bytes`: its kind is its tag.
+                                    let buffer_shape_check = if class.sym == *"Uint8Array" {
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var(
+                                                "__thaw_json_is_buffer_shape".to_string(),
+                                            )),
+                                            vec![HirExpr::Var(temp.clone())],
+                                        )
+                                    } else {
+                                        HirExpr::BinOp(
+                                            BinOp::EqEqEq,
+                                            Box::new(HirExpr::Call(
+                                                Box::new(HirExpr::Var("__thaw_json_object_tag".to_string())),
+                                                vec![HirExpr::Var(temp.clone())],
+                                            )),
+                                            Box::new(HirExpr::Lit(HirLit::Str(format!("[object {}]", class.sym)))),
+                                        )
+                                    };
                                     let body = HirExpr::Conditional(
                                         Box::new(is_handle),
                                         Box::new(live_check),
@@ -3374,6 +3386,12 @@ impl<'a> FnLowerer<'a> {
                         self.lower_logical_expr(lhs, rhs, bin.op == BinaryOp::LogicalAnd)?
                     }
                     BinaryOp::NullishCoalescing => self.lower_nullish_coalescing(lhs, rhs)?,
+                    BinaryOp::Add if self.json_static_bigint_pair(&lhs, &rhs)? => {
+                        self.lower_json_bigint_add(lhs, rhs)?
+                    }
+                    op if Self::bigint_dispatch_op(op) && self.json_bigint_pair(&lhs, &rhs)? => {
+                        self.lower_json_bigint_binary(op, lhs, rhs)?
+                    }
                     BinaryOp::Lt => self.lower_relational(lhs, rhs, BinOp::Lt)?,
                     BinaryOp::Gt => self.lower_relational(lhs, rhs, BinOp::Gt)?,
                     BinaryOp::LtEq => self.lower_relational(lhs, rhs, BinOp::LtEq)?,
@@ -3970,6 +3988,9 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Lit(HirLit::BigInt("0".into()))),
                             Box::new(value),
                         )
+                    }
+                    UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::Json => {
+                        self.lower_json_negate(value)?
                     }
                     UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::JsValue => {
                         // A beyond-`i64` bigint handle: `0 - x` on decimal
