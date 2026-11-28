@@ -391,3 +391,64 @@ impl Interp {
         }
     }
 }
+
+impl Interp {
+    /// A builtin function that thaw-js's preludes define as a plain `function` has a [[Construct]] it should not
+    /// have. By the spec's naming rule only constructors are capitalised (or the `constructor` key itself), so every
+    /// other reachable prelude closure, and every accessor function, loses it. Natives are decided by
+    /// `native_is_constructor` instead.
+    pub(crate) fn mark_methods_non_constructors(&mut self) {
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut stack: Vec<Obj> = vec![self.global_object.clone()];
+        for name in self.global_own_names(false) {
+            if let Some(Value::Object(o)) = self.lookup(&self.global.clone(), &name) {
+                if is_function(&o) && !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    mark_closure(&o);
+                }
+                stack.push(o);
+            }
+        }
+        while let Some(o) = stack.pop() {
+            if !seen.insert(Rc::as_ptr(&o) as usize) {
+                continue;
+            }
+            if let Some(p) = o.proto.borrow().clone() {
+                stack.push(p);
+            }
+            let props: Vec<(Rc<str>, Slot)> = o
+                .raw_props
+                .borrow()
+                .iter()
+                .map(|p| (p.key.clone(), p.slot.clone()))
+                .collect();
+            for (key, slot) in props {
+                match slot {
+                    Slot::Data(Value::Object(f)) => {
+                        let ctor_key = &*key == "constructor"
+                            || key.starts_with(|c: char| c.is_ascii_uppercase());
+                        if !ctor_key && &*key != "prototype" && is_function(&f) {
+                            mark_closure(&f);
+                        }
+                        stack.push(f);
+                    }
+                    Slot::Accessor { get, set } => {
+                        for f in [get, set].into_iter().flatten() {
+                            if let Value::Object(f) = f {
+                                mark_closure(&f);
+                                stack.push(f);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// A prelude closure (not a class) that is not a constructor.
+fn mark_closure(f: &Obj) {
+    if matches!(&*f.kind.borrow(), Kind::Closure { def, .. } if def.class.is_none()) {
+        f.no_ctor.set(true);
+    }
+}
