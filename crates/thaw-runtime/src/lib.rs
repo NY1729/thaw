@@ -1226,6 +1226,11 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
         if unsafe { thaw_promise_state(promise) } != 0 {
             continue;
         }
+        // A reported unhandled rejection is fatal (Node exits 1): timers no longer run, so sleeping to the
+        // next one would spin forever.
+        if UNHANDLED_FAILURE.with(Cell::get) {
+            return std::ptr::null();
+        }
         let delay = match (next_timer_delay(), invocation_deadline_remaining()) {
             (Some(timer), Some(deadline)) => Some(timer.min(deadline)),
             (Some(timer), None) => Some(timer),

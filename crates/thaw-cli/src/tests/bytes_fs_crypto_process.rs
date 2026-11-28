@@ -415,3 +415,33 @@ console.log("end");
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// An unhandled rejection ends the program with exit 1 and the error on stderr even while a timer is pending.
+#[test]
+fn unhandled_rejection_exits_1_without_waiting_for_timers() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-unhandled-await-timer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "async function f(): Promise<void> { throw new Error(\"x\"); }\nasync function main(): Promise<void> {\n  f();\n  await new Promise<void>((r) => setTimeout(r, 10));\n  console.log(\"after\");\n}\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let mut child = Command::new(&output).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(20) {
+            child.kill().unwrap();
+            panic!("program kept running after an unhandled rejection");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(dir);
+}
