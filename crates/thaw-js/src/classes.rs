@@ -200,9 +200,17 @@ impl Interp {
                     };
                     let key: Rc<str> = format!("@@priv:{}", &*pm.key.name).into();
                     let shown: Rc<str> = match pm.kind {
-                        a::MethodKind::Getter => format!("get #{}", &*pm.key.name).into(),
-                        a::MethodKind::Setter => format!("set #{}", &*pm.key.name).into(),
-                        a::MethodKind::Method => format!("#{}", &*pm.key.name).into(),
+                        a::MethodKind::Getter => {
+                            format!("get #{}", crate::private_names::source_name(&pm.key.name))
+                                .into()
+                        }
+                        a::MethodKind::Setter => {
+                            format!("set #{}", crate::private_names::source_name(&pm.key.name))
+                                .into()
+                        }
+                        a::MethodKind::Method => {
+                            format!("#{}", crate::private_names::source_name(&pm.key.name)).into()
+                        }
                     };
                     let f = self.method_value(Some(shown), &pm.function, &mscope)?;
                     match pm.kind {
@@ -221,7 +229,8 @@ impl Interp {
                         Some(e) => {
                             let v = self.eval(e, &static_scope)?;
                             if crate::is_anonymous_fn_def(e) {
-                                let name = format!("#{}", &*p.key.name);
+                                let name =
+                                    format!("#{}", crate::private_names::source_name(&p.key.name));
                                 crate::name_anonymous_fn(&v, &name);
                             }
                             v
@@ -269,7 +278,7 @@ impl Interp {
                     let v = self.eval(&e, &frame)?;
                     if crate::is_anonymous_fn_def(&e) {
                         let name = match key.strip_prefix("@@priv:") {
-                            Some(n) => format!("#{n}").into(),
+                            Some(n) => format!("#{}", crate::private_names::source_name(n)).into(),
                             None => self.fn_name_of_key(&key),
                         };
                         crate::name_anonymous_fn(&v, &name);
