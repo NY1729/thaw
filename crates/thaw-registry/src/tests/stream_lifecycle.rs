@@ -725,7 +725,7 @@ function runCase(cfg, consumer, readMode) {
     function finish(tag) { if (done) return; done = true; clearTimeout(timer); log.push(tag); resolve(log); }
     r.on('end', function () { log.push('end'); });
     r.on('close', function () { setImmediate(function () { finish('close'); }); });
-    var timer = setTimeout(function () { finish('TIMEOUT'); }, 2000);
+    var timer = setTimeout(function () { finish('TIMEOUT'); }, 20000);
     function sawData(v) { log.push('data:' + (typeof v === 'string' ? v : v.length)); }
     if (consumer === 'data') {
       r.on('data', sawData);

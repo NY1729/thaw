@@ -545,6 +545,37 @@ fn peer_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
         .map_err(|e| js_error(it, &e.to_string()))
 }
 
+/// The declared (not yet loaded) `node:*` bundles of this thread, by name: a spawned worker's realm declares the
+/// same ones, so its `require('node:x')` finds them (`worker.rs`).
+pub(crate) fn declared_builtin_sources() -> Vec<(String, String)> {
+    let mut all: HashMap<String, String> = LOADED_BUILTIN_SOURCES.with(|m| m.borrow().clone());
+    PEER_SOURCES.with(|s| {
+        for (name, text) in s
+            .borrow()
+            .iter()
+            .filter(|(name, _)| name.starts_with("node:"))
+        {
+            all.entry(name.clone()).or_insert_with(|| text.clone());
+        }
+    });
+    all.into_iter().collect()
+}
+
+/// Declares `sources` on this thread (a worker thread), keeping a name the thread already has.
+pub(crate) fn declare_sources(sources: Vec<(String, String)>) {
+    PEER_SOURCES.with(|s| {
+        let mut s = s.borrow_mut();
+        for (name, text) in sources {
+            s.entry(name).or_insert(text);
+        }
+    });
+}
+
+/// The exports of the builtin `node:<bare>` when a declared or loaded bundle of this thread serves it.
+pub(crate) fn builtin_exports(it: &mut Interp, spec: &str) -> R<Option<Value>> {
+    peer_exports(it, spec)
+}
+
 /// Whether `peer_exports(spec)` would find a package (no load happens).
 fn peer_known(spec: &str) -> bool {
     BOOTING.with(|b| b.borrow().iter().any(|(name, _)| name == spec))
@@ -6472,11 +6503,12 @@ fn abort_native_pending_work() {}
 pub(crate) fn drain_native_continuations(it: &mut Interp) -> bool {
     let http = poll_native_servers();
     let ran = drain_native();
+    let awaited = settle_handle_watches(it);
     // Node ends the process at the first drain that leaves a rejection unhandled, before a later timer runs
     if native_unhandled_failure() {
         it.yielded = true;
     }
-    ran || (http & 2) != 0
+    ran || awaited || (http & 2) != 0
 }
 
 /// Process-wide barrier ids (unique across threads and realms; 0 is "no barrier").
@@ -8152,6 +8184,8 @@ pub struct ThawResult {
 thread_local! {
     /// Bundles declared by `thaw_tjs_declare`, by package name: loaded by a peer `require` on first use.
     static PEER_SOURCES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// The text of each `node:*` bundle this thread loaded, so a worker spawned from here can load it too.
+    static LOADED_BUILTIN_SOURCES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     /// Entry modules still running (a load in progress), by package name, with their partial `module.exports`.
     static BOOTING: RefCell<Vec<(String, Value)>> = const { RefCell::new(Vec::new()) };
     static BY_NAME: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
@@ -8298,6 +8332,9 @@ fn register_declared(name: &str, source: &str) -> Result<(), HostError> {
 /// fallback). A declared name that is already loaded keeps that instance: a peer's `require` and the
 /// program's own registration then share one module.
 fn register_bundle(name: String, src: &str) -> Result<(), HostError> {
+    if name.starts_with("node:") {
+        LOADED_BUILTIN_SOURCES.with(|m| m.borrow_mut().insert(name.clone(), src.to_string()));
+    }
     let declared_and_loaded = PEER_SOURCES.with(|s| s.borrow().contains_key(&name))
         && BY_NAME.with(|m| m.borrow().contains_key(&name));
     if declared_and_loaded {
@@ -8437,6 +8474,8 @@ struct Watch {
     promise: Value,
     native: *mut c_void,
     settle: SettleFn,
+    /// The settled value is handed back as a new handle id (a `JsValue` await), not as JSON.
+    handle_result: bool,
 }
 
 thread_local! {
@@ -8461,6 +8500,7 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
                 promise,
                 native,
                 settle,
+                handle_result: false,
             })
         }),
         None => settle_native(
@@ -8469,6 +8509,53 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
             Err("thaw-js: invalid pending promise handle".into()),
         ),
     }
+}
+
+/// `await <JsValue>` of compiled code: links `native` (a fresh native promise) to the value behind `handle`.
+/// A Promise settles `native` once it leaves Pending (see `pump_watches`), a plain value at once; either way the
+/// result is a new handle id as decimal text. The input handle stays the caller's.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_watch_handle(handle: i64, native: *mut c_void, settle: SettleFn) {
+    let Some((package, value)) = (handle >= 0).then(|| slot(handle as u64)).flatten() else {
+        settle_native(
+            native,
+            settle,
+            Err("thaw-js: invalid JsValue handle".into()),
+        );
+        return;
+    };
+    // a thenable (an object with a callable `then`, a query builder) is adopted as `Promise.resolve` does
+    let adopted = with_package(package, |p| {
+        let v = adopt_thenable(&mut p.interp, value.clone())?;
+        if p.interp.is_promise(&v) {
+            // observed by the awaiting frame: its rejection is delivered there, not reported as unhandled
+            p.interp.mark_handled(&v);
+        }
+        Ok(v)
+    });
+    let (is_promise, value) = match adopted {
+        Ok(v) => (
+            with_package(package, |p| Ok(p.interp.is_promise(&v))).unwrap_or(false),
+            v,
+        ),
+        Err(e) => {
+            settle_native(native, settle, Err(e.to_string()));
+            return;
+        }
+    };
+    if !is_promise {
+        settle_native(native, settle, Ok(store_handle(package, value).to_string()));
+        return;
+    }
+    WATCHES.with(|w| {
+        w.borrow_mut().push(Watch {
+            package,
+            promise: value,
+            native,
+            settle,
+            handle_result: true,
+        })
+    });
 }
 
 fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, String>) {
@@ -8487,6 +8574,47 @@ fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, S
     );
     // SAFETY: `error` is null or the arena string made above, no longer used by the settler.
     unsafe { thaw_arena::destroy_string(error) };
+}
+
+/// From a loop turn of the realm `it` (which a realm's own loop keeps running while it waits on native work):
+/// settles the `await <JsValue>` watches (`thaw_tjs_watch_handle`) whose Promise has left Pending. They need no
+/// realm to convert the value (a handle is stored by id), so no re-entry into `with_package` is needed.
+/// Returns whether any settled.
+fn settle_handle_watches(it: &mut Interp) -> bool {
+    let watches = WATCHES.with(|w| std::mem::take(&mut *w.borrow_mut()));
+    if watches.is_empty() {
+        return false;
+    }
+    let mut waiting = Vec::new();
+    let mut settled = Vec::new();
+    for w in watches {
+        match it.promise_state(&w.promise).filter(|_| w.handle_result) {
+            Some(Ok(v)) => {
+                let id = store_handle(w.package, v).to_string();
+                settled.push((w, Ok(id)));
+            }
+            Some(Err(e)) => {
+                let text = match frame_error(it, &e).ok().flatten() {
+                    Some((_, framed, _)) => framed,
+                    None => from_value(it, &e, 0)
+                        .map(|n| n.to_json())
+                        .unwrap_or_default(),
+                };
+                settled.push((w, Err(text)));
+            }
+            None => waiting.push(w),
+        }
+    }
+    WATCHES.with(|w| {
+        let mut cur = w.borrow_mut();
+        waiting.append(&mut cur);
+        *cur = waiting;
+    });
+    let any = !settled.is_empty();
+    for (w, result) in settled {
+        settle_native(w.native, w.settle, result);
+    }
+    any
 }
 
 /// Drain the jobs of every package with a watched promise, then settle the watches that left Pending.
@@ -8514,6 +8642,7 @@ fn pump_watches() -> usize {
                 return Ok(None);
             };
             Ok(Some(match state {
+                Ok(v) if w.handle_result => Ok(store_handle(w.package, v).to_string()),
                 Ok(v) => from_value(&mut p.interp, &v, 0)
                     .map(|n| n.to_json_keeping_undefined())
                     .map_err(|e| e.to_string()),

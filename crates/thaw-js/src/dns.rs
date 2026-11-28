@@ -51,6 +51,7 @@ const DNS_TYPES: &[(&str, u16)] = &[
     ("SRV", 33),
     ("NAPTR", 35),
     ("CAA", 257),
+    ("TLSA", 52),
     ("ANY", 255),
 ];
 
@@ -244,6 +245,19 @@ fn dns_record(
             let (regexp, next) = dns_character_string(packet, next, end)?;
             let (replacement, _) = dns_read_name(packet, next)?;
             json!({ "type": label, "flags": flags, "service": service, "regexp": regexp, "replacement": replacement, "order": order, "preference": preference })
+        }
+        52 => {
+            let bytes = packet
+                .get(start..end)
+                .ok_or(DnsFailure { code: "EBADRESP" })?;
+            if bytes.len() < 3 {
+                return Err(DnsFailure { code: "EBADRESP" });
+            }
+            let data: String = bytes[3..]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            json!({ "type": label, "certUsage": bytes[0], "selector": bytes[1], "match": bytes[2], "data": data })
         }
         257 => {
             let critical = *packet.get(start).ok_or(DnsFailure { code: "EBADRESP" })?;

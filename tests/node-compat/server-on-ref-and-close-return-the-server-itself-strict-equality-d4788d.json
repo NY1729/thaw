@@ -1,0 +1,5 @@
+{
+  "name": "server.on, ref and close return the server itself (strict equality)",
+  "expect": "matched",
+  "source": "import http from 'http';\nfunction main(): void {\n  const srv = http.createServer((req: any, res: any) => { res.end('x'); });\n  const out: string[] = [];\n  out.push('on:' + (srv.on('listening', () => {}) === srv));\n  out.push('ref:' + (srv.ref() === srv));\n  srv.listen(0, '127.0.0.1', () => {\n    out.push('close:' + (srv.close() === srv));\n  });\n  setTimeout(() => console.log(out.join(',')), 300);\n}\n"
+}

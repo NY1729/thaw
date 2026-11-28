@@ -1312,6 +1312,30 @@ impl Interp {
         // a typed array's element takes only a plain data descriptor (no accessor, no false attribute)
         if let Some(valid) = crate::typed::typed_own_key(o, key) {
             let refused = |x: &Option<Value>| x.as_ref().is_some_and(|v| !v.truthy());
+            // an immutable buffer's element is fixed: only a descriptor equal to the current one is accepted
+            let frozen =
+                matches!(&*o.kind.borrow(), Kind::Typed(t) if crate::typed::is_immutable(&t.data));
+            if frozen && valid {
+                let cur = match &*o.kind.borrow() {
+                    Kind::Typed(t) => match t.key(key) {
+                        TypedKey::Index(i) => t.get_value(i),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let truthy_not = |x: &Option<Value>| x.as_ref().is_some_and(|v| v.truthy());
+                let same = match (&d.value, &cur) {
+                    (None, _) => true,
+                    (Some(a), Some(b)) => same_value(a, b),
+                    _ => false,
+                };
+                return Ok(same
+                    && d.get.is_none()
+                    && d.set.is_none()
+                    && !truthy_not(&d.writable)
+                    && !truthy_not(&d.configurable)
+                    && !refused(&d.enumerable));
+            }
             if !valid
                 || d.get.is_some()
                 || d.set.is_some()
@@ -1986,7 +2010,10 @@ impl Interp {
                 }
                 // an Array's `length` follows its indices and leads the named keys (V8 order)
                 if let Value::Object(o) = &t {
-                    if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+                    if matches!(
+                        &*o.kind.borrow(),
+                        Kind::Array(_) | Kind::Wrapper(Value::Str(_))
+                    ) {
                         names.push(Value::str("length"));
                     }
                 }
@@ -2046,18 +2073,43 @@ impl Interp {
                 let Value::Object(o) = arg(args, 0) else {
                     return Ok(Value::Undefined);
                 };
-                if let Some((target, handler, trap)) =
-                    it.proxy_trap(&o, "getOwnPropertyDescriptor")?
-                {
-                    let gopd = it
-                        .lookup(&it.global.clone(), "Object")
-                        .unwrap_or(Value::Undefined);
-                    let gopd = it.get(&gopd, "getOwnPropertyDescriptor")?;
-                    return if trap.is_callable() {
-                        it.call(&trap, &handler, &[target, arg(args, 1)])
-                    } else {
-                        it.call(&gopd, &Value::Undefined, &[target, arg(args, 1)])
-                    };
+                if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+                    return it.proxy_gopd(&o, &key);
+                }
+                // a String object's indices and `length` are non-writable, non-configurable data properties
+                let wrapped = match &*o.kind.borrow() {
+                    Kind::Wrapper(Value::Str(st)) if &*key == "length" => {
+                        Some((Value::Number(st.len16() as f64), false))
+                    }
+                    Kind::Wrapper(Value::Str(st)) => array_index(&key)
+                        .and_then(|i| st.unit_at(i))
+                        .map(|u| (Value::Str(units_str(&[u]).into()), true)),
+                    _ => None,
+                };
+                if let Some((v, enumerable)) = wrapped {
+                    let d = it.plain();
+                    put(&d, "value", v);
+                    put(&d, "writable", Value::Bool(false));
+                    put(&d, "enumerable", Value::Bool(enumerable));
+                    put(&d, "configurable", Value::Bool(false));
+                    return Ok(Value::Object(d));
+                }
+                // a typed array's element is a writable, enumerable, configurable data property
+                let element = match &*o.kind.borrow() {
+                    Kind::Typed(t) => match t.key(&key) {
+                        TypedKey::Index(i) => t.get_value(i),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(v) = element {
+                    let d = it.plain();
+                    put(&d, "value", v);
+                    let frozen = matches!(&*o.kind.borrow(), Kind::Typed(t) if crate::typed::is_immutable(&t.data));
+                    put(&d, "writable", Value::Bool(!frozen));
+                    put(&d, "enumerable", Value::Bool(true));
+                    put(&d, "configurable", Value::Bool(!frozen));
+                    return Ok(Value::Object(d));
                 }
                 o.force_key(&key);
                 // a context's global: a descriptor of a sandbox property is the sandbox's
@@ -2322,8 +2374,10 @@ impl Interp {
                 Ok(Value::Str(n)) => n.to_string(),
                 _ => String::new(),
             };
+            // HasOwnProperty(target, "length") first: an inherited `length` does not count
+            let own_length = it.has_own_property(&target0, &Value::str("length"))?;
             let length = match it.get(&target0, "length") {
-                Ok(Value::Number(n)) => (n - bound_count as f64).max(0.0),
+                Ok(Value::Number(n)) if own_length => (n - bound_count as f64).max(0.0),
                 _ => 0.0,
             };
             let bound_fn = it.native(move |it, _, call_args| {
@@ -2338,6 +2392,9 @@ impl Interp {
             });
             if let Value::Object(b) = &bound_fn {
                 it.rt.note_bound(b, target0.clone());
+                if target0.is_constructor() {
+                    put_hidden(b, "@@ctor", Value::Bool(true));
+                }
                 put_with(b, "length", Value::Number(length), false, false, true);
                 put_with(
                     b,
@@ -3671,12 +3728,12 @@ impl Interp {
     fn define_through_proxy(&mut self, target: &Value, key: &Value, desc: &Value) -> R<()> {
         let key_text = self.key_of(key);
         if let Value::Object(po) = target {
-            if let Some((inner, handler, trap)) = self.proxy_trap(po, "defineProperty")? {
-                self.prop_desc_of(desc)?;
-                if trap.is_callable() {
-                    self.call(&trap, &handler, &[inner, key.clone(), desc.clone()])?;
-                } else {
-                    self.define_through_proxy(&inner, key, desc)?;
+            if matches!(&*po.kind.borrow(), Kind::Proxy(_)) {
+                if !self.proxy_define(po, &key_text, desc)? {
+                    return self.throw_error(
+                        "TypeError",
+                        &format!("'defineProperty' on proxy: trap returned falsish for property '{key_text}'"),
+                    );
                 }
                 return Ok(());
             }
@@ -4009,6 +4066,13 @@ impl Interp {
             return Ok(true);
         }
         Ok(match target {
+            // a String wrapper's own index and `length` properties
+            Value::Object(o)
+                if matches!(&*o.kind.borrow(), Kind::Wrapper(Value::Str(s))
+                    if *key == *"length" || array_index(&key).is_some_and(|i| i < str_len(s))) =>
+            {
+                true
+            }
             Value::Object(o) => {
                 crate::typed::typed_own_key(o, &key).unwrap_or_else(|| find_own(o, &key).is_some()
                     || synth_fn_own(o, &key).is_some()

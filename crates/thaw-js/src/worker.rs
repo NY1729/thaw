@@ -612,6 +612,8 @@ fn spawn(
     // the entry is an ES module
     esm: bool,
 ) -> u32 {
+    // the `node:*` bundles of this thread: the worker's `require('node:x')` loads them in its own realm
+    let builtins = crate::host::declared_builtin_sources();
     let (tx, cmd_rx) = mpsc::channel();
     let (evt_tx, rx) = mpsc::channel();
     let ids = thread_ids(it);
@@ -666,7 +668,7 @@ fn spawn(
     let join = std::thread::Builder::new()
         .name("thaw-js-worker".into())
         .stack_size(stack)
-        .spawn(move || run_worker(&source, &opts, stack, heap, side, env, main))
+        .spawn(move || run_worker(&source, &opts, stack, heap, side, env, main, builtins))
         .expect("worker thread spawns");
     it.worker.next += 1;
     let id = it.worker.next;
@@ -894,6 +896,7 @@ fn stop_children(it: &mut Interp) {
 }
 
 /// Runs on the worker thread: the script, then its event loop; always ends with an `Exit` event.
+#[allow(clippy::too_many_arguments)]
 fn run_worker(
     source: &str,
     opts: &str,
@@ -902,6 +905,7 @@ fn run_worker(
     side: Side,
     env: EnvTable,
     main: Option<MainBundle>,
+    builtins: Vec<(String, String)>,
 ) {
     let exit_tx = side.tx.clone();
     let key = (side.hub, side.thread_id);
@@ -916,6 +920,7 @@ fn run_worker(
         it.interrupt = Some(side.interrupt.clone());
         it.worker.side = Some(side);
         it.worker.env_table = Some(env);
+        crate::host::declare_sources(builtins);
         // a panic in the script still stops its children: the unwind stops here, not at the outer catch
         let ran =
             std::panic::catch_unwind(AssertUnwindSafe(|| run_script(&mut it, source, opts, main)));
@@ -944,6 +949,34 @@ fn run_worker(
     let _ = exit_tx.send(Evt::Exit(code));
 }
 
+/// The global `require` of a CommonJS worker: `worker_threads`, then any `node:*` module the spawning thread had
+/// loaded or declared (booted in this worker's own realm on first use). `node:` of an unknown module is
+/// ERR_UNKNOWN_BUILTIN_MODULE, anything else MODULE_NOT_FOUND (as Node).
+fn install_worker_require(it: &mut Interp, worker_threads: Value) {
+    let f = it.native(move |it, _, args| {
+        let name = it.to_str(&args.first().cloned().unwrap_or(Value::Undefined));
+        let bare = name.strip_prefix("node:").unwrap_or(&name).to_string();
+        if bare == "worker_threads" {
+            return Ok(worker_threads.clone());
+        }
+        if let Some(exports) = crate::host::builtin_exports(it, &format!("node:{bare}"))? {
+            return Ok(exports);
+        }
+        let (message, code) = if name.starts_with("node:") {
+            (
+                format!("No such built-in module: {name}"),
+                "ERR_UNKNOWN_BUILTIN_MODULE",
+            )
+        } else {
+            (format!("Cannot find module '{name}'"), "MODULE_NOT_FOUND")
+        };
+        let err = it.make_error("Error", &message)?;
+        it.set(&err, "code", Value::str(code))?;
+        Err(Ctl::Throw(err))
+    });
+    it.global.declare("require", f, true);
+}
+
 fn run_script(it: &mut Interp, source: &str, opts: &str, main: Option<MainBundle>) -> i32 {
     it.global
         .declare("__thaw_worker_opts", Value::str(opts), true);
@@ -960,10 +993,7 @@ fn run_script(it: &mut Interp, source: &str, opts: &str, main: Option<MainBundle
     // an ES-module entry gets no global `require` (its own imports are resolved by the loader)
     let esm = it.worker.side.as_ref().is_some_and(|side| side.esm);
     if !esm {
-        it.install_require(vec![
-            ("node:worker_threads".into(), exports.clone()),
-            ("worker_threads".into(), exports),
-        ]);
+        install_worker_require(it, exports);
     }
     to_parent(it, Evt::Online);
     let entry = match &main {

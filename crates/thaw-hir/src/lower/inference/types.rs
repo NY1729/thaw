@@ -582,7 +582,7 @@ impl<'a> FnLowerer<'a> {
                     BinOp::EqEqEq => {
                         if left_ty != HirType::Dynamic
                             && right_ty != HirType::Dynamic
-                            && left_ty != right_ty
+                            && !left_ty.same_modulo_recursive(&right_ty)
                         {
                             return Err(format!(
                                 "strict equality compares incompatible types {left_ty:?} and {right_ty:?}"
@@ -3126,6 +3126,9 @@ impl<'a> FnLowerer<'a> {
                     "callDynamicValueHandle" | crate::compiler_helpers::TO_ITERATOR_EXACT | "__thaw_to_async_iterator_exact" =>
                         return Ok(HirType::JsValue),
                     "resolveDynamicValue" => return Ok(HirType::JsValue),
+                    "__thaw_js_await_handle" => {
+                        return Ok(HirType::Promise(Box::new(HirType::JsValue)))
+                    }
                     "callDynamicValueWithValue" => return Ok(HirType::Json),
                     "releaseDynamicValue" => return Ok(HirType::Bool),
                     "getDynamicProperty" => return Ok(HirType::JsValue),

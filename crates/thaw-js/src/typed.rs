@@ -226,6 +226,7 @@ pub(crate) fn sab_store(block: Arc<SabBlock>) -> Bytes {
         cell: RefCell::new(alias),
         shared: None,
         detached: Cell::new(false),
+        immutable: Cell::new(false),
         sab: Some(block),
         charged: Cell::new(0),
         max,
@@ -241,6 +242,8 @@ pub(crate) struct Store {
     /// The owner empties it when the memory is replaced, which is how a stale view sees length 0.
     shared: Option<Rc<RefCell<Vec<u8>>>>,
     detached: Cell<bool>,
+    /// An immutable ArrayBuffer (`transferToImmutable` / `sliceToImmutable`): its bytes never change again.
+    immutable: Cell<bool>,
     /// The block of a SharedArrayBuffer; `cell` then aliases it (see `SabBlock`).
     sab: Option<Arc<SabBlock>>,
     /// Bytes this storage charged to the heap limit (`heap_limit`); 0 once detached.
@@ -297,6 +300,7 @@ pub(crate) fn new_bytes_max(v: Vec<u8>, max: Option<usize>) -> Bytes {
         cell: RefCell::new(v),
         shared: None,
         detached: Cell::new(false),
+        immutable: Cell::new(false),
         sab: None,
         charged: Cell::new(charged),
         max,
@@ -369,6 +373,7 @@ pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
         cell: RefCell::new(Vec::new()),
         shared: Some(shared),
         detached: Cell::new(false),
+        immutable: Cell::new(false),
         sab: None,
         charged: Cell::new(0),
         max: None,
@@ -377,6 +382,10 @@ pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
 
 /// Detach a storage: its bytes are released (length 0) and it reports `detached`. Idempotent.
 /// A shared storage keeps its bytes (the engine owns them); only the flag changes.
+pub(crate) fn is_immutable(b: &Bytes) -> bool {
+    b.immutable.get()
+}
+
 pub(crate) fn detach_bytes(b: &Bytes) {
     // a SharedArrayBuffer is never detached: its Vec aliases a shared block (invariant 1)
     if b.sab.is_some() {
@@ -542,6 +551,9 @@ impl TypedArr {
     /// Store a JS value at `i` (ToNumber for the numeric types, ToBigInt for the 64-bit ones, which throws
     /// for a Number). An out-of-range index is a no-op after the conversion, as the spec orders it.
     pub(crate) fn set_value(&self, it: &mut Interp, i: usize, v: &Value) -> R<()> {
+        if is_immutable(&self.data) {
+            return it.throw_error("TypeError", "Cannot modify an immutable ArrayBuffer");
+        }
         if self.ty.is_big() {
             let x = it.bigint_element_of(v)?;
             self.set_big(i, &x);
@@ -761,7 +773,20 @@ impl Interp {
         keep_resizable: bool,
     ) -> R<Value> {
         let data = self.ab_receiver(this, method)?;
+        if is_immutable(&data) {
+            // the new length is converted (observably) before the receiver is refused
+            if !matches!(arg(a, 0), Value::Undefined) {
+                self.tonum(&arg(a, 0))?;
+            }
+            return self.throw_error(
+                "TypeError",
+                &format!("Cannot perform {method} on an immutable ArrayBuffer"),
+            );
+        }
         if is_detached(&data) {
+            if !matches!(arg(a, 0), Value::Undefined) {
+                self.tonum(&arg(a, 0))?;
+            }
             return self.throw_error(
                 "TypeError",
                 &format!("Cannot perform {method} on a detached ArrayBuffer"),
@@ -772,7 +797,7 @@ impl Interp {
         let new_len = match arg(a, 0) {
             Value::Undefined => cur,
             v => {
-                let n = self.num(&v);
+                let n = self.tonum(&v)?;
                 let n = if n.is_nan() { 0.0 } else { n.trunc() };
                 if n < 0.0 {
                     return self.throw_error("RangeError", "Invalid array buffer length");
@@ -787,6 +812,13 @@ impl Interp {
                 n as usize
             }
         };
+        // the length's conversion may have detached the buffer
+        if is_detached(&data) {
+            return self.throw_error(
+                "TypeError",
+                &format!("Cannot perform {method} on a detached ArrayBuffer"),
+            );
+        }
         if max.is_some_and(|m| new_len > m) {
             return self.throw_error("RangeError", "Invalid array buffer length");
         }
@@ -802,10 +834,18 @@ impl Interp {
     }
 
     /// `new ArrayBuffer(n)` / `new SharedArrayBuffer(n)`: zero-filled, `n` truncated, NaN = 0.
-    fn alloc_buffer(&mut self, args: &[Value], shared: bool) -> R<Value> {
-        let n = self.num(&arg(args, 0));
-        let n = if n.is_nan() { 0.0 } else { n };
-        if !(0.0..=2f64.powi(32)).contains(&n) {
+    fn alloc_buffer(&mut self, this: &Value, args: &[Value], shared: bool) -> R<Value> {
+        self.require_new(
+            this,
+            if shared {
+                "SharedArrayBuffer"
+            } else {
+                "ArrayBuffer"
+            },
+        )?;
+        let n = self.index_of(&arg(args, 0), "array buffer length")?;
+        self.native_proto()?;
+        if n > 2f64.powi(32) {
             return self.throw_error("RangeError", "Array buffer allocation failed");
         }
         let max = self.ab_max_option(&arg(args, 1), n as usize)?;
@@ -912,106 +952,187 @@ impl Interp {
         Ok(())
     }
 
-    fn construct_typed(&mut self, ty: Ty, args: &[Value]) -> R<Value> {
+    /// ToIndex: `undefined` is 0, NaN is 0, a negative or past-2^53-1 integer is a RangeError (`what` names it).
+    fn index_of(&mut self, v: &Value, what: &str) -> R<f64> {
+        if matches!(v, Value::Undefined) {
+            return Ok(0.0);
+        }
+        let n = self.tonum(v)?;
+        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+        if !(0.0..=9007199254740991.0).contains(&n) {
+            return self.throw_error("RangeError", &format!("Invalid {what}"));
+        }
+        Ok(n + 0.0)
+    }
+
+    /// A constructor reached by a plain call (no `new`, no derived-class `this`) is a TypeError.
+    fn require_new(&mut self, this: &Value, name: &str) -> R<()> {
+        if !self.rt.constructing && !matches!(this, Value::Object(_)) {
+            return self.throw_error("TypeError", &format!("Constructor {name} requires 'new'"));
+        }
+        Ok(())
+    }
+
+    /// The values of `v` by its `@@iterator` (`None` when it has none). A non-callable, non-nullish method is a
+    /// TypeError; a plain array is read directly while the array iteration protocol is untouched.
+    fn typed_source_values(&mut self, v: &Value) -> R<Option<Vec<Value>>> {
+        let key = self.well_known_key("iterator");
+        let method = self.get(v, &key)?;
+        if matches!(method, Value::Undefined | Value::Null) {
+            return Ok(None);
+        }
+        if !method.is_callable() {
+            return self.throw_error("TypeError", "object is not iterable");
+        }
+        let is_array = matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Array(_)));
+        if is_array && self.array_iter_intact() {
+            let array = self.lookup(&self.global.clone(), "Array");
+            let values = match array {
+                Some(a) => {
+                    let p = self.get(&a, "prototype")?;
+                    self.get(&p, "values")?
+                }
+                None => Value::Undefined,
+            };
+            if matches!((&values, &method), (Value::Object(x), Value::Object(y)) if Rc::ptr_eq(x, y))
+            {
+                if let Some(items) = self.iter_items(v) {
+                    return Ok(Some(items));
+                }
+            }
+        }
+        let iter = self.call(&method, v, &[])?;
+        if !matches!(iter, Value::Object(_)) {
+            return self.throw_error(
+                "TypeError",
+                "Result of the Symbol.iterator method is not an object",
+            );
+        }
+        let next = self.get(&iter, "next")?;
+        let mut out = Vec::new();
+        loop {
+            let r = self.call(&next, &iter, &[])?;
+            if !matches!(r, Value::Object(_)) {
+                return self.throw_error("TypeError", "Iterator result is not an object");
+            }
+            if self.get(&r, "done")?.truthy() {
+                return Ok(Some(out));
+            }
+            out.push(self.get(&r, "value")?);
+        }
+    }
+
+    fn construct_typed(&mut self, ty: Ty, this: &Value, args: &[Value]) -> R<Value> {
+        self.require_new(this, ty.name())?;
         let a0 = arg(args, 0);
-        match &a0 {
-            Value::Undefined | Value::Null => Ok(self.typed_with_len(ty, 0)),
-            Value::Number(n) => {
-                if !(*n >= 0.0 && n.is_finite()) || *n > 2f64.powi(32) {
+        if !matches!(a0, Value::Object(_)) || is_symbol_object(&a0) {
+            // a primitive (or a Symbol, which throws here) is a ToIndex length
+            if let Value::Number(x) = a0 {
+                if x <= -1.0 || x.is_infinite() {
                     return self.throw_error(
                         "RangeError",
-                        &format!("Invalid typed array length: {}", number_to_string(*n)),
+                        &format!("Invalid typed array length: {}", number_to_string(x)),
                     );
                 }
-                Ok(self.typed_with_len(ty, *n as usize))
             }
-            Value::Object(o) => {
-                if let Some(data) = Self::bytes_of_buffer(&a0) {
-                    if is_detached(&data) {
-                        return self.throw_error(
-                            "TypeError",
-                            "Cannot perform Construct on a detached ArrayBuffer",
-                        );
-                    }
-                    let total = data.borrow().len();
-                    let off = match arg(args, 1) {
-                        Value::Undefined => 0,
-                        v => self.num(&v) as usize,
-                    };
-                    if off % ty.size() != 0 {
+            let n = self.index_of(&a0, "typed array length")?;
+            if n > 2f64.powi(32) {
+                return self.throw_error(
+                    "RangeError",
+                    &format!("Invalid typed array length: {}", number_to_string(n)),
+                );
+            }
+            return Ok(self.typed_with_len(ty, n as usize));
+        }
+        let Value::Object(o) = &a0 else {
+            unreachable!()
+        };
+        if let Some(data) = Self::bytes_of_buffer(&a0) {
+            let off = self.index_of(&arg(args, 1), "offset")?;
+            if !(off as usize).is_multiple_of(ty.size()) {
+                return self.throw_error(
+                    "RangeError",
+                    &format!(
+                        "start offset of {} should be a multiple of {}",
+                        ty.name(),
+                        ty.size()
+                    ),
+                );
+            }
+            let off = off as usize;
+            let new_len = match arg(args, 2) {
+                Value::Undefined => None,
+                v => Some(self.index_of(&v, "typed array length")?),
+            };
+            if is_detached(&data) {
+                return self.throw_error(
+                    "TypeError",
+                    "Cannot perform Construct on a detached ArrayBuffer",
+                );
+            }
+            let total = data.borrow().len();
+            if off > total && new_len.is_none() {
+                return self.throw_error(
+                    "RangeError",
+                    &format!("Start offset {off} is outside the bounds of the buffer"),
+                );
+            }
+            // a resizable buffer with no length gives a length-tracking view (spec: IsFixedLength false)
+            let track = data.max.is_some() && new_len.is_none();
+            let len = match new_len {
+                None if track => 0,
+                None => {
+                    if !(total - off).is_multiple_of(ty.size()) {
                         return self.throw_error(
                             "RangeError",
                             &format!(
-                                "start offset of {} should be a multiple of {}",
+                                "byte length of {} should be a multiple of {}",
                                 ty.name(),
                                 ty.size()
                             ),
                         );
                     }
-                    if off > total {
-                        return self.throw_error(
-                            "RangeError",
-                            &format!("Start offset {off} is outside the bounds of the buffer"),
-                        );
-                    }
-                    // a resizable buffer with no length gives a length-tracking view (spec: IsFixedLength false)
-                    let track = data.max.is_some() && matches!(arg(args, 2), Value::Undefined);
-                    let len = match arg(args, 2) {
-                        Value::Undefined if track => 0,
-                        Value::Undefined => {
-                            if (total - off) % ty.size() != 0 {
-                                return self.throw_error(
-                                    "RangeError",
-                                    &format!(
-                                        "byte length of {} should be a multiple of {}",
-                                        ty.name(),
-                                        ty.size()
-                                    ),
-                                );
-                            }
-                            (total - off) / ty.size()
-                        }
-                        v => self.num(&v) as usize,
-                    };
-                    if !track && off + len * ty.size() > total {
-                        return self.throw_error(
-                            "RangeError",
-                            &format!("Invalid typed array length: {len}"),
-                        );
-                    }
-                    return Ok(self.new_typed(ty, o.clone(), data, off, len, track));
+                    (total - off) / ty.size()
                 }
-                let items: Vec<Value> = if let Some(t) = Self::typed_of(&a0) {
-                    self.check_mix(t.ty, ty)?;
-                    t.to_values()
-                } else if let Some(items) = self.iter_protocol(&a0)? {
-                    items
-                } else {
-                    let n = self.get(&a0, "length")?;
-                    let n = self.num(&n);
-                    let n = if n.is_nan() { 0.0 } else { n };
-                    // the element buffer is allocated before any element is read: past the ceiling, RangeError
-                    if n >= crate::MAX_DENSE_ARRAY_LEN as f64 {
-                        return self.throw_error("RangeError", "Array buffer allocation failed");
-                    }
-                    let mut v = Vec::new();
-                    for i in 0..n as usize {
-                        v.push(self.get(&a0, &i.to_string())?);
-                    }
-                    v
-                };
-                let out = self.typed_with_len(ty, items.len());
-                let t = Self::typed_of(&out).unwrap();
-                for (i, v) in items.iter().enumerate() {
-                    t.set_value(self, i, v)?;
-                }
-                Ok(out)
+                Some(v) => v as usize,
+            };
+            if !track && off.saturating_add(len.saturating_mul(ty.size())) > total {
+                return self
+                    .throw_error("RangeError", &format!("Invalid typed array length: {len}"));
             }
-            other => {
-                let n = self.num(other);
-                Ok(self.typed_with_len(ty, if n.is_nan() { 0 } else { n as usize }))
-            }
+            return Ok(self.new_typed(ty, o.clone(), data, off, len, track));
         }
+        let items: Vec<Value> = if let Some(t) = Self::typed_of(&a0) {
+            if t.gone() {
+                return self.throw_error(
+                    "TypeError",
+                    "Cannot perform Construct on a detached ArrayBuffer",
+                );
+            }
+            self.check_mix(t.ty, ty)?;
+            t.to_values()
+        } else if let Some(items) = self.typed_source_values(&a0)? {
+            items
+        } else {
+            let n = self.get(&a0, "length")?;
+            let n = self.tonum(&n)?;
+            let n = if n.is_nan() { 0.0 } else { n.trunc().max(0.0) };
+            // the element buffer is allocated before any element is read: past the ceiling, RangeError
+            if n >= crate::MAX_DENSE_ARRAY_LEN as f64 {
+                return self.throw_error("RangeError", "Array buffer allocation failed");
+            }
+            let mut v = Vec::new();
+            for i in 0..n as usize {
+                v.push(self.get(&a0, &i.to_string())?);
+            }
+            v
+        };
+        let out = self.typed_with_len(ty, items.len());
+        let t = Self::typed_of(&out).unwrap();
+        for (i, v) in items.iter().enumerate() {
+            t.set_value(self, i, v)?;
+        }
+        Ok(out)
     }
 
     pub(crate) fn install_typed(&mut self) {
@@ -1019,7 +1140,7 @@ impl Interp {
         // ----- ArrayBuffer -----
         let ab_proto = self.plain();
         self.rt.arraybuffer_proto = Some(ab_proto.clone());
-        let ab = self.native(|it, _, args| it.alloc_buffer(args, false));
+        let ab = self.native(|it, this, args| it.alloc_buffer(this, args, false));
         if let Value::Object(c) = &ab {
             put_hidden(c, "prototype", Value::Object(ab_proto.clone()));
             put_hidden(&ab_proto, "constructor", ab.clone());
@@ -1049,6 +1170,67 @@ impl Interp {
                 false,
             )
         });
+        self.set_native(&ab_proto, "transferToImmutable", |it, this, a| {
+            let out =
+                it.ab_transfer(this, a, "ArrayBuffer.prototype.transferToImmutable", false)?;
+            if let Some(b) = Self::bytes_of_buffer(&out) {
+                b.immutable.set(true);
+            }
+            Ok(out)
+        });
+        self.set_native(&ab_proto, "sliceToImmutable", |it, this, a| {
+            let m = "ArrayBuffer.prototype.sliceToImmutable";
+            let data = it.ab_receiver(this, m)?;
+            if is_detached(&data) {
+                return it.throw_error(
+                    "TypeError",
+                    &format!("Cannot perform {m} on a detached ArrayBuffer"),
+                );
+            }
+            let n = data.borrow().len() as f64;
+            let rel = |it: &mut Interp, v: Value, d: f64| -> R<f64> {
+                if matches!(v, Value::Undefined) {
+                    return Ok(d);
+                }
+                let x = it.tonum(&v)?;
+                let x = if x.is_nan() { 0.0 } else { x.trunc() };
+                Ok(if x < 0.0 { (n + x).max(0.0) } else { x.min(n) })
+            };
+            let s = rel(it, arg(a, 0), 0.0)?;
+            let e = rel(it, arg(a, 1), n)?;
+            if is_detached(&data) {
+                return it.throw_error(
+                    "TypeError",
+                    &format!("Cannot perform {m} on a detached ArrayBuffer"),
+                );
+            }
+            let cur = data.borrow().len() as f64;
+            let (s, e) = (s.min(cur), e.min(cur));
+            let bytes = if e > s {
+                data.borrow()[s as usize..e as usize].to_vec()
+            } else {
+                Vec::new()
+            };
+            let out = it.new_array_buffer(new_bytes(bytes));
+            if let Some(b) = Self::bytes_of_buffer(&Value::Object(out.clone())) {
+                b.immutable.set(true);
+            }
+            Ok(Value::Object(out))
+        });
+        // Node 22 has no table rows for these, so their heads are set here
+        for (name, len) in [("transferToImmutable", 0.0), ("sliceToImmutable", 2.0)] {
+            if let Some((Slot::Data(Value::Object(f)), _)) = find_own(&ab_proto, name) {
+                crate::builtin_table::set_fn_head(&f, name, len);
+            }
+        }
+        let immutable_get = self.native(|it, this, _| {
+            let data = it.ab_receiver(this, "get ArrayBuffer.prototype.immutable")?;
+            Ok(Value::Bool(is_immutable(&data)))
+        });
+        if let Value::Object(g) = &immutable_get {
+            crate::builtin_table::set_fn_head(g, "get immutable", 0.0);
+        }
+        define_accessor(&ab_proto, "immutable", Some(immutable_get), None, false);
         self.set_native(&ab_proto, "resize", |it, this, a| it.ab_resize(this, a));
         let detached_get = self.native(|it, this, _| {
             let data = it.ab_receiver(this, "get ArrayBuffer.prototype.detached")?;
@@ -1077,7 +1259,7 @@ impl Interp {
         // the ArrayBuffer fast path in lib.rs, the prelude adds the brand-checked accessors -----
         let sab_proto = self.plain();
         self.rt.sharedarraybuffer_proto = Some(sab_proto.clone());
-        let sab = self.native(|it, _, args| it.alloc_buffer(args, true));
+        let sab = self.native(|it, this, args| it.alloc_buffer(this, args, true));
         if let Value::Object(c) = &sab {
             put_hidden(c, "prototype", Value::Object(sab_proto.clone()));
             put_hidden(&sab_proto, "constructor", sab.clone());
@@ -1160,6 +1342,12 @@ impl Interp {
             ))
         });
         g.declare("__thaw_ta_track", track, true);
+        let imm = self.native(|_, _, a| {
+            Ok(Value::Bool(
+                Self::typed_of(&arg(a, 0)).is_some_and(|t| is_immutable(&t.data)),
+            ))
+        });
+        g.declare("__thaw_ta_imm", imm, true);
         // the wire and structuredClone move a block between Interps as an id (the table is in worker.rs)
         let export = self.native(|it, _, a| {
             let Some(block) = Self::bytes_of_buffer(&arg(a, 0)).and_then(|b| b.sab.clone()) else {
@@ -1245,7 +1433,7 @@ impl Interp {
         for ty in ALL {
             let proto = new_obj(Some(ta_proto.clone()), Kind::Plain);
             self.rt.typed_protos.push(proto.clone());
-            let ctor = self.native(move |it, _, args| it.construct_typed(ty, args));
+            let ctor = self.native(move |it, this, args| it.construct_typed(ty, this, args));
             if let Value::Object(c) = &ctor {
                 *c.proto.borrow_mut() = Some(ta_ctor.clone());
                 put_hidden(c, "prototype", Value::Object(proto.clone()));
@@ -1261,12 +1449,6 @@ impl Interp {
             let Some(t) = Self::typed_of(this) else {
                 return it.throw_error("TypeError", "this is not a typed array.");
             };
-            if t.gone() {
-                return it.throw_error(
-                    "TypeError",
-                    "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer",
-                );
-            }
             let off = match arg(a, 1) {
                 Value::Undefined => 0,
                 v => {
@@ -1279,13 +1461,25 @@ impl Interp {
                     n as usize
                 }
             };
+            // the offset's conversion may have detached the target (or the source): that is a TypeError
+            if t.gone() {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer",
+                );
+            }
             // spec: a typed array source is copied after its checks; an array-like's length is checked before any element
-            // is read, and a resize made by a getter in between just drops the writes past the new end
-            let mut array_like = false;
+            // is read, then each element is read and written in turn (a getter sees the earlier writes)
             let src: Vec<Value> = if let Some(s) = Self::typed_of(&arg(a, 0)) {
+                if s.gone() {
+                    return it.throw_error(
+                        "TypeError",
+                        "Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer",
+                    );
+                }
                 it.check_mix(s.ty, t.ty)?;
                 // same element type: the bytes copy as they are (no f64 round trip per element)
-                if s.ty == t.ty && !s.gone() {
+                if s.ty == t.ty {
                     let n = s.cur_len();
                     if off + n > t.cur_len() {
                         return it.throw_error("RangeError", "offset is out of bounds");
@@ -1295,10 +1489,28 @@ impl Interp {
                     t.data.borrow_mut()[at..at + bytes.len()].copy_from_slice(&bytes);
                     return Ok(Value::Undefined);
                 }
-                s.to_values()
+                let v = s.to_values();
+                if off + v.len() > t.cur_len() {
+                    return it.throw_error("RangeError", "offset is out of bounds");
+                }
+                v
             } else {
-                match it.iter_items(&arg(a, 0)) {
-                    Some(i) => i,
+                // a plain dense array is read in one go; everything else is an array-like read element by element
+                let items = match &arg(a, 0) {
+                    v @ Value::Object(o)
+                        if matches!(&*o.kind.borrow(), Kind::Array(_)) && !o.is_exotic() =>
+                    {
+                        it.iter_items(v)
+                    }
+                    _ => None,
+                };
+                match items {
+                    Some(i) => {
+                        if off + i.len() > t.cur_len() {
+                            return it.throw_error("RangeError", "offset is out of bounds");
+                        }
+                        i
+                    }
                     None => {
                         let n = it.get(&arg(a, 0), "length")?;
                         let n = it.tonum(&n)?;
@@ -1310,18 +1522,14 @@ impl Interp {
                         if off + n > t.cur_len() {
                             return it.throw_error("RangeError", "offset is out of bounds");
                         }
-                        array_like = true;
-                        let mut v = Vec::new();
                         for i in 0..n {
-                            v.push(it.get(&arg(a, 0), &i.to_string())?);
+                            let v = it.get(&arg(a, 0), &i.to_string())?;
+                            t.set_value(it, off + i, &v)?;
                         }
-                        v
+                        return Ok(Value::Undefined);
                     }
                 }
             };
-            if !array_like && off + src.len() > t.cur_len() {
-                return it.throw_error("RangeError", "offset is out of bounds");
-            }
             for (i, v) in src.iter().enumerate() {
                 t.set_value(it, off + i, v)?;
             }
@@ -1420,11 +1628,22 @@ impl Interp {
                     "Cannot perform %TypedArray%.prototype.with on a detached ArrayBuffer",
                 );
             }
-            let n = t.cur_len();
+            // the relative index, then the value's conversion (which may detach or shrink), then the bounds
             let rel = match it.tonum(&arg(a, 0))?.trunc() {
                 x if x.is_nan() => 0.0,
                 x => x,
             };
+            let scratch = it.typed_with_len(t.ty, 1);
+            let sc = Self::typed_of(&scratch).unwrap();
+            sc.set_value(it, 0, &arg(a, 1))?;
+            let value = sc.get_value(0).unwrap_or(Value::Undefined);
+            if t.gone() {
+                return it.throw_error(
+                    "TypeError",
+                    "Cannot perform %TypedArray%.prototype.with on a detached ArrayBuffer",
+                );
+            }
+            let n = t.cur_len();
             let idx = if rel < 0.0 { n as f64 + rel } else { rel };
             let in_range = idx >= 0.0 && idx < n as f64;
             let at = if in_range { idx as usize } else { n };
@@ -1433,7 +1652,7 @@ impl Interp {
             let size = t.ty.size();
             let bytes = n * size;
             o.data.borrow_mut()[..bytes].copy_from_slice(&t.data.borrow()[t.off..t.off + bytes]);
-            o.set_value(it, at, &arg(a, 1))?;
+            o.set_value(it, at, &value)?;
             if !in_range {
                 return it.throw_error("RangeError", "Invalid typed array index");
             }
@@ -1477,121 +1696,261 @@ const TYPED_PRELUDE: &str = r#"
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
   function gone(t) { return isTA(t) && (detGet.call(t.buffer) || __thaw_ta_oob(t)); }
   Object.defineProperty(SharedArrayBuffer.prototype, TAG, { value: 'SharedArrayBuffer', configurable: true });
-  ['forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex', 'reduce', 'reduceRight', 'fill', 'at', 'toString', 'keys', 'values', 'entries'].forEach(function (n) {
+  ['at', 'toString', 'keys', 'values', 'entries'].forEach(function (n) {
     if (AP[n]) def(TP, n, AP[n]);
   });
   // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function. Compiled `Array.from(view)` and `for..of` use the protocol.
   def(TP, Symbol.iterator, TP.values);
+  var rApply = Reflect.apply, rConstruct = Reflect.construct;
+  var SPECIES = Symbol.species, ITER = Symbol.iterator;
+  function toInt(v) { var x = +v; return x !== x ? 0 : (x === Infinity || x === -Infinity ? x : Math.trunc(x) + 0); }
+  function relIndex(v, len, d) {
+    if (v === undefined) return d;
+    var x = toInt(v);
+    return x < 0 ? Math.max(len + x, 0) : Math.min(x, len);
+  }
+  function needFn(f) { if (typeof f !== 'function') throw new TypeError('callback is not a function'); }
   def(TP, 'toLocaleString', function () {
     var len = this.length, out = '';
     for (var i = 0; i < len; i++) {
       if (i) out += ',';
       var v = this[i];
-      if (v !== undefined && v !== null) out += v.toLocaleString();
+      if (v !== undefined && v !== null) out += `${v.toLocaleString()}`;
     }
     return out;
   });
   def(TP, 'indexOf', function (v, from) {
-    from = from === undefined ? 0 : (from < 0 ? Math.max(this.length + from, 0) : from);
-    for (var i = from; i < this.length; i++) if (this[i] === v) return i;
+    var len = this.length;
+    if (len === 0) return -1;
+    var n = toInt(from);
+    if (n === Infinity) return -1;
+    if (n === -Infinity) n = 0;
+    for (var k = n >= 0 ? n : Math.max(len + n, 0); k < len; k++) if (k in this && this[k] === v) return k;
     return -1;
   });
   def(TP, 'lastIndexOf', function (v, from) {
-    from = from === undefined ? this.length - 1 : (from < 0 ? this.length + from : Math.min(from, this.length - 1));
-    for (var i = from; i >= 0; i--) if (this[i] === v) return i;
+    var len = this.length;
+    if (len === 0) return -1;
+    var n = arguments.length > 1 ? toInt(from) : len - 1;
+    if (n === -Infinity) return -1;
+    for (var k = n >= 0 ? Math.min(n, len - 1) : len + n; k >= 0; k--) if (k in this && this[k] === v) return k;
     return -1;
   });
   def(TP, 'join', function (sep) {
-    sep = sep === undefined ? ',' : String(sep);
+    var len = this.length;
+    var s = sep === undefined ? ',' : `${sep}`;
     var out = '';
-    for (var i = 0; i < this.length; i++) out += (i ? sep : '') + this[i];
+    for (var k = 0; k < len; k++) {
+      if (k > 0) out += s;
+      var e = this[k];
+      if (e !== undefined) out += e;
+    }
     return out;
   });
   def(TP, 'includes', function (v, from) {
-    for (var i = from || 0; i < this.length; i++) if (this[i] === v || (v !== v && this[i] !== this[i])) return true;
+    var len = this.length;
+    if (len === 0) return false;
+    var n = toInt(from);
+    if (n === Infinity) return false;
+    if (n === -Infinity) n = 0;
+    for (var k = n >= 0 ? n : Math.max(len + n, 0); k < len; k++) {
+      var e = this[k];
+      if (e === v || (e !== e && v !== v)) return true;
+    }
     return false;
   });
   def(TP, 'reverse', function () {
     for (var i = 0, j = this.length - 1; i < j; i++, j--) { var t = this[i]; this[i] = this[j]; this[j] = t; }
     return this;
   });
-  // TypedArraySpeciesCreate: the default constructor of each kind is captured here, before user code runs
-  var DEFAULTS = {};
-  ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'].forEach(function (n) {
-    if (typeof globalThis[n] === 'function') DEFAULTS[n] = globalThis[n];
+  def(TP, 'forEach', function (f, t) {
+    var len = this.length; needFn(f);
+    for (var k = 0; k < len; k++) rApply(f, t, [this[k], k, this]);
   });
+  def(TP, 'some', function (f, t) {
+    var len = this.length; needFn(f);
+    for (var k = 0; k < len; k++) if (rApply(f, t, [this[k], k, this])) return true;
+    return false;
+  });
+  def(TP, 'every', function (f, t) {
+    var len = this.length; needFn(f);
+    for (var k = 0; k < len; k++) if (!rApply(f, t, [this[k], k, this])) return false;
+    return true;
+  });
+  [['find', false, false], ['findIndex', false, true], ['findLast', true, false], ['findLastIndex', true, true]].forEach(function (d) {
+    var back = d[1], wantIndex = d[2];
+    def(TP, d[0], { [d[0]]: function (f, t) {
+      var len = this.length; needFn(f);
+      for (var i = 0; i < len; i++) {
+        var k = back ? len - 1 - i : i, v = this[k];
+        if (rApply(f, t, [v, k, this])) return wantIndex ? k : v;
+      }
+      return wantIndex ? -1 : undefined;
+    } }[d[0]]);
+  });
+  [['reduce', false], ['reduceRight', true]].forEach(function (d) {
+    var back = d[1];
+    def(TP, d[0], { [d[0]]: function (f, init) {
+      var len = this.length; needFn(f);
+      var i = 0, acc;
+      if (arguments.length >= 2) acc = init;
+      else {
+        if (len === 0) throw new TypeError('Reduce of empty array with no initial value');
+        acc = this[back ? len - 1 : 0]; i = 1;
+      }
+      for (; i < len; i++) { var k = back ? len - 1 - i : i; acc = rApply(f, undefined, [acc, this[k], k, this]); }
+      return acc;
+    } }[d[0]]);
+  });
+  // TypedArraySpeciesCreate: the default constructor of each kind is captured here, before user code runs
+  var DEFAULTS = {}, SCRATCH = {};
+  ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'].forEach(function (n) {
+    if (typeof globalThis[n] === 'function') { DEFAULTS[n] = globalThis[n]; SCRATCH[n] = new DEFAULTS[n](1); }
+  });
+  // ToNumber / ToBigInt of `v` as `o`'s element type, done once (the engine's own element conversion)
+  function coerce(o, v) { var s = SCRATCH[o[TAG]]; s[0] = v; return s[0]; }
   var isBig = function (o) { return /^Big/.test(o[TAG]); };
   function speciesCtor(o) {
     var dflt = DEFAULTS[o[TAG]], C = o.constructor;
     if (C === undefined) return dflt;
     if ((typeof C !== 'object' && typeof C !== 'function') || C === null) throw new TypeError('object.constructor is not an object');
-    var S = C[Symbol.species];
+    var S = C[SPECIES];
     if (S === undefined || S === null) return dflt;
     if (typeof S !== 'function') throw new TypeError('object.constructor[Symbol.species] is not a constructor');
     return S;
   }
-  function speciesCreate(o, args, count) {
-    var r = Reflect.construct(speciesCtor(o), args);
-    if (!isTA(r) || gone(r)) throw new TypeError('species constructor did not return a TypedArray');
+  // TypedArrayCreateFromConstructor: construct, validate, and check the length of a single-length request
+  function createFrom(C, args) {
+    var r = rConstruct(C, args);
+    if (!isTA(r) || gone(r)) throw new TypeError('constructor did not return a TypedArray');
+    if (args.length === 1 && typeof args[0] === 'number' && r.length < args[0]) throw new TypeError('constructor returned a too short TypedArray');
+    return r;
+  }
+  function speciesCreate(o, args, count, writes) {
+    var r = createFrom(speciesCtor(o), args);
+    if (writes && __thaw_ta_imm(r)) throw new TypeError('constructor returned a view of an immutable ArrayBuffer');
     if (isBig(r) !== isBig(o)) throw new TypeError('Content type mismatch');
     if (count !== undefined && r.length < count) throw new TypeError('species constructor returned a too short TypedArray');
     return r;
   }
+  def(TP, 'fill', function (value, start, end) {
+    var len = this.length;
+    value = coerce(this, value);
+    var k = relIndex(start, len, 0), fin = relIndex(end, len, len);
+    if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.fill on a detached ArrayBuffer');
+    fin = Math.min(fin, this.length);
+    for (; k < fin; k++) this[k] = value;
+    return this;
+  });
   def(TP, 'map', function (f, t) {
     var len = this.length;
-    if (typeof f !== 'function') throw new TypeError(String(f) + ' is not a function');
-    var r = speciesCreate(this, [len], len);
-    for (var i = 0; i < len; i++) r[i] = f.call(t, this[i], i, this);
+    needFn(f);
+    var r = speciesCreate(this, [len], len, true);
+    for (var i = 0; i < len; i++) r[i] = rApply(f, t, [this[i], i, this]);
     return r;
   });
   def(TP, 'filter', function (f, t) {
     var kept = [], len = this.length;
-    if (typeof f !== 'function') throw new TypeError(String(f) + ' is not a function');
-    for (var i = 0; i < len; i++) if (f.call(t, this[i], i, this)) kept.push(this[i]);
-    var r = speciesCreate(this, [kept.length], kept.length);
+    needFn(f);
+    for (var i = 0; i < len; i++) { var v = this[i]; if (rApply(f, t, [v, i, this])) kept.push(v); }
+    var r = speciesCreate(this, [kept.length], kept.length, true);
     for (var j = 0; j < kept.length; j++) r[j] = kept[j];
     return r;
   });
+  function sortValues(vals, cmp) {
+    if (cmp !== undefined) return vals.sort(function (x, y) { var v = +cmp(x, y); return v !== v ? 0 : v; });
+    return vals.sort(function (x, y) {
+      if (x < y) return -1;
+      if (x > y) return 1;
+      if (x === 0 && y === 0) { var nx = Object.is(x, -0), ny = Object.is(y, -0); return nx && !ny ? -1 : !nx && ny ? 1 : 0; }
+      if (x !== x) return y !== y ? 0 : 1;
+      if (y !== y) return -1;
+      return 0;
+    });
+  }
+  function vals(o, len) { var a = []; for (var i = 0; i < len; i++) a.push(o[i]); return a; }
+  var mutating = Object.assign(Object.create(null), { fill: 1, copyWithin: 1, reverse: 1, sort: 1 });
+  function validate(o, name) {
+    if (!isTA(o)) throw new TypeError('this is not a typed array.');
+    if (mutating[name] && __thaw_ta_imm(o)) throw new TypeError('Cannot modify an immutable ArrayBuffer');
+    if (gone(o)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + name + ' on a detached ArrayBuffer');
+  }
   def(TP, 'sort', function (cmp) {
-    var a = Array.from(this);
-    a.sort(cmp || function (x, y) { return x < y ? -1 : x > y ? 1 : 0; });
-    for (var i = 0; i < a.length; i++) this[i] = a[i];
+    if (cmp !== undefined && typeof cmp !== 'function') throw new TypeError('The comparison function must be either a function or undefined');
+    validate(this, 'sort');
+    var len = this.length, a = sortValues(vals(this, len), cmp);
+    for (var i = 0; i < len; i++) this[i] = a[i];
     return this;
   });
-  def(TP, 'toSorted', function (cmp) { return nSlice.call(this, 0, this.length).sort(cmp); });
+  def(TP, 'toSorted', function (cmp) {
+    if (cmp !== undefined && typeof cmp !== 'function') throw new TypeError('The comparison function must be either a function or undefined');
+    validate(this, 'toSorted');
+    var len = this.length, r = new DEFAULTS[this[TAG]](len), a = sortValues(vals(this, len), cmp);
+    for (var i = 0; i < len; i++) r[i] = a[i];
+    return r;
+  });
   def(TP, 'toReversed', function () { return nSlice.call(this, 0, this.length).reverse(); });
   def(TP, 'copyWithin', function (target, start, end) {
-    var n = this.length, vals = Array.from(this);
-    target = target < 0 ? Math.max(n + target, 0) : Math.min(target, n);
-    start = start === undefined ? 0 : (start < 0 ? Math.max(n + start, 0) : Math.min(start, n));
-    end = end === undefined ? n : (end < 0 ? Math.max(n + end, 0) : Math.min(end, n));
-    for (var i = 0; i < end - start && target + i < n; i++) this[target + i] = vals[start + i];
+    var len = this.length;
+    var to = relIndex(target, len, 0), from = relIndex(start, len, 0), fin = relIndex(end, len, len);
+    var count = Math.min(fin - from, len - to);
+    if (count > 0) {
+      if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.copyWithin on a detached ArrayBuffer');
+      var now = this.length;
+      if (from < to && to < from + count) for (var i = count - 1; i >= 0; i--) { if (from + i < now && to + i < now) this[to + i] = this[from + i]; }
+      else for (var j = 0; j < count; j++) { if (from + j < now && to + j < now) this[to + j] = this[from + j]; }
+    }
     return this;
   });
   // %TypedArray%.from / .of: own on %TypedArray% only; the concrete constructors inherit them.
   var TAC = Object.getPrototypeOf(Uint8Array);
+  function isCtor(C) { try { rConstruct(function () {}, [], C); return true; } catch (e) { return false; } }
   def(TAC, 'from', function from(src) {
-    var mapFn = arguments[1], thisArg = arguments[2];
-    var items = Array.from(src);
-    if (mapFn) items = items.map(function (v, i) { return mapFn.call(thisArg, v, i); });
-    return new this(items);
+    var C = this, mapFn = arguments[1], thisArg = arguments[2];
+    if (!isCtor(C)) throw new TypeError(String(C) + ' is not a constructor');
+    if (mapFn !== undefined && typeof mapFn !== 'function') throw new TypeError(String(mapFn) + ' is not a function');
+    var using = src === undefined || src === null ? src[ITER] : Object(src)[ITER];
+    if (using !== undefined && using !== null && typeof using !== 'function') throw new TypeError('source[Symbol.iterator] is not a function');
+    var items;
+    if (using !== undefined && using !== null) items = Array.from({ [ITER]: function () { return rApply(using, src, []); } });
+    else { var o = Object(src), n = Math.min(Math.max(toInt(o.length), 0), 9007199254740991); items = []; for (var i = 0; i < n; i++) items.push(o[i]); }
+    var len = items.length, r = createFrom(C, [len]);
+    if (__thaw_ta_imm(r)) throw new TypeError('constructor returned a view of an immutable ArrayBuffer');
+    for (var k = 0; k < len; k++) {
+      var v = items[k];
+      if (mapFn !== undefined) v = rApply(mapFn, thisArg, [v, k]);
+      if (!Reflect.set(r, k, v)) throw new TypeError('Cannot set element ' + k);
+    }
+    return r;
   });
-  def(TAC, 'of', function of() { return new this(Array.from(arguments)); });
+  def(TAC, 'of', function of() {
+    var C = this, len = arguments.length;
+    if (!isCtor(C)) throw new TypeError(String(C) + ' is not a constructor');
+    var r = createFrom(C, [len]);
+    if (__thaw_ta_imm(r)) throw new TypeError('constructor returned a view of an immutable ArrayBuffer');
+    for (var k = 0; k < len; k++) if (!Reflect.set(r, k, arguments[k])) throw new TypeError('Cannot set element ' + k);
+    return r;
+  });
+  [TAC, ArrayBuffer].forEach(function (C) {
+    if (!Object.prototype.hasOwnProperty.call(C, SPECIES))
+      Object.defineProperty(C, SPECIES, { get: Object.getOwnPropertyDescriptor({ get [SPECIES]() { return this; } }, SPECIES).get, configurable: true });
+  });
   // Detached-buffer guard for the methods V8 checks (message names as V8 prints them).
   var detachedNames = { forEach: 'forEach', some: 'some', every: 'every', find: 'find', findIndex: 'findIndex',
     findLast: 'findLast', findLastIndex: 'findIndexLast', reduce: 'reduce', reduceRight: 'reduceRight', fill: 'fill',
     at: 'at', keys: 'keys', values: 'values', entries: 'entries', join: 'join', includes: 'includes',
-    indexOf: 'indexOf', lastIndexOf: 'lastIndexOf', map: 'map', filter: 'filter', sort: 'sort',
-    toSorted: 'toSorted', toReversed: 'toReversed', reverse: 'reverse', copyWithin: 'copyWithin',
+    indexOf: 'indexOf', lastIndexOf: 'lastIndexOf', map: 'map', filter: 'filter',
+    toReversed: 'toReversed', reverse: 'reverse', copyWithin: 'copyWithin',
     toString: 'join', toLocaleString: 'toLocaleString' };
   Object.keys(detachedNames).forEach(function (n) {
     var orig = TP[n];
     if (typeof orig !== 'function') return;
-    def(TP, n, function () {
+    def(TP, n, { [n]: function () {
       if (n !== 'toString' && !isTA(this)) throw new TypeError('this is not a typed array.');
+      if (mutating[n] && __thaw_ta_imm(this)) throw new TypeError('Cannot modify an immutable ArrayBuffer');
       if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + detachedNames[n] + ' on a detached ArrayBuffer');
       return orig.apply(this, arguments);
-    });
+    } }[n]);
   });
   // slice / subarray: a user species constructor builds the result; the default (and Buffer) keep the native path
   function relIdx(v, len, d) {
@@ -1607,7 +1966,7 @@ const TYPED_PRELUDE: &str = r#"
     if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer');
     var len = this.length, s = relIdx(start, len, 0), e = relIdx(end, len, len), C = speciesCtor(this);
     if (plainCtor(C, this)) return nSlice.call(this, s, e);
-    var cnt = Math.max(e - s, 0), r = speciesCreate(this, [cnt], cnt);
+    var cnt = Math.max(e - s, 0), r = speciesCreate(this, [cnt], cnt, true);
     if (cnt > 0) {
       if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer');
       e = Math.min(e, this.length);
@@ -1617,11 +1976,37 @@ const TYPED_PRELUDE: &str = r#"
   });
   def(TP, 'subarray', function (begin, end) {
     if (!isTA(this)) throw new TypeError('this is not a typed array.');
-    var len = this.length, s = relIdx(begin, len, 0), e = relIdx(end, len, len), C = speciesCtor(this);
+    var len = this.length, off = this.byteOffset, buf = this.buffer, tracking = __thaw_ta_track(this);
+    var s = relIdx(begin, len, 0), e = relIdx(end, len, len), C = speciesCtor(this);
     if (plainCtor(C, this)) return nSub.call(this, s, end === undefined ? undefined : e);
-    var args = [this.buffer, this.byteOffset + s * this.BYTES_PER_ELEMENT];
-    args.push(Math.max(e - s, 0)); // ponytail: a length-tracking source loses tracking in the species path
+    var args = [buf, off + s * this.BYTES_PER_ELEMENT];
+    if (!(end === undefined && tracking)) args.push(Math.max(e - s, 0));
     return speciesCreate(this, args);
+  });
+  // ArrayBuffer.prototype.slice: relative indices, then SpeciesConstructor and the checks on what it builds
+  var abSlice = ArrayBuffer.prototype.slice, AB = ArrayBuffer;
+  var immGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'immutable').get;
+  def(ArrayBuffer.prototype, 'slice', function slice(start, end) {
+    var isDet;
+    try { isDet = detGet.call(this); } catch (e) { return rApply(abSlice, this, [start, end]); } // the native names the bad receiver
+    if (isDet) throw new TypeError('Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer');
+    var len = this.byteLength, first = relIdx(start, len, 0), fin = relIdx(end, len, len), n = Math.max(fin - first, 0);
+    var C = this.constructor, S = AB;
+    if (C !== undefined) {
+      if ((typeof C !== 'object' && typeof C !== 'function') || C === null) throw new TypeError('object.constructor is not an object');
+      var sp = C[SPECIES];
+      if (sp !== undefined && sp !== null) { if (!isCtor(sp)) throw new TypeError('object.constructor[Symbol.species] is not a constructor'); S = sp; }
+    }
+    if (S === AB) return rApply(abSlice, this, [first, fin]);
+    var r = rConstruct(S, [n]);
+    if (detGet.call(r)) throw new TypeError('species constructor returned a detached ArrayBuffer');
+    if (immGet.call(r)) throw new TypeError('species constructor returned an immutable ArrayBuffer');
+    if (r === this) throw new TypeError('species constructor returned the same ArrayBuffer');
+    if (r.byteLength < n) throw new TypeError('species constructor returned a too small ArrayBuffer');
+    if (detGet.call(this)) throw new TypeError('Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer');
+    var avail = Math.max(Math.min(n, this.byteLength - first), 0);
+    if (avail > 0) new Uint8Array(r).set(new Uint8Array(this, first, avail));
+    return r;
   });
   // Spec: %TypedArray%.prototype[Symbol.iterator] is the `values` function (the guarded one now).
   def(TP, Symbol.iterator, TP.values);

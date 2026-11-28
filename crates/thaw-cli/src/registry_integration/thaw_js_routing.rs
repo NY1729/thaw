@@ -141,6 +141,73 @@ fn force_realm_fetch_bundles(
     }
 }
 
+/// The `node:*` builtins a worker body requires: `require('x')` / `require("node:x")` and static `from 'node:x'`.
+fn worker_source_builtin_requires(text: &str) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    for needle in ["require(", "from ", "import "] {
+        for (at, _) in text.match_indices(needle) {
+            let rest = text[at + needle.len()..].trim_start();
+            let Some(quote) = rest.chars().next().filter(|c| matches!(c, '\'' | '"' | '`')) else {
+                continue;
+            };
+            let Some(end) = rest[1..].find(quote) else { continue };
+            let spec = &rest[1..1 + end];
+            let bare = spec.strip_prefix("node:").unwrap_or(spec);
+            if !bare.is_empty()
+                && bare.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '/')
+            {
+                found.insert(format!("node:{bare}"));
+            }
+        }
+    }
+    found
+}
+
+/// The registry builtins a program's workers may `require`: a worker realm only has the bundles the program
+/// carries, so those named in `new Worker(<code>, { eval: true })` source text (any source mentioning `Worker`; a
+/// computed code string cannot be scanned, so its `require('node:x')` is MODULE_NOT_FOUND at run time) and in the
+/// local worker files `new Worker('./file.js')` names (relative to `base`).
+fn eval_worker_builtin_bundles(sources: &[&str], base: Option<&Path>) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for source in sources.iter().filter(|source| thaw_js_mentions(source, "Worker")) {
+        out.extend(worker_source_builtin_requires(source));
+        for (at, _) in source.match_indices("new Worker(") {
+            let rest = source[at + "new Worker(".len()..].trim_start();
+            let Some(quote) = rest.chars().next().filter(|c| matches!(c, '\'' | '"')) else { continue };
+            let Some(end) = rest[1..].find(quote) else { continue };
+            let file = &rest[1..1 + end];
+            if !(file.starts_with("./") || file.starts_with("../")) {
+                continue;
+            }
+            if let Some(text) = base.and_then(|base| std::fs::read_to_string(base.join(file)).ok()) {
+                out.extend(worker_source_builtin_requires(&text));
+            }
+        }
+    }
+    out.retain(|name| name != "node:worker_threads" && thaw_registry::resolve_builtin(name).is_ok());
+    out
+}
+
+/// Adds the builtins `names` as if imported, at runtime only and without typed declarations (the fetch
+/// transport's mechanism): the program loads their bundles so a worker it spawns can `require` them.
+fn force_worker_builtin_bundles(
+    names: &std::collections::BTreeSet<String>,
+    runtime_packages: &mut std::collections::HashSet<String>,
+    static_packages: &mut std::collections::HashSet<String>,
+    resolved_packages: &mut Vec<String>,
+    forced: &mut std::collections::HashSet<String>,
+) {
+    for builtin in names {
+        runtime_packages.insert(builtin.clone());
+        // loaded at startup (not on first typed use): the worker's realm finds the bundle already registered
+        static_packages.insert(builtin.clone());
+        if !resolved_packages.iter().any(|package| package == builtin) {
+            resolved_packages.push(builtin.clone());
+            forced.insert(builtin.clone());
+        }
+    }
+}
+
 /// The local names the program binds to the default export of the package `pkg_name`: `import p from`,
 /// `import { default as p } from`, `import p = require(..)`. Unparseable source binds none.
 fn thaw_js_default_import_locals(pkg_name: &str, user_source: &str) -> Vec<String> {
@@ -1432,3 +1499,37 @@ fn thaw_js_group_marker_goes_after_the_entry_key_statement() {
     assert_eq!(parts.group.as_deref(), Some("drizzle-orm"));
 }
 
+
+#[test]
+fn worker_source_requires_find_node_builtins_in_both_spellings() {
+    let found = worker_source_builtin_requires(
+        "const a = require('node:stream'); const b = require(\"path\"); import x from 'node:util'; require('./local'); require(name);",
+    );
+    assert_eq!(
+        found.into_iter().collect::<Vec<_>>(),
+        ["node:path", "node:stream", "node:util"]
+    );
+}
+
+#[test]
+fn eval_worker_builtins_need_a_worker_mention_and_skip_worker_threads() {
+    let program = "new Worker(`require('node:events'); require('worker_threads')`, { eval: true });";
+    let found = eval_worker_builtin_bundles(&[program], None);
+    assert_eq!(found.into_iter().collect::<Vec<_>>(), ["node:events"]);
+    assert!(eval_worker_builtin_bundles(&["require('node:events')"], None).is_empty());
+}
+
+#[test]
+fn file_worker_bodies_are_scanned_relative_to_the_program() {
+    let dir = std::env::temp_dir().join(format!("thaw-file-worker-scan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("w.js"),
+        "const { Readable } = require('node:stream'); const os = require(\"os\");",
+    )
+    .unwrap();
+    let program = "new Worker('./w.js'); new Worker('./missing.js'); new Worker(computed);";
+    let found = eval_worker_builtin_bundles(&[program], Some(&dir));
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(found.into_iter().collect::<Vec<_>>(), ["node:os", "node:stream"]);
+}

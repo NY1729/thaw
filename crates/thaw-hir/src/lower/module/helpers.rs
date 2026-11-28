@@ -496,6 +496,20 @@ fn source_omission_mask(patterns: &[Pat], receiver_count: usize) -> HirOptionalM
     )
 }
 
+/// `source_omission_mask` for a declared `function f(a, b)`: in JavaScript an unannotated
+/// parameter is `undefined` when the caller leaves it out.
+fn declared_function_omission_mask(patterns: &[Pat], receiver_count: usize) -> HirOptionalMask {
+    HirOptionalMask::from_bools(
+        &(0..receiver_count)
+            .map(|_| false)
+            .chain(patterns.iter().map(|pattern| {
+                pattern_is_omittable(pattern)
+                    || matches!(pattern, Pat::Ident(binding) if binding.type_ann.is_none())
+            }))
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn mask_with_offset(mask: &HirOptionalMask, offset: usize, len: usize) -> HirOptionalMask {
     HirOptionalMask::from_bools(
         &(0..len)
@@ -522,7 +536,7 @@ fn is_optional_parameter(mask: &HirOptionalMask, index: usize) -> bool {
 
 fn omitted_parameter_value(ty: &HirType) -> Result<HirExpr, String> {
     match ty {
-        HirType::Json | HirType::Dynamic | HirType::JsValue => {
+        HirType::Json | HirType::Dynamic | HirType::JsValue | HirType::Undefined => {
             Ok(HirExpr::Lit(HirLit::Undefined))
         }
         HirType::Optional(payload) => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),

@@ -244,6 +244,97 @@ impl<'a> FnLowerer<'a> {
         std::borrow::Cow::Owned(result)
     }
 
+    /// `const fn = () => clear(h); const h = setImmediate(fn);`: an earlier statement mentions a
+    /// non-closure `const`/`let` declared after it. Declare the binding up front (`let h;`,
+    /// keeping its annotation) and turn the declaration into the assignment `h = init`.
+    pub(in crate::lower) fn predeclare_captured_bindings(stmts: &[Stmt]) -> std::borrow::Cow<'_, [Stmt]> {
+        use swc_ecma_visit::{Visit, VisitWith};
+        #[derive(Default)]
+        struct Names(HashSet<String>);
+        impl Visit for Names {
+            fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+                self.0.insert(ident.sym.to_string());
+            }
+            // names inside a type annotation (`(value: T) => U`) are not value mentions
+            fn visit_ts_type_ann(&mut self, _: &swc_ecma_ast::TsTypeAnn) {}
+        }
+        let mentions = |node: &dyn Fn(&mut Names)| {
+            let mut names = Names::default();
+            node(&mut names);
+            names.0
+        };
+        // Only the true cycle `const f = <closure mentioning h>; const h = g(.. f ..)`: a closure
+        // declaration that mentions an unannotated later binding whose initializer mentions
+        // that closure, so neither can move. (declaration index, insertion index)
+        let mut firsts: Vec<(usize, usize)> = Vec::new();
+        for (j, stmt) in stmts.iter().enumerate() {
+            let Stmt::Decl(Decl::Var(var)) = stmt else { continue };
+            if !matches!(var.kind, VarDeclKind::Const | VarDeclKind::Let) || var.declare {
+                continue;
+            }
+            let [declarator] = var.decls.as_slice() else { continue };
+            let (Pat::Ident(binding), Some(init)) = (&declarator.name, declarator.init.as_deref()) else { continue };
+            if binding.type_ann.is_some() || !matches!(init, Expr::Call(_)) {
+                continue;
+            }
+            let name = binding.id.sym.to_string();
+            let init_names = mentions(&|names| init.visit_with(names));
+            let earlier = stmts[..j].iter().position(|before| {
+                let Stmt::Decl(Decl::Var(v)) = before else { return false };
+                let [d] = v.decls.as_slice() else { return false };
+                let (Pat::Ident(closure), Some(body)) = (&d.name, d.init.as_deref()) else { return false };
+                matches!(body, Expr::Arrow(_) | Expr::Fn(_))
+                    && init_names.contains(closure.id.sym.as_ref())
+                    && mentions(&|names| body.visit_with(names)).contains(&name)
+            });
+            let Some(insert_at) = earlier else { continue };
+            firsts.push((j, insert_at));
+        }
+        if firsts.is_empty() {
+            return std::borrow::Cow::Borrowed(stmts);
+        }
+        let sp = swc_common::DUMMY_SP;
+        let mut result: Vec<Stmt> = Vec::with_capacity(stmts.len() + firsts.len());
+        for (index, stmt) in stmts.iter().enumerate() {
+            for (j, _) in firsts.iter().filter(|(_, at)| *at == index) {
+                let Stmt::Decl(Decl::Var(var)) = &stmts[*j] else { continue };
+                let Pat::Ident(binding) = &var.decls[0].name else { continue };
+                result.push(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                    span: sp,
+                    ctxt: var.ctxt,
+                    kind: VarDeclKind::Let,
+                    declare: false,
+                    decls: vec![swc_ecma_ast::VarDeclarator {
+                        span: sp,
+                        name: Pat::Ident(binding.clone()),
+                        init: None,
+                        definite: false,
+                    }],
+                }))));
+            }
+            match firsts.iter().find(|(j, _)| *j == index) {
+                Some(_) => {
+                    let Stmt::Decl(Decl::Var(var)) = stmt else { unreachable!() };
+                    let Pat::Ident(binding) = &var.decls[0].name else { unreachable!() };
+                    let init = var.decls[0].init.clone().expect("checked above");
+                    result.push(Stmt::Expr(swc_ecma_ast::ExprStmt {
+                        span: var.span,
+                        expr: Box::new(Expr::Assign(swc_ecma_ast::AssignExpr {
+                            span: var.span,
+                            op: swc_ecma_ast::AssignOp::Assign,
+                            left: swc_ecma_ast::AssignTarget::Simple(swc_ecma_ast::SimpleAssignTarget::Ident(
+                                swc_ecma_ast::BindingIdent { id: binding.id.clone(), type_ann: None },
+                            )),
+                            right: init,
+                        })),
+                    }));
+                }
+                None => result.push(stmt.clone()),
+            }
+        }
+        std::borrow::Cow::Owned(result)
+    }
+
     /// `const even = (n: number): boolean => .. odd(n - 1); const odd = ..`:
     /// a fully annotated const arrow that is referenced by itself or by an
     /// earlier arrow gets a `let name = <throwing stub>` placed before the
@@ -608,6 +699,7 @@ impl<'a> FnLowerer<'a> {
     fn lower_stmts_in_order(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let hoisted_closures = Self::hoist_forward_closure_consts(stmts);
         let hoisted_closures = Self::delay_forward_closure_consts(&hoisted_closures);
+        let hoisted_closures = Self::predeclare_captured_bindings(&hoisted_closures);
         let forward = Self::forward_declare_arrows(&hoisted_closures);
         let hoisted = Self::hoist_function_declarations(&forward);
         let stmts: &[Stmt] = &hoisted;

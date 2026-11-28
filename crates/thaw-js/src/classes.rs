@@ -10,7 +10,20 @@ pub(crate) struct ClassInfo {
     /// instance field initializers, evaluated per construction with `this` bound
     pub fields: Vec<(Rc<str>, Option<a::Expr>)>,
     pub field_scope: Rc<Scope>,
+    /// instance private methods/accessors, installed on each instance before its fields (filled while the class evaluates)
+    pub private_methods: Box<RefCell<Vec<PrivMethod>>>,
 }
+
+/// One instance private method (`value`) or accessor pair (`get`/`set`) under its per-evaluation key.
+#[derive(Clone)]
+pub(crate) struct PrivMethod {
+    pub key: Rc<str>,
+    pub value: Option<Value>,
+    pub get: Option<Value>,
+    pub set: Option<Value>,
+}
+
+static NEXT_CLASS_EVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Interp {
     pub(crate) fn eval_class(
@@ -25,6 +38,27 @@ impl Interp {
         };
         let cscope = Scope::new(Some(scope.clone()));
         cscope.strict.set(true);
+        // every evaluation of a class gets its own private names; references resolve through `%pk:<name>`
+        let eval_id = NEXT_CLASS_EVAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut private_keys: HashMap<String, Rc<str>> = HashMap::new();
+        for m in &class.body {
+            let name = match m {
+                a::ClassMember::PrivateProp(p) => &p.key.name,
+                a::ClassMember::PrivateMethod(pm) => &pm.key.name,
+                _ => continue,
+            };
+            private_keys.entry(name.to_string()).or_insert_with(|| {
+                let key: Rc<str> = format!(
+                    "@@priv:{}{}e{}",
+                    name,
+                    crate::private_names::SUFFIX_MARK,
+                    eval_id
+                )
+                .into();
+                cscope.declare(&format!("%pk:{name}"), Value::str(&key), false);
+                key
+            });
+        }
         let proto_parent = match &parent {
             None => Some(self.object_proto.clone()),
             Some(Value::Null) => None,
@@ -59,7 +93,7 @@ impl Interp {
                     fields.push((k, p.value.as_ref().map(|v| (**v).clone())));
                 }
                 a::ClassMember::PrivateProp(p) if !p.is_static => {
-                    let k: Rc<str> = format!("@@priv:{}", &*p.key.name).into();
+                    let k: Rc<str> = private_keys[&*p.key.name].clone();
                     fields.push((k, p.value.as_ref().map(|v| (**v).clone())));
                 }
                 _ => {}
@@ -71,6 +105,7 @@ impl Interp {
             explicit_ctor: ctor_member.is_some(),
             fields,
             field_scope: proto_scope.clone(),
+            private_methods: Box::default(),
         };
         let (params, body) = match ctor_member {
             Some(c) => (
@@ -118,6 +153,7 @@ impl Interp {
             ctor_props: std::cell::Cell::new(0),
         });
         crate::gc_registry::capture_scope(&proto_scope);
+        let class_def = def.clone();
         let ctor_obj = new_obj(
             Some(self.function_proto.clone()),
             Kind::Closure {
@@ -192,43 +228,64 @@ impl Interp {
                     put(&ctor_obj, &key, v);
                 }
                 a::ClassMember::PrivateMethod(pm) => {
-                    let target = if pm.is_static { &ctor_obj } else { &proto };
                     let mscope = if pm.is_static {
                         static_scope.clone()
                     } else {
                         proto_scope.clone()
                     };
-                    let key: Rc<str> = format!("@@priv:{}", &*pm.key.name).into();
+                    let key: Rc<str> = private_keys[&*pm.key.name].clone();
                     let shown: Rc<str> = match pm.kind {
-                        a::MethodKind::Getter => format!("get #{}", &*pm.key.name).into(),
-                        a::MethodKind::Setter => format!("set #{}", &*pm.key.name).into(),
-                        a::MethodKind::Method => format!("#{}", &*pm.key.name).into(),
-                    };
-                    let f = self.method_value(Some(shown), &pm.function, &mscope)?;
-                    match pm.kind {
-                        a::MethodKind::Method => put_hidden(target, &key, f),
                         a::MethodKind::Getter => {
-                            define_accessor(target, &key, Some(f), None, false)
+                            format!("get #{}", crate::private_names::source_name(&pm.key.name))
+                                .into()
                         }
                         a::MethodKind::Setter => {
-                            define_accessor(target, &key, None, Some(f), false)
+                            format!("set #{}", crate::private_names::source_name(&pm.key.name))
+                                .into()
+                        }
+                        a::MethodKind::Method => {
+                            format!("#{}", crate::private_names::source_name(&pm.key.name)).into()
+                        }
+                    };
+                    let f = self.method_value(Some(shown), &pm.function, &mscope)?;
+                    let (value, get, set) = match pm.kind {
+                        a::MethodKind::Method => (Some(f), None, None),
+                        a::MethodKind::Getter => (None, Some(f), None),
+                        a::MethodKind::Setter => (None, None, Some(f)),
+                    };
+                    if pm.is_static {
+                        install_private_method(&ctor_obj, &key, value, get, set);
+                    } else if let Some(info) = &class_def.class {
+                        let mut list = info.private_methods.borrow_mut();
+                        match list.iter_mut().find(|m| m.key == key) {
+                            Some(m) => {
+                                m.get = m.get.take().or(get);
+                                m.set = m.set.take().or(set);
+                            }
+                            None => list.push(PrivMethod {
+                                key,
+                                value,
+                                get,
+                                set,
+                            }),
                         }
                     }
                 }
                 a::ClassMember::PrivateProp(p) if p.is_static => {
-                    let key: Rc<str> = format!("@@priv:{}", &*p.key.name).into();
+                    let key: Rc<str> = private_keys[&*p.key.name].clone();
                     let v = match &p.value {
                         Some(e) => {
                             let v = self.eval(e, &static_scope)?;
                             if crate::is_anonymous_fn_def(e) {
-                                let name = format!("#{}", &*p.key.name);
+                                let name =
+                                    format!("#{}", crate::private_names::source_name(&p.key.name));
                                 crate::name_anonymous_fn(&v, &name);
                             }
                             v
                         }
                         None => Value::Undefined,
                     };
-                    put_hidden(&ctor_obj, &key, v);
+                    self.private_add(&ctor_obj, &key, v)?;
                 }
                 a::ClassMember::StaticBlock(block) => {
                     let inner = Scope::new(Some(static_scope.clone()));
@@ -247,19 +304,38 @@ impl Interp {
         let Value::Object(co) = class else {
             return Ok(());
         };
-        let (fields, scope) = match &*co.kind.borrow() {
+        let (fields, scope, methods) = match &*co.kind.borrow() {
             Kind::Closure { def, .. } => match &def.class {
-                Some(info) if !info.fields.is_empty() => (
-                    info.fields
-                        .iter()
-                        .map(|(k, e)| (k.clone(), e.clone()))
-                        .collect::<Vec<_>>(),
-                    info.field_scope.clone(),
-                ),
+                Some(info)
+                    if !info.fields.is_empty() || !info.private_methods.borrow().is_empty() =>
+                {
+                    (
+                        info.fields
+                            .iter()
+                            .map(|(k, e)| (k.clone(), e.clone()))
+                            .collect::<Vec<_>>(),
+                        info.field_scope.clone(),
+                        info.private_methods.borrow().clone(),
+                    )
+                }
                 _ => return Ok(()),
             },
             _ => return Ok(()),
         };
+        if let Value::Object(target) = this {
+            for m in &methods {
+                if target.position(&m.key).is_some() {
+                    return self.private_twice(&m.key);
+                }
+                install_private_method(
+                    target,
+                    &m.key,
+                    m.value.clone(),
+                    m.get.clone(),
+                    m.set.clone(),
+                );
+            }
+        }
         let frame = Scope::new(Some(scope));
         frame.kind.set(SK_VAR | SK_FIELD);
         frame.set_this(this.clone());
@@ -269,7 +345,7 @@ impl Interp {
                     let v = self.eval(&e, &frame)?;
                     if crate::is_anonymous_fn_def(&e) {
                         let name = match key.strip_prefix("@@priv:") {
-                            Some(n) => format!("#{n}").into(),
+                            Some(n) => format!("#{}", crate::private_names::source_name(n)).into(),
                             None => self.fn_name_of_key(&key),
                         };
                         crate::name_anonymous_fn(&v, &name);
@@ -282,7 +358,7 @@ impl Interp {
                 return Ok(());
             };
             if key.starts_with("@@priv:") {
-                put_hidden(target, &key, v);
+                self.private_add(target, &key, v)?;
             } else {
                 put(target, &key, v);
             }
@@ -390,12 +466,19 @@ impl Interp {
                 self.call_closure(ctor, &def, &scope, this, args)
             } else {
                 let parent = info.parent.clone().unwrap_or(Value::Undefined);
+                let mut over = None;
                 if !matches!(parent, Value::Null) {
                     self.rt.pending_nt = nt.clone();
-                    self.init_instance(&parent, this, args)?;
+                    // a base constructor that returns another object makes that object `this`
+                    let r = self.init_instance(&parent, this, args)?;
+                    if !is_native_fn(&parent)
+                        && matches!((&r, this), (Value::Object(o), Value::Object(t)) if !Rc::ptr_eq(o, t))
+                    {
+                        over = Some(r);
+                    }
                 }
-                self.run_fields(ctor, this)?;
-                Ok(Value::Undefined)
+                self.run_fields(ctor, over.as_ref().unwrap_or(this))?;
+                Ok(over.unwrap_or(Value::Undefined))
             }
         })();
         self.frame_truncate(mark);
@@ -420,7 +503,17 @@ impl Interp {
         self.rt.pending_nt = self.lookup(scope, "%newtarget");
         let r = self.init_instance(&parent, &this, args);
         self.rt.pending_nt = None;
-        r?;
+        // a base constructor that returns another object makes that object `this` (and gets the fields)
+        let this = match r? {
+            over @ Value::Object(_)
+                if !is_native_fn(&parent)
+                    && !matches!((&over, &this), (Value::Object(o), Value::Object(t)) if Rc::ptr_eq(o, t)) =>
+            {
+                scope.rebind_this(over.clone());
+                over
+            }
+            _ => this,
+        };
         self.run_fields(&class, &this)?;
         Ok(Value::Undefined)
     }
@@ -519,4 +612,123 @@ impl Interp {
             other => Ok(Some(self.eval(other, scope)?)),
         }
     }
+}
+
+/// A private method is a non-writable own slot; an accessor pair is an own accessor.
+fn install_private_method(
+    o: &Obj,
+    key: &str,
+    value: Option<Value>,
+    get: Option<Value>,
+    set: Option<Value>,
+) {
+    match value {
+        Some(f) => put_with(o, key, f, false, false, true),
+        None => define_accessor(o, key, get, set, false),
+    }
+}
+
+impl Interp {
+    fn private_display(key: &str) -> String {
+        let name = key.strip_prefix("@@priv:").unwrap_or(key);
+        format!("#{}", crate::private_names::source_name(name))
+    }
+
+    pub(crate) fn private_twice<T>(&mut self, key: &str) -> R<T> {
+        let msg = format!(
+            "Cannot initialize {} twice on the same object",
+            Self::private_display(key)
+        );
+        self.throw_error("TypeError", &msg)
+    }
+
+    /// Adds private field `key` to `o`; an object that already has it (a constructor returned it twice) throws.
+    pub(crate) fn private_add(&mut self, o: &Obj, key: &str, v: Value) -> R<()> {
+        if o.position(key).is_some() {
+            return self.private_twice(key);
+        }
+        put_with(o, key, v, true, false, true);
+        Ok(())
+    }
+
+    /// `o.#x` read: an own slot only (a prototype's or a foreign object's does not count).
+    pub(crate) fn private_get(&mut self, target: &Value, key: &str) -> R<Value> {
+        let own = match target {
+            Value::Object(o) => find_own(o, key),
+            _ => None,
+        };
+        match own {
+            Some((Slot::Data(v), _)) => Ok(v),
+            Some((Slot::Accessor { get: Some(g), .. }, _)) => self.call(&g, target, &[]),
+            Some(_) => {
+                let msg = format!(
+                    "'{}' was defined without a getter",
+                    Self::private_display(key)
+                );
+                self.throw_error("TypeError", &msg)
+            }
+            None => {
+                let msg = format!(
+                    "Cannot read private member {} from an object whose class did not declare it",
+                    Self::private_display(key)
+                );
+                self.throw_error("TypeError", &msg)
+            }
+        }
+    }
+
+    /// `o.#x = v`: writes an own writable slot or calls the setter; anything else is a TypeError.
+    pub(crate) fn private_set(&mut self, target: &Value, key: &str, value: Value) -> R<()> {
+        let found = match target {
+            Value::Object(o) => o.position(key).map(|i| {
+                let props = o.raw_props.borrow();
+                (o.clone(), i, props[i].slot.clone(), props[i].writable)
+            }),
+            _ => None,
+        };
+        match found {
+            Some((o, i, Slot::Data(_), true)) => {
+                o.raw_props.borrow_mut()[i].slot = Slot::Data(value);
+                Ok(())
+            }
+            Some((_, _, Slot::Data(_), false)) => {
+                let msg = format!(
+                    "Private method '{}' is not writable",
+                    Self::private_display(key)
+                );
+                self.throw_error("TypeError", &msg)
+            }
+            Some((_, _, Slot::Accessor { set: Some(s), .. }, _)) => {
+                self.call(&s, target, &[value])?;
+                Ok(())
+            }
+            Some(_) => {
+                let msg = format!(
+                    "'{}' was defined without a setter",
+                    Self::private_display(key)
+                );
+                self.throw_error("TypeError", &msg)
+            }
+            None => {
+                let msg = format!(
+                    "Cannot write private member {} to an object whose class did not declare it",
+                    Self::private_display(key)
+                );
+                self.throw_error("TypeError", &msg)
+            }
+        }
+    }
+
+    /// The per-evaluation key of private name `name`, resolved through the lexical class scopes.
+    pub(crate) fn private_key(&self, name: &str, scope: &Rc<Scope>) -> Rc<str> {
+        match self.lookup(scope, &format!("%pk:{name}")) {
+            Some(Value::Str(k)) => k.to_string().into(),
+            _ => format!("@@priv:{name}").into(),
+        }
+    }
+}
+
+/// A native constructor builds its own object, which `init_instance` already moved into `this`.
+fn is_native_fn(v: &Value) -> bool {
+    matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Native(_)))
 }

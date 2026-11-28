@@ -189,7 +189,9 @@ Socket.prototype.dropSourceSpecificMembership = function(source, group, interfac
 Socket.prototype.getRecvBufferSize = Socket.prototype.getSendBufferSize = function() { return 212992; };
 Socket.prototype.setRecvBufferSize = Socket.prototype.setSendBufferSize = function() { return this; };
 function createSocket(type, listener) { return new Socket(type, listener); }
-module.exports = { Socket: Socket, createSocket: createSocket };
+// ponytail: Node returns the raw libuv UDP handle (or a negative errno); this returns the bound Socket, which exposes the same bind/close/ref surface.
+function _createSocketHandle(address, port, addressType, fd, flags) { var socket = new Socket(addressType); socket.bind(port, address); return socket; }
+module.exports = { Socket: Socket, createSocket: createSocket, _createSocketHandle: _createSocketHandle };
 module.exports.default = module.exports;
 module.exports.__esModule = true;
 "#,
@@ -297,8 +299,8 @@ function queryAsync(hostname, rrtype, done) {
     else done(null, found.map(function(entry) { return entry.address; }));
   });
 }
-var DNS_RECORD_TYPES = ['A', 'AAAA', 'ANY', 'CAA', 'CNAME', 'MX', 'NAPTR', 'NS', 'PTR', 'SOA', 'SRV', 'TXT'];
-var DNS_SYSCALLS = { A: 'queryA', AAAA: 'queryAaaa', ANY: 'queryAny', CAA: 'queryCaa', CNAME: 'queryCname', MX: 'queryMx', NAPTR: 'queryNaptr', NS: 'queryNs', PTR: 'queryPtr', SOA: 'querySoa', SRV: 'querySrv', TXT: 'queryTxt' };
+var DNS_RECORD_TYPES = ['A', 'AAAA', 'ANY', 'CAA', 'CNAME', 'MX', 'NAPTR', 'NS', 'PTR', 'SOA', 'SRV', 'TLSA', 'TXT'];
+var DNS_SYSCALLS = { A: 'queryA', AAAA: 'queryAaaa', ANY: 'queryAny', CAA: 'queryCaa', CNAME: 'queryCname', MX: 'queryMx', NAPTR: 'queryNaptr', NS: 'queryNs', PTR: 'queryPtr', SOA: 'querySoa', SRV: 'querySrv', TLSA: 'queryTlsa', TXT: 'queryTxt' };
 function systemServers() { return JSON.parse(__thaw_dns_default_servers()); }
 function invalidIp(entry) { var error = new TypeError('Invalid IP address: ' + String(entry)); error.code = 'ERR_INVALID_IP_ADDRESS'; return error; }
 // Accepts 'ip', 'ip:port', '[v6]' and '[v6]:port'; the canonical form drops the default port and brackets only when a port follows.
@@ -366,6 +368,7 @@ function dnsRecordShape(record, includeType) {
     case 'SOA': shaped = { nsname: record.nsname, hostmaster: record.hostmaster, serial: record.serial, refresh: record.refresh, retry: record.retry, expire: record.expire, minttl: record.minttl }; break;
     case 'NAPTR': shaped = { flags: record.flags, service: record.service, regexp: record.regexp, replacement: record.replacement, order: record.order, preference: record.preference }; break;
     case 'TXT': shaped = { entries: record.entries }; break;
+    case 'TLSA': shaped = { certUsage: record.certUsage, selector: record.selector, match: record.match, data: new Uint8Array((record.data.match(/../g) || []).map(function(pair) { return parseInt(pair, 16); })).buffer }; break;
     case 'CAA': shaped = {}; Object.keys(record).forEach(function(key) { if (key !== 'type') shaped[key] = record[key]; }); break;
     default: shaped = { value: record.value };
   }
@@ -413,7 +416,7 @@ function reverseRecords(resolver, ip, done) {
 }
 function requireCallback(callback) { if (typeof callback !== 'function') throw invalidType('callback', 'of type function', callback); }
 function defineResolverMethods(prototype) {
-  [['resolve4', 'A'], ['resolve6', 'AAAA'], ['resolveAny', 'ANY'], ['resolveCaa', 'CAA'], ['resolveCname', 'CNAME'], ['resolveMx', 'MX'], ['resolveNaptr', 'NAPTR'], ['resolveNs', 'NS'], ['resolvePtr', 'PTR'], ['resolveSoa', 'SOA'], ['resolveSrv', 'SRV'], ['resolveTxt', 'TXT']].forEach(function(pair) {
+  [['resolve4', 'A'], ['resolve6', 'AAAA'], ['resolveAny', 'ANY'], ['resolveCaa', 'CAA'], ['resolveCname', 'CNAME'], ['resolveMx', 'MX'], ['resolveNaptr', 'NAPTR'], ['resolveNs', 'NS'], ['resolvePtr', 'PTR'], ['resolveSoa', 'SOA'], ['resolveSrv', 'SRV'], ['resolveTlsa', 'TLSA'], ['resolveTxt', 'TXT']].forEach(function(pair) {
     prototype[pair[0]] = function(hostname, options, callback) {
       if (typeof options === 'function') { callback = options; options = undefined; }
       requireCallback(callback);
@@ -436,10 +439,17 @@ var moduleResolver = new Resolver();
 function moduleMethod(name) { return function() { return moduleResolver[name].apply(moduleResolver, arguments); }; }
 function setDefaultResultOrder(order) { defaultOrder = validateOrder(order, 'order'); globalThis.__thaw_dns_order = defaultOrder; }
 // The promises API is built once here and shared by dns.promises and node:dns/promises.
-function PromisesResolver(options) {
-  if (!(this instanceof PromisesResolver)) return new PromisesResolver(options);
-  this._resolver = new Resolver(options);
-}
+var CallbackResolver = Resolver;
+function ChannelWrap() {}
+// Node's promises Resolver is a `Resolver` whose only own property is `_handle`; the callback resolver is kept off to the side.
+var PromisesResolver = (function() {
+  function Resolver(options) {
+    if (!(this instanceof Resolver)) return new Resolver(options);
+    Object.defineProperty(this, '_resolver', { value: new CallbackResolver(options), writable: true, configurable: true, enumerable: false });
+    this._handle = new ChannelWrap();
+  }
+  return Resolver;
+})();
 PromisesResolver.prototype.getServers = function() { return this._resolver.getServers(); };
 PromisesResolver.prototype.setServers = function(servers) { return this._resolver.setServers(servers); };
 PromisesResolver.prototype.setLocalAddress = function() {};
@@ -453,7 +463,7 @@ function promiseMethod(name) {
     });
   };
 }
-['resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt', 'reverse'].forEach(function(name) {
+['resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTlsa', 'resolveTxt', 'reverse'].forEach(function(name) {
   var method = promiseMethod(name);
   PromisesResolver.prototype[name] = function() { return method.apply(this._resolver, arguments); };
 });
@@ -474,14 +484,14 @@ var promises = {
   getServers: function() { return moduleResolver.getServers(); },
   setServers: function(servers) { return moduleResolver.setServers(servers); }
 };
-['resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt', 'reverse'].forEach(function(name) {
+['resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTlsa', 'resolveTxt', 'reverse'].forEach(function(name) {
   var method = promiseMethod(name);
   promises[name] = function() { return method.apply(moduleResolver, arguments); };
 });
 Object.defineProperty(promises, 'default', { value: promises, enumerable: false });
 Object.defineProperty(promises, '__esModule', { value: true, enumerable: false });
 module.exports = { lookup: lookup, Resolver: Resolver, promises: promises, getDefaultResultOrder: function() { return defaultOrder; }, setDefaultResultOrder: setDefaultResultOrder, getServers: moduleMethod('getServers'), setServers: moduleMethod('setServers'), ADDRCONFIG: 32, V4MAPPED: 8, NODATA: 'ENODATA', FORMERR: 'EFORMERR', SERVFAIL: 'ESERVFAIL', NOTFOUND: 'ENOTFOUND', NOTIMP: 'ENOTIMP', REFUSED: 'EREFUSED', ADDRGETNETWORKPARAMS: 'EADDRGETNETWORKPARAMS', ALL: 16, BADFAMILY: 'EBADFAMILY', BADFLAGS: 'EBADFLAGS', BADHINTS: 'EBADHINTS', BADNAME: 'EBADNAME', BADQUERY: 'EBADQUERY', BADRESP: 'EBADRESP', BADSTR: 'EBADSTR', CANCELLED: 'ECANCELLED', CONNREFUSED: 'ECONNREFUSED', DESTRUCTION: 'EDESTRUCTION', EOF: 'EOF', FILE: 'EFILE', LOADIPHLPAPI: 'ELOADIPHLPAPI', NOMEM: 'ENOMEM', NONAME: 'ENONAME', NOTINITIALIZED: 'ENOTINITIALIZED', TIMEOUT: 'ETIMEOUT' };
-['resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt', 'reverse'].forEach(function(name) { module.exports[name] = moduleMethod(name); });
+['resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTlsa', 'resolveTxt', 'reverse'].forEach(function(name) { module.exports[name] = moduleMethod(name); });
 module.exports.default = module.exports;
 module.exports.__esModule = true;
 "#,

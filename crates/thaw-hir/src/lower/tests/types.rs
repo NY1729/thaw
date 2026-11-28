@@ -6276,3 +6276,21 @@ fn exec_on_an_any_regexp_keeps_groups_index_and_input_on_a_prototype_record() {
     let main = format!("{:?}", program.functions.iter().find(|f| f.name == "main").unwrap().body);
     assert!(main.contains("__thaw_json_set_prototype"), "{main}");
 }
+
+#[test]
+fn a_recursive_back_edge_equals_its_one_level_unrolled_layout() {
+    let key = crate::new_recursive_key("Node");
+    let node = HirType::Object(vec![
+        ("next".to_string(), HirType::Function(Vec::new(), Box::new(HirType::Recursive(key.clone())))),
+        ("value".to_string(), HirType::F64),
+    ]);
+    crate::register_recursive_layout(&key, node.clone());
+    let unrolled = HirType::Object(vec![
+        ("next".to_string(), HirType::Function(Vec::new(), Box::new(node.clone()))),
+        ("value".to_string(), HirType::F64),
+    ]);
+    assert!(node.same_modulo_recursive(&unrolled));
+    assert!(unrolled.same_modulo_recursive(&node));
+    let other = HirType::Object(vec![("value".to_string(), HirType::Str)]);
+    assert!(!node.same_modulo_recursive(&other));
+}

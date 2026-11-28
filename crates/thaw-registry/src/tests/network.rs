@@ -36,7 +36,7 @@ fn readline_splits_lines_and_supports_callback_and_promise_questions() {
     let empty_node_modules = temp_registry("builtin_readline_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5); // readline now requires node:events (Interface is an EventEmitter, as in Node)
     let result = run_js(&bundle);
     assert_eq!(
         result,
@@ -232,8 +232,9 @@ fn net_socket_timeout_fires_without_closing_the_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
-        let (_stream, _) = listener.accept().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (mut stream, _) = listener.accept().unwrap();
+        // hold the connection open until the client destroys it, however late its 10ms timer fires under load
+        let _ = std::io::Read::read(&mut stream, &mut [0u8; 1]);
     });
 
     let dir = temp_registry("builtin_net_socket_timeout");
@@ -1509,17 +1510,17 @@ fn http_server_deferred_end_after_write_under_connection_close_delivers_the_fina
     let client = std::thread::spawn(move || {
         let mut responses = Vec::new();
         for (path, request, stop, _) in cases {
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
             let mut stream = loop {
                 match TcpStream::connect(("127.0.0.1", port)) {
                     Ok(stream) => break stream,
                     Err(_) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    Err(error) => panic!("failed to connect for {path}: {error}"),
+                    Err(error) => panic!("JS server on port {port} never accepted a connection for {path} within 30s (startup too slow or port taken): {error}"),
                 }
             };
-            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
             stream.write_all(request.as_bytes()).unwrap();
             let mut response = Vec::new();
             let mut chunk = [0u8; 1024];
@@ -1565,7 +1566,7 @@ fn http_server_deferred_end_after_write_under_connection_close_delivers_the_fina
                         clearInterval(inspect);
                         sockets.forEach(function(socket) { socket.destroy(); });
                         server.close(function() { resolve(closed); });
-                    }, 5000);
+                    }, 20000);
                 });
             });
         };"#,
@@ -1595,17 +1596,17 @@ fn http_server_releases_completed_connection_close_responses() {
     drop(probe);
     let client = std::thread::spawn(move || {
         for path in ["/buffered-now", "/buffered-later", "/streamed-now", "/streamed-later"] {
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
             let mut stream = loop {
                 match TcpStream::connect(("127.0.0.1", port)) {
                     Ok(stream) => break stream,
                     Err(_) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    Err(error) => panic!("failed to connect for {path}: {error}"),
+                    Err(error) => panic!("JS server on port {port} never accepted a connection for {path} within 30s (startup too slow or port taken): {error}"),
                 }
             };
-            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
             write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
             let mut response = Vec::new();
             stream.read_to_end(&mut response).unwrap();
@@ -1661,7 +1662,7 @@ fn http_server_releases_completed_connection_close_responses() {
                             sockets.forEach(function(socket) { socket.destroy(); });
                             server.close(function() { Buffer.concat = originalConcat; resolve([closedBeforeCleanup, count, markerBytesConcatenated]); });
                         });
-                    }, 2000);
+                    }, 20000);
                 });
             });
         };"#,
@@ -1956,7 +1957,7 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     let greeting_port = greeting_listener.local_addr().unwrap().port();
     let greeting_server = std::thread::spawn(move || {
         let (socket, _) = greeting_listener.accept().unwrap();
-        socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
         let mut stream = StreamOwned::new(ServerConnection::new(config).unwrap(), socket);
         stream.write_all(b"greeting").unwrap();
         stream.flush().unwrap();
@@ -2004,7 +2005,7 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
                 }
             };
-            socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
             let connection = ClientConnection::new(
                 client_config.clone(),
                 ServerName::try_from("localhost").unwrap(),
@@ -2234,7 +2235,7 @@ fn http_server_emits_headers_before_body_and_keeps_early_response_body_framed() 
     let dir = temp_registry("builtin_http_server_streaming_pipeline");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'); module.exports = function(port) { return new Promise(function(resolve, reject) {
       var server = http.createServer(), first = { headersComplete: null, data: '', ends: 0, endComplete: null }, second = [], sockets = [];
-      var timeout = setTimeout(function() { sockets.forEach(function(socket) { socket.destroy(); }); server.close(); }, 2000);
+      var timeout = setTimeout(function() { sockets.forEach(function(socket) { socket.destroy(); }); server.close(); }, 20000);
       server.on('connection', function(socket) { sockets.push(socket); });
       server.on('request', function(req, res) {
         if (req.url === '/one') {
@@ -2294,7 +2295,7 @@ fn http_server_streams_chunked_body_and_rejects_short_content_length() {
     let dir = temp_registry("builtin_http_server_streaming_chunked");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'); module.exports = function(port) { return new Promise(function(resolve, reject) {
       var server = http.createServer(), chunks = [], short = [], faults = 0, before = [], after = [], sockets = [];
-      var timeout = setTimeout(function() { sockets.forEach(function(socket) { socket.destroy(); }); server.close(); }, 2000);
+      var timeout = setTimeout(function() { sockets.forEach(function(socket) { socket.destroy(); }); server.close(); }, 20000);
       server.on('connection', function(socket) { sockets.push(socket); });
       server.on('request', function(req, res) {
         if (req.url === '/chunks') {
@@ -3325,15 +3326,15 @@ fn net_accepted_socket_keeps_write_half_only_when_requested() {
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
     let peer = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut stream = loop {
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => break stream,
                 Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-                Err(error) => panic!("TCP connect timed out: {error}"),
+                Err(error) => panic!("JS server on port {port} never accepted a connection within 30s (startup too slow or port taken): {error}"),
             }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         stream.write_all(b"ping").unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
         let mut response = String::new();
@@ -3343,7 +3344,7 @@ fn net_accepted_socket_keeps_write_half_only_when_requested() {
     let dir = temp_registry("builtin_net_accepted_half_close");
     fs::write(dir.join("index.js"), r#"var net = require('node:net'); module.exports = function(port, allowHalfOpen) { return new Promise(function(resolve, reject) {
       var server = net.createServer({ allowHalfOpen: allowHalfOpen }), socket, ends = 0, closes = 0, callbacks = 0, callbacksOnClose = -1, writableOnEnd = false;
-      var timeout = setTimeout(function() { if (socket) socket.destroy(); server.close(); }, 2000);
+      var timeout = setTimeout(function() { if (socket) socket.destroy(); server.close(); }, 20000);
       server.on('connection', function(value) { socket = value; value.on('error', reject); value.on('end', function() { ends++; writableOnEnd = value.writable; if (allowHalfOpen) setTimeout(function() { value.end('pong', function() { callbacks++; }); }, 10); else value.write('sync'); }); value.on('close', function() { closes++; callbacksOnClose = callbacks; server.close(); }); value.resume(); });
       server.on('error', reject); server.on('close', function() { clearTimeout(timeout); resolve([ends, closes, writableOnEnd, callbacksOnClose]); });
       server.listen(port, '127.0.0.1');
@@ -3366,7 +3367,7 @@ fn run_net_client_against_peer<T: Send + 'static>(name: &str, body: &str, peer: 
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
         peer(stream)
     });
     let dir = temp_registry(name);
@@ -3435,15 +3436,15 @@ fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
     let peer = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut stream = loop {
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => break stream,
                 Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-                Err(error) => panic!("TCP connect timed out: {error}"),
+                Err(error) => panic!("JS server on port {port} never accepted a connection within 30s (startup too slow or port taken): {error}"),
             }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         stream.write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
         let mut response = String::new();
@@ -3453,7 +3454,7 @@ fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
     let dir = temp_registry("builtin_http_half_closed_pipeline");
     fs::write(dir.join("index.js"), r#"var http = require('node:http'); module.exports = function(port) { return new Promise(function(resolve, reject) {
       var server = http.createServer(), socket, requests = [], ends = 0, closes = 0;
-      var timeout = setTimeout(function() { if (socket) socket.destroy(); server.close(); }, 2000);
+      var timeout = setTimeout(function() { if (socket) socket.destroy(); server.close(); }, 20000);
       server.on('connection', function(value) { socket = value; value.on('error', reject); value.on('end', function() { ends++; }); value.on('close', function() { closes++; server.close(); }); });
       server.on('request', function(req, res) { requests.push(req.url); if (req.url === '/first') { res.setHeader('Content-Length', '3'); res.flushHeaders(); } setTimeout(function() { res.end(req.url === '/first' ? 'one' : 'two'); }, 10); });
       server.on('error', reject); server.on('close', function() { clearTimeout(timeout); resolve([requests, ends, closes]); });

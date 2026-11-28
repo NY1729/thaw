@@ -1439,13 +1439,16 @@ fn deliver_request_body_events(context: &mut RequestContext) {
     }
     context.body_events_delivered = true;
     let end_listeners = std::mem::take(&mut context.request_end_listeners);
+    // The listener is typed `(chunk: Bytes) => void` like a data listener: a JS callback adapter reads that
+    // argument, so pass an empty chunk rather than nothing (an ignoring native closure never looks at it).
+    let empty_chunk = native_bytes_from_slice(&[]);
     for listener in end_listeners {
         let callback = listener.callback as *const c_void;
         unsafe {
-            type Callback = unsafe extern "C" fn(*const c_void);
+            type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
             let code = *(callback as *const *const c_void);
             let callback_fn: Callback = std::mem::transmute(code);
-            callback_fn(callback);
+            callback_fn(callback, empty_chunk);
         }
     }
 }
@@ -1500,6 +1503,8 @@ fn sync_request_body_buffer(connection: &mut ConnectionState, context: &mut Requ
                 // doesn't distinguish "genuinely finished" from "gave up"
                 // -- both correctly force a close here).
                 None => {
+                    // llhttp errors the request: no `data`/`end` listener ever fires for it.
+                    context.abandoned = true;
                     if connection.response.is_empty() && !context.headers_sent {
                         if let Some(stream) = connection.stream.as_mut() {
                             let _ = stream.write_all(&rejection_bytes(&Reject::BadRequest));
@@ -1546,6 +1551,9 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
             unsafe { (*self.0).delivery_depth -= 1 };
         }
     }
+    if unsafe { (*context_ptr).abandoned } {
+        return;
+    }
     unsafe { (*context_ptr).delivery_depth += 1 };
     let _delivery_lease = DeliveryLease(context_ptr);
     let (new_bytes, data_listeners) = unsafe {
@@ -1570,13 +1578,14 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
         unsafe { (*context_ptr).request.complete = 1 };
         // Data callbacks may register an end listener for this same body.
         let end_listeners = unsafe { std::mem::take(&mut (*context_ptr).request_end_listeners) };
+        let empty_chunk = native_bytes_from_slice(&[]);
         for listener in end_listeners {
             let callback = listener.callback as *const c_void;
             unsafe {
-                type Callback = unsafe extern "C" fn(*const c_void);
+                type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
                 let code = *(callback as *const *const c_void);
                 let callback_fn: Callback = std::mem::transmute(code);
-                callback_fn(callback);
+                callback_fn(callback, empty_chunk);
             }
         }
     }
@@ -4109,11 +4118,16 @@ unsafe extern "C" fn server_address(environment: *const c_void) -> NativeNullabl
     }
 }
 
-unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_char {
+unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_void {
     listen_on(environment, "127.0.0.1", port)
 }
 
-unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const c_char {
+/// Node's `listen` returns the server: the native record this closure belongs to.
+fn server_record(state: &ServerState) -> *const c_void {
+    state.record.load(Ordering::Acquire) as *const c_void
+}
+
+unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     if !port.is_finite() || port < 0.0 || port > u16::MAX as f64 {
@@ -4123,7 +4137,7 @@ unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const
             "ERR_SOCKET_BAD_PORT".into(),
             port,
         );
-        return CString::new("").unwrap().into_raw();
+        return server_record(state);
     }
     let listener = match TcpListener::bind((host, port as u16)) {
         Ok(listener) => listener,
@@ -4138,7 +4152,7 @@ unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const
                 (message.clone(), message)
             };
             fail_server_listen(state, message, code, port);
-            return CString::new("").unwrap().into_raw();
+            return server_record(state);
         }
     };
     if listener.set_nonblocking(true).is_err() {
@@ -4148,7 +4162,7 @@ unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const
             "ERR_SERVER_LISTEN".into(),
             port,
         );
-        return CString::new("").unwrap().into_raw();
+        return server_record(state);
     }
     state.closed.store(false, Ordering::Release);
     *state.listener.lock().unwrap() = Some(listener);
@@ -4170,19 +4184,19 @@ unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const
             "ERR_SERVER_LISTEN".into(),
             port,
         );
-        return CString::new("").unwrap().into_raw();
+        return server_record(state);
     }
     state.watcher.store(watcher, Ordering::Release);
     state.pending_listening.store(true, Ordering::Release);
     register_server(state);
-    CString::new("").unwrap().into_raw()
+    server_record(state)
 }
 
 unsafe extern "C" fn server_listen_with_callback(
     environment: *const c_void,
     port: f64,
     callback: *const c_void,
-) -> *const c_char {
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     add_event_listener(&state.listening_listeners, callback, true);
@@ -4194,7 +4208,7 @@ unsafe extern "C" fn server_listen_with_host_callback(
     port: f64,
     host: *const c_char,
     callback: *const c_void,
-) -> *const c_char {
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     add_event_listener(&state.listening_listeners, callback, true);
@@ -4288,53 +4302,56 @@ unsafe extern "C" fn server_get_connections(
 }
 
 // ponytail: ref/unref are accepted; an unref'd server still keeps the event loop alive.
-unsafe extern "C" fn server_ref(_environment: *const c_void) -> bool {
-    true
+unsafe extern "C" fn server_ref(environment: *const c_void) -> *const c_void {
+    let closure = &*(environment as *const NativeClosure);
+    server_record(&*(closure.context as *const ServerState))
 }
 
-unsafe extern "C" fn server_close(environment: *const c_void) -> bool {
+unsafe extern "C" fn server_close(environment: *const c_void) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    close_server_state(state)
+    close_server_state(state);
+    server_record(state)
 }
 
 unsafe extern "C" fn server_close_with_callback(
     environment: *const c_void,
     callback: *const c_void,
-) -> bool {
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     add_event_listener(&state.close_listeners, callback, true);
-    close_server_state(state)
+    close_server_state(state);
+    server_record(state)
 }
 
+/// `server.on(event, listener)` returns the server (Node's EventEmitter contract), whether or not the event is known.
 unsafe extern "C" fn server_on(
     environment: *const c_void,
     event: *const c_char,
     callback: *const c_void,
-) -> bool {
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     match string_from_ptr(event).as_str() {
         "listening" => add_event_listener(&state.listening_listeners, callback, false),
         "close" => add_event_listener(&state.close_listeners, callback, false),
-        _ => return false,
+        _ => {}
     }
-    !callback.is_null()
+    server_record(state)
 }
 
 unsafe extern "C" fn server_on_error(
     environment: *const c_void,
     event: *const c_char,
     callback: *const c_void,
-) -> bool {
-    if string_from_ptr(event) != "error" {
-        return false;
-    }
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    add_event_listener(&state.error_listeners, callback, false);
-    !callback.is_null()
+    if string_from_ptr(event) == "error" {
+        add_event_listener(&state.error_listeners, callback, false);
+    }
+    server_record(state)
 }
 
 fn close_server_state(state: &ServerState) -> bool {
@@ -6121,7 +6138,7 @@ mod tests {
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
-            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+            let _ = result;
         }
 
         let client = thread::spawn(move || {
@@ -6215,7 +6232,7 @@ mod tests {
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
-            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+            let _ = result;
         }
 
         let client = thread::spawn(move || {
@@ -6351,7 +6368,7 @@ mod tests {
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
-            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+            let _ = result;
         }
 
         let client = thread::spawn(move || {
