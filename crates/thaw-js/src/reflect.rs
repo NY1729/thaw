@@ -149,7 +149,14 @@ pub(crate) fn get(it: &mut Interp, o: &Obj, key: &str, recv: &Value) -> R<Value>
                     None => Ok(Value::Undefined),
                 }
             }
-            None => {}
+            None => {
+                // an own property own_prop does not model (a closure's name/length, a regexp's lastIndex)
+                if !matches!(&*cur.kind.borrow(), Kind::Plain)
+                    && it.has_own_property(&Value::Object(cur.clone()), &Value::Str(key.into()))?
+                {
+                    return it.get(&Value::Object(cur.clone()), key);
+                }
+            }
         }
         let next = cur.proto.borrow().clone();
         match next {
