@@ -33,6 +33,7 @@ owner	key	kind	flags	vtype	length	name	hasPrototype	alias	tag
 %GeneratorFunction%.prototype.prototype	next	data	w-c	function	1	next	0	-	-
 %GeneratorFunction%.prototype.prototype	return	data	w-c	function	1	return	0	-	-
 %GeneratorFunction%.prototype.prototype	throw	data	w-c	function	1	throw	0	-	-
+%TypedArray%	@@species	accessor	--c	-	-	get [Symbol.species]|-	-	-	-
 %TypedArray%	from	data	w-c	function	1	from	0	-	-
 %TypedArray%	length	data	--c	number	0	-	-	-	-
 %TypedArray%	name	data	--c	string	-	TypedArray	-	-	-
