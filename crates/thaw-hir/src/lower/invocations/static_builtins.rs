@@ -6124,12 +6124,31 @@ impl<'a> FnLowerer<'a> {
                                 property.sym
                             ));
                         }
-                        let argument = call.args[0].expr.as_ref();
+                        let mut argument = call.args[0].expr.as_ref();
+                        while let Expr::TsAs(cast) = argument {
+                            argument = cast.expr.as_ref();
+                        }
                         if property.sym == *"supportedValuesOf" {
                             let Expr::Lit(Lit::Str(key)) = argument else {
                     return Err("`Intl.supportedValuesOf` requires a string-literal key".into());
                             };
-                            let values = supported_values_of(&key.value.to_string_lossy());
+                            let key = key.value.to_string_lossy();
+                            if !matches!(
+                                key.as_ref(),
+                                "calendar" | "collation" | "currency" | "numberingSystem" | "timeZone" | "unit"
+                            ) {
+                                // V8: `RangeError: Invalid key : <key>` (an arrow thunk lowers the throw in expression position).
+                                let source =
+                                    format!("(() => {{ throw new RangeError({:?}); }})();", format!("Invalid key : {key}"));
+                                let module = thaw_parser::parse_typescript(&source)?;
+                                let Some(swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(statement))) =
+                                    module.body.first()
+                                else {
+                                    return Err("internal: Intl.supportedValuesOf throw did not parse".into());
+                                };
+                                return self.lower_expr(statement.expr.as_ref());
+                            }
+                            let values = supported_values_of(&key);
                             return Ok(HirExpr::ArrayLit(
                                 values
                                     .into_iter()
