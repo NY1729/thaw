@@ -2,6 +2,9 @@ thread_local! {
     /// Whether the program deletes a `stack` property anywhere (`delete e.stack`). Only then does a
     /// typed Error's `.stack` read become `string | undefined`; every other program keeps `string`.
     static PROGRAM_DELETES_STACK: Cell<bool> = const { Cell::new(false) };
+    /// The program can hold a BigInt (a literal, `BigInt`, a `bigint` type or member), so `any`
+    /// arithmetic checks for one at run time; without one the checks would only cost time.
+    static PROGRAM_USES_BIGINT: Cell<bool> = const { Cell::new(false) };
     /// Maps a decorated class's own identity marker field name (the
     /// `__thaw_class_identity_<chain>` field every native class carries
     /// as `fields[0]`, see `module/classes.rs`'s `resolve_layout`) to the
@@ -221,6 +224,7 @@ fn lower_module_once(module: &Module) -> Result<HirProgram, String> {
     DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
     PROGRAM_DELETES_STACK.with(|flag| flag.set(module_deletes_stack(module)));
+    PROGRAM_USES_BIGINT.with(|flag| flag.set(module_uses_bigint(module)));
     FN_LOCS.with(|locs| locs.borrow_mut().clear());
     CALLBACK_VIA.with(|via| via.borrow_mut().clear());
     let mut normalized = normalize_module_for_lowering(module)?;
@@ -3192,6 +3196,73 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             layouts.into_iter().map(|(_, ty)| ty).collect()
         },
     })
+}
+
+/// Whether `module` can hold a BigInt: a literal, a `BigInt*` / `bigint` name, a `bigint` type, or
+/// any import / `require` / dynamic `import()` (a dependency may return one). A program with none of
+/// these has no source of a BigInt, so `any` arithmetic skips the run-time check.
+fn module_uses_bigint(module: &Module) -> bool {
+    struct Finder(bool);
+    impl Finder {
+        fn name(&mut self, sym: &str) {
+            if sym.contains("BigInt") || sym.contains("BigUint") || matches!(sym, "bigint" | "eval" | "Function") {
+                if !self.0 && std::env::var_os("THAW_DEBUG_BIGINT").is_some() {
+                    eprintln!("bigint trigger: {sym}");
+                }
+                self.0 = true;
+            }
+        }
+    }
+    impl Visit for Finder {
+        fn visit_big_int(&mut self, _: &swc_ecma_ast::BigInt) {
+            self.0 = true;
+        }
+        fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+            self.name(ident.sym.as_ref());
+        }
+        fn visit_ident_name(&mut self, ident: &swc_ecma_ast::IdentName) {
+            self.name(ident.sym.as_ref());
+        }
+        fn visit_ts_keyword_type(&mut self, keyword: &swc_ecma_ast::TsKeywordType) {
+            self.0 |= keyword.kind == swc_ecma_ast::TsKeywordTypeKind::TsBigIntKeyword;
+        }
+        // A program that imports anything can receive a BigInt from it without naming one
+        // (`process.hrtime.bigint()` is named, but a package's own return value is not).
+        fn visit_import_decl(&mut self, _: &swc_ecma_ast::ImportDecl) {
+            self.0 = true;
+        }
+        fn visit_call_expr(&mut self, call: &swc_ecma_ast::CallExpr) {
+            self.0 |= match &call.callee {
+                swc_ecma_ast::Callee::Import(_) => true,
+                swc_ecma_ast::Callee::Expr(callee) => matches!(callee.as_ref(), Expr::Ident(name) if name.sym == *"require"),
+                _ => false,
+            };
+            call.visit_children_with(self);
+        }
+        // Ambient declarations (the builtin typings) name BigInt in every program.
+        fn visit_ts_interface_decl(&mut self, _: &swc_ecma_ast::TsInterfaceDecl) {}
+        fn visit_ts_type_alias_decl(&mut self, _: &swc_ecma_ast::TsTypeAliasDecl) {}
+        fn visit_ts_module_decl(&mut self, _: &swc_ecma_ast::TsModuleDecl) {}
+        fn visit_ts_enum_decl(&mut self, _: &swc_ecma_ast::TsEnumDecl) {}
+        fn visit_fn_decl(&mut self, decl: &swc_ecma_ast::FnDecl) {
+            if !decl.declare {
+                decl.visit_children_with(self);
+            }
+        }
+        fn visit_class_decl(&mut self, decl: &swc_ecma_ast::ClassDecl) {
+            if !decl.declare {
+                decl.visit_children_with(self);
+            }
+        }
+        fn visit_var_decl(&mut self, decl: &swc_ecma_ast::VarDecl) {
+            if !decl.declare {
+                decl.visit_children_with(self);
+            }
+        }
+    }
+    let mut finder = Finder(false);
+    module.visit_with(&mut finder);
+    finder.0
 }
 
 /// Whether `module` contains a `delete <expr>.stack`.

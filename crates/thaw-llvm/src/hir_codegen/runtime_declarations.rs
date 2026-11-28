@@ -3019,6 +3019,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_is_bigint",
+            json_as_bool_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_is_not_iterable",
             json_as_bool_type,
             Some(Linkage::External),

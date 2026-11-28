@@ -9008,6 +9008,17 @@ fn is_native_iterator(value: &Value) -> bool {
     }
 }
 
+/// Whether `value` holds a BigInt (a cheap check for the `any` arithmetic dispatch).
+#[no_mangle]
+pub extern "C" fn thaw_json_is_bigint(value: *const Value) -> u8 {
+    u8::from(match unsafe { value.as_ref() } {
+        Some(Value::BigInt(_)) => true,
+        // A BigInt held by thaw-js.
+        Some(Value::Host(lease)) => host_query(lease, 0).as_deref() == Some("bigint"),
+        _ => false,
+    })
+}
+
 /// A dynamic value that `for...of` can never iterate: a number, boolean,
 /// BigInt, null/undefined, or a plain object that is neither a Buffer nor a
 /// Map/Set carrier. Arrays and strings (and live hosts) iterate.
