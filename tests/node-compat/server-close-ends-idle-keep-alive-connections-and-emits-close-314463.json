@@ -1,0 +1,5 @@
+{
+  "name": "server.close() ends idle keep-alive connections and emits close",
+  "expect": "matched",
+  "source": "import http from 'http';\nfunction main(): void {\n  const events: string[] = [];\n  const srv = http.createServer((req: any, res: any) => { res.end('x'); });\n  srv.on('close', () => events.push('close'));\n  srv.listen(0, '127.0.0.1', () => {\n    http.get({ port: (srv.address() as any).port, host: '127.0.0.1' }, (res: any) => {\n      res.on('data', () => {});\n      res.on('end', () => { events.push('end'); srv.close(); events.push('closed-call:' + srv.listening); });\n    });\n  });\n  setTimeout(() => console.log(events.join(',')), 400);\n}\n"
+}

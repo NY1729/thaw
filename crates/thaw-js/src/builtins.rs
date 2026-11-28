@@ -2346,6 +2346,9 @@ impl Interp {
             });
             if let Value::Object(b) = &bound_fn {
                 it.rt.note_bound(b, target0.clone());
+                if target0.is_constructor() {
+                    put_hidden(b, "@@ctor", Value::Bool(true));
+                }
                 put_with(b, "length", Value::Number(length), false, false, true);
                 put_with(
                     b,
