@@ -5,7 +5,7 @@ use crate::*;
 
 /// The `Object` functions captured at install time, so later user changes to `Object` do not reach
 /// `Reflect`. They are proxy-aware themselves.
-struct Intrinsics {
+pub(crate) struct Intrinsics {
     gopd: Value,
     define: Value,
     gopn: Value,
@@ -16,23 +16,58 @@ fn is_proxy(o: &Obj) -> bool {
     matches!(&*o.kind.borrow(), Kind::Proxy(_))
 }
 
+/// The `Object` functions `Reflect` relies on, read from the current `Object`.
+pub(crate) fn intrinsics(it: &mut Interp) -> Rc<Intrinsics> {
+    let object = it
+        .lookup(&it.global.clone(), "Object")
+        .unwrap_or(Value::Undefined);
+    let grab = |it: &mut Interp, name: &str| it.get(&object, name).unwrap_or(Value::Undefined);
+    Rc::new(Intrinsics {
+        gopd: grab(it, "getOwnPropertyDescriptor"),
+        define: grab(it, "defineProperty"),
+        gopn: grab(it, "getOwnPropertyNames"),
+        gops: grab(it, "getOwnPropertySymbols"),
+    })
+}
+
 fn obj(it: &mut Interp, name: &str, v: &Value) -> R<Obj> {
     match v {
+        Value::Object(o) if !crate::proxy::is_obj(v) => {
+            let _ = o;
+            it.throw_error("TypeError", &format!("Reflect.{name} called on non-object"))
+        }
         Value::Object(o) => Ok(o.clone()),
         _ => it.throw_error("TypeError", &format!("Reflect.{name} called on non-object")),
     }
 }
 
-/// `CreateListFromArrayLike`. ponytail: array-likes are read by `array_items` (plain objects with a
-/// numeric `length` only).
-fn list_from(it: &mut Interp, v: &Value) -> R<Vec<Value>> {
-    match v {
-        Value::Object(_) => {
-            it.sparse_unsupported(v)?;
-            Ok(it.array_items(v))
-        }
-        _ => it.throw_error("TypeError", "CreateListFromArrayLike called on non-object"),
+/// `CreateListFromArrayLike`: an array's elements, or `length` and each index read through `[[Get]]`.
+pub(crate) fn list_from(it: &mut Interp, v: &Value) -> R<Vec<Value>> {
+    let Value::Object(o) = v else {
+        return it.throw_error("TypeError", "CreateListFromArrayLike called on non-object");
+    };
+    if !crate::proxy::is_obj(v) {
+        return it.throw_error("TypeError", "CreateListFromArrayLike called on non-object");
     }
+    if matches!(&*o.kind.borrow(), Kind::Array(_)) {
+        it.sparse_unsupported(v)?;
+        return Ok(it.array_items(v));
+    }
+    let len = it.get(v, "length")?;
+    let n = it.tonum(&len)?;
+    let n = if n.is_nan() {
+        0.0
+    } else {
+        n.trunc().clamp(0.0, 9007199254740991.0)
+    };
+    if n > 50_000_000.0 {
+        return it.throw_error("RangeError", "Invalid array length");
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 0..n as usize {
+        out.push(it.get(v, &i.to_string())?);
+    }
+    Ok(out)
 }
 
 /// Own property `key` as (slot, writable). Array elements and `length` count as writable data; a
@@ -58,6 +93,17 @@ fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
             TypedKey::Ordinary => {}
         }
     }
+    if let Kind::Wrapper(Value::Str(st)) = &*o.kind.borrow() {
+        if key == "length" {
+            return Some((Slot::Data(Value::Number(st.len16() as f64)), false));
+        }
+        if let Some(u) = array_index(key).and_then(|i| st.unit_at(i)) {
+            return Some((
+                Slot::Data(Value::Str(crate::builtins::units_str(&[u]).into())),
+                false,
+            ));
+        }
+    }
     if let Kind::Array(items) = &*o.kind.borrow() {
         if key == "length" {
             return Some((
@@ -79,34 +125,22 @@ fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
     Some((props[i].slot.clone(), props[i].writable && writable))
 }
 
-fn is_extensible(it: &mut Interp, o: &Obj) -> R<bool> {
-    if let Some((target, handler, trap)) = it.proxy_trap(o, "isExtensible")? {
-        if trap.is_callable() {
-            return Ok(it.call(&trap, &handler, &[target])?.truthy());
-        }
-        return match &target {
-            Value::Object(t) => is_extensible(it, t),
-            _ => Ok(false),
-        };
+pub(crate) fn is_extensible(it: &mut Interp, o: &Obj) -> R<bool> {
+    if let Some(r) = it.proxy_is_extensible(o)? {
+        return Ok(r);
     }
     Ok(o.ext.get() == 0 && !o.frozen.get())
 }
 
-fn prevent_extensions(it: &mut Interp, o: &Obj) -> R<bool> {
-    if let Some((target, handler, trap)) = it.proxy_trap(o, "preventExtensions")? {
-        if trap.is_callable() {
-            return Ok(it.call(&trap, &handler, &[target])?.truthy());
-        }
-        return match &target {
-            Value::Object(t) => prevent_extensions(it, t),
-            _ => Ok(false),
-        };
+pub(crate) fn prevent_extensions(it: &mut Interp, o: &Obj) -> R<bool> {
+    if let Some(r) = it.proxy_prevent_extensions(o)? {
+        return Ok(r);
     }
     o.ext.set(o.ext.get().max(1));
     Ok(true)
 }
 
-fn get(it: &mut Interp, o: &Obj, key: &str, recv: &Value) -> R<Value> {
+pub(crate) fn get(it: &mut Interp, o: &Obj, key: &str, recv: &Value) -> R<Value> {
     if matches!(recv, Value::Object(r) if Rc::ptr_eq(r, o)) {
         return it.get(&Value::Object(o.clone()), key);
     }
@@ -126,17 +160,32 @@ fn get(it: &mut Interp, o: &Obj, key: &str, recv: &Value) -> R<Value> {
                     None => Ok(Value::Undefined),
                 }
             }
-            None => {}
+            None => {
+                // an own property own_prop does not model (a closure's name/length, a regexp's lastIndex)
+                if !matches!(&*cur.kind.borrow(), Kind::Plain)
+                    && it.has_own_property(&Value::Object(cur.clone()), &Value::Str(key.into()))?
+                {
+                    return it.get(&Value::Object(cur.clone()), key);
+                }
+            }
         }
         let next = cur.proto.borrow().clone();
         match next {
             Some(p) => cur = p,
-            None => return Ok(Value::Undefined),
+            // exotic own properties own_prop does not model (function name/length, string indices)
+            None => return it.get(&Value::Object(o.clone()), key),
         }
     }
 }
 
-fn set(it: &mut Interp, o: &Obj, key: &str, v: Value, recv: &Value, intr: &Intrinsics) -> R<bool> {
+pub(crate) fn set(
+    it: &mut Interp,
+    o: &Obj,
+    key: &str,
+    v: Value,
+    recv: &Value,
+    intr: &Intrinsics,
+) -> R<bool> {
     // integer-indexed [[Set]]: a numeric key of a typed array never reaches the prototype or a define
     if let Some(valid) = crate::typed::typed_own_key(o, key) {
         if matches!(recv, Value::Object(r) if std::rc::Rc::ptr_eq(r, o)) {
@@ -218,36 +267,14 @@ fn set_via_proxy(
     key: &str,
     v: Value,
     recv: &Value,
-    intr: &Intrinsics,
+    _intr: &Intrinsics,
 ) -> R<bool> {
-    let Some((target, handler, trap)) = it.proxy_trap(p, "set")? else {
-        return Ok(false);
-    };
-    if trap.is_callable() {
-        let k = it.key_value(key);
-        return Ok(it
-            .call(&trap, &handler, &[target, k, v, recv.clone()])?
-            .truthy());
-    }
-    match &target {
-        Value::Object(t) => set(it, t, key, v, recv, intr),
-        _ => Ok(false),
-    }
+    it.proxy_set_full(p, key, &v, recv)
 }
 
-fn define(it: &mut Interp, o: &Obj, key: &str, desc: &Value) -> R<bool> {
-    if let Some((target, handler, trap)) = it.proxy_trap(o, "defineProperty")? {
-        it.prop_desc_of(desc)?;
-        if trap.is_callable() {
-            let k = it.key_value(key);
-            return Ok(it
-                .call(&trap, &handler, &[target, k, desc.clone()])?
-                .truthy());
-        }
-        return match &target {
-            Value::Object(t) => define(it, t, key, desc),
-            _ => Ok(false),
-        };
+pub(crate) fn define(it: &mut Interp, o: &Obj, key: &str, desc: &Value) -> R<bool> {
+    if is_proxy(o) {
+        return it.proxy_define(o, key, desc);
     }
     it.try_define(o, key, desc)
 }
@@ -338,23 +365,17 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
     Ok(true)
 }
 
-fn get_prototype_of(it: &mut Interp, o: &Obj) -> R<Value> {
+pub(crate) fn get_prototype_of(it: &mut Interp, o: &Obj) -> R<Value> {
     if is_proxy(o) {
         return Ok(it.proxy_get_prototype_of(o)?.unwrap_or(Value::Null));
     }
     Ok(o.proto.borrow().clone().map_or(Value::Null, Value::Object))
 }
 
-fn set_prototype_of(it: &mut Interp, o: &Obj, p: Option<Obj>) -> R<bool> {
-    if let Some((target, handler, trap)) = it.proxy_trap(o, "setPrototypeOf")? {
-        if trap.is_callable() {
-            let pv = p.map_or(Value::Null, Value::Object);
-            return Ok(it.call(&trap, &handler, &[target, pv])?.truthy());
-        }
-        return match &target {
-            Value::Object(t) => set_prototype_of(it, t, p),
-            _ => Ok(false),
-        };
+pub(crate) fn set_prototype_of(it: &mut Interp, o: &Obj, p: Option<Obj>) -> R<bool> {
+    if is_proxy(o) {
+        let pv = p.map_or(Value::Null, Value::Object);
+        return Ok(it.proxy_set_prototype_of(o, &pv)?.unwrap_or(false));
     }
     let same = match (&*o.proto.borrow(), &p) {
         (Some(a), Some(b)) => Rc::ptr_eq(a, b),
@@ -397,7 +418,7 @@ impl Interp {
         let r = self.plain();
         self.set_native(&r, "get", |it, _, args| {
             let o = obj(it, "get", &arg(args, 0))?;
-            let key = it.key_of(&arg(args, 1));
+            let key = it.prop_key(&arg(args, 1))?;
             let recv = args
                 .get(2)
                 .cloned()
@@ -408,7 +429,7 @@ impl Interp {
             let i = intr.clone();
             self.set_native(&r, "set", move |it, _, args| {
                 let o = obj(it, "set", &arg(args, 0))?;
-                let key = it.key_of(&arg(args, 1));
+                let key = it.prop_key(&arg(args, 1))?;
                 let recv = args
                     .get(3)
                     .cloned()
@@ -418,7 +439,7 @@ impl Interp {
         }
         self.set_native(&r, "has", |it, _, args| {
             let o = obj(it, "has", &arg(args, 0))?;
-            let key = it.key_of(&arg(args, 1));
+            let key = it.prop_key(&arg(args, 1))?;
             Ok(Value::Bool(it.has_property(&Value::Object(o), &key)?))
         });
         {
@@ -438,7 +459,7 @@ impl Interp {
         }
         self.set_native(&r, "defineProperty", |it, _, args| {
             let o = obj(it, "defineProperty", &arg(args, 0))?;
-            let key = it.key_of(&arg(args, 1));
+            let key = it.prop_key(&arg(args, 1))?;
             let desc = arg(args, 2);
             Ok(Value::Bool(define(it, &o, &key, &desc)?))
         });
@@ -446,14 +467,14 @@ impl Interp {
             let i = intr.clone();
             self.set_native(&r, "getOwnPropertyDescriptor", move |it, _, args| {
                 let o = obj(it, "getOwnPropertyDescriptor", &arg(args, 0))?;
-                let key = it.key_of(&arg(args, 1));
+                let key = it.prop_key(&arg(args, 1))?;
                 let k = Value::Str((&*key).into());
                 it.call(&i.gopd, &Value::Undefined, &[Value::Object(o), k])
             });
         }
         self.set_native(&r, "deleteProperty", |it, _, args| {
             let o = obj(it, "deleteProperty", &arg(args, 0))?;
-            let key = it.key_of(&arg(args, 1));
+            let key = it.prop_key(&arg(args, 1))?;
             Ok(Value::Bool(delete_own(it, &o, &key)?))
         });
         self.set_native(&r, "getPrototypeOf", |it, _, args| {
@@ -463,7 +484,7 @@ impl Interp {
         self.set_native(&r, "setPrototypeOf", |it, _, args| {
             let o = obj(it, "setPrototypeOf", &arg(args, 0))?;
             let p = match arg(args, 1) {
-                Value::Object(p) => Some(p),
+                Value::Object(p) if crate::proxy::is_obj(&arg(args, 1)) => Some(p),
                 Value::Null => None,
                 _ => {
                     return it.throw_error(
