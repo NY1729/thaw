@@ -1240,7 +1240,13 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
             continue;
         }
         // thaw-js work (a socket, a timer, a watched Promise) is turned here, not slept through
-        let js_live = JS_TURN_HOOK.with(Cell::get).is_some_and(|turn| turn() != 0);
+        let turned = JS_TURN_HOOK.with(Cell::get).map_or(0, |turn| turn());
+        if turned == 2 {
+            // a watched Promise settled: its continuation is queued
+            continue;
+        }
+        // 1: a thaw-js realm has work; 3: only a watched Promise, which matters only while the wait sleeps on fds
+        let js_live = turned == 1 || (turned == 3 && has_fd_waits());
         if unsafe { thaw_promise_state(promise) } != 0 {
             continue;
         }

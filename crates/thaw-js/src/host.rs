@@ -6633,13 +6633,22 @@ fn register_js_job_hooks() {
     }
 }
 
-/// One non-blocking pass over every realm for a native wait: settles watched Promises, turns each realm that has
-/// work, and answers 1 while any realm still has work.
+/// One non-blocking pass over every realm for a native wait: settles watched Promises and turns each realm that
+/// has work. Answers 2 when a watched Promise settled (native continuations are queued: poll again at once), 1
+/// while a realm has work, 3 when only a Promise is watched (the wait must still wake to look again if it sleeps
+/// on file descriptors), else 0 (nothing in thaw-js can make progress, so a wait that can never finish ends).
 extern "C" fn js_turn_hook() -> u8 {
-    pump_watches();
+    let settled = pump_watches();
     let ran = drive_other_realms_once(std::ptr::null());
-    let watching = WATCHES.with(|w| !w.borrow().is_empty());
-    u8::from(ran || watching)
+    if settled > 0 {
+        2
+    } else if ran {
+        1
+    } else if WATCHES.with(|w| !w.borrow().is_empty()) {
+        3
+    } else {
+        0
+    }
 }
 
 #[cfg(not(unix))]
