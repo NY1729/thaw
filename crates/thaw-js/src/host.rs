@@ -6667,6 +6667,28 @@ pub(crate) extern "C" fn js_turn_hook() -> u8 {
 #[cfg(not(unix))]
 fn register_js_job_hooks() {}
 
+/// Runs the compiled runtime's ready continuations (native promise jobs) now, without starting its timers: the
+/// microtask checkpoint after one timer callback of a realm driven from a native wait.
+#[cfg(unix)]
+pub(crate) fn native_checkpoint() {
+    // SAFETY: both symbols are the compiled runtime's, looked up like the retired-engine host does.
+    unsafe {
+        let poll = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_poll_one".as_ptr());
+        let ready = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_ready_pending".as_ptr());
+        if poll.is_null() || ready.is_null() {
+            return;
+        }
+        let poll = std::mem::transmute::<*mut c_void, extern "C" fn() -> u8>(poll);
+        let ready = std::mem::transmute::<*mut c_void, extern "C" fn() -> u8>(ready);
+        while ready() != 0 {
+            poll();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn native_checkpoint() {}
+
 #[cfg(unix)]
 fn native_promise_state(promise: usize) -> u8 {
     // SAFETY: both symbols are the compiled runtime's, looked up like the retired-engine host does.

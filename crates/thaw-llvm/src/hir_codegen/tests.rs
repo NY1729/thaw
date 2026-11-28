@@ -472,6 +472,7 @@ fn thaw_js_link_args(
         "thaw_runtime_poll_one",
         "thaw_runtime_set_js_job_hooks",
         "thaw_runtime_set_js_turn_hook",
+        "thaw_runtime_ready_pending",
         "thaw_promise_state",
         "thaw_promise_mark_handled",
         "thaw_runtime_run_until_idle",

@@ -1057,6 +1057,12 @@ pub extern "C" fn thaw_runtime_run_until_idle() -> usize {
     count
 }
 
+/// Whether a ready continuation (a promise job) is queued: thaw-js runs them between its timer callbacks.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_ready_pending() -> u8 {
+    u8::from(READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty()))
+}
+
 /// Timers and fd waits can become ready after an idle drain returns zero.
 #[no_mangle]
 pub extern "C" fn thaw_runtime_async_work_pending() -> u8 {
