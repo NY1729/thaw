@@ -15,7 +15,7 @@
 // Node's resolve*/reverse take (hostname, options): length 2 (the shared implementation uses `arguments`).
 (function () {
   var P = module.exports;
-  ['resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt', 'reverse'].forEach(function (name) {
+  ['resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTlsa', 'resolveTxt', 'reverse'].forEach(function (name) {
     if (typeof P[name] === 'function' && P[name].length !== 2) Object.defineProperty(P[name], 'length', { value: 2, configurable: true });
   });
 })();

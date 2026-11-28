@@ -6,7 +6,6 @@
  "v8.Serializer / Deserializer / DefaultSerializer / DefaultDeserializer": "V8 wire format; thaw's v8.serialize uses its own graph format, so a byte-compatible Serializer class is a separate project",
  "v8.promiseHooks": "needs promise lifecycle hooks in the engine; a registration-only stub would silently never fire",
  "v8.queryObjects": "needs heap enumeration by constructor prototype",
- "dns.resolveTlsa / dns.promises.resolveTlsa": "the resolver has no TLSA record type",
  "http2.performServerHandshake": "needs the raw-socket HTTP/2 server session API",
  "process._events.* / process.argv index probes / process.moduleLoadList / process.features.typescript": "probe artifacts or Node-internal state (listener tables, loaded internal bindings)",
  "arity: callback-typed or overloaded declarations": "an extra optional parameter breaks the native lowering (http.createServer) or overload resolution (fs.readFileSync); arity_sync.py lists them as skipped: child_process.exec/execFile/execFileSync, dns.lookup, crypto.scrypt/randomBytes/randomInt, assert.rejects/doesNotReject, fs.readFile/watch/stat/lstat/writeFile/readdir/readFileSync/readdirSync, fs/promises.readFile/readdir, http.createServer, timers/promises.setTimeout/setImmediate, zlib.zstdCompress/zstdDecompress",
