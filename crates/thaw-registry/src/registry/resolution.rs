@@ -199,11 +199,12 @@ fn runtime_env_prelude(env: &BTreeMap<String, String>) -> String {
     )
 }
 
-/// `import fs from "fs"` means the same module as `"node:fs"`. `path` and `events`
-/// already resolve bare and `test` is only a builtin with its `node:` prefix, so they
-/// are left alone. Returns the prefixed specifier for any other bare builtin.
+/// `import fs from "fs"` means the same module as `"node:fs"`, and so does a bare `events`
+/// (the builtin wins over the npm `events` package, as in Node). `path` already resolves
+/// bare and `test` is only a builtin with its `node:` prefix, so they are left alone.
+/// Returns the prefixed specifier for any other bare builtin.
 pub fn bare_node_builtin_specifier(specifier: &str) -> Option<String> {
-    if specifier.starts_with("path") || matches!(specifier, "events" | "test" | "test/reporters") {
+    if specifier.starts_with("path") || matches!(specifier, "test" | "test/reporters") {
         return None;
     }
     let names: Vec<String> = serde_json::from_str(NODE_BUILTIN_MODULES_JSON).ok()?;

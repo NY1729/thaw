@@ -1466,6 +1466,7 @@ fn bare_node_builtin_specifiers_gain_the_node_prefix() {
         "assert",
         "fs/promises",
         "child_process",
+        "events",
     ] {
         assert_eq!(
             bare_node_builtin_specifier(name),
@@ -1479,7 +1480,6 @@ fn bare_node_builtin_specifiers_gain_the_node_prefix() {
         "lodash",
         "path",
         "path/posix",
-        "events",
         "test",
         "node:test",
     ] {
