@@ -1,0 +1,5 @@
+{
+  "name": "await of an any-typed thenable result suspends and plain values pass through",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r: any = new Readable({ read() {} });\n  // `any` through a Json-typed call result: a thenable the await has to suspend on\n  const holder: any = { p: r.toArray() };\n  setTimeout(() => { r.push('z'); r.push(null); }, 20);\n  const out: any = await holder.p;\n  console.log(out.length, String(out[0]));\n  const plain: any = { v: 3 };\n  console.log((await plain).v);\n}\n"
+}
