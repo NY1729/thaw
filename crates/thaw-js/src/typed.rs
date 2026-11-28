@@ -226,6 +226,7 @@ pub(crate) fn sab_store(block: Arc<SabBlock>) -> Bytes {
         cell: RefCell::new(alias),
         shared: None,
         detached: Cell::new(false),
+        immutable: Cell::new(false),
         sab: Some(block),
         charged: Cell::new(0),
         max,
@@ -241,6 +242,8 @@ pub(crate) struct Store {
     /// The owner empties it when the memory is replaced, which is how a stale view sees length 0.
     shared: Option<Rc<RefCell<Vec<u8>>>>,
     detached: Cell<bool>,
+    /// An immutable ArrayBuffer (`transferToImmutable` / `sliceToImmutable`): its bytes never change again.
+    immutable: Cell<bool>,
     /// The block of a SharedArrayBuffer; `cell` then aliases it (see `SabBlock`).
     sab: Option<Arc<SabBlock>>,
     /// Bytes this storage charged to the heap limit (`heap_limit`); 0 once detached.
@@ -297,6 +300,7 @@ pub(crate) fn new_bytes_max(v: Vec<u8>, max: Option<usize>) -> Bytes {
         cell: RefCell::new(v),
         shared: None,
         detached: Cell::new(false),
+        immutable: Cell::new(false),
         sab: None,
         charged: Cell::new(charged),
         max,
@@ -369,6 +373,7 @@ pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
         cell: RefCell::new(Vec::new()),
         shared: Some(shared),
         detached: Cell::new(false),
+        immutable: Cell::new(false),
         sab: None,
         charged: Cell::new(0),
         max: None,
@@ -377,6 +382,10 @@ pub(crate) fn shared_bytes(shared: Rc<RefCell<Vec<u8>>>) -> Bytes {
 
 /// Detach a storage: its bytes are released (length 0) and it reports `detached`. Idempotent.
 /// A shared storage keeps its bytes (the engine owns them); only the flag changes.
+pub(crate) fn is_immutable(b: &Bytes) -> bool {
+    b.immutable.get()
+}
+
 pub(crate) fn detach_bytes(b: &Bytes) {
     // a SharedArrayBuffer is never detached: its Vec aliases a shared block (invariant 1)
     if b.sab.is_some() {
@@ -542,6 +551,9 @@ impl TypedArr {
     /// Store a JS value at `i` (ToNumber for the numeric types, ToBigInt for the 64-bit ones, which throws
     /// for a Number). An out-of-range index is a no-op after the conversion, as the spec orders it.
     pub(crate) fn set_value(&self, it: &mut Interp, i: usize, v: &Value) -> R<()> {
+        if is_immutable(&self.data) {
+            return it.throw_error("TypeError", "Cannot modify an immutable ArrayBuffer");
+        }
         if self.ty.is_big() {
             let x = it.bigint_element_of(v)?;
             self.set_big(i, &x);
@@ -761,6 +773,16 @@ impl Interp {
         keep_resizable: bool,
     ) -> R<Value> {
         let data = self.ab_receiver(this, method)?;
+        if is_immutable(&data) {
+            // the new length is converted (observably) before the receiver is refused
+            if !matches!(arg(a, 0), Value::Undefined) {
+                self.tonum(&arg(a, 0))?;
+            }
+            return self.throw_error(
+                "TypeError",
+                &format!("Cannot perform {method} on an immutable ArrayBuffer"),
+            );
+        }
         if is_detached(&data) {
             return self.throw_error(
                 "TypeError",
@@ -1138,6 +1160,58 @@ impl Interp {
                 false,
             )
         });
+        self.set_native(&ab_proto, "transferToImmutable", |it, this, a| {
+            let out =
+                it.ab_transfer(this, a, "ArrayBuffer.prototype.transferToImmutable", false)?;
+            if let Some(b) = Self::bytes_of_buffer(&out) {
+                b.immutable.set(true);
+            }
+            Ok(out)
+        });
+        self.set_native(&ab_proto, "sliceToImmutable", |it, this, a| {
+            let m = "ArrayBuffer.prototype.sliceToImmutable";
+            let data = it.ab_receiver(this, m)?;
+            if is_detached(&data) {
+                return it.throw_error(
+                    "TypeError",
+                    &format!("Cannot perform {m} on a detached ArrayBuffer"),
+                );
+            }
+            let n = data.borrow().len() as f64;
+            let rel = |it: &mut Interp, v: Value, d: f64| -> R<f64> {
+                if matches!(v, Value::Undefined) {
+                    return Ok(d);
+                }
+                let x = it.tonum(&v)?;
+                let x = if x.is_nan() { 0.0 } else { x.trunc() };
+                Ok(if x < 0.0 { (n + x).max(0.0) } else { x.min(n) })
+            };
+            let s = rel(it, arg(a, 0), 0.0)?;
+            let e = rel(it, arg(a, 1), n)?;
+            if is_detached(&data) {
+                return it.throw_error(
+                    "TypeError",
+                    &format!("Cannot perform {m} on a detached ArrayBuffer"),
+                );
+            }
+            let cur = data.borrow().len() as f64;
+            let (s, e) = (s.min(cur), e.min(cur));
+            let bytes = if e > s {
+                data.borrow()[s as usize..e as usize].to_vec()
+            } else {
+                Vec::new()
+            };
+            let out = it.new_array_buffer(new_bytes(bytes));
+            if let Some(b) = Self::bytes_of_buffer(&Value::Object(out.clone())) {
+                b.immutable.set(true);
+            }
+            Ok(Value::Object(out))
+        });
+        let immutable_get = self.native(|it, this, _| {
+            let data = it.ab_receiver(this, "get ArrayBuffer.prototype.immutable")?;
+            Ok(Value::Bool(is_immutable(&data)))
+        });
+        define_accessor(&ab_proto, "immutable", Some(immutable_get), None, false);
         self.set_native(&ab_proto, "resize", |it, this, a| it.ab_resize(this, a));
         let detached_get = self.native(|it, this, _| {
             let data = it.ab_receiver(this, "get ArrayBuffer.prototype.detached")?;
@@ -1249,6 +1323,12 @@ impl Interp {
             ))
         });
         g.declare("__thaw_ta_track", track, true);
+        let imm = self.native(|_, _, a| {
+            Ok(Value::Bool(
+                Self::typed_of(&arg(a, 0)).is_some_and(|t| is_immutable(&t.data)),
+            ))
+        });
+        g.declare("__thaw_ta_imm", imm, true);
         // the wire and structuredClone move a block between Interps as an id (the table is in worker.rs)
         let export = self.native(|it, _, a| {
             let Some(block) = Self::bytes_of_buffer(&arg(a, 0)).and_then(|b| b.sab.clone()) else {
@@ -1727,8 +1807,9 @@ const TYPED_PRELUDE: &str = r#"
     if (args.length === 1 && typeof args[0] === 'number' && r.length < args[0]) throw new TypeError('constructor returned a too short TypedArray');
     return r;
   }
-  function speciesCreate(o, args, count) {
+  function speciesCreate(o, args, count, writes) {
     var r = createFrom(speciesCtor(o), args);
+    if (writes && __thaw_ta_imm(r)) throw new TypeError('constructor returned a view of an immutable ArrayBuffer');
     if (isBig(r) !== isBig(o)) throw new TypeError('Content type mismatch');
     if (count !== undefined && r.length < count) throw new TypeError('species constructor returned a too short TypedArray');
     return r;
@@ -1745,7 +1826,7 @@ const TYPED_PRELUDE: &str = r#"
   def(TP, 'map', function (f, t) {
     var len = this.length;
     needFn(f);
-    var r = speciesCreate(this, [len], len);
+    var r = speciesCreate(this, [len], len, true);
     for (var i = 0; i < len; i++) r[i] = rApply(f, t, [this[i], i, this]);
     return r;
   });
@@ -1753,7 +1834,7 @@ const TYPED_PRELUDE: &str = r#"
     var kept = [], len = this.length;
     needFn(f);
     for (var i = 0; i < len; i++) { var v = this[i]; if (rApply(f, t, [v, i, this])) kept.push(v); }
-    var r = speciesCreate(this, [kept.length], kept.length);
+    var r = speciesCreate(this, [kept.length], kept.length, true);
     for (var j = 0; j < kept.length; j++) r[j] = kept[j];
     return r;
   });
@@ -1769,8 +1850,10 @@ const TYPED_PRELUDE: &str = r#"
     });
   }
   function vals(o, len) { var a = []; for (var i = 0; i < len; i++) a.push(o[i]); return a; }
+  var mutating = Object.assign(Object.create(null), { fill: 1, copyWithin: 1, reverse: 1, sort: 1 });
   function validate(o, name) {
     if (!isTA(o)) throw new TypeError('this is not a typed array.');
+    if (mutating[name] && __thaw_ta_imm(o)) throw new TypeError('Cannot modify an immutable ArrayBuffer');
     if (gone(o)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + name + ' on a detached ArrayBuffer');
   }
   def(TP, 'sort', function (cmp) {
@@ -1813,6 +1896,7 @@ const TYPED_PRELUDE: &str = r#"
     if (using !== undefined && using !== null) items = Array.from({ [ITER]: function () { return rApply(using, src, []); } });
     else { var o = Object(src), n = Math.min(Math.max(toInt(o.length), 0), 9007199254740991); items = []; for (var i = 0; i < n; i++) items.push(o[i]); }
     var len = items.length, r = createFrom(C, [len]);
+    if (__thaw_ta_imm(r)) throw new TypeError('constructor returned a view of an immutable ArrayBuffer');
     for (var k = 0; k < len; k++) {
       var v = items[k];
       if (mapFn !== undefined) v = rApply(mapFn, thisArg, [v, k]);
@@ -1824,6 +1908,7 @@ const TYPED_PRELUDE: &str = r#"
     var C = this, len = arguments.length;
     if (!isCtor(C)) throw new TypeError(String(C) + ' is not a constructor');
     var r = createFrom(C, [len]);
+    if (__thaw_ta_imm(r)) throw new TypeError('constructor returned a view of an immutable ArrayBuffer');
     for (var k = 0; k < len; k++) if (!Reflect.set(r, k, arguments[k])) throw new TypeError('Cannot set element ' + k);
     return r;
   });
@@ -1843,6 +1928,7 @@ const TYPED_PRELUDE: &str = r#"
     if (typeof orig !== 'function') return;
     def(TP, n, { [n]: function () {
       if (n !== 'toString' && !isTA(this)) throw new TypeError('this is not a typed array.');
+      if (mutating[n] && __thaw_ta_imm(this)) throw new TypeError('Cannot modify an immutable ArrayBuffer');
       if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.' + detachedNames[n] + ' on a detached ArrayBuffer');
       return orig.apply(this, arguments);
     } }[n]);
@@ -1861,7 +1947,7 @@ const TYPED_PRELUDE: &str = r#"
     if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer');
     var len = this.length, s = relIdx(start, len, 0), e = relIdx(end, len, len), C = speciesCtor(this);
     if (plainCtor(C, this)) return nSlice.call(this, s, e);
-    var cnt = Math.max(e - s, 0), r = speciesCreate(this, [cnt], cnt);
+    var cnt = Math.max(e - s, 0), r = speciesCreate(this, [cnt], cnt, true);
     if (cnt > 0) {
       if (gone(this)) throw new TypeError('Cannot perform %TypedArray%.prototype.slice on a detached ArrayBuffer');
       e = Math.min(e, this.length);
@@ -1880,6 +1966,7 @@ const TYPED_PRELUDE: &str = r#"
   });
   // ArrayBuffer.prototype.slice: relative indices, then SpeciesConstructor and the checks on what it builds
   var abSlice = ArrayBuffer.prototype.slice, AB = ArrayBuffer;
+  var immGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'immutable').get;
   def(ArrayBuffer.prototype, 'slice', function slice(start, end) {
     var isDet;
     try { isDet = detGet.call(this); } catch (e) { return rApply(abSlice, this, [start, end]); } // the native names the bad receiver
@@ -1894,6 +1981,7 @@ const TYPED_PRELUDE: &str = r#"
     if (S === AB) return rApply(abSlice, this, [first, fin]);
     var r = rConstruct(S, [n]);
     if (detGet.call(r)) throw new TypeError('species constructor returned a detached ArrayBuffer');
+    if (immGet.call(r)) throw new TypeError('species constructor returned an immutable ArrayBuffer');
     if (r === this) throw new TypeError('species constructor returned the same ArrayBuffer');
     if (r.byteLength < n) throw new TypeError('species constructor returned a too small ArrayBuffer');
     if (detGet.call(this)) throw new TypeError('Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer');

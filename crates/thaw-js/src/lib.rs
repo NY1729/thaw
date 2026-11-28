@@ -1635,6 +1635,17 @@ pub(crate) fn string_to_number(s: &str) -> f64 {
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         return i64::from_str_radix(hex, 16).map_or(f64::NAN, |v| v as f64);
     }
+    for (p, radix) in [("0b", 2), ("0B", 2), ("0o", 8), ("0O", 8)] {
+        if let Some(digits) = t.strip_prefix(p) {
+            return if !digits.is_empty() && digits.chars().all(|c| c.is_digit(radix)) {
+                digits.chars().fold(0.0, |a, c| {
+                    a * radix as f64 + c.to_digit(radix).unwrap() as f64
+                })
+            } else {
+                f64::NAN
+            };
+        }
+    }
     match t {
         "Infinity" | "+Infinity" => f64::INFINITY,
         "-Infinity" => f64::NEG_INFINITY,
@@ -3511,6 +3522,9 @@ impl Interp {
             _ => None,
         };
         if let Some(t) = typed {
+            if !matches!(t.key(key), TypedKey::Ordinary) && crate::typed::is_immutable(&t.data) {
+                return self.refuse_write(strict, o, key, Refusal::ReadOnly);
+            }
             match t.key(key) {
                 TypedKey::Index(i) => {
                     t.set_value(self, i, &value)?;
