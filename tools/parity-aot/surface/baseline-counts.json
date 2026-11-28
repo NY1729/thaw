@@ -137,8 +137,7 @@
   "skipped": 6
  },
  "util_types": {
-  "match": 60,
-  "output-diff": 26
+  "match": 86
  },
  "v8": {
   "match": 59,
