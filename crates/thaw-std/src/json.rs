@@ -1236,6 +1236,8 @@ pub(crate) struct BytesRef {
 unsafe extern "C" {
     fn thaw_bytes_console_info(buffer: *const u8, field: f64) -> f64;
     fn thaw_bytes_data(buffer: *const u8) -> *mut u8;
+    fn thaw_bytes_byte_offset(buffer: *const u8) -> f64;
+    fn thaw_bytes_console_target(buffer: *const u8) -> *mut u8;
 }
 
 impl BytesRef {
@@ -6334,8 +6336,31 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
         return match bytes.kind() {
             0 => Node::Buffer(data),
             1 => Node::Raw(crate::inspect::format_array_buffer(&data, 0)),
-            // ponytail: a DataView prints its own range, not offset/store; fix with a runtime offset accessor
-            2 => Node::Raw(crate::inspect::format_data_view(&data, 0, data.len())),
+            // A DataView prints its own range over the whole backing store.
+            2 => {
+                let (store, offset) = unsafe {
+                    (
+                        thaw_bytes_console_target(bytes.record),
+                        thaw_bytes_byte_offset(bytes.record),
+                    )
+                };
+                let whole = unsafe {
+                    let (base, len) = (
+                        thaw_bytes_data(store),
+                        thaw_bytes_console_info(store, 1.0) as usize,
+                    );
+                    if base.is_null() {
+                        &[][..]
+                    } else {
+                        std::slice::from_raw_parts(base, len)
+                    }
+                };
+                Node::Raw(crate::inspect::format_data_view(
+                    whole,
+                    offset as usize,
+                    data.len(),
+                ))
+            }
             _ => Node::Typed {
                 name: "Uint8Array".into(),
                 items: data
