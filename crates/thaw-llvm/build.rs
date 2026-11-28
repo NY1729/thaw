@@ -9,7 +9,11 @@ fn main() {
     let mut files: Vec<PathBuf> = fs::read_dir(&dir)
         .expect("tests directory")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with("_contracts.rs")))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("_contracts.rs"))
+        })
         .collect();
     files.sort();
     let mut out = String::new();
@@ -17,5 +21,9 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
         out.push_str(&format!("include!({:?});\n", path.display().to_string()));
     }
-    fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("contract_tests.rs"), out).unwrap();
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("contract_tests.rs"),
+        out,
+    )
+    .unwrap();
 }

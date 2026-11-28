@@ -722,10 +722,6 @@ fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment
     );
 }
 
-
-
-
-
 include!("tests/library_mode.rs");
 
 include!("tests/forof_tuple_round8.rs");
@@ -734,7 +730,6 @@ include!("tests/invalid_date_inspect_round9.rs");
 include!("tests/undefined_json_array_round9.rs");
 include!("tests/iterator_inspect_round10.rs");
 include!("tests/typed_array_inspect_round10.rs");
-
 
 /// Debug aid: `THAW_TEST_SRC=<file.ts> cargo test ... scratch_run_file -- --ignored --nocapture`
 /// compiles and runs the file on the thaw-js lane and prints stdout/stderr.
