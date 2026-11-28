@@ -635,8 +635,9 @@ impl<'a> FnLowerer<'a> {
         let test = self.lower_expr(&and(and(is_object, not_null), has_then))?;
         let argument = self.coerce_to_declared(&HirType::Json, HirExpr::Var(name.clone()))?;
         let args = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![argument]))?;
-        let resolved = HirExpr::Call(
-            Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+        // `Promise.resolve(thenable)` as a handle, then a real suspension on it (S2), read back as Json
+        let handle = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicMethodHandle".to_string())),
             vec![
                 HirExpr::Call(
                     Box::new(HirExpr::Var("getDynamicValue".to_string())),
@@ -645,6 +646,16 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Lit(HirLit::Str("resolve".to_string())),
                 args,
             ],
+        );
+        let resolved = HirExpr::Call(
+            Box::new(HirExpr::Var("readDynamicValue".to_string())),
+            vec![HirExpr::AwaitPromise(
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_js_await_handle".to_string())),
+                    vec![handle],
+                )),
+                HirType::JsValue,
+            )],
         );
         let result = HirExpr::Conditional(
             Box::new(test),
