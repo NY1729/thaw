@@ -216,8 +216,8 @@
    "skip": 104
   },
   "built-ins/String": {
-   "pass": 1136,
-   "fail": 84,
+   "pass": 1115,
+   "fail": 105,
    "skip": 3
   },
   "built-ins/StringIteratorPrototype": {
@@ -474,8 +474,8 @@
  "commit": "ce79e79daa4cf358e29174b439ea6df9158d1d86",
  "test262": "2a1ade303f72d3de80565c921d685222405c32ce",
  "totals": {
-  "pass": 38424,
-  "fail": 3204,
+  "pass": 38403,
+  "fail": 3225,
   "skip": 7175
  }
 }
