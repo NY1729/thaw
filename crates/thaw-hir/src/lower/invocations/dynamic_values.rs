@@ -11,7 +11,14 @@ impl<'a> FnLowerer<'a> {
         native_views_from: Option<usize>,
     ) -> Result<HirExpr, String> {
         if args.iter().any(|argument| argument.spread.is_some()) {
-            return Err("dynamic function calls do not support spread arguments".into());
+            // `f(a, ...xs)`: the argument list is the array literal `[a, ...xs]`.
+            let span = args.first().map_or(swc_common::DUMMY_SP, |argument| argument.expr.span());
+            let list = Expr::Array(swc_ecma_ast::ArrayLit {
+                span,
+                elems: args.iter().cloned().map(Some).collect(),
+            });
+            let value = self.lower_expr_with_expected_type(&list, Some(&HirType::Json))?;
+            return self.coerce_to_declared(&HirType::Json, value);
         }
         let values = args
             .iter()

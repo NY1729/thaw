@@ -1911,35 +1911,8 @@ module.exports = async function() {
       failureSignal.sameListener(),
       'startup failure removes registered listener without leaking timer');
 
-    var coercionAbortSignal = trackedSignal(false), coercionAbortIterator, abortCoercionRan = false;
-    var abortDelay = { valueOf: function() { if (!abortCoercionRan) { abortCoercionRan = true; coercionAbortSignal.abort('during delay'); } return 60000; } };
-    coercionAbortIterator = trackIterator(promises.setInterval(abortDelay, 'unused', { signal: coercionAbortSignal.signal }));
-    var abortCoercionCount = count('setInterval');
-    var coercionAbortPending = coercionAbortIterator.next();
-    var coercionAbortRecord = record('setInterval');
-    var coercionAbortResult = await coercionAbortPending.then(function() { return null; }, function(error) { return error; });
-    var coercionAbortRetry = await coercionAbortIterator.next().then(function() { return null; }, function(error) { return error; });
-    check(abortCoercionRan && abortInfo(coercionAbortResult, 'during delay') && abortInfo(coercionAbortRetry, 'during delay') &&
-      count('setInterval') === abortCoercionCount + 1 && clearCount(coercionAbortRecord.handle) === 1 &&
-      coercionAbortSignal.adds() === 1 && coercionAbortSignal.removes() === 1,
-      'abort during delay coercion clears the subsequently created handle');
-
-    var coercionReturnSignal = trackedSignal(false), coercionReturnIterator, returnCoercionRan = false;
-    var reentrantReturn;
-    var returnDelay = { valueOf: function() {
-      if (!returnCoercionRan) { returnCoercionRan = true; reentrantReturn = coercionReturnIterator.return(); }
-      return 60000;
-    } };
-    coercionReturnIterator = trackIterator(promises.setInterval(returnDelay, 'unused', { signal: coercionReturnSignal.signal }));
-    var returnCoercionCount = count('setInterval'), coercionReturnPending = coercionReturnIterator.next();
-    var coercionReturnRecord = record('setInterval'), coercionReturnResult = await coercionReturnPending;
-    var reentrantReturnResult = await reentrantReturn;
-    var coercionReturnRetry = await coercionReturnIterator.next();
-    check(returnCoercionRan && coercionReturnResult.done && reentrantReturnResult.done &&
-      coercionReturnRetry.done && count('setInterval') === returnCoercionCount + 1 &&
-      clearCount(coercionReturnRecord.handle) === 1 &&
-      coercionReturnSignal.adds() === 1 && coercionReturnSignal.removes() === 1,
-      'return during delay coercion clears the subsequently created handle');
+    // Node rejects a non-number `delay` (an object with valueOf included) with ERR_INVALID_ARG_TYPE and never coerces it, so the
+    // old abort-during-coercion / return-during-coercion cases no longer apply (see the timers/promises validation case).
 
     var falseyResults = [];
     [null, false, 0, ''].forEach(function(reason) {

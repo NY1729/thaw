@@ -472,7 +472,7 @@ class Sign {
     const data = Buffer.concat(this._chunks).toString('hex');
     const usePss = privateKey && privateKey.padding === RSA_PKCS1_PSS_PADDING;
     const signer = usePss ? __thaw_crypto_asymmetric_sign_pss_hex : __thaw_crypto_asymmetric_sign_hex;
-    const value = Buffer.from(signer(this.algorithm, pem, data), 'hex');
+    const value = Buffer.from(usePss ? signer(this.algorithm, pem, data, privateKey.saltLength) : signer(this.algorithm, pem, data), 'hex');
     return outputEncoding === undefined ? value : value.toString(outputEncoding);
   }
 }
@@ -485,7 +485,7 @@ class Verify {
     const signatureHex = Buffer.from(signature, signatureEncoding).toString('hex');
     const usePss = publicKey && publicKey.padding === RSA_PKCS1_PSS_PADDING;
     const verifier = usePss ? __thaw_crypto_asymmetric_verify_pss : __thaw_crypto_asymmetric_verify;
-    return verifier(this.algorithm, pem, data, signatureHex);
+    return usePss ? verifier(this.algorithm, pem, data, signatureHex, publicKey.saltLength) : verifier(this.algorithm, pem, data, signatureHex);
   }
 }
 const createSign = algorithm => new Sign(algorithm);

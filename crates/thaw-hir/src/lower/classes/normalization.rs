@@ -315,6 +315,48 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
         }
     }
 
+    // `const kX = Symbol(..)` used as a class member key (`[kX]: any`, `this[kX]`): the member
+    // is a native field/method named `__thaw_symkey_kX` (a fixed-layout class cannot hold a
+    // symbol-keyed slot), and `this[kX]` inside the module's classes folds to the same name.
+    // ponytail: instances reached through another receiver (`obj[kX]`) are not folded.
+    let mut symbol_keys: HashMap<Symbol, String> = HashMap::new();
+    {
+        let mut class_keys = HashSet::new();
+        let mut scan = |class: &swc_ecma_ast::Class| {
+            for member in &class.body {
+                let key = match member {
+                    ClassMember::ClassProp(property) => &property.key,
+                    ClassMember::Method(method) => &method.key,
+                    _ => continue,
+                };
+                if let PropName::Computed(computed) = key {
+                    if let Expr::Ident(name) = computed.expr.as_ref() {
+                        class_keys.insert(name.sym.to_string());
+                    }
+                }
+            }
+        };
+        for item in &module.body {
+            match item {
+                ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => scan(&declaration.class),
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                    if let Decl::Class(declaration) = &export.decl {
+                        scan(&declaration.class);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (name, initializer) in &declarations {
+            if class_keys.contains(name)
+                && matches!(initializer, Expr::Call(call) if matches!(&call.callee,
+                    Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Ident(id) if id.sym == "Symbol")))
+            {
+                symbol_keys.insert(name.clone(), format!("__thaw_symkey_{name}"));
+            }
+        }
+    }
+
     let normalize_class = |class: &mut swc_ecma_ast::Class, initialized: &HashMap<Symbol, String>| {
         let mut uninitialized_key = None;
         for member in &mut class.body {
@@ -347,7 +389,7 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             // pass.
             let missing = RefCell::new(None);
             let Some(value) = static_class_member_name(&computed.expr, &|name| {
-                initialized.get(name).cloned().or_else(|| {
+                symbol_keys.get(name).cloned().or_else(|| initialized.get(name).cloned()).or_else(|| {
                     let value = constants.get(name).cloned()?;
                     if missing.borrow().is_none() {
                         *missing.borrow_mut() = Some(name.to_string());
@@ -432,6 +474,7 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
     }
     struct ComputedAccessNormalizer<'a> {
         constants: &'a HashMap<Symbol, String>,
+        symbol_keys: &'a HashMap<Symbol, String>,
         shadowed: Vec<HashSet<Symbol>>,
     }
     impl ComputedAccessNormalizer<'_> {
@@ -444,7 +487,7 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             collector
                 .names
                 .into_iter()
-                .filter(|name| name == "Symbol" || self.constants.contains_key(name))
+                .filter(|name| name == "Symbol" || self.constants.contains_key(name) || self.symbol_keys.contains_key(name))
                 .collect()
         }
 
@@ -503,6 +546,25 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             self.shadowed.push(shadowed);
             arrow.visit_mut_children_with(self);
             self.shadowed.pop();
+        }
+
+        fn visit_mut_member_expr(&mut self, member: &mut swc_ecma_ast::MemberExpr) {
+            if matches!(member.obj.as_ref(), Expr::This(_)) {
+                if let MemberProp::Computed(computed) = &member.prop {
+                    if let Expr::Ident(name) = computed.expr.as_ref() {
+                        if let Some(key) = self.symbol_keys.get(name.sym.as_ref()) {
+                            if !self.expression_is_shadowed(&computed.expr) {
+                                member.prop = MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                    key.as_str().into(),
+                                    computed.span,
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            member.visit_mut_children_with(self);
         }
 
         fn visit_mut_member_prop(&mut self, property: &mut MemberProp) {
@@ -589,6 +651,7 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
     }
     normalized.visit_mut_with(&mut ComputedAccessNormalizer {
         constants: &constants,
+        symbol_keys: &symbol_keys,
         shadowed: Vec::new(),
     });
     normalized
