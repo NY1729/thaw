@@ -1002,6 +1002,15 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     if (n !== n || (n = Math.trunc(n)) < 0) throw new RangeError(String(limit) + ' must be positive');
     return n;
   }
+  // `this` is an object; `validate()` checks the arguments and, when it throws, the receiver is closed
+  // (a close error is masked by the validation error) before GetIteratorDirect reads `next`.
+  function direct(self, name, validate) {
+    var it = requireObj(self, name);
+    if (validate) {
+      try { validate(); } catch (e) { try { closeIt(it); } catch (_) {} throw e; }
+    }
+    return it;
+  }
   function closeIt(it) {
     var r = it.return;
     if (r !== undefined && r !== null) r.call(it);
@@ -1044,7 +1053,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   }
   var DONE = { value: undefined, done: true };
   def(ITP, 'map', function map(fn) {
-    var it = requireObj(this, 'map'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'map', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     return helper(it, function () {
       var r = step();
@@ -1053,7 +1063,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'filter', function filter(fn) {
-    var it = requireObj(this, 'filter'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'filter', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     return helper(it, function () {
       for (;;) {
@@ -1066,7 +1077,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'take', function take(limit) {
-    var it = requireObj(this, 'take'), left = toLimit(limit), step = stepOf(it);
+    'use strict';
+    var left, it = direct(this, 'take', function () { left = toLimit(limit); }), step = stepOf(it);
     return helper(it, function () {
       if (left <= 0) { closeIt(it); return DONE; }
       left--;
@@ -1075,7 +1087,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'drop', function drop(limit) {
-    var it = requireObj(this, 'drop'), left = toLimit(limit), step = stepOf(it);
+    'use strict';
+    var left, it = direct(this, 'drop', function () { left = toLimit(limit); }), step = stepOf(it);
     return helper(it, function () {
       while (left > 0) { left--; if (step().done) return DONE; }
       var r = step();
@@ -1083,7 +1096,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'flatMap', function flatMap(fn) {
-    var it = requireObj(this, 'flatMap'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'flatMap', function () { requireFn(fn); });
     var step = stepOf(it), n = 0, inner = null;
     return helper(it, function () {
       for (;;) {
@@ -1107,7 +1121,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }, function () { return inner && inner.it; });
   });
   def(ITP, 'reduce', function reduce(fn) {
-    var it = requireObj(this, 'reduce'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'reduce', function () { requireFn(fn); });
     var step = stepOf(it), acc, c = 0;
     if (arguments.length < 2) {
       var first = step();
@@ -1121,6 +1136,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }
   });
   def(ITP, 'toArray', function toArray() {
+    'use strict';
     var step = stepOf(requireObj(this, 'toArray')), out = [];
     for (;;) {
       var r = step();
@@ -1129,7 +1145,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }
   });
   def(ITP, 'forEach', function forEach(fn) {
-    var it = requireObj(this, 'forEach'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'forEach', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     for (;;) {
       var r = step();
@@ -1139,7 +1156,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   });
   // some / every / find: stop at the first decisive value and close the iterator
   function search(self, name, fn, decide) {
-    var it = requireObj(self, name); requireFn(fn);
+    var it = direct(self, name, function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     for (;;) {
       var r = step();
@@ -1150,14 +1167,113 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }
   }
   def(ITP, 'some', function some(fn) {
+    'use strict';
     return search(this, 'some', fn, { on: true, none: false, hit: function () { return true; } });
   });
   def(ITP, 'every', function every(fn) {
+    'use strict';
     return search(this, 'every', fn, { on: false, none: true, hit: function () { return false; } });
   });
   def(ITP, 'find', function find(fn) {
+    'use strict';
     return search(this, 'find', fn, { on: true, none: undefined, hit: function (v) { return v; } });
   });
+
+  // ---- iterator-includes / iterator-join / iterator-chunking (windows, chunks) ----
+  var MAX_SAFE = 9007199254740991;
+  var meth = {
+    includes(value) {
+      'use strict';
+      var skipped = arguments[1];
+      var it = direct(this, 'includes', function () {
+        if (skipped === undefined) { skipped = 0; return; }
+        if (typeof skipped !== 'number' || skipped !== skipped) throw new TypeError('skippedElements must be an integral Number');
+        if (skipped === Infinity) return;
+        if (skipped === -Infinity) throw new RangeError('skippedElements must not be negative');
+        if (Math.trunc(skipped) !== skipped) throw new TypeError('skippedElements must be an integral Number');
+        if (skipped < 0 || skipped > MAX_SAFE) throw new RangeError('skippedElements is out of range');
+      });
+      var step = stepOf(it);
+      while (skipped > 0) { if (step().done) return false; skipped--; }
+      for (;;) {
+        var r = step();
+        if (r.done) return false;
+        var v = r.value;
+        if (v === value || (v !== v && value !== value)) { closeIt(it); return true; }
+      }
+    },
+    join(separator) {
+      'use strict';
+      var sep;
+      var it = direct(this, 'join', function () { sep = separator === undefined ? ',' : `${separator}`; });
+      var step = stepOf(it), out = '', first = true;
+      for (;;) {
+        var r = step();
+        if (r.done) return out;
+        var part = '';
+        if (r.value !== undefined && r.value !== null) {
+          try { part = `${r.value}`; } catch (e) { closeIt(it); throw e; }
+        }
+        out = first ? part : out + sep + part;
+        first = false;
+      }
+    },
+    chunks(chunkSize) {
+      'use strict';
+      var size = sizeArg(this, 'chunks', chunkSize, 'chunkSize');
+      var it = size.it, n = size.n, step = stepOf(it), ended = false;
+      return helper(it, function () {
+        if (ended) return DONE;
+        var buf = [];
+        while (buf.length < n) {
+          var r = step();
+          if (r.done) { ended = true; break; }
+          buf.push(r.value);
+        }
+        return buf.length === 0 ? DONE : { value: buf, done: false };
+      });
+    },
+    windows(windowSize) {
+      'use strict';
+      var mode = arguments[1], partial = false;
+      var size = sizeArg(this, 'windows', windowSize, 'windowSize', function () {
+        if (mode === undefined || mode === 'only-full') return;
+        if (mode === 'allow-partial') { partial = true; return; }
+        throw new TypeError('undersized must be "only-full" or "allow-partial"');
+      });
+      var it = size.it, n = size.n, step = stepOf(it), buf = [], ended = false;
+      return helper(it, function () {
+        if (ended) return DONE;
+        for (;;) {
+          var r = step();
+          if (r.done) {
+            ended = true;
+            if (partial && buf.length > 0 && buf.length < n) return { value: buf.slice(), done: false };
+            return DONE;
+          }
+          buf.push(r.value);
+          if (buf.length > n) buf.shift();
+          if (buf.length === n) return { value: buf.slice(), done: false };
+        }
+      });
+    },
+  };
+  function sizeArg(self, name, v, label, extra) {
+    var n;
+    var it = direct(self, name, function () {
+      if (typeof v !== 'number' || v !== v || v === Infinity || v === -Infinity || Math.trunc(v) !== v) {
+        throw new TypeError(label + ' must be an integral Number');
+      }
+      if (v < 1 || v > 4294967295) throw new RangeError(label + ' must be between 1 and 2^32 - 1');
+      n = v;
+      if (extra) extra();
+    });
+    return { it: it, n: n };
+  }
+  def(ITP, 'includes', meth.includes);
+  def(ITP, 'join', meth.join);
+  def(ITP, 'chunks', meth.chunks);
+  def(ITP, 'windows', meth.windows);
   def(Iterator, 'from', function from(o) {
     var it;
     if (typeof o === 'string' || isObj(o)) {
