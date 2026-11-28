@@ -33,4 +33,4 @@ const KIND: usize = 80;
 const OBJDATA: usize = 216;
 const SCOPE: usize = 136;
 const BINDING: usize = 32;
-const FUNCDEF: usize = 232;
+const FUNCDEF: usize = 240;
