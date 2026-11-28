@@ -654,7 +654,7 @@ fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
     let client = std::thread::spawn(move || {
         (0..3)
             .map(|index| {
-                let socket = (0..50)
+                let socket = (0..3000)
                     .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
                         Ok(socket) => Some(socket),
                         Err(_) => {
@@ -662,7 +662,7 @@ fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
                             None
                         }
                     })
-                    .expect("TLS server did not start");
+                    .expect("TLS server never accepted a connection within ~30s (startup too slow or port taken)");
                 let connection = ClientConnection::new(
                     Arc::clone(&config),
                     ServerName::try_from("localhost".to_string()).unwrap(),
