@@ -648,9 +648,9 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   function DataView(buffer, byteOffset, byteLength) {
     if (new.target === undefined) throw new TypeError("Constructor DataView requires 'new'");
     if (!(buffer instanceof ArrayBuffer || buffer instanceof SharedArrayBuffer)) throw new TypeError('First argument to DataView constructor must be an ArrayBuffer');
-    var off = byteOffset === undefined ? 0 : (Math.trunc(byteOffset) || 0), total = buffer.byteLength;
+    var off = toIndex(byteOffset), total = buffer.byteLength;
     if (off < 0 || off > total) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
-    var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
+    var len = byteLength === undefined ? total - off : toIndex(byteLength);
     if (len < 0 || off + len > total) throw new RangeError('Invalid DataView length ' + len);
     if (buffer instanceof ArrayBuffer && detGet.call(buffer)) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
     // no length on a resizable buffer: the view tracks the buffer's end (spec: length-tracking)
@@ -672,8 +672,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     if (dv.__off > b.byteLength || (!dv.__track && dv.__off + dv.__len > b.byteLength)) throw new TypeError('Cannot perform ' + (oobWhat || what) + ' on a detached ArrayBuffer');
   }
   Object.defineProperty(DataView.prototype, 'buffer', { enumerable: false, configurable: true, get: function () { if (!Object.prototype.hasOwnProperty.call(this, '__buf')) throw new TypeError('Method get DataView.prototype.buffer called on incompatible receiver'); return this.__buf; } });
-  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { brand(this, 'get DataView.prototype.byteLength'); dvLive(this, 'get DataView.prototype.byteLength'); return dvLen(this); } });
-  Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { brand(this, 'get DataView.prototype.byteOffset'); dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
+  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { dvBrand(this, 'get DataView.prototype.byteLength'); dvLive(this, 'get DataView.prototype.byteLength'); return dvLen(this); } });
+  Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { dvBrand(this, 'get DataView.prototype.byteOffset'); dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
   var resizableGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'resizable').get;
   var scratch = new Uint8Array(8);
@@ -682,7 +682,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     Int32: [4, Int32Array], Uint32: [4, Uint32Array], Float16: [2, Float16Array], Float32: [4, Float32Array], Float64: [8, Float64Array]
   };
   var hasOwn = Object.prototype.hasOwnProperty;
-  function brand(dv, what) {
+  function dvBrand(dv, what) {
     if (typeof dv !== 'object' || dv === null || !hasOwn.call(dv, '__buf')) throw new TypeError('Method ' + what + ' called on incompatible receiver');
   }
   // ToIndex (RangeError for a negative or too large integer), before any detach / bounds check
@@ -698,23 +698,23 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   }
   Object.keys(kinds).forEach(function (name) {
     var size = kinds[name][0], View = kinds[name][1], view = new View(scratch.buffer, 0, 1);
-    def(DataView.prototype, 'get' + name, function (index, little) {
-      brand(this, 'DataView.prototype.get' + name);
+    def(DataView.prototype, 'get' + name, { ['get' + name](index, little) {
+      dvBrand(this, 'DataView.prototype.get' + name);
       index = toIndex(index);
       dvLive(this, 'DataView.prototype.get' + name);
       index = check(this, index, size);
       for (var i = 0; i < size; i++) scratch[little ? i : size - 1 - i] = this.__bytes[index + i];
       return view[0];
-    });
-    def(DataView.prototype, 'set' + name, function (index, value, little) {
-      brand(this, 'DataView.prototype.set' + name);
+    } }['get' + name]);
+    def(DataView.prototype, 'set' + name, { ['set' + name](index, value, little) {
+      dvBrand(this, 'DataView.prototype.set' + name);
       index = toIndex(index);
       value = +value;
       dvLive(this, 'DataView.prototype.set' + name, 'DataView.prototype.get' + name);
       index = check(this, index, size);
       view[0] = value;
       for (var i = 0; i < size; i++) this.__bytes[index + i] = scratch[little ? i : size - 1 - i];
-    });
+    } }['set' + name]);
   });
   ['get', 'set'].forEach(function (p) {
     var f = DataView.prototype[p + 'Float16'];
@@ -722,23 +722,23 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     Object.defineProperty(f, 'length', { value: p === 'get' ? 1 : 2, configurable: true });
   });
   [['BigInt64', true], ['BigUint64', false]].forEach(function (k) {
-    def(DataView.prototype, 'get' + k[0], function (index, little) {
-      brand(this, 'DataView.prototype.get' + k[0]);
+    def(DataView.prototype, 'get' + k[0], { ['get' + k[0]](index, little) {
+      dvBrand(this, 'DataView.prototype.get' + k[0]);
       index = toIndex(index);
       dvLive(this, 'DataView.prototype.get' + k[0]);
       index = check(this, index, 8);
       var v = 0n;
       for (var i = 0; i < 8; i++) v = (v << 8n) | BigInt(this.__bytes[index + (little ? 7 - i : i)]);
       return k[1] ? BigInt.asIntN(64, v) : v;
-    });
-    def(DataView.prototype, 'set' + k[0], function (index, value, little) {
-      brand(this, 'DataView.prototype.set' + k[0]);
+    } }['get' + k[0]]);
+    def(DataView.prototype, 'set' + k[0], { ['set' + k[0]](index, value, little) {
+      dvBrand(this, 'DataView.prototype.set' + k[0]);
       index = toIndex(index);
       var v = BigInt.asUintN(64, BigInt(value));
       dvLive(this, 'DataView.prototype.set' + k[0], 'DataView.prototype.get' + k[0]);
       index = check(this, index, 8);
       for (var i = 7; i >= 0; i--) { this.__bytes[index + (little ? 7 - i : i)] = Number(v & 255n); v >>= 8n; }
-    });
+    } }['set' + k[0]]);
   });
   def(DataView.prototype, Symbol.toStringTag, 'DataView');
   def(DataView.prototype, 'constructor', DataView);

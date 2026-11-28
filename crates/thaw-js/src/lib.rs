@@ -3834,6 +3834,16 @@ impl Interp {
     }
 
     /// [[Construct]](f, args, newTarget): the instance takes its prototype from `new_target.prototype`.
+    /// For a native constructor that must read `newTarget.prototype` before it allocates (GetPrototypeFromConstructor
+    /// comes first in the spec): reads it now; `construct_with` then reuses the value instead of reading again.
+    pub(crate) fn native_proto(&mut self) -> R<()> {
+        if let Some(nt) = self.rt.native_nt.take() {
+            let p = self.get(&nt, "prototype")?;
+            self.rt.native_proto = Some(p);
+        }
+        Ok(())
+    }
+
     pub(crate) fn construct_with(
         &mut self,
         f: &Value,
@@ -3856,15 +3866,29 @@ impl Interp {
         if !is_closure && !is_native && !is_hostcb || fo.no_ctor.get() {
             return self.throw_error("TypeError", "value is not a constructor");
         }
-        let proto = match self.get(new_target, "prototype")? {
-            Value::Object(p) => p,
-            _ => self.object_proto.clone(),
-        };
         if is_native {
-            // natives that act as constructors (Array, RegExp, Object, ...) return their own object
+            // natives that act as constructors (Array, RegExp, Object, ...) return their own object.
+            // The new target's `prototype` is read after the native's own argument checks (the typed array and
+            // ArrayBuffer constructors validate before GetPrototypeFromConstructor).
+            self.rt.native_nt = Some(new_target.clone());
+            self.rt.native_proto = None;
             let r = self.call_as(f, &Value::Undefined, args, true);
             self.rt.constructing = false;
+            self.rt.native_nt = None;
+            let early = self.rt.native_proto.take();
             let r = r?;
+            // a non-object `prototype` falls back to the constructor's own default prototype
+            let read = match early {
+                Some(p) => p,
+                None => self.get(new_target, "prototype")?,
+            };
+            let proto = match read {
+                Value::Object(p) if !is_symbol_object(&Value::Object(p.clone())) => p,
+                _ => match self.get(f, "prototype")? {
+                    Value::Object(p) => p,
+                    _ => self.object_proto.clone(),
+                },
+            };
             if !matches!(r, Value::Object(_)) && find_own(fo, "@@wrap").is_some() {
                 return Ok(Value::Object(new_obj(Some(proto), Kind::Wrapper(r))));
             }
@@ -3880,6 +3904,10 @@ impl Interp {
             }
             return Ok(r);
         }
+        let proto = match self.get(new_target, "prototype")? {
+            Value::Object(p) => p,
+            _ => self.object_proto.clone(),
+        };
         let this_obj = new_obj(Some(proto), Kind::Plain);
         let ctor_def = match &*fo.kind.borrow() {
             Kind::Closure { def, .. } => Some(def.clone()),
