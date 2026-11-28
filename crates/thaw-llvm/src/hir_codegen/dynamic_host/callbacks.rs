@@ -1528,15 +1528,13 @@ impl<'ctx> HirCompiler<'ctx> {
             let promise = call_result
                 .ok_or("async value callback must return a Promise")?
                 .into_pointer_value();
-            for (index, param) in params.iter().enumerate() {
-                if *param == HirType::JsValue {
-                    self.builder.build_call(
-                        self.module.get_function("thaw_tjs_release_handle").unwrap(),
-                        &[callback_args[index + 1 + holder_offset]],
-                        "release_deferred_callback_argument",
-                    ).map_err(|error| error.to_string())?;
-                }
-            }
+            // An async callback may suspend (`await <JsValue>`), so its JsValue arguments must outlive this
+            // call: they are released when the callback's Promise settles.
+            let deferred_handles = params.iter().enumerate()
+                .filter(|(_, param)| **param == HirType::JsValue)
+                .map(|(index, _)| callback_args[index + 1 + holder_offset])
+                .collect::<Vec<_>>();
+            self.compile_release_handles_on_settle(promise, &deferred_handles)?;
             for (position, value) in argument_json.iter().copied().enumerate() {
                 let param = position.checked_sub(holder_offset).and_then(|index| params.get(index));
                 self.compile_release_callback_json_argument(value, param, "deferred_callback_argument")?;
@@ -1836,6 +1834,81 @@ impl<'ctx> HirCompiler<'ctx> {
     /// the pointer in a native array, object field or closure: those boxes move to the arena
     /// reachability graph (freed once unreferenced and the invocation arena resets) instead of
     /// being destroyed under the stored reference. Every other box is a pure decoding temporary.
+    /// Releases `handles` (thaw-js handle ids, i64) when the native `promise` settles: the handles are stored in an
+    /// arena cell that a subscription keeps rooted, and the continuation releases each one.
+    fn compile_release_handles_on_settle(
+        &mut self,
+        promise: PointerValue<'ctx>,
+        handles: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<(), String> {
+        if handles.is_empty() {
+            return Ok(());
+        }
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+        let array_type = i64_type.array_type(handles.len() as u32);
+        let cell = self.allocate_arena_cell(array_type.into(), "deferred_callback_handles")?;
+        for (index, handle) in handles.iter().enumerate() {
+            let slot = unsafe {
+                self.builder.build_in_bounds_gep(
+                    array_type,
+                    cell,
+                    &[i64_type.const_zero(), i64_type.const_int(index as u64, false)],
+                    "deferred_callback_handle_slot",
+                )
+            }
+            .map_err(|error| error.to_string())?;
+            self.builder.build_store(slot, handle.into_int_value()).map_err(|error| error.to_string())?;
+        }
+        let n = self.next_lambda;
+        self.next_lambda += 1;
+        let release = self.module.add_function(
+            &format!("__thaw_release_callback_handles_{n}"),
+            self.context.void_type().fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            Some(Linkage::Internal),
+        );
+        let return_block = self.builder.get_insert_block().unwrap();
+        let body = isolated_codegen_scope!(self, {
+            let entry = self.context.append_basic_block(release, "entry");
+            self.builder.position_at_end(entry);
+            let frame = release.get_nth_param(0).unwrap().into_pointer_value();
+            for index in 0..handles.len() {
+                let slot = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        array_type,
+                        frame,
+                        &[i64_type.const_zero(), i64_type.const_int(index as u64, false)],
+                        "release_callback_handle_slot",
+                    )
+                }
+                .map_err(|error| error.to_string())?;
+                let handle = self
+                    .builder
+                    .build_load(i64_type, slot, "release_callback_handle")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_tjs_release_handle").unwrap(),
+                        &[handle.into()],
+                        "release_settled_callback_argument",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            self.builder.build_return(None).map_err(|error| error.to_string())?;
+            Ok(())
+        });
+        self.builder.position_at_end(return_block);
+        body?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_subscribe").unwrap(),
+                &[promise.into(), release.as_global_value().as_pointer_value().into(), cell.into()],
+                "release_callback_handles_on_settle",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     fn compile_release_callback_json_argument(
         &mut self,
         value: PointerValue<'ctx>,
