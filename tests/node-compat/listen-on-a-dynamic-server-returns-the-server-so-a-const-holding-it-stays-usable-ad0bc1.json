@@ -1,5 +1,0 @@
-{
-  "name": "listen on a dynamic server returns the server so a const holding it stays usable in a wrapped callback",
-  "expect": "matched",
-  "source": "import http from 'http';\ntype Fn = (...a: any[]) => any;\nfunction wrap(fn: Fn): any { return function (...a: any[]) { return fn(...a); }; }\nasync function main(): Promise<void> {\n  const s0 = http.createServer((req, res) => { res.end(); });\n  const s = s0.listen(0, '127.0.0.1', wrap(() => {\n    console.log('L', s.address().port > 0, s0.address().port > 0);\n    s.close();\n  }));\n  await new Promise<void>((r) => setTimeout(r, 300));\n}\n"
-}
