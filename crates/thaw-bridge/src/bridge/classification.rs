@@ -211,6 +211,42 @@ pub(crate) fn render_ts_array_of(element: &HirType) -> String {
     if needs_grouping(element) { format!("({rendered})[]") } else { format!("{rendered}[]") }
 }
 
+thread_local! {
+    /// Recursive layouts named by `render_ts_type` since the last `take_rendered_recursive_aliases`.
+    static RENDERED_RECURSIVE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn recursive_alias_name(key: &str) -> String {
+    RENDERED_RECURSIVE.with(|names| {
+        let mut names = names.borrow_mut();
+        if !names.iter().any(|name| name == key) {
+            names.push(key.to_string());
+        }
+    });
+    let sanitized: String = key.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    format!("__ThawRecursive_{sanitized}")
+}
+
+/// `type __ThawRecursive_X = { ... }` declarations for every recursive layout rendered so far (a layout
+/// rendering may name further layouts, so this runs until none is new).
+pub(crate) fn take_rendered_recursive_aliases() -> String {
+    let mut out = String::new();
+    let mut done = Vec::new();
+    loop {
+        let pending: Vec<String> = RENDERED_RECURSIVE.with(|names| std::mem::take(&mut *names.borrow_mut()));
+        let pending: Vec<String> = pending.into_iter().filter(|key| !done.contains(key)).collect();
+        if pending.is_empty() {
+            return out;
+        }
+        for key in pending {
+            let layout = HirType::Recursive(key.clone()).expand();
+            let sanitized: String = key.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+            out.push_str(&format!("type __ThawRecursive_{sanitized} = {};\n", render_ts_type(&layout)));
+            done.push(key);
+        }
+    }
+}
+
 pub(crate) fn render_ts_type(ty: &HirType) -> String {
     match ty {
         HirType::F64 => "number".to_string(),
@@ -221,7 +257,8 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         HirType::Void => "void".to_string(),
         HirType::Str | HirType::StrLiteral(_) => "string".to_string(),
         HirType::Symbol => "symbol".to_string(),
-        HirType::Recursive(_) => "object".to_string(),
+        // A self-reference is named; `generate_shim` declares the alias (`take_rendered_recursive_aliases`).
+        HirType::Recursive(key) => recursive_alias_name(key),
         HirType::Json => "Json".to_string(),
         HirType::Dictionary(element) => {
             format!("{{ [key: string]: {} }}", render_ts_type(element))
