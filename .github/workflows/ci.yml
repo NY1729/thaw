@@ -265,6 +265,12 @@ jobs:
           for m in $MANIFESTS; do
             cargo run -p thaw-cli -- node-compat "tests/$m.json"
           done
+      # Non-gating for now: reuses the debug binary built above, so no extra build.
+      - name: Implicit-any differential check (non-gating)
+        if: matrix.group == 'others'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: THAW=target/debug/thaw tools/implicit-any/run.sh
       - name: Collect diagnostics
         if: always()
         run: |
