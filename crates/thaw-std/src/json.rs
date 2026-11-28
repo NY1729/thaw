@@ -1234,6 +1234,7 @@ pub(crate) struct BytesRef {
 }
 
 unsafe extern "C" {
+    fn thaw_bytes_clone_kind(buffer: *const u8) -> *mut u8;
     fn thaw_bytes_console_info(buffer: *const u8, field: f64) -> f64;
     fn thaw_bytes_data(buffer: *const u8) -> *mut u8;
 }
@@ -1255,6 +1256,18 @@ impl BytesRef {
             unsafe { std::slice::from_raw_parts_mut(data, len) }
         }
     }
+}
+
+/// A copy of a `Bytes` value with its own store and the same kind (`structuredClone`).
+pub(crate) fn clone_bytes_value(bytes: &BytesRef) -> Value {
+    let record = unsafe { thaw_bytes_clone_kind(bytes.record) };
+    if record.is_null() {
+        return Value::Null;
+    }
+    Value::Bytes(Rc::new(BytesRef {
+        record,
+        _root: thaw_arena::ArenaRoot::new(record as usize),
+    }))
 }
 
 /// A fresh `Json` box aliasing the native byte view `record`.

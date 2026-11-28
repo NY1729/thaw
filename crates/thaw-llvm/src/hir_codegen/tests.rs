@@ -909,6 +909,7 @@ include!("tests/thaw_js_stream_ctor_contracts.rs");
 include!("tests/thaw_js_jsvalue_callback_contracts.rs");
 include!("tests/thaw_js_callback_own_param_contracts.rs");
 include!("tests/typeof_json_iteration_contracts.rs");
+include!("tests/structured_clone_bytes_contracts.rs");
 include!("tests/instanceof_view_contracts.rs");
 include!("tests/any_bigint_arithmetic_contracts.rs");
 
