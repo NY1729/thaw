@@ -354,6 +354,7 @@ impl Interp {
             it.make_proxy(&arg(args, 0), &arg(args, 1))
         });
         let Value::Object(c) = &ctor else { return };
+        put_hidden(c, "@@ctor", Value::Bool(true));
         self.set_native(c, "revocable", |it, _, args| {
             let proxy = it.make_proxy(&arg(args, 0), &arg(args, 1))?;
             let p = proxy.clone();

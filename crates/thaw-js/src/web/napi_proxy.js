@@ -726,8 +726,9 @@
       for (let index = 0; index < args.length; index++) values.push(args[index]);
       return values;
     };
-    // An arrow function has no own `prototype` (a `function` one is non-configurable and cannot lose it).
-    const target = () => {};
+    // A bound function is a constructor without an own `prototype` (a `function` one is non-configurable and
+    // cannot lose it; an arrow function is not a constructor, so a proxy over it could not be `new`ed).
+    const target = function () {}.bind();
     const initialTargetOwn = new Map();
     reflectOwnKeys(target).forEach(key => { initialTargetOwn.set(key, reflectGetOwn(target, key)); });
     const fallbackGetters = new Map();
