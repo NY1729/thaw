@@ -1172,6 +1172,15 @@ pub extern "C" fn thaw_process_ppid() -> f64 {
     }
 }
 
+/// A blocking `await` whose Promise nothing can settle any more: Node ends the process with a warning and
+/// exit code 13 (`Detected unsettled top-level await`).
+#[no_mangle]
+pub extern "C" fn thaw_runtime_unsettled_await() {
+    eprint_line("Warning: Detected unsettled top-level await");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(13);
+}
+
 /// `thaw_runtime_run_until_resolved` for a blocking `await` in synchronous
 /// code. The awaiter observes the settlement, so a rejection counts as handled
 /// exactly as it does for a coroutine subscription.

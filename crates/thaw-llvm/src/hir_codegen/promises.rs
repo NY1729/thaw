@@ -2918,6 +2918,32 @@ impl<'ctx> HirCompiler<'ctx> {
     /// callback that settles `promise` through a dynamic (thaw-js) call runs only inside that loop
     /// (as in the async `main` entry), so a pending promise gets one idle drain and a second wait.
     fn call_await_blocking(&mut self, promise: PointerValue<'ctx>) -> Result<PointerValue<'ctx>, String> {
+        let result = self.call_await_blocking_idle(promise)?;
+        // Nothing can settle it any more (no timer, fd, server or thaw-js work): Node ends a program stuck on an
+        // unsettled top-level await with a warning and exit code 13.
+        let state = self.builder
+            .build_call(self.module.get_function("thaw_promise_state").unwrap(), &[promise.into()], "await_blocking_final_state")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("typed Promise has no state")?
+            .into_int_value();
+        let pending = self.builder
+            .build_int_compare(IntPredicate::EQ, state, self.context.i8_type().const_zero(), "await_blocking_unsettled")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let unsettled = self.context.append_basic_block(function, "await_blocking_unsettled_exit");
+        let settled = self.context.append_basic_block(function, "await_blocking_settled_continue");
+        self.builder.build_conditional_branch(pending, unsettled, settled).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(unsettled);
+        self.builder
+            .build_call(self.module.get_function("thaw_runtime_unsettled_await").unwrap(), &[], "unsettled_top_level_await")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unreachable().map_err(|error| error.to_string())?;
+        self.builder.position_at_end(settled);
+        Ok(result)
+    }
+
+    fn call_await_blocking_idle(&mut self, promise: PointerValue<'ctx>) -> Result<PointerValue<'ctx>, String> {
         let await_blocking = self.module.get_function("thaw_runtime_await_blocking").unwrap();
         let first = self.builder
             .build_call(await_blocking, &[promise.into()], "await_blocking_result")
