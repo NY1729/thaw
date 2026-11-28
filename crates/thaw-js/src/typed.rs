@@ -784,6 +784,9 @@ impl Interp {
             );
         }
         if is_detached(&data) {
+            if !matches!(arg(a, 0), Value::Undefined) {
+                self.tonum(&arg(a, 0))?;
+            }
             return self.throw_error(
                 "TypeError",
                 &format!("Cannot perform {method} on a detached ArrayBuffer"),
@@ -809,6 +812,13 @@ impl Interp {
                 n as usize
             }
         };
+        // the length's conversion may have detached the buffer
+        if is_detached(&data) {
+            return self.throw_error(
+                "TypeError",
+                &format!("Cannot perform {method} on a detached ArrayBuffer"),
+            );
+        }
         if max.is_some_and(|m| new_len > m) {
             return self.throw_error("RangeError", "Invalid array buffer length");
         }

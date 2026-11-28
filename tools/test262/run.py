@@ -18,7 +18,7 @@ SKIP = {'Atomics.waitAsync', 'resizable-arraybuffer', 'Temporal', 'ShadowRealm',
         'Intl.DurationFormat'}
 SKIP_SRC = ['$262.agent', 'createRealm', 'IsHTMLDDA']
 PRE = ("var print=console.log;var $262={global:globalThis,gc:function(){},evalScript:function(s){return __thaw_eval_script(String(s))},"
-       "detachArrayBuffer:function(b){b.transfer()},agent:{},createRealm:function(){throw new Error('no realm')},"
+       "detachArrayBuffer:function(b){if(!b.detached)b.transfer()},agent:{},createRealm:function(){throw new Error('no realm')},"
        "IsHTMLDDA:undefined};\n"
        # an unhandled rejection is not a test failure in the test262 host model (Node 22 would exit 1 on it)
        "process.on('unhandledRejection',function(){});\n")

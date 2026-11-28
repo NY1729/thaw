@@ -1663,8 +1663,23 @@ pub(crate) fn number_to_string(n: f64) -> String {
     }
 }
 
+/// ECMAScript WhiteSpace and LineTerminator (not Unicode `White_Space`: U+FEFF is in, U+0085 is out).
+fn is_js_space(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
+}
+
 pub(crate) fn string_to_number(s: &str) -> f64 {
-    let t = s.trim();
+    let t = s.trim_matches(is_js_space);
     if t.is_empty() {
         return 0.0;
     }
@@ -3591,11 +3606,27 @@ impl Interp {
         if is_legacy_fn_key(o, key) {
             return self.refuse_write(strict, o, key, Refusal::ReadOnly);
         }
+        // a typed array further up the chain owns every canonical numeric key: no prototype setter is reached, an
+        // invalid index drops the write, a valid one is a data property the receiver then defines
+        let mut typed_holder = false;
+        {
+            let mut cur = o.proto.borrow().clone();
+            while let Some(c) = cur {
+                if let Some(valid) = crate::typed::typed_own_key(&c, key) {
+                    if !valid {
+                        return Ok(());
+                    }
+                    typed_holder = true;
+                    break;
+                }
+                cur = c.proto.borrow().clone();
+            }
+        }
         // a proxy further up the prototype chain, before any holder of `key`, takes the write
         if let Some(p) = proxy_before_holder(o, key) {
             return self.proxy_set_chain(&p, key, &value, target, strict);
         }
-        match find_in_chain(o, key) {
+        match find_in_chain(o, key).filter(|_| !typed_holder) {
             Some(Slot::Accessor { set, .. }) => {
                 let Some(s) = set else {
                     return self.refuse_write(strict, o, key, Refusal::GetterOnly);

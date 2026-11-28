@@ -530,6 +530,10 @@ impl Interp {
         if let Some(r) = self.proxy_has(o, key)? {
             return Ok(r);
         }
+        // a typed array's numeric key answers for the element alone, never the prototype chain
+        if let Some(valid) = crate::typed::typed_own_key(o, key) {
+            return Ok(valid);
+        }
         // a proxy on the prototype chain answers for the rest of the walk
         {
             let mut cur = o.proto.borrow().clone();
@@ -557,10 +561,6 @@ impl Interp {
                 }
                 cur = p.proto.borrow().clone();
             }
-        }
-        // a typed array's numeric key answers for the element alone, never the prototype chain
-        if let Some(valid) = crate::typed::typed_own_key(o, key) {
-            return Ok(valid);
         }
         let is_index = matches!(&*o.kind.borrow(), Kind::Array(items) if key == "length" || array_index(key).is_some_and(|i| array_has_index(o, items, i)));
         if matches!(&*o.kind.borrow(), Kind::Global) {
