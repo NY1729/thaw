@@ -30,13 +30,19 @@ impl<'a> FnLowerer<'a> {
         let Expr::Call(call) = expression else {
             return false;
         };
-        call.args.iter().any(|argument| {
-            if !matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
-                return false;
-            }
+        let mentions = |expr: &Expr| {
             let mut finder = Finder { name, found: false };
-            argument.expr.visit_with(&mut finder);
+            expr.visit_with(&mut finder);
             finder.found
+        };
+        call.args.iter().any(|argument| match argument.expr.as_ref() {
+            Expr::Arrow(_) | Expr::Fn(_) => mentions(&argument.expr),
+            // `wrap(() => { server.address() })`: a forwarding wrapper keeps the callback.
+            Expr::Call(wrapper) => wrapper
+                .args
+                .iter()
+                .any(|inner| matches!(inner.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) && mentions(&inner.expr)),
+            _ => false,
         })
     }
 
@@ -833,6 +839,30 @@ impl<'a> FnLowerer<'a> {
                         let Callee::Expr(callee) = &call.callee else {
                             return None;
                         };
+                        // `recv.method(..)` on a native object: the method's declared return type
+                        // (`server.listen(..)` is declared to return the server).
+                        if let Expr::Member(member) = callee.as_ref() {
+                            let swc_ecma_ast::MemberProp::Ident(property) = &member.prop else {
+                                return None;
+                            };
+                            let receiver = self.lower_expr(&member.obj).ok()?;
+                            let receiver_type = self.infer_expr_type(&receiver).ok()?;
+                            // A method called on a dynamic receiver yields a dynamic value.
+                            if receiver_type == HirType::Json {
+                                return Some(HirType::Json);
+                            }
+                            let HirType::Object(fields) = receiver_type else {
+                                return None;
+                            };
+                            return fields.iter().find(|(field, _)| field == property.sym.as_ref()).and_then(|(_, ty)| {
+                                match ty {
+                                    HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret) => {
+                                        Some(ret.as_ref().clone())
+                                    }
+                                    _ => None,
+                                }
+                            });
+                        }
                         let Expr::Ident(callee) = callee.as_ref() else {
                             return None;
                         };
