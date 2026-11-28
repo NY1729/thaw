@@ -555,6 +555,7 @@ fn generated_builtin_declarations(module: &str) -> String {
             ..Default::default()
         },
         "stream" => ExportKinds { numbers: "length", strings: "name", values: "prototype", ..Default::default() },
+        "dgram" => ExportKinds { functions: "_createSocketHandle/5", ..Default::default() },
         "timers" => ExportKinds { functions: "_unrefActive/1 active/1 enroll/2 unenroll/1", values: "promises", ..Default::default() },
         "url" => ExportKinds { classes: "Url", functions: "fileURLToPathBuffer/1 resolveObject/2", ..Default::default() },
         "vm" => ExportKinds { values: "constants", ..Default::default() },
