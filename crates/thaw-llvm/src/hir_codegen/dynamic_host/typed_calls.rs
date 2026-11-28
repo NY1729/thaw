@@ -1756,6 +1756,103 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(value)
     }
 
+    /// Splits on a `{"__thaw_tjs_pending__": handle}` result: the pending side links a fresh native promise to
+    /// the host Promise (`thaw_tjs_watch_promise`) and jumps to the merge block; the builder is left at the
+    /// resolved side. Returns `(pending promise, pending side's last block, merge block)`.
+    fn compile_thaw_js_pending_branch(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        awaited: &HirType,
+    ) -> Result<(PointerValue<'ctx>, BasicBlock<'ctx>, BasicBlock<'ctx>), String> {
+        let function = self.current_function();
+        let pending_block = self.context.append_basic_block(function, "tjs_pending_marker");
+        let resolved_block = self.context.append_basic_block(function, "tjs_resolved");
+        let merge_block = self.context.append_basic_block(function, "tjs_pending_merge");
+        let key = self.intern_string("__thaw_tjs_pending__", "tjs_pending_key")
+            .map_err(|error| error.to_string())?;
+        let has = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_has_own").unwrap(),
+                &[json.into(), key.as_pointer_value().into()],
+                "tjs_pending_has",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_has_own returned no value")?
+            .into_int_value();
+        let is_pending = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                has,
+                self.context.i8_type().const_zero(),
+                "tjs_is_pending",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(is_pending, pending_block, resolved_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(pending_block);
+        let marker = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_get").unwrap(),
+                &[json.into(), key.as_pointer_value().into()],
+                "tjs_pending_marker_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_get returned no value")?;
+        self.compile_check_json_host_error(marker, Some("thaw_json_destroy"))?;
+        let handle = self.compile_json_as_value(marker, "thaw_json_as_number")?.into_float_value();
+        let handle = self
+            .builder
+            .build_float_to_signed_int(handle, self.context.i64_type(), "tjs_pending_handle")
+            .map_err(|error| error.to_string())?;
+        let pending_promise = self
+            .builder
+            .build_call(self.module.get_function("thaw_promise_new").unwrap(), &[], "tjs_pending_promise")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_promise_new returned no value")?
+            .into_pointer_value();
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_retain").unwrap(),
+                &[pending_promise.into()],
+                "tjs_pending_watch_retain",
+            )
+            .map_err(|error| error.to_string())?;
+        let marker_insert = self.builder.get_insert_block().unwrap();
+        let settler = self.compile_thaw_js_pending_settler(awaited)?;
+        self.builder.position_at_end(marker_insert);
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_tjs_watch_promise").unwrap(),
+                &[handle.into(), pending_promise.into(), settler.into()],
+                "tjs_watch_pending_promise",
+            )
+            .map_err(|error| error.to_string())?;
+        let pending_end = self.builder.get_insert_block().unwrap();
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[json.into()],
+                "destroy_tjs_pending_marker",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(resolved_block);
+        Ok((pending_promise, pending_end, merge_block))
+    }
+
     fn compile_typed_thaw_js_call_scoped(
         &mut self,
         signature: &DynamicSignature,
@@ -1900,96 +1997,11 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         // A `\u{4}` call may answer with `{"__thaw_tjs_pending__": handle}` instead of the value: the
         // Promise is then settled later by the host, through the generated settler.
-        let mut pending_edge = None;
-        if pending_site {
-            let function = self.current_function();
-            let pending_block = self.context.append_basic_block(function, "tjs_pending_marker");
-            let resolved_block = self.context.append_basic_block(function, "tjs_resolved");
-            let merge_block = self.context.append_basic_block(function, "tjs_pending_merge");
-            let key = self.intern_string("__thaw_tjs_pending__", "tjs_pending_key")
-                .map_err(|error| error.to_string())?;
-            let has = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_json_has_own").unwrap(),
-                    &[json.into(), key.as_pointer_value().into()],
-                    "tjs_pending_has",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or("thaw_json_has_own returned no value")?
-                .into_int_value();
-            let is_pending = self
-                .builder
-                .build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    has,
-                    self.context.i8_type().const_zero(),
-                    "tjs_is_pending",
-                )
-                .map_err(|error| error.to_string())?;
-            self.builder
-                .build_conditional_branch(is_pending, pending_block, resolved_block)
-                .map_err(|error| error.to_string())?;
-
-            self.builder.position_at_end(pending_block);
-            let marker = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_json_get").unwrap(),
-                    &[json.into(), key.as_pointer_value().into()],
-                    "tjs_pending_marker_json",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or("thaw_json_get returned no value")?;
-            self.compile_check_json_host_error(marker, Some("thaw_json_destroy"))?;
-            let handle = self.compile_json_as_value(marker, "thaw_json_as_number")?.into_float_value();
-            let handle = self
-                .builder
-                .build_float_to_signed_int(handle, self.context.i64_type(), "tjs_pending_handle")
-                .map_err(|error| error.to_string())?;
-            let pending_promise = self
-                .builder
-                .build_call(self.module.get_function("thaw_promise_new").unwrap(), &[], "tjs_pending_promise")
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or("thaw_promise_new returned no value")?
-                .into_pointer_value();
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_promise_retain").unwrap(),
-                    &[pending_promise.into()],
-                    "tjs_pending_watch_retain",
-                )
-                .map_err(|error| error.to_string())?;
-            let marker_insert = self.builder.get_insert_block().unwrap();
-            let settler = self.compile_thaw_js_pending_settler(awaited)?;
-            self.builder.position_at_end(marker_insert);
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_tjs_watch_promise").unwrap(),
-                    &[handle.into(), pending_promise.into(), settler.into()],
-                    "tjs_watch_pending_promise",
-                )
-                .map_err(|error| error.to_string())?;
-            let pending_end = self.builder.get_insert_block().unwrap();
-            self.builder
-                .build_call(
-                    self.module.get_function("thaw_json_destroy").unwrap(),
-                    &[json.into()],
-                    "destroy_tjs_pending_marker",
-                )
-                .map_err(|error| error.to_string())?;
-            self.builder
-                .build_unconditional_branch(merge_block)
-                .map_err(|error| error.to_string())?;
-            self.builder.position_at_end(resolved_block);
-            pending_edge = Some((pending_promise, pending_end, merge_block));
-        }
+        let pending_edge = if pending_site {
+            Some(self.compile_thaw_js_pending_branch(json, awaited)?)
+        } else {
+            None
+        };
         if let HirType::Object(fields) = &signature.ret {
             if thaw_js_date_type(&signature.ret) {
                 // `{"__thaw_tjs_date__": ms}` -> a native Date.
@@ -2409,10 +2421,13 @@ impl<'ctx> HirCompiler<'ctx> {
         // bit 0: the result is a handle id; bit 1: await a returned Promise (see `class_call`);
         // bit 2: await a returned Promise only for a union return (`$await` runtime-key suffix)
         let union_promise = ret_handle && symbol.ends_with("$await");
+        // a Promise result still pending when thaw-js has no more work is linked to a native promise
+        let pending_class = is_promise && !promise_handle && !is_new && thaw_js_pending_ok(awaited);
         let want_handle = self.context.i8_type().const_int(
             u64::from(ret_handle || promise_handle)
                 | (u64::from(is_promise) << 1)
-                | (u64::from(union_promise) << 2),
+                | (u64::from(union_promise) << 2)
+                | (u64::from(pending_class) << 3),
             false,
         );
         let json = self.compile_json_backend_values_with_extra(
@@ -2451,7 +2466,25 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             return Ok(promise.into());
         }
-        self.compile_typed_dynamic_result(json, &signature.ret)
+        let pending_edge = if pending_class {
+            Some(self.compile_thaw_js_pending_branch(json, awaited)?)
+        } else {
+            None
+        };
+        let result = self.compile_typed_dynamic_result(json, &signature.ret)?;
+        if let Some((pending_promise, pending_end, merge_block)) = pending_edge {
+            let resolved_end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge_block).map_err(|error| error.to_string())?;
+            self.builder.position_at_end(merge_block);
+            let phi = self.builder.build_phi(result.get_type(), "tjs_class_promise_or_pending")
+                .map_err(|error| error.to_string())?;
+            phi.add_incoming(&[
+                (&result as &dyn BasicValue<'ctx>, resolved_end),
+                (&pending_promise as &dyn BasicValue<'ctx>, pending_end),
+            ]);
+            return Ok(phi.as_basic_value());
+        }
+        Ok(result)
     }
 
     /// The object literal call of a `JsValue` argument, built as Json with the thaw-js argument flag

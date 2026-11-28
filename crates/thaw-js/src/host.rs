@@ -2122,7 +2122,15 @@ fn class_call(
             }
         };
         let it = &mut p.interp;
-        let result = if await_promise || (await_union && it.is_promise(&result)) {
+        // bit 3: a Promise that is still pending when the loop has no more work comes back as a pending marker
+        // (`{"__thaw_tjs_pending__": handle}`) that compiled code links to a native promise (see `PENDING_KEY`)
+        let result = if flags & 8 != 0 && await_promise && !want_handle {
+            let kept = awaited_or_pending(it, result)?;
+            if it.is_promise(&kept) && it.promise_state(&kept).is_none() {
+                return Ok(pending_marker_json(store_handle(package_handle, kept)));
+            }
+            kept
+        } else if await_promise || (await_union && it.is_promise(&result)) {
             awaited(it, result)?
         } else {
             result
@@ -2632,7 +2640,7 @@ pub extern "C" fn thaw_tjs_call_graph_result(
             }
             let result = it.call(&f, &this, &args).map_err(|c| classify(it, c))?;
             let result = adopt_thenable(it, result)?;
-            let result = awaited(it, result)?;
+            let result = awaited_held(it, result)?;
             let mut out = WireOut {
                 owner,
                 plain: true,
@@ -3333,7 +3341,7 @@ pub extern "C" fn thaw_tjs_call_selected_method_graph_result(
             let result = it
                 .call(&method, &this, &args)
                 .map_err(|c| classify(it, c))?;
-            let result = awaited(it, result)?;
+            let result = awaited_held(it, result)?;
             let mut out = WireOut {
                 owner,
                 plain: true,
@@ -3842,7 +3850,7 @@ pub extern "C" fn thaw_tjs_call_method_graph_result(
             let result = it
                 .call(&method, &this, &args)
                 .map_err(|c| classify(it, c))?;
-            let result = awaited(it, result)?;
+            let result = awaited_held(it, result)?;
             let mut out = WireOut {
                 owner,
                 plain: true,
@@ -4368,7 +4376,7 @@ pub extern "C" fn thaw_tjs_call_selected_method_handle_graph_args_result(
             let result = if defer_resolution {
                 result
             } else {
-                awaited(it, result)?
+                awaited_held(it, result)?
             };
             Ok(store_handle(owner, result))
         })
@@ -4467,7 +4475,7 @@ pub extern "C" fn thaw_tjs_call_handle_handle_graph_args_result(
             let value = if defer_resolution {
                 value
             } else {
-                awaited(it, value)?
+                awaited_held(it, value)?
             };
             Ok(store_handle(owner, value))
         })
@@ -4851,7 +4859,7 @@ pub extern "C" fn thaw_tjs_call_method_handle_graph_args_result(
             let result = if chain_intermediate {
                 result
             } else {
-                awaited(it, result)?
+                awaited_held(it, result)?
             };
             Ok(store_handle(owner, result))
         })
@@ -5188,8 +5196,30 @@ pub(crate) fn awaited(it: &mut Interp, v: Value) -> Result<Value, HostError> {
     match it.await_settled(&v).map_err(|c| classify(it, c))? {
         Some(Ok(v)) => Ok(v),
         Some(Err(e)) => Err(classify(it, Ctl::Throw(e))),
-        None => Err(HostError::Thrown("promise never settled".into())),
+        None => Err(HostError::Thrown("promise never settled".to_string())),
     }
+}
+
+/// `awaited` for a call whose result is kept as a handle: a Promise still pending when the loop has no more
+/// work is kept as it is (Node returns it pending); a later `await` of the handle drives the loop again.
+fn awaited_held(it: &mut Interp, v: Value) -> Result<Value, HostError> {
+    let was_handled = match &v {
+        Value::Object(o) => match &*o.kind.borrow() {
+            Kind::Promise(d) => d.handled,
+            _ => true,
+        },
+        _ => true,
+    };
+    let out = awaited_or_pending(it, v)?;
+    if !was_handled && it.is_promise(&out) && it.promise_state(&out).is_none() {
+        // still pending and nobody observed it: a later rejection is reported as unhandled, like Node
+        if let Value::Object(o) = &out {
+            if let Kind::Promise(d) = &mut *o.kind.borrow_mut() {
+                d.handled = false;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `awaited` for a `\u{4}` call: a promise still pending when the loop runs out of work is returned as it is.
@@ -8873,6 +8903,21 @@ mod live_result_lease_tests {
         assert!(token.starts_with("{\"r\":0}"), "{token}");
         assert!(out.nodes[0].starts_with("{\"o\":"), "{:?}", out.nodes);
         assert!(out.leases.is_empty());
+    }
+
+    #[test]
+    fn held_call_result_keeps_a_pending_promise_and_awaits_later() {
+        let mut it = Interp::new();
+        let pending = object(&mut it, "new Promise(() => {})");
+        // a Promise nothing can settle is kept as it is (Node returns it pending), not thrown as "never settled"
+        let kept = awaited_held(&mut it, pending.clone()).ok().unwrap();
+        assert!(it.is_promise(&kept) && it.promise_state(&kept).is_none());
+        // a settled one is unwrapped as before
+        let done = object(&mut it, "Promise.resolve(7)");
+        let value = awaited_held(&mut it, done).ok().unwrap();
+        assert_eq!(it.to_str(&value).to_string(), "7");
+        // the strict path still reports a Promise that never settles
+        assert!(awaited(&mut it, pending).is_err());
     }
 
     #[test]

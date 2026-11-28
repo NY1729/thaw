@@ -1466,6 +1466,7 @@ fn bare_node_builtin_specifiers_gain_the_node_prefix() {
         "assert",
         "fs/promises",
         "child_process",
+        "events",
     ] {
         assert_eq!(
             bare_node_builtin_specifier(name),
@@ -1479,7 +1480,6 @@ fn bare_node_builtin_specifiers_gain_the_node_prefix() {
         "lodash",
         "path",
         "path/posix",
-        "events",
         "test",
         "node:test",
     ] {
@@ -1533,7 +1533,7 @@ fn builtin_bundle_sha256(specifier: &str) -> String {
 fn node_util_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:util"),
-        "80cd2f7480b27da45a9fbf477a6dc442bccc057d4296def886e637940c762d60",
+        "7d97e0443dcde2382e6a6b0ddd2e57b8cfc2d0d3221f8426dd304ce5b3a7bf19",
         "node:util bundle sha256"
     );
 }
@@ -1542,7 +1542,7 @@ fn node_util_bundle_text_is_pinned() {
 fn node_events_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:events"),
-        "dc90a5ecc6c00dbb5b7d753059c3ff8630b613650f361d0ee512d264453c8ca9",
+        "bc6761f3cbe27cf3b0a2d8b7dc3b937471ce5ef3ae8b29b1a7c62afab264de5c",
         "node:events bundle sha256"
     );
 }
@@ -1552,7 +1552,7 @@ fn node_url_bundle_text_is_pinned() {
     assert_eq!(
         builtin_bundle_sha256("node:url"),
         // node:url bundles node:path: the hash moved from ed14c972... when #958 dropped path's .default/__esModule; then to 2ea12be4... when url.Url was added
-        "882eca9519b1c6332cdd341bc89840a59f45cd28699402b11d8b015cdfeceb2f",
+        "9fe51b81acc5d649114b9dbf47b1a985ef73a00bb03ced6698cce44152826197",
         "node:url bundle sha256"
     );
 }

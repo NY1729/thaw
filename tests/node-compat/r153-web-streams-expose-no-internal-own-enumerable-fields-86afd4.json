@@ -1,0 +1,5 @@
+{
+  "name": "r153 web streams expose no internal own enumerable fields",
+  "expect": "matched",
+  "source": "function main(): void {\n  const r: any = new ReadableStream();\n  const w: any = new WritableStream();\n  const t: any = new TransformStream();\n  const e: any = new TextEncoderStream();\n  const d: any = new TextDecoderStream();\n  const c: any = new CompressionStream('gzip');\n  console.log(Object.keys(r).length, Object.keys(w).length, Object.keys(t).length, Object.keys(e).length, Object.keys(d).length, Object.keys(c).length);\n  console.log(JSON.stringify(r), JSON.stringify(t), r.locked, w.locked, typeof t.readable, typeof e.writable);\n}\n"
+}
