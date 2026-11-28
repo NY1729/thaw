@@ -1792,7 +1792,9 @@ const TYPED_PRELUDE: &str = r#"
   // ArrayBuffer.prototype.slice: relative indices, then SpeciesConstructor and the checks on what it builds
   var abSlice = ArrayBuffer.prototype.slice, AB = ArrayBuffer;
   def(ArrayBuffer.prototype, 'slice', function slice(start, end) {
-    if (detGet.call(this)) throw new TypeError('Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer');
+    var isDet;
+    try { isDet = detGet.call(this); } catch (e) { return rApply(abSlice, this, [start, end]); } // the native names the bad receiver
+    if (isDet) throw new TypeError('Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer');
     var len = this.byteLength, first = relIdx(start, len, 0), fin = relIdx(end, len, len), n = Math.max(fin - first, 0);
     var C = this.constructor, S = AB;
     if (C !== undefined) {
