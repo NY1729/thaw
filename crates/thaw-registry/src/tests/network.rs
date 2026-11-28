@@ -36,7 +36,7 @@ fn readline_splits_lines_and_supports_callback_and_promise_questions() {
     let empty_node_modules = temp_registry("builtin_readline_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5); // readline now requires node:events (Interface is an EventEmitter, as in Node)
     let result = run_js(&bundle);
     assert_eq!(
         result,

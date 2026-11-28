@@ -1,0 +1,5 @@
+{
+  "name": "r153 readline Interface stores listeners in Node's _events shape",
+  "expect": "matched",
+  "source": "import * as readline from 'node:readline';\nimport { PassThrough } from 'node:stream';\nfunction main(): void {\n  const input: any = new PassThrough();\n  const rl: any = readline.createInterface({ input, terminal: false });\n  const seen: string[] = [];\n  const first = () => { seen.push('first'); };\n  rl.on('line', (l: string) => { seen.push('line:' + l); });\n  console.log(typeof rl._events.line, rl.listenerCount('line'));\n  rl.on('line', first);\n  console.log(Array.isArray(rl._events.line), rl.listenerCount('line'), rl.eventNames().indexOf('line') >= 0);\n  rl.once('close', () => { seen.push('close'); });\n  rl.off('line', first);\n  console.log(typeof rl._events.line, rl.listenerCount('line'));\n  input.write('a\\nb\\n');\n  input.end();\n  rl.on('close', () => { console.log(seen.join(',')); });\n}\n"
+}
