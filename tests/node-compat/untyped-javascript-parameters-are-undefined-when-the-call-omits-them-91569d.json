@@ -1,0 +1,5 @@
+{
+  "name": "untyped JavaScript parameters are undefined when the call omits them",
+  "expect": "matched",
+  "source": "function show(a, b) { console.log(a, b); }\nfunction main() {\n  show('p');\n  show('q');\n}\n"
+}

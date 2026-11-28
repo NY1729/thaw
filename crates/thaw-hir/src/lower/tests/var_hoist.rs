@@ -100,3 +100,27 @@ fn a_closure_parameter_named_like_a_later_const_is_not_a_tdz_read() {
     let body = format!("{:?}", program.functions[0].body);
     assert!(!body.contains("before initialization"), "{body}");
 }
+
+#[test]
+fn closure_captured_const_is_predeclared_and_assigned() {
+    let parse = |source: &str| -> Vec<Stmt> {
+        thaw_parser::parse_typescript(source)
+            .unwrap()
+            .body
+            .iter()
+            .filter_map(|item| match item {
+                swc_ecma_ast::ModuleItem::Stmt(stmt) => Some(stmt.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let source = parse("const f = () => g; const g = make(f); const h = make(1);");
+    let rewritten = FnLowerer::predeclare_captured_bindings(&source);
+    // `let g;` before the closure, `g = make(f)` in place of the declaration, `h` untouched
+    assert_eq!(rewritten.len(), 4);
+    assert!(matches!(&rewritten[0], Stmt::Decl(Decl::Var(var)) if var.decls[0].init.is_none()));
+    assert!(matches!(&rewritten[2], Stmt::Expr(_)));
+    assert!(matches!(&rewritten[3], Stmt::Decl(Decl::Var(var)) if var.decls[0].init.is_some()));
+    let untouched = parse("const a = 1; const b = () => a;");
+    assert!(matches!(FnLowerer::predeclare_captured_bindings(&untouched), std::borrow::Cow::Borrowed(_)));
+}

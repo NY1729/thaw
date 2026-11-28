@@ -1546,12 +1546,21 @@ impl Value {
     }
     /// Whether `new` accepts this value: the same test `construct_with` applies.
     pub(crate) fn is_constructor(&self) -> bool {
-        matches!(self, Value::Object(o) if !o.no_ctor.get() && match &*o.kind.borrow() {
-            Kind::Closure { def, .. } => !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype,
+        let Value::Object(o) = self else {
+            return false;
+        };
+        if o.no_ctor.get() {
+            return false;
+        }
+        let native = match &*o.kind.borrow() {
+            Kind::Closure { def, .. } => {
+                return !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype
+            }
             Kind::Native(_) => true,
-            Kind::Proxy(p) => p.callable,
-            _ => false,
-        })
+            Kind::Proxy(p) => return p.callable && p.target.is_constructor(),
+            _ => return false,
+        };
+        native && native_is_constructor(o)
     }
 
     fn is_callable(&self) -> bool {
@@ -1561,6 +1570,15 @@ impl Value {
             _ => false,
         })
     }
+}
+
+/// Whether a native function has a [[Construct]]: the constructors carry an own `prototype` (Proxy and bound
+/// functions are marked `@@ctor`, a host callback `@@hostcb`); every other native (a method, a getter, a
+/// resolving function, `eval`) is not a constructor.
+fn native_is_constructor(o: &Obj) -> bool {
+    ["prototype", "@@ctor", "@@hostcb"]
+        .iter()
+        .any(|k| find_own(o, k).is_some())
 }
 
 fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
@@ -2078,6 +2096,7 @@ impl Interp {
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
         web_console::install(&mut it);
         it.apply_builtin_table();
+        it.mark_methods_non_constructors();
         it.order_array_proto();
         // the preludes redefine `navigator`, `crypto` and `performance` as data; their Node form is an
         // accessor, so only a redefinition by user code counts (`node_accessor`)
@@ -3877,7 +3896,10 @@ impl Interp {
         let is_native = !is_hostcb && matches!(&*fo.kind.borrow(), Kind::Native(_));
         let is_class =
             matches!(&*fo.kind.borrow(), Kind::Closure { def, .. } if def.class.is_some());
-        if !is_closure && !is_native && !is_hostcb || fo.no_ctor.get() {
+        if !is_closure && !is_native && !is_hostcb
+            || fo.no_ctor.get()
+            || (is_native && !native_is_constructor(fo))
+        {
             return self.throw_error("TypeError", "value is not a constructor");
         }
         if is_native {
