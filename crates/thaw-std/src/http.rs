@@ -4302,53 +4302,56 @@ unsafe extern "C" fn server_get_connections(
 }
 
 // ponytail: ref/unref are accepted; an unref'd server still keeps the event loop alive.
-unsafe extern "C" fn server_ref(_environment: *const c_void) -> bool {
-    true
+unsafe extern "C" fn server_ref(environment: *const c_void) -> *const c_void {
+    let closure = &*(environment as *const NativeClosure);
+    server_record(&*(closure.context as *const ServerState))
 }
 
-unsafe extern "C" fn server_close(environment: *const c_void) -> bool {
+unsafe extern "C" fn server_close(environment: *const c_void) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    close_server_state(state)
+    close_server_state(state);
+    server_record(state)
 }
 
 unsafe extern "C" fn server_close_with_callback(
     environment: *const c_void,
     callback: *const c_void,
-) -> bool {
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     add_event_listener(&state.close_listeners, callback, true);
-    close_server_state(state)
+    close_server_state(state);
+    server_record(state)
 }
 
+/// `server.on(event, listener)` returns the server (Node's EventEmitter contract), whether or not the event is known.
 unsafe extern "C" fn server_on(
     environment: *const c_void,
     event: *const c_char,
     callback: *const c_void,
-) -> bool {
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     match string_from_ptr(event).as_str() {
         "listening" => add_event_listener(&state.listening_listeners, callback, false),
         "close" => add_event_listener(&state.close_listeners, callback, false),
-        _ => return false,
+        _ => {}
     }
-    !callback.is_null()
+    server_record(state)
 }
 
 unsafe extern "C" fn server_on_error(
     environment: *const c_void,
     event: *const c_char,
     callback: *const c_void,
-) -> bool {
-    if string_from_ptr(event) != "error" {
-        return false;
-    }
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    add_event_listener(&state.error_listeners, callback, false);
-    !callback.is_null()
+    if string_from_ptr(event) == "error" {
+        add_event_listener(&state.error_listeners, callback, false);
+    }
+    server_record(state)
 }
 
 fn close_server_state(state: &ServerState) -> bool {
