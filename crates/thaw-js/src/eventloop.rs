@@ -171,6 +171,10 @@ pub(crate) struct Rt {
     pub(crate) bound_targets: crate::FxMap<usize, (std::rc::Weak<crate::ObjData>, Value)>,
     pub(crate) bound_sweep_at: usize,
     pub(crate) pending_nt: Option<Value>,
+    /// The new target of the native constructor being run by `construct_with`, and the `prototype` it already
+    /// read (a native that must read it before allocating takes both, see `Interp::native_proto`).
+    pub(crate) native_nt: Option<Value>,
+    pub(crate) native_proto: Option<Value>,
     pub(crate) bigint_proto: Option<Obj>,
     pub(crate) generator_proto: Option<Obj>,
     pub(crate) async_generator_proto: Option<Obj>,

@@ -2059,6 +2059,22 @@ impl Interp {
                         it.call(&gopd, &Value::Undefined, &[target, arg(args, 1)])
                     };
                 }
+                // a typed array's element is a writable, enumerable, configurable data property
+                let element = match &*o.kind.borrow() {
+                    Kind::Typed(t) => match t.key(&key) {
+                        TypedKey::Index(i) => t.get_value(i),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(v) = element {
+                    let d = it.plain();
+                    put(&d, "value", v);
+                    put(&d, "writable", Value::Bool(true));
+                    put(&d, "enumerable", Value::Bool(true));
+                    put(&d, "configurable", Value::Bool(true));
+                    return Ok(Value::Object(d));
+                }
                 o.force_key(&key);
                 // a context's global: a descriptor of a sandbox property is the sandbox's
                 let o = match crate::vm::sandbox_of(&o) {
