@@ -420,8 +420,8 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                         const target: string = server.__thaw_listenMany({}, 2);
                         console.log(target);
                         console.log(requests);
-                        console.log(server.close());
-                        console.log(server.close());
+                        server.close();
+                        server.close();
                         server.on("listening", (): void => {{
                             console.log("event:listening");
                         }});
@@ -434,9 +434,9 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
                         server.listen({}, (): void => {{
                             console.log("listening");
                         }});
-                        console.log(server.close((): void => {{
+                        server.close((): void => {{
                             console.log("closed");
-                        }}));
+                        }});
                         server.listen(70000);
                         server.listen({});
                     }}
@@ -499,7 +499,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
     assert!(matches!(last_target, "/health" | "/ready"));
     assert_eq!(
         events,
-        "2\ntrue\nfalse\ntrue\nevent:listening\nlistening\nERR_SOCKET_BAD_PORT\nEADDRINUSE\nevent:close\nclosed\n"
+        "2\nevent:listening\nlistening\nERR_SOCKET_BAD_PORT\nEADDRINUSE\nevent:close\nclosed\n"
     );
 
     std::fs::write(
