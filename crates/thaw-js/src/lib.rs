@@ -82,6 +82,7 @@ mod napi_weak;
 mod net;
 mod node_crypto;
 mod numfmt;
+mod private_names;
 mod process_env;
 mod process_events;
 mod process_members;
