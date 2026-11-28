@@ -93,6 +93,17 @@ fn own_prop(it: &Interp, o: &Obj, key: &str) -> Option<(Slot, bool)> {
             TypedKey::Ordinary => {}
         }
     }
+    if let Kind::Wrapper(Value::Str(st)) = &*o.kind.borrow() {
+        if key == "length" {
+            return Some((Slot::Data(Value::Number(st.len16() as f64)), false));
+        }
+        if let Some(u) = array_index(key).and_then(|i| st.unit_at(i)) {
+            return Some((
+                Slot::Data(Value::Str(crate::builtins::units_str(&[u]).into())),
+                false,
+            ));
+        }
+    }
     if let Kind::Array(items) = &*o.kind.borrow() {
         if key == "length" {
             return Some((
