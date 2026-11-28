@@ -3374,6 +3374,9 @@ impl<'a> FnLowerer<'a> {
                         self.lower_logical_expr(lhs, rhs, bin.op == BinaryOp::LogicalAnd)?
                     }
                     BinaryOp::NullishCoalescing => self.lower_nullish_coalescing(lhs, rhs)?,
+                    BinaryOp::Add if self.json_static_bigint_pair(&lhs, &rhs)? => {
+                        self.lower_json_bigint_add(lhs, rhs)?
+                    }
                     op if Self::bigint_dispatch_op(op) && self.json_bigint_pair(&lhs, &rhs)? => {
                         self.lower_json_bigint_binary(op, lhs, rhs)?
                     }
