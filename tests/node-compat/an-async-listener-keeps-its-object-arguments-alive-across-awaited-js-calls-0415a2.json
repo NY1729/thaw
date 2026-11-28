@@ -1,0 +1,5 @@
+{
+  "name": "an async listener keeps its object arguments alive across awaited js calls",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events';\nasync function main(): Promise<void> {\n  const ee: any = new EventEmitter();\n  const ctx: any = new EventEmitter();\n  ctx.on('y', () => {});\n  const done: Promise<void>[] = [];\n  ee.on('x', (o: any, d: any): Promise<void> => {\n    const p = (async (): Promise<void> => {\n      const v: any = await d.later();\n      console.log(o.listenerCount('y'), String(v));\n      const w: any = await d.later();\n      console.log(o.listenerCount('y'), String(w));\n    })();\n    done.push(p);\n    return p;\n  });\n  ee.emit('x', ctx, { later() { return new Promise((r: any) => setTimeout(() => r(7), 5)); } });\n  await Promise.all(done);\n  console.log('done');\n}\n"
+}
