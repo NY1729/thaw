@@ -1,0 +1,5 @@
+{
+  "name": "http server request end listener registered through an any-typed handler wrapper",
+  "expect": "matched",
+  "source": "import * as http from 'node:http';\nimport * as net from 'node:net';\nfunction wrap(fn: any): any { return fn; }\nfunction main(): void {\n  const server = http.createServer(wrap((req: any, res: any): void => {\n    req.on('end', (): void => { console.log('end'); });\n    res.end('hello');\n  }));\n  server.listen(0, (): void => {\n    const client = net.connect((server.address() as any).port);\n    client.on('data', (): void => {});\n    client.on('close', (): void => { server.close(); });\n    client.end('POST / HTTP/1.1\\r\\nHost: x\\r\\nConnection: close\\r\\nContent-Length: 2\\r\\n\\r\\nhi');\n  });\n}\n"
+}

@@ -5289,8 +5289,8 @@ fn builtin_events_zlib_fs_promises_runtime_exports_match_declarations() {
     let events = resolve_builtin("events").unwrap().bundle_js.unwrap_or_default();
     for assignment in [
         "module.exports.usingDomains = false;",
-        "module.exports.kMaxEventTargetListeners = Symbol('events.maxEventTargetListeners');",
-        "module.exports.kMaxEventTargetListenersWarned = Symbol('events.maxEventTargetListenersWarned');",
+        "Object.defineProperty(module.exports, 'kMaxEventTargetListeners', { value: Symbol('events.maxEventTargetListeners')",
+        "Object.defineProperty(module.exports, 'kMaxEventTargetListenersWarned', { value: Symbol('events.maxEventTargetListenersWarned')",
         "module.exports.EventEmitterAsyncResource = EventEmitterAsyncResource;",
     ] {
         assert!(events.contains(assignment), "events bundle lacks `{assignment}`");
@@ -6085,7 +6085,11 @@ fn undeclared_builtin_exports(modules: &[&str]) -> Vec<String> {
         for row in table.lines().skip(1) {
             let cells: Vec<&str> = row.split('\t').collect();
             // Symbol-keyed rows (`process @@kCapture`) are not identifiers, so they cannot be declared.
-            if cells.first() == Some(&module) && !cells[1].starts_with("@@") && !names.contains(cells[1]) {
+            // `events.length/name/prototype/kMaxEventTargetListeners*` are non-enumerable in Node, so its ESM
+            // namespace (what these declarations model) does not list them.
+            let hidden = module == "node:events"
+                && ["length", "name", "prototype", "kMaxEventTargetListeners", "kMaxEventTargetListenersWarned"].contains(&cells[1]);
+            if cells.first() == Some(&module) && !hidden && !cells[1].starts_with("@@") && !names.contains(cells[1]) {
                 missing.push(format!("{module} {}", cells[1]));
             }
         }
