@@ -518,8 +518,63 @@ pub(crate) const EXTRAS: &str = r#"
     var S = `${this}`, rx = new RegExp(re, 'g');
     return rx[Symbol.matchAll](S);
   });
-  def(RXP, Symbol.search, function (s) { return spSearch.call(s, this); });
-  def(RXP, Symbol.split, function (s, limit) { return spSplit.call(s, this, limit); });
+  // RegExp.prototype[@@search] / [@@split]: the spec algorithms over RegExpExec (user exec, flags, species honoured);
+  // a pristine instance keeps the native String implementation.
+  def(RXP, Symbol.search, function (string) {
+    'use strict';
+    var rx = needObj(this, '@@search');
+    if (pristine(rx)) return spSearch.call(`${string}`, rx);
+    var S = `${string}`, prev = rx.lastIndex;
+    if (!Object.is(prev, 0)) rx.lastIndex = 0;
+    var result = regExpExec(rx, S);
+    var cur = rx.lastIndex;
+    if (!Object.is(cur, prev)) rx.lastIndex = prev;
+    return result === null ? -1 : result.index;
+  });
+  def(RXP, Symbol.split, function (string, limit) {
+    'use strict';
+    var rx = needObj(this, '@@split');
+    if (pristine(rx)) return spSplit.call(`${string}`, rx, limit);
+    var S = `${string}`;
+    var C = rx.constructor, Ctor = RegExp;
+    if (C !== undefined) {
+      if (!isObj(C)) throw new TypeError('object.constructor is not an object');
+      var sp = C[Symbol.species];
+      if (sp !== undefined && sp !== null) {
+        if (typeof sp !== 'function') throw new TypeError('object.constructor[Symbol.species] is not a constructor');
+        Ctor = sp;
+      }
+    }
+    var flags = `${rx.flags}`, unicode = has(flags, 'u') || has(flags, 'v');
+    var splitter = new Ctor(rx, has(flags, 'y') ? flags : flags + 'y');
+    var A = [], lim = limit === undefined ? 4294967295 : limit >>> 0;
+    if (lim === 0) return A;
+    var size = S.length;
+    if (size === 0) {
+      if (regExpExec(splitter, S) !== null) return A;
+      A.push(S);
+      return A;
+    }
+    var p = 0, q = 0;
+    while (q < size) {
+      splitter.lastIndex = q;
+      var z = regExpExec(splitter, S);
+      if (z === null) { q = advance(S, q, unicode); continue; }
+      var e = Math.min(toLength(splitter.lastIndex), size);
+      if (e === p) { q = advance(S, q, unicode); continue; }
+      A.push(sSlice.call(S, p, q));
+      if (A.length === lim) return A;
+      p = e;
+      var caps = Math.max(toLength(z.length) - 1, 0);
+      for (var i = 1; i <= caps; i++) {
+        A.push(z[i]);
+        if (A.length === lim) return A;
+      }
+      q = p;
+    }
+    A.push(sSlice.call(S, p, size));
+    return A;
+  });
   var NORM_C = '\u00c0\u00c1\u00c2\u00c3\u00c4\u00c5\u00c7\u00c8\u00c9\u00ca\u00cb\u00cc\u00cd\u00ce\u00cf\u00d1\u00d2\u00d3\u00d4\u00d5\u00d6\u00d9\u00da\u00db\u00dc\u00dd\u00e0\u00e1\u00e2\u00e3\u00e4\u00e5\u00e7\u00e8\u00e9\u00ea\u00eb\u00ec\u00ed\u00ee\u00ef\u00f1\u00f2\u00f3\u00f4\u00f5\u00f6\u00f9\u00fa\u00fb\u00fc\u00fd\u00ff\u0100\u0101\u0102\u0103\u0104\u0105\u0106\u0107\u0108\u0109\u010a\u010b\u010c\u010d\u010e\u010f\u0112\u0113\u0114\u0115\u0116\u0117\u0118\u0119\u011a\u011b\u011c\u011d\u011e\u011f\u0120\u0121\u0122\u0123\u0124\u0125\u0128\u0129\u012a\u012b\u012c\u012d\u012e\u012f\u0130\u0134\u0135\u0136\u0137\u0139\u013a\u013b\u013c\u013d\u013e\u0143\u0144\u0145\u0146\u0147\u0148\u014c\u014d\u014e\u014f\u0150\u0151\u0154\u0155\u0156\u0157\u0158\u0159\u015a\u015b\u015c\u015d\u015e\u015f\u0160\u0161\u0162\u0163\u0164\u0165\u0168\u0169\u016a\u016b\u016c\u016d\u016e\u016f\u0170\u0171\u0172\u0173\u0174\u0175\u0176\u0177\u0178\u0179\u017a\u017b\u017c\u017d\u017e\u01cd\u01ce\u01cf\u01d0\u01d1\u01d2\u01d3\u01d4\u1e00\u1e01\u1e02\u1e03\u1e04\u1e05\u1e06\u1e07\u1e0a\u1e0b\u1e0c\u1e0d\u1e0e\u1e0f\u1e10\u1e11\u1e12\u1e13\u1e18\u1e19\u1e1a\u1e1b\u1e1e\u1e1f\u1e20\u1e21\u1e22\u1e23\u1e24\u1e25\u1e26\u1e27\u1e28\u1e29\u1e2a\u1e2b\u1e2c\u1e2d\u1e30\u1e31\u1e32\u1e33\u1e34\u1e35\u1e36\u1e37\u1e3a\u1e3b\u1e3c\u1e3d\u1e3e\u1e3f\u1e40\u1e41\u1e42\u1e43\u1e44\u1e45\u1e46\u1e47\u1e48\u1e49\u1e4a\u1e4b\u1e54\u1e55\u1e56\u1e57\u1e58\u1e59\u1e5a\u1e5b\u1e5e\u1e5f\u1e60\u1e61\u1e62\u1e63\u1e6a\u1e6b\u1e6c\u1e6d\u1e6e\u1e6f\u1e70\u1e71\u1e72\u1e73\u1e74\u1e75\u1e76\u1e77\u1e7c\u1e7d\u1e7e\u1e7f\u1e80\u1e81\u1e82\u1e83\u1e84\u1e85\u1e86\u1e87\u1e88\u1e89\u1e8a\u1e8b\u1e8c\u1e8d\u1e8e\u1e8f\u1e90\u1e91\u1e92\u1e93\u1e94\u1e95\u1e96\u1e97\u1e98\u1e99\u1e9b\u1ea0\u1ea1\u1ea2\u1ea3\u1eb8\u1eb9\u1eba\u1ebb\u1ebc\u1ebd\u1ec8\u1ec9\u1eca\u1ecb\u1ecc\u1ecd\u1ece\u1ecf\u1ee4\u1ee5\u1ee6\u1ee7\u1ef2\u1ef3\u1ef4\u1ef5\u1ef6\u1ef7\u1ef8\u1ef9', NORM_D = 'A\u0300A\u0301A\u0302A\u0303A\u0308A\u030aC\u0327E\u0300E\u0301E\u0302E\u0308I\u0300I\u0301I\u0302I\u0308N\u0303O\u0300O\u0301O\u0302O\u0303O\u0308U\u0300U\u0301U\u0302U\u0308Y\u0301a\u0300a\u0301a\u0302a\u0303a\u0308a\u030ac\u0327e\u0300e\u0301e\u0302e\u0308i\u0300i\u0301i\u0302i\u0308n\u0303o\u0300o\u0301o\u0302o\u0303o\u0308u\u0300u\u0301u\u0302u\u0308y\u0301y\u0308A\u0304a\u0304A\u0306a\u0306A\u0328a\u0328C\u0301c\u0301C\u0302c\u0302C\u0307c\u0307C\u030cc\u030cD\u030cd\u030cE\u0304e\u0304E\u0306e\u0306E\u0307e\u0307E\u0328e\u0328E\u030ce\u030cG\u0302g\u0302G\u0306g\u0306G\u0307g\u0307G\u0327g\u0327H\u0302h\u0302I\u0303i\u0303I\u0304i\u0304I\u0306i\u0306I\u0328i\u0328I\u0307J\u0302j\u0302K\u0327k\u0327L\u0301l\u0301L\u0327l\u0327L\u030cl\u030cN\u0301n\u0301N\u0327n\u0327N\u030cn\u030cO\u0304o\u0304O\u0306o\u0306O\u030bo\u030bR\u0301r\u0301R\u0327r\u0327R\u030cr\u030cS\u0301s\u0301S\u0302s\u0302S\u0327s\u0327S\u030cs\u030cT\u0327t\u0327T\u030ct\u030cU\u0303u\u0303U\u0304u\u0304U\u0306u\u0306U\u030au\u030aU\u030bu\u030bU\u0328u\u0328W\u0302w\u0302Y\u0302y\u0302Y\u0308Z\u0301z\u0301Z\u0307z\u0307Z\u030cz\u030cA\u030ca\u030cI\u030ci\u030cO\u030co\u030cU\u030cu\u030cA\u0325a\u0325B\u0307b\u0307B\u0323b\u0323B\u0331b\u0331D\u0307d\u0307D\u0323d\u0323D\u0331d\u0331D\u0327d\u0327D\u032dd\u032dE\u032de\u032dE\u0330e\u0330F\u0307f\u0307G\u0304g\u0304H\u0307h\u0307H\u0323h\u0323H\u0308h\u0308H\u0327h\u0327H\u032eh\u032eI\u0330i\u0330K\u0301k\u0301K\u0323k\u0323K\u0331k\u0331L\u0323l\u0323L\u0331l\u0331L\u032dl\u032dM\u0301m\u0301M\u0307m\u0307M\u0323m\u0323N\u0307n\u0307N\u0323n\u0323N\u0331n\u0331N\u032dn\u032dP\u0301p\u0301P\u0307p\u0307R\u0307r\u0307R\u0323r\u0323R\u0331r\u0331S\u0307s\u0307S\u0323s\u0323T\u0307t\u0307T\u0323t\u0323T\u0331t\u0331T\u032dt\u032dU\u0324u\u0324U\u0330u\u0330U\u032du\u032dV\u0303v\u0303V\u0323v\u0323W\u0300w\u0300W\u0301w\u0301W\u0308w\u0308W\u0307w\u0307W\u0323w\u0323X\u0307x\u0307X\u0308x\u0308Y\u0307y\u0307Z\u0302z\u0302Z\u0323z\u0323Z\u0331z\u0331h\u0331t\u0308w\u030ay\u030a\u017f\u0307A\u0323a\u0323A\u0309a\u0309E\u0323e\u0323E\u0309e\u0309E\u0303e\u0303I\u0309i\u0309I\u0323i\u0323O\u0323o\u0323O\u0309o\u0309U\u0323u\u0323U\u0309u\u0309Y\u0300y\u0300Y\u0323y\u0323Y\u0309y\u0309Y\u0303y\u0303';
   var NORM_DEC = null, NORM_COMP = null;
   def(SP, 'normalize', function (form) {

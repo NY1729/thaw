@@ -82,6 +82,7 @@ mod napi_weak;
 mod net;
 mod node_crypto;
 mod numfmt;
+mod private_names;
 mod process_env;
 mod process_events;
 mod process_members;
@@ -344,6 +345,8 @@ pub struct ObjData {
     lazy_proto: Cell<bool>,
     /// A closure from a prelude that Node implements natively: `toString` prints `[native code]`.
     native_text: Cell<bool>,
+    /// A native on `Object.prototype`: it receives a wrapper object itself, never its wrapped primitive.
+    raw_this: Cell<bool>,
     /// The `Error.prototype` of some realm: an object whose chain reaches one is an error (`is_error_instance`).
     error_proto: Cell<bool>,
     /// Made by an Error constructor ([[ErrorData]]): stays an error after its prototype changes (`util.types`).
@@ -1588,6 +1591,7 @@ fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
         raw_props: PropVec::new(),
         lazy_proto: Cell::new(false),
         native_text: Cell::new(false),
+        raw_this: Cell::new(false),
         error_proto: Cell::new(false),
         error_instance: Cell::new(false),
         proto: RefCell::new(proto),
@@ -1901,7 +1905,9 @@ impl Interp {
         // Array.prototype is itself an Array exotic object (`Array.isArray` true, length 0)
         let array_proto = new_obj(Some(object_proto.clone()), Kind::Array(vec![]));
         let (string_proto, regexp_proto) = (mk(&object_proto), mk(&object_proto));
-        let (number_proto, bool_proto) = (mk(&object_proto), mk(&object_proto));
+        // Number/Boolean.prototype are themselves wrapper objects (+0, false)
+        let wrap = |v: Value| new_obj(Some(object_proto.clone()), Kind::Wrapper(v));
+        let (number_proto, bool_proto) = (wrap(Value::Number(0.0)), wrap(Value::Bool(false)));
         let mut it = Interp {
             global: Scope::new(None),
             object_proto: object_proto.clone(),
@@ -2208,6 +2214,11 @@ impl Interp {
         f: impl Fn(&mut Interp, &Value, &[Value]) -> R<Value> + 'static,
     ) {
         let v = self.native(f);
+        if let Value::Object(fo) = &v {
+            if Rc::ptr_eq(target, &self.object_proto) {
+                fo.raw_this.set(true);
+            }
+        }
         put_hidden(target, name, v);
     }
 
@@ -3681,7 +3692,7 @@ impl Interp {
             Callee::Native(n) => {
                 // natives on a wrapper object's prototype chain see the wrapped primitive
                 let prim = match this {
-                    Value::Object(o) => match &*o.kind.borrow() {
+                    Value::Object(o) if !fo.raw_this.get() => match &*o.kind.borrow() {
                         Kind::Wrapper(p) => Some(p.clone()),
                         _ => None,
                     },

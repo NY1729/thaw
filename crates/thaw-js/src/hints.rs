@@ -154,6 +154,7 @@ impl VisitMut for Annotate<'_> {
 
 /// Annotates `module` for hinted reads; see [`Annotate`].
 pub(crate) fn annotate(module: &mut a::Module, table: &mut Vec<HintSlot>) {
+    crate::private_names::uniquify_module(module);
     module.visit_mut_with(&mut Annotate { table });
 }
 
@@ -161,6 +162,7 @@ impl Interp {
     /// Annotates one pre-parsed function (a package factory) with this interpreter's hint table,
     /// before `function_value` clones its body.
     pub(crate) fn annotate_function(&mut self, f: &mut a::Function) {
+        crate::private_names::uniquify_function(f);
         f.visit_mut_with(&mut Annotate {
             table: &mut self.ident_hints,
         });

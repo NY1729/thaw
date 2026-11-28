@@ -37,6 +37,13 @@ pub fn allow_native_bytes_type(enabled: bool) -> NativeBytesTypeGuard {
 }
 
 thread_local! {
+    /// The interfaces being resolved right now (innermost last) with the recursive-layout key a
+    /// self-reference to them uses, and whether such a reference was made. See `resolve_interface`.
+    pub(crate) static RESOLVING_INTERFACES: std::cell::RefCell<Vec<(String, String, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+thread_local! {
     /// Bare names of the classes declared in the module being lowered by
     /// `lower_dts_class`. A callback parameter typed as one of them (`(list:
     /// PerformanceObserverEntryList) => void` on a same-module constructor)
@@ -660,6 +667,16 @@ fn classify_ts_type(
                 };
             }
 
+            // `interface Server { listen: (port: number) => Server }`: a reference to the interface being
+            // resolved is a back-edge to its own layout (registered once the interface is complete).
+            if let Some(key) = RESOLVING_INTERFACES.with(|stack| {
+                stack.borrow_mut().iter_mut().rev().find(|(name, _, _)| *name == scoped).map(|entry| {
+                    entry.2 = true;
+                    entry.1.clone()
+                })
+            }) {
+                return DtsType::Native(HirType::Recursive(key));
+            }
             DtsType::Unsupported(format!(
                 "type reference `{ref_name}` is not classified yet (Array<T>/Promise<T>)"
             ))

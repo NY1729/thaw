@@ -820,3 +820,22 @@ fn promise_of_unsupported_payload_keeps_a_marked_reason() {
         DtsType::Unsupported("`any` is not supported".into())
     );
 }
+
+#[test]
+fn an_interface_may_name_itself_in_a_callable_field() {
+    let functions = parse_dts(
+        "export interface Server { listen: (port: number) => Server; close: () => boolean; }\n\
+         export declare function make(): Server;",
+    )
+    .unwrap();
+    let DtsType::Native(HirType::Object(fields)) = &functions[0].ret else {
+        panic!("Server should classify as an object: {:?}", functions[0].ret);
+    };
+    let (_, listen) = fields.iter().find(|(name, _)| name == "listen").unwrap();
+    let HirType::Function(params, ret) = listen else { panic!("listen should be a function: {listen:?}") };
+    assert_eq!(params, &vec![HirType::F64]);
+    // The back-edge names the interface's own layout.
+    let HirType::Recursive(_) = ret.as_ref() else { panic!("listen should return the interface: {ret:?}") };
+    let DtsType::Native(whole) = &functions[0].ret else { unreachable!() };
+    assert_eq!(&ret.expand(), whole);
+}
