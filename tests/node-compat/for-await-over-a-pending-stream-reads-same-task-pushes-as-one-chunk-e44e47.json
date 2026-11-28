@@ -1,0 +1,5 @@
+{
+  "name": "for await over a pending stream reads same-task pushes as one chunk",
+  "expect": "matched",
+  "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r2: any = new Readable({ read() {} });\n  setTimeout(() => { console.log('t0'); r2.push('x'); console.log('t1'); r2.push('y'); console.log('t2'); r2.push(null); console.log('t3'); }, 5);\n  for await (const c of r2) console.log(String(c));\n}\n"
+}

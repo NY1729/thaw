@@ -615,6 +615,8 @@ thaw_runtime_run_one_event
 thaw_runtime_run_until_idle
 thaw_runtime_run_until_resolved
 thaw_runtime_set_js_job_hooks
+thaw_runtime_set_js_turn_hook
+thaw_runtime_ready_pending
 thaw_runtime_set_server_poll_hook
 thaw_runtime_shutdown_wait
 thaw_runtime_unwatch_fd

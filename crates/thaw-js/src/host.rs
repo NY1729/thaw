@@ -2160,9 +2160,8 @@ pub extern "C" fn thaw_tjs_class_call(
         if let Some(message) = symbol.strip_prefix('\u{1}') {
             return Err(message.to_string());
         }
-        let out = class_call(&symbol, &args, receiver, flags).map_err(|e| e.to_string());
-        pump_watches();
-        out
+        // watches settle at the loop's turns (`js_turn_hook`), not inside a call: a native callback is one task
+        class_call(&symbol, &args, receiver, flags).map_err(|e| e.to_string())
     })())
 }
 
@@ -5014,34 +5013,48 @@ pub extern "C" fn thaw_tjs_iterator_step_exact_result(
         eprintln!("thaw-js iterator_step({iterator}, {mode})");
     }
     let outcome: Result<Result<i64, (i64, bool)>, String> = (|| {
-        if mode > 11 {
+        if mode > 23 {
             return Err("Invalid iterator step mode".to_string());
         }
+        // 12..=17 begin an async step (the step Promise itself comes back, not awaited here), 18..=23 finish
+        // one: `iterator` is then the awaited step result and only its `done`/`value` are read
+        let (begin, finish) = ((12..18).contains(&mode), mode >= 18);
+        let mode = if begin || finish {
+            mode - if begin { 12 } else { 18 }
+        } else {
+            mode
+        };
         let (asynchronous, mode) = (mode >= 6, if mode >= 6 { mode - 6 } else { mode });
         let (capture, mode) = (mode >= 3, if mode >= 3 { mode - 3 } else { mode });
         let error = cstr(thrown_text);
         on_handle(iterator, |p, owner, iter| {
             let it = &mut p.interp;
             let step = (|it: &mut Interp| -> R<Value> {
-                let key = ["next", "return", "throw"][mode as usize];
-                let method = it.get(&iter, key)?;
-                if mode == 1 && matches!(method, Value::Undefined | Value::Null) {
-                    let o = Value::Object(it.plain());
-                    it.set(&o, "done", Value::Bool(true))?;
-                    if capture {
-                        it.set(&o, "value", Value::Undefined)?;
+                let mut step = iter.clone();
+                if !finish {
+                    let key = ["next", "return", "throw"][mode as usize];
+                    let method = it.get(&iter, key)?;
+                    if mode == 1 && matches!(method, Value::Undefined | Value::Null) {
+                        let o = Value::Object(it.plain());
+                        it.set(&o, "done", Value::Bool(true))?;
+                        if capture {
+                            it.set(&o, "value", Value::Undefined)?;
+                        }
+                        return Ok(o);
                     }
-                    return Ok(o);
+                    if !method.is_callable() {
+                        return it.throw_error("TypeError", "Iterator method is not callable");
+                    }
+                    let args = if mode == 2 {
+                        vec![Value::str(error.as_deref().unwrap_or(""))]
+                    } else {
+                        vec![]
+                    };
+                    step = it.call(&method, &iter, &args)?;
+                    if begin {
+                        return Ok(step);
+                    }
                 }
-                if !method.is_callable() {
-                    return it.throw_error("TypeError", "Iterator method is not callable");
-                }
-                let args = if mode == 2 {
-                    vec![Value::str(error.as_deref().unwrap_or(""))]
-                } else {
-                    vec![]
-                };
-                let mut step = it.call(&method, &iter, &args)?;
                 if asynchronous {
                     step = match it.await_settled(&step)? {
                         Some(Ok(v)) => v,
@@ -6621,11 +6634,60 @@ fn register_js_job_hooks() {
             hooks,
             thaw_tjs_exception_report_text,
         );
+        let turn = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"thaw_runtime_set_js_turn_hook".as_ptr(),
+        );
+        if !turn.is_null() {
+            std::mem::transmute::<*mut c_void, extern "C" fn(extern "C" fn() -> u8)>(turn)(
+                js_turn_hook,
+            );
+        }
+    }
+}
+
+/// One non-blocking pass over every realm for a native wait: settles watched Promises and turns each realm that
+/// has work. Answers 2 when a watched Promise settled (native continuations are queued: poll again at once), 1
+/// while a realm has work, 3 when only a Promise is watched (the wait must still wake to look again if it sleeps
+/// on file descriptors), else 0 (nothing in thaw-js can make progress, so a wait that can never finish ends).
+pub(crate) extern "C" fn js_turn_hook() -> u8 {
+    let settled = pump_watches();
+    let ran = drive_other_realms_once(std::ptr::null());
+    if settled > 0 {
+        2
+    } else if ran {
+        1
+    } else if WATCHES.with(|w| !w.borrow().is_empty()) {
+        3
+    } else {
+        0
     }
 }
 
 #[cfg(not(unix))]
 fn register_js_job_hooks() {}
+
+/// Runs the compiled runtime's ready continuations (native promise jobs) now, without starting its timers: the
+/// microtask checkpoint after one timer callback of a realm driven from a native wait.
+#[cfg(unix)]
+pub(crate) fn native_checkpoint() {
+    // SAFETY: both symbols are the compiled runtime's, looked up like the retired-engine host does.
+    unsafe {
+        let poll = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_poll_one".as_ptr());
+        let ready = libc::dlsym(libc::RTLD_DEFAULT, c"thaw_runtime_ready_pending".as_ptr());
+        if poll.is_null() || ready.is_null() {
+            return;
+        }
+        let poll = std::mem::transmute::<*mut c_void, extern "C" fn() -> u8>(poll);
+        let ready = std::mem::transmute::<*mut c_void, extern "C" fn() -> u8>(ready);
+        while ready() != 0 {
+            poll();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn native_checkpoint() {}
 
 #[cfg(unix)]
 fn native_promise_state(promise: usize) -> u8 {
@@ -7902,6 +7964,12 @@ pub(crate) fn other_packages_have_work() -> bool {
 /// delivers). The realm doing the waiting is skipped. Returns
 /// whether any such realm still has work, so the caller keeps waiting instead of declaring the promise unsettled.
 pub(crate) fn drive_other_realms_once(me: *const Interp) -> bool {
+    drive_realms_once(me, false)
+}
+
+/// As [`drive_other_realms_once`]; `force` turns every realm, idle or not (a native wait whose frame is suspended
+/// on a watched Promise polls the realms' platform events too).
+fn drive_realms_once(me: *const Interp, force: bool) -> bool {
     let count = PACKAGES.with(|ps| ps.borrow().len());
     let mut any_work = false;
     for handle in 0..count {
@@ -7919,10 +7987,10 @@ pub(crate) fn drive_other_realms_once(me: *const Interp) -> bool {
             }),
             None => true,
         });
-        if idle {
+        if idle && !force {
             continue;
         }
-        any_work = true;
+        any_work |= !idle;
         let _ = with_package(handle, |p| {
             match p.interp.drive_once() {
                 Ok(()) => {}
@@ -8486,6 +8554,7 @@ thread_local! {
 /// queued jobs of its package have drained (see `pump_watches`).
 #[no_mangle]
 pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settle: SettleFn) {
+    ensure_js_job_hooks();
     // 0 is `undefined`, which is never a pending promise: it takes the failure path below.
     let entry = if handle == 0 {
         None
@@ -8515,6 +8584,8 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
 /// result is a new handle id as decimal text. The input handle stays the caller's.
 #[no_mangle]
 pub extern "C" fn thaw_tjs_watch_handle(handle: i64, native: *mut c_void, settle: SettleFn) {
+    // a native wait must be able to turn this realm while the awaiting frame is suspended
+    ensure_js_job_hooks();
     let Some((package, value)) = (handle >= 0).then(|| slot(handle as u64)).flatten() else {
         settle_native(
             native,
@@ -8752,7 +8823,6 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             e.to_string()
         });
         LAST_THROWN.with(|t| t.borrow_mut().take());
-        pump_watches();
         out
     })())
 }

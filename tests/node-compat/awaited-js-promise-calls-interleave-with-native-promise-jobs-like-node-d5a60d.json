@@ -1,0 +1,5 @@
+{
+  "name": "awaited js promise calls interleave with native promise jobs like Node",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'node:events';\nimport { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const e: any = new EventEmitter();\n  const log: string[] = [];\n  const a = (async () => { await e.setMaxListeners(1); log.push('a1'); await e.setMaxListeners(2); log.push('a2'); })();\n  const b = (async () => { await e.setMaxListeners(3); log.push('b1'); await e.setMaxListeners(4); log.push('b2'); })();\n  await a; await b;\n  console.log(log.join(','));\n  // a JS promise settled by an AOT timer, awaited next to native promise jobs\n  const r: JsValue = new Readable({ read() {} }) as JsValue;\n  const order: string[] = [];\n  setTimeout(() => { r.push('x'); r.push(null); }, 5);\n  const t = (async () => { const v: JsValue = await r.toArray(); order.push(\"js:\" + String(v.length)); })();\n  const n = (async () => { await Promise.resolve(); order.push('native1'); await Promise.resolve(); order.push('native2'); })();\n  await t; await n;\n  console.log(order.join(','));\n}\n"
+}

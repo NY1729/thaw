@@ -803,6 +803,19 @@ pub unsafe extern "C" fn thaw_runtime_set_js_job_hooks(
     }
 }
 
+thread_local! {
+    /// thaw-js's turn hook (`thaw_runtime_set_js_turn_hook`): one non-blocking turn of its realms.
+    static JS_TURN_HOOK: Cell<Option<extern "C" fn() -> u8>> = const { Cell::new(None) };
+}
+
+/// Registers thaw-js's turn hook: a non-blocking pass over its realms (timers, sockets, watched promises) that
+/// answers non-zero while any of them still has work. A native wait (`thaw_runtime_run_until_resolved`) calls it,
+/// so a frame suspended on a thaw-js Promise does not sleep through that realm's work.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_set_js_turn_hook(turn: extern "C" fn() -> u8) {
+    JS_TURN_HOOK.with(|slot| slot.set(Some(turn)));
+}
+
 /// Runtime callbacks the JS engine can call (same layout as the engine's `RuntimeHooks`).
 #[repr(C)]
 pub struct RuntimeHooks {
@@ -1044,6 +1057,12 @@ pub extern "C" fn thaw_runtime_run_until_idle() -> usize {
     count
 }
 
+/// Whether a ready continuation (a promise job) is queued: thaw-js runs them between its timer callbacks.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_ready_pending() -> u8 {
+    u8::from(READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty()))
+}
+
 /// Timers and fd waits can become ready after an idle drain returns zero.
 #[no_mangle]
 pub extern "C" fn thaw_runtime_async_work_pending() -> u8 {
@@ -1226,11 +1245,33 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
         if unsafe { thaw_promise_state(promise) } != 0 {
             continue;
         }
+        // thaw-js work (a socket, a timer, a watched Promise) is turned here, not slept through
+        // (a reported unhandled rejection is fatal: no further thaw-js timers may run)
+        let turned = JS_TURN_HOOK
+            .with(Cell::get)
+            .filter(|_| !UNHANDLED_FAILURE.with(Cell::get))
+            .map_or(0, |turn| turn());
+        if turned == 2 {
+            // a watched Promise settled: its continuation is queued
+            continue;
+        }
+        // 1: a thaw-js realm has work; 3: only a watched Promise, which matters only while the wait sleeps on fds
+        let js_live = turned == 1 || (turned == 3 && has_fd_waits());
+        if unsafe { thaw_promise_state(promise) } != 0 {
+            continue;
+        }
         let delay = match (next_timer_delay(), invocation_deadline_remaining()) {
             (Some(timer), Some(deadline)) => Some(timer.min(deadline)),
             (Some(timer), None) => Some(timer),
             (None, Some(deadline)) => Some(deadline),
             (None, None) => None,
+        };
+        let delay = if js_live {
+            Some(delay.map_or(Duration::from_millis(2), |d| {
+                d.min(Duration::from_millis(2))
+            }))
+        } else {
+            delay
         };
         if has_fd_waits() {
             poll_fd_waits(delay);

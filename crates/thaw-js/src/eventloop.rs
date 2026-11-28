@@ -160,6 +160,9 @@ pub(crate) struct Rt {
     /// True until the first loop turn starts: timers armed before it (by the main script) get a 2 ms
     /// head start, so that delays of 2 ms or less are due on the first turn, ahead of `setImmediate`.
     first_turn: bool,
+    /// Set while a native wait drives this realm (`drive_once`): its timer callbacks are followed by the compiled
+    /// runtime's promise jobs, as Node runs a microtask checkpoint after each callback.
+    native_checkpoint: bool,
     promise_proto: Option<Obj>,
     timeout_proto: Option<Obj>,
     immediate_proto: Option<Obj>,
@@ -1563,6 +1566,9 @@ impl Interp {
                 }
             }
             self.run_jobs()?;
+            if self.rt.native_checkpoint {
+                crate::host::native_checkpoint();
+            }
             self.turn_checkpoint();
         }
     }
@@ -1656,7 +1662,10 @@ impl Interp {
         self.rt.first_turn = false;
         self.rt.now = clock_ms();
         self.poll_platform_events()?;
-        self.run_timers()?;
+        self.rt.native_checkpoint = true;
+        let timers = self.run_timers();
+        self.rt.native_checkpoint = false;
+        timers?;
         if !self.rt.immediates.is_empty() {
             self.run_immediates()?;
         }

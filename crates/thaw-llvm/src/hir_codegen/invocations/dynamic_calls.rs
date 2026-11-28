@@ -1,6 +1,6 @@
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_dynamic_iterator_step_exact(
-        &mut self, args: &[HirExpr],
+        &mut self, args: &[HirExpr], begin: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let [iterator, mode, error_text] = args else {
             return Err("exact iterator step expects iterator, mode, and error text".into());
@@ -20,6 +20,9 @@ impl<'ctx> HirCompiler<'ctx> {
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("exact iterator step returned no result")?.into_struct_value();
         let value = self.compile_exact_iterator_handle_result(result, "iterator_step")?;
+        if begin {
+            return Ok(value);
+        }
         self.compile_original_js_exception_handle(value, true)
     }
 
@@ -105,7 +108,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "declareThawJs" => self.compile_declare_thaw_js(args),
             "__thaw_to_iterator_exact" => self.compile_to_iterator_exact(args, false),
             "__thaw_to_async_iterator_exact" => self.compile_to_iterator_exact(args, true),
-            "__thaw_dynamic_iterator_step_exact" => self.compile_dynamic_iterator_step_exact(args),
+            "__thaw_dynamic_iterator_step_exact" => self.compile_dynamic_iterator_step_exact(args, false),
+            "__thaw_dynamic_iterator_step_begin" => self.compile_dynamic_iterator_step_exact(args, true),
             "callDynamic" => self.compile_call_dynamic(args),
             "getDynamicValue" => self.compile_get_dynamic_value(args),
             "newDynamicFunction" => self.compile_new_dynamic_function(args),

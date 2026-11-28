@@ -1860,7 +1860,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let [handle] = args else {
             return Err("__thaw_js_await_handle expects one handle".into());
         };
-        let handle = self.compile_expr(handle)?;
+        // A dynamic method call that is the operand of this await returns its Promise at once (the host does not
+        // wait for it, `chain_intermediate`): the frame suspends on the native link instead of the host call
+        // running the event loop. Any other operand is evaluated as before.
+        let handle = self.compile_dynamic_method_receiver(handle)?;
         let promise = self
             .builder
             .build_call(self.module.get_function("thaw_promise_new").unwrap(), &[], "js_await_promise")
