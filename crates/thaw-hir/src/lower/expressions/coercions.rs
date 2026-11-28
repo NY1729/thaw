@@ -4145,14 +4145,16 @@ impl<'a> FnLowerer<'a> {
         rhs: HirExpr,
     ) -> Result<HirExpr, String> {
         let (lhs_ty, rhs_ty) = (self.infer_expr_type(&lhs)?, self.infer_expr_type(&rhs)?);
+        // An operand that is already a variable is read directly (no closure per operation).
+        let simple = |expr: &HirExpr| matches!(expr, HirExpr::Var(_));
         let (ln, rn) = (
             format!("__thaw_bigint_lhs_{}", self.next_binding),
             format!("__thaw_bigint_rhs_{}", self.next_binding),
         );
         self.next_binding += 1;
-        self.scope.insert(ln.clone(), lhs_ty.clone());
-        self.scope.insert(rn.clone(), rhs_ty.clone());
-        let (l, r) = (HirExpr::Var(ln.clone()), HirExpr::Var(rn.clone()));
+        let (bind_l, bind_r) = (!simple(&lhs), !simple(&rhs));
+        let l = if bind_l { self.scope.insert(ln.clone(), lhs_ty.clone()); HirExpr::Var(ln.clone()) } else { lhs.clone() };
+        let r = if bind_r { self.scope.insert(rn.clone(), rhs_ty.clone()); HirExpr::Var(rn.clone()) } else { rhs.clone() };
         let is_bigint = |value: &HirExpr, ty: &HirType| {
             if *ty == HirType::Json {
                 HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_bigint".into())), vec![value.clone()])
@@ -4229,7 +4231,14 @@ impl<'a> FnLowerer<'a> {
             );
             HirExpr::Conditional(Box::new(either), Box::new(big), Box::new(number), result_ty)
         };
-        self.wrap_call_argument_bindings(result, &[(ln, lhs_ty, lhs), (rn, rhs_ty, rhs)])
+        let mut bindings = Vec::new();
+        if bind_l {
+            bindings.push((ln, lhs_ty, lhs));
+        }
+        if bind_r {
+            bindings.push((rn, rhs_ty, rhs));
+        }
+        self.wrap_call_argument_bindings(result, &bindings)
     }
 
     /// `-x` on an `any`: the exact BigInt negation for a bigint, else the number negation. The result is `any`.
