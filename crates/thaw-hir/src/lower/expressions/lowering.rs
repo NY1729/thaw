@@ -3386,6 +3386,12 @@ impl<'a> FnLowerer<'a> {
                         self.lower_logical_expr(lhs, rhs, bin.op == BinaryOp::LogicalAnd)?
                     }
                     BinaryOp::NullishCoalescing => self.lower_nullish_coalescing(lhs, rhs)?,
+                    BinaryOp::Add if self.json_static_bigint_pair(&lhs, &rhs)? => {
+                        self.lower_json_bigint_add(lhs, rhs)?
+                    }
+                    op if Self::bigint_dispatch_op(op) && self.json_bigint_pair(&lhs, &rhs)? => {
+                        self.lower_json_bigint_binary(op, lhs, rhs)?
+                    }
                     BinaryOp::Lt => self.lower_relational(lhs, rhs, BinOp::Lt)?,
                     BinaryOp::Gt => self.lower_relational(lhs, rhs, BinOp::Gt)?,
                     BinaryOp::LtEq => self.lower_relational(lhs, rhs, BinOp::LtEq)?,
@@ -3982,6 +3988,9 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Lit(HirLit::BigInt("0".into()))),
                             Box::new(value),
                         )
+                    }
+                    UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::Json => {
+                        self.lower_json_negate(value)?
                     }
                     UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::JsValue => {
                         // A beyond-`i64` bigint handle: `0 - x` on decimal

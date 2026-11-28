@@ -4104,6 +4104,228 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// Operators whose `any` operands may be BigInts at run time (`+` has its own guard).
+    pub(super) fn bigint_dispatch_op(op: BinaryOp) -> bool {
+        matches!(
+            op,
+            BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Mod
+                | BinaryOp::Exp
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitAnd
+                | BinaryOp::LShift
+                | BinaryOp::RShift
+                | BinaryOp::Lt
+                | BinaryOp::Gt
+                | BinaryOp::LtEq
+                | BinaryOp::GtEq
+        )
+    }
+
+    /// One operand is `any` and the other is `any` or a static BigInt: a BigInt may flow through.
+    pub(super) fn json_bigint_pair(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Result<bool, String> {
+        if !PROGRAM_USES_BIGINT.with(Cell::get) {
+            return Ok(false);
+        }
+        let (l, r) = (self.infer_expr_type(lhs)?, self.infer_expr_type(rhs)?);
+        let bigint = |ty: &HirType| matches!(ty, HirType::I64 | HirType::BigInt);
+        Ok((l == HirType::Json && (r == HirType::Json || bigint(&r))) || (r == HirType::Json && bigint(&l)))
+    }
+
+    /// `a op b` where an `any` operand may hold a BigInt: both BigInt (or one static BigInt) runs
+    /// the exact BigInt operation, otherwise the number operation. The result is `any` for the
+    /// arithmetic operators, `boolean` for the comparisons.
+    pub(super) fn lower_json_bigint_binary(
+        &mut self,
+        op: BinaryOp,
+        lhs: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let (lhs_ty, rhs_ty) = (self.infer_expr_type(&lhs)?, self.infer_expr_type(&rhs)?);
+        // An operand that is already a variable is read directly (no closure per operation).
+        let simple = |expr: &HirExpr| matches!(expr, HirExpr::Var(_));
+        let (ln, rn) = (
+            format!("__thaw_bigint_lhs_{}", self.next_binding),
+            format!("__thaw_bigint_rhs_{}", self.next_binding),
+        );
+        self.next_binding += 1;
+        let (bind_l, bind_r) = (!simple(&lhs), !simple(&rhs));
+        let l = if bind_l { self.scope.insert(ln.clone(), lhs_ty.clone()); HirExpr::Var(ln.clone()) } else { lhs.clone() };
+        let r = if bind_r { self.scope.insert(rn.clone(), rhs_ty.clone()); HirExpr::Var(rn.clone()) } else { rhs.clone() };
+        let is_bigint = |value: &HirExpr, ty: &HirType| {
+            if *ty == HirType::Json {
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_bigint".into())), vec![value.clone()])
+            } else {
+                HirExpr::Lit(HirLit::Bool(true))
+            }
+        };
+        let compare = matches!(op, BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq);
+        let bin_op = match op {
+            BinaryOp::Lt => BinOp::Lt,
+            BinaryOp::Gt => BinOp::Gt,
+            BinaryOp::LtEq => BinOp::LtEq,
+            BinaryOp::GtEq => BinOp::GtEq,
+            other => lower_bin_op(other)?,
+        };
+        // A static BigInt operand stays as is; an `any` one is checked and read exactly.
+        let as_bigint = |value: &HirExpr, ty: &HirType| {
+            if *ty == HirType::Json {
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_as_bigint_i64".into())), vec![value.clone()])
+            } else {
+                value.clone()
+            }
+        };
+        // Bound to BigInt-typed locals so codegen picks the BigInt operators.
+        let (bl, br) = (format!("__thaw_bigint_val_l_{}", self.next_binding), format!("__thaw_bigint_val_r_{}", self.next_binding));
+        self.next_binding += 1;
+        self.scope.insert(bl.clone(), HirType::BigInt);
+        self.scope.insert(br.clone(), HirType::BigInt);
+        let big_l = as_bigint(&l, &lhs_ty);
+        let big_r = as_bigint(&r, &rhs_ty);
+        let big = HirExpr::BinOp(bin_op, Box::new(HirExpr::Var(bl.clone())), Box::new(HirExpr::Var(br.clone())));
+        let result_ty = if compare { HirType::Bool } else { HirType::Json };
+        let big = if compare { big } else { self.coerce_to_declared(&HirType::Json, big)? };
+        let big = self.wrap_call_argument_bindings(
+            big,
+            &[(bl, HirType::BigInt, big_l), (br, HirType::BigInt, big_r)],
+        )?;
+        let mix_error = || -> Result<HirExpr, String> {
+            Ok(HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(
+                    "\u{1}TypeError\u{1}Cannot mix BigInt and other types, use explicit conversions".into(),
+                ))),
+                Box::new(Self::unreachable_value(&result_ty)?),
+            ))
+        };
+        let both = |l: &HirExpr, r: &HirExpr| {
+            HirExpr::Conditional(
+                Box::new(is_bigint(l, &lhs_ty)),
+                Box::new(is_bigint(r, &rhs_ty)),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                HirType::Bool,
+            )
+        };
+        // Both operands must be BigInts once either is.
+        let big = HirExpr::Conditional(Box::new(both(&l, &r)), Box::new(big), Box::new(mix_error()?), result_ty.clone());
+        let result = if lhs_ty != HirType::Json || rhs_ty != HirType::Json {
+            big
+        } else {
+            let number = if compare {
+                self.lower_relational(l.clone(), r.clone(), bin_op)?
+            } else {
+                let number = HirExpr::BinOp(
+                    bin_op,
+                    Box::new(self.coerce_primitive_to_number(l.clone())?),
+                    Box::new(self.coerce_primitive_to_number(r.clone())?),
+                );
+                self.coerce_to_declared(&HirType::Json, number)?
+            };
+            let either = HirExpr::Conditional(
+                Box::new(is_bigint(&l, &lhs_ty)),
+                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                Box::new(is_bigint(&r, &rhs_ty)),
+                HirType::Bool,
+            );
+            HirExpr::Conditional(Box::new(either), Box::new(big), Box::new(number), result_ty)
+        };
+        let mut bindings = Vec::new();
+        if bind_l {
+            bindings.push((ln, lhs_ty, lhs));
+        }
+        if bind_r {
+            bindings.push((rn, rhs_ty, rhs));
+        }
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    /// `any + <static BigInt>` (either order): the generic `+` reads the BigInt through a number.
+    pub(super) fn json_static_bigint_pair(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Result<bool, String> {
+        if !PROGRAM_USES_BIGINT.with(Cell::get) {
+            return Ok(false);
+        }
+        let (l, r) = (self.infer_expr_type(lhs)?, self.infer_expr_type(rhs)?);
+        let bigint = |ty: &HirType| matches!(ty, HirType::I64 | HirType::BigInt);
+        Ok((l == HirType::Json && bigint(&r)) || (r == HirType::Json && bigint(&l)))
+    }
+
+    /// `any + <static BigInt>`: the exact BigInt sum when the `any` holds a BigInt, else the generic
+    /// `+` (string concatenation, TypeError for a number).
+    pub(super) fn lower_json_bigint_add(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
+        let (lhs_ty, rhs_ty) = (self.infer_expr_type(&lhs)?, self.infer_expr_type(&rhs)?);
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let (ln, rn) = (format!("__thaw_bigint_add_l_{id}"), format!("__thaw_bigint_add_r_{id}"));
+        let simple = |expr: &HirExpr| matches!(expr, HirExpr::Var(_));
+        let (bind_l, bind_r) = (!simple(&lhs), !simple(&rhs));
+        let l = if bind_l { self.scope.insert(ln.clone(), lhs_ty.clone()); HirExpr::Var(ln.clone()) } else { lhs.clone() };
+        let r = if bind_r { self.scope.insert(rn.clone(), rhs_ty.clone()); HirExpr::Var(rn.clone()) } else { rhs.clone() };
+        let (json_side, json_ty) = if lhs_ty == HirType::Json { (&l, &lhs_ty) } else { (&r, &rhs_ty) };
+        let _ = json_ty;
+        let is_bigint = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_bigint".into())), vec![json_side.clone()]);
+        let (bl, br) = (format!("__thaw_bigint_add_val_l_{id}"), format!("__thaw_bigint_add_val_r_{id}"));
+        self.scope.insert(bl.clone(), HirType::BigInt);
+        self.scope.insert(br.clone(), HirType::BigInt);
+        let as_bigint = |value: &HirExpr, ty: &HirType| {
+            if *ty == HirType::Json {
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_as_bigint_i64".into())), vec![value.clone()])
+            } else {
+                value.clone()
+            }
+        };
+        let sum = HirExpr::BinOp(BinOp::Add, Box::new(HirExpr::Var(bl.clone())), Box::new(HirExpr::Var(br.clone())));
+        let sum = self.coerce_to_declared(&HirType::Json, sum)?;
+        let sum = self.wrap_call_argument_bindings(
+            sum,
+            &[(bl, HirType::BigInt, as_bigint(&l, &lhs_ty)), (br, HirType::BigInt, as_bigint(&r, &rhs_ty))],
+        )?;
+        let generic = self.lower_add_with_to_primitive(l, r)?;
+        let generic = self.coerce_to_declared(&HirType::Json, generic)?;
+        let result = HirExpr::Conditional(Box::new(is_bigint), Box::new(sum), Box::new(generic), HirType::Json);
+        let mut bindings = Vec::new();
+        if bind_l {
+            bindings.push((ln, lhs_ty, lhs));
+        }
+        if bind_r {
+            bindings.push((rn, rhs_ty, rhs));
+        }
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    /// `-x` on an `any`: the exact BigInt negation for a bigint, else the number negation. The result is `any`.
+    pub(super) fn lower_json_negate(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        if !PROGRAM_USES_BIGINT.with(Cell::get) {
+            let number = self.coerce_primitive_to_number(value)?;
+            return Ok(HirExpr::Call(Box::new(HirExpr::Var("__thaw_number_neg".into())), vec![number]));
+        }
+        let name = format!("__thaw_negate_{}", self.next_binding);
+        let big = format!("__thaw_negate_big_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Json);
+        self.scope.insert(big.clone(), HirType::BigInt);
+        let var = HirExpr::Var(name.clone());
+        let is_bigint = HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_bigint".into())), vec![var.clone()]);
+        let negated = HirExpr::BinOp(
+            BinOp::Sub,
+            Box::new(HirExpr::Lit(HirLit::BigInt("0".into()))),
+            Box::new(HirExpr::Var(big.clone())),
+        );
+        let negated = self.coerce_to_declared(&HirType::Json, negated)?;
+        let negated = self.wrap_call_argument_bindings(
+            negated,
+            &[(big, HirType::BigInt, HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_as_bigint_i64".into())), vec![var.clone()]))],
+        )?;
+        let number = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_number_neg".into())),
+            vec![self.coerce_primitive_to_number(var)?],
+        );
+        let number = self.coerce_to_declared(&HirType::Json, number)?;
+        let result = HirExpr::Conditional(Box::new(is_bigint), Box::new(negated), Box::new(number), HirType::Json);
+        self.wrap_call_argument_bindings(result, &[(name, HirType::Json, value)])
+    }
+
     fn add_operand_may_be_string(ty: &HirType) -> bool {
         match ty {
             HirType::Str | HirType::StrLiteral(_) => true,

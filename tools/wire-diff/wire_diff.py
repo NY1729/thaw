@@ -54,7 +54,7 @@ def handler_code(n, status, hstyle, bstyle):
 
 # ---- client side dimensions -------------------------------------------------------------------------------
 METHODS = ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]
-CONNS = ["keepalive", "close", "http10", "http10-keepalive", "pipeline"]
+CONNS = ["keepalive", "close", "http10", "http10-keepalive", "pipeline", "pipeline-3", "seq-2"]
 REQBODY = ["none", "content-length", "chunked"]
 REQHDR = ["normal", "lower", "upper", "dup"]
 
@@ -67,7 +67,7 @@ def client_bytes(method, path, conn, reqbody, reqhdr):
         h.append(f"{hdr('User-Agent')}: wire")
         if reqhdr == "dup": h += ["X-Dup: a", "X-Dup: b"]
         c = {"close": "close", "http10-keepalive": "keep-alive", "keepalive": "keep-alive"}.get(conn)
-        if conn == "pipeline": c = "close" if last else "keep-alive"
+        if conn in ("pipeline", "pipeline-3", "seq-2"): c = "close" if last else "keep-alive"
         if c: h.append(f"{hdr('Connection')}: {c}")
         body = b""
         if reqbody == "content-length":
@@ -75,7 +75,10 @@ def client_bytes(method, path, conn, reqbody, reqhdr):
         elif reqbody == "chunked":
             body = b"3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n"; h.append(f"{hdr('Transfer-Encoding')}: chunked")
         return ("\r\n".join(h) + "\r\n\r\n").encode() + body
-    return one(False) + one(True) if conn == "pipeline" else one(True)
+    if conn == "pipeline": return one(False) + one(True)
+    if conn == "pipeline-3": return one(False) + one(False) + one(True)
+    if conn == "seq-2": return [one(False), one(True)]  # two requests on one connection, the second sent after the first answer
+    return one(True)
 
 # ---- scene generation --------------------------------------------------------------------------------------
 def gen_scenes(count, seed):
@@ -111,7 +114,11 @@ def exchange(port, data, idle=0.35, total=6.0):
         s = socket.create_connection(("127.0.0.1", port), timeout=2)
     except OSError as e:
         return None, f"connect failed: {e}"
-    s.sendall(data); s.settimeout(idle); closed = False
+    parts = data if isinstance(data, list) else [data]
+    for n, part in enumerate(parts):
+        s.sendall(part)
+        if n + 1 < len(parts): time.sleep(0.25)
+    s.settimeout(idle); closed = False
     while time.time() - t0 < total:
         try:
             d = s.recv(1 << 16)

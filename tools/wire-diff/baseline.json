@@ -1,8 +1,8 @@
 {
  "scenes": 300,
  "seed": 1,
- "same": 246,
- "diff": 12,
- "build_fail": 42,
+ "same": 283,
+ "diff": 17,
+ "build_fail": 0,
  "hang": 0
 }

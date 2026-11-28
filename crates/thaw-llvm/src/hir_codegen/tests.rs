@@ -908,6 +908,7 @@ include!("tests/thaw_js_jsvalue_callback_contracts.rs");
 include!("tests/thaw_js_callback_own_param_contracts.rs");
 include!("tests/typeof_json_iteration_contracts.rs");
 include!("tests/instanceof_view_contracts.rs");
+include!("tests/any_bigint_arithmetic_contracts.rs");
 
 /// Debug aid: `THAW_TEST_SRC=<file.ts> cargo test ... scratch_run_file -- --ignored --nocapture`
 /// compiles and runs the file on the thaw-js lane and prints stdout/stderr.
