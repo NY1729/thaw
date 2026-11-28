@@ -4,8 +4,7 @@
   "skipped": 5
  },
  "buffer": {
-  "match": 48,
-  "output-diff": 2,
+  "match": 50,
   "skipped": 130
  },
  "child_process": {
@@ -15,11 +14,11 @@
   "match": 45
  },
  "console": {
-  "match": 57,
+  "match": 49,
   "skipped": 19
  },
  "constants": {
-  "match": 224
+  "match": 223
  },
  "crypto": {
   "match": 164,
@@ -38,8 +37,7 @@
   "output-diff": 4
  },
  "domain": {
-  "match": 31,
-  "output-diff": 1
+  "match": 32
  },
  "events": {
   "match": 57
@@ -53,18 +51,18 @@
   "match": 119
  },
  "globals": {
-  "match": 652,
-  "output-diff": 13,
+  "match": 660,
+  "output-diff": 5,
   "skipped": 154
  },
  "http": {
-  "build-fail": 173,
-  "match": 195,
-  "output-diff": 114
+  "build-fail": 129,
+  "match": 353,
+  "output-diff": 6
  },
  "http2": {
-  "match": 270,
-  "output-diff": 1,
+  "match": 268,
+  "output-diff": 3,
   "skipped": 118
  },
  "https": {
@@ -74,7 +72,7 @@
   "match": 64
  },
  "module": {
-  "match": 180,
+  "match": 169,
   "output-diff": 3,
   "skipped": 4
  },
@@ -90,7 +88,7 @@
   "skipped": 63
  },
  "process": {
-  "match": 430
+  "match": 413
  },
  "punycode": {
   "match": 16
@@ -104,15 +102,14 @@
   "skipped": 26
  },
  "repl": {
-  "match": 79
+  "match": 77
  },
  "stream": {
   "match": 378,
   "output-diff": 8
  },
  "stream_web": {
-  "match": 39,
-  "output-diff": 5,
+  "match": 44,
   "skipped": 41
  },
  "string_decoder": {
@@ -140,7 +137,8 @@
   "skipped": 6
  },
  "util_types": {
-  "match": 86
+  "match": 60,
+  "output-diff": 26
  },
  "v8": {
   "match": 59,
