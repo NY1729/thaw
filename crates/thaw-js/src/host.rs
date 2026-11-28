@@ -9626,8 +9626,12 @@ mod host_query_live_tests {
 
     #[test]
     fn host_query_typed_probe_is_empty_for_non_typed_values() {
-        // node 22: a Buffer and a DataView are not probed; a plain object, a Map and a RegExp are not typed arrays
-        assert_eq!(query(construct("Buffer", "[{\"v\":3}]"), 27), "");
+        // a Buffer answers its own name (the console prints `<Buffer ..>` for one nested in a value); a plain
+        // object, a Map and a RegExp are not typed arrays
+        assert_eq!(
+            query(construct("Buffer", "[{\"v\":3}]"), 27),
+            r#"{"n":"Buffer","v":["0","0","0"]}"#
+        );
         assert_eq!(query(construct("Object", "[]"), 27), "");
         assert_eq!(query(construct("Map", "[]"), 27), "");
         assert_eq!(query(construct("RegExp", "[{\"v\":\"y\"}]"), 27), "");
