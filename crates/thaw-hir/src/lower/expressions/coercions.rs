@@ -2103,6 +2103,15 @@ impl<'a> FnLowerer<'a> {
         if matches!(rhs_type, HirType::Dictionary(_)) && matches!(lhs_type, HirType::Undefined | HirType::Null) {
             return self.lower_strict_equality(lhs, HirExpr::TypedClosure(HirType::Json, Box::new(rhs)));
         }
+        // A Symbol against `any` compares as its wire text (how `any` holds a Symbol).
+        if lhs_type == HirType::Symbol && rhs_type == HirType::Json {
+            let lhs = self.coerce_to_declared(&HirType::Json, lhs)?;
+            return self.lower_strict_equality(lhs, rhs);
+        }
+        if rhs_type == HirType::Symbol && lhs_type == HirType::Json {
+            let rhs = self.coerce_to_declared(&HirType::Json, rhs)?;
+            return self.lower_strict_equality(lhs, rhs);
+        }
         let source_lhs_type = lhs_type.clone();
         let source_rhs_type = rhs_type.clone();
         // Two statically numeric operands compare directly: the float compare is
@@ -2822,6 +2831,14 @@ impl<'a> FnLowerer<'a> {
         rhs_ty: &HirType,
         strict: bool,
     ) -> Result<HirExpr, String> {
+        // A Symbol held in `any` is its wire text, so against a `Json` operand it compares as that text.
+        let as_wire = |value: HirExpr, ty: &HirType, other: &HirType| match (ty, other) {
+            (HirType::Symbol, HirType::Json) => (HirExpr::TypedClosure(HirType::Str, Box::new(value)), HirType::Str),
+            _ => (value, ty.clone()),
+        };
+        let (lhs, lhs_ty) = as_wire(lhs, lhs_ty, rhs_ty);
+        let (rhs, rhs_ty) = as_wire(rhs, rhs_ty, &lhs_ty);
+        let (lhs_ty, rhs_ty) = (&lhs_ty, &rhs_ty);
         let (left, left_kind) = self.function_loose_dynamic_value(lhs, lhs_ty)?;
         let (right, right_kind) = self.function_loose_dynamic_value(rhs, rhs_ty)?;
         let left_flag =

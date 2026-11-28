@@ -22,7 +22,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              }\n\
              function StringDecoder(encoding) {\n\
              \x20\x20if (!(this instanceof StringDecoder)) return new StringDecoder(encoding);\n\
-             \x20\x20this.encoding = normalizeEncoding(encoding); this._pending = globalThis.Buffer.alloc(0); this.lastNeed = 0; this.lastTotal = 0; this.lastChar = globalThis.Buffer.alloc(4);\n\
+             \x20\x20this.encoding = normalizeEncoding(encoding); [['_pending', globalThis.Buffer.alloc(0)], ['lastNeed', 0], ['lastTotal', 0], ['lastChar', globalThis.Buffer.alloc(4)]].forEach(function(p) { Object.defineProperty(this, p[0], { value: p[1], writable: true, enumerable: false, configurable: true }); }, this);\n\
              }\n\
              StringDecoder.prototype.write = function(value) {\n\
              \x20\x20var input = globalThis.Buffer.from(value); var combined = this._pending.length ? globalThis.Buffer.concat([this._pending, input]) : input; var complete = combined.length;\n\
@@ -39,6 +39,12 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
         ),
         "timers" => Some(
             "var timers = {}; ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate'].forEach(function (name) { Object.defineProperty(timers, name, { enumerable: true, get: function () { return globalThis[name]; } }); });\n\
+             function unenroll(item) { if (item._idleTimer) { globalThis.clearTimeout(item._idleTimer); item._idleTimer = null; } item._idleTimeout = -1; }\n\
+             function enroll(item, msecs) { if (typeof msecs !== 'number' || msecs < 0 || msecs !== msecs) { var e = new RangeError('The value of \"msecs\" is out of range. It must be a non-negative finite number. Received ' + String(msecs)); e.code = 'ERR_OUT_OF_RANGE'; throw e; } unenroll(item); item._idleTimeout = msecs; }\n\
+             function active(item) { var msecs = item._idleTimeout; if (msecs >= 0) item._idleTimer = globalThis.setTimeout(function() { item._idleTimer = null; if (typeof item._onTimeout === 'function') item._onTimeout(); }, msecs); }\n\
+             function _unrefActive(item) { active(item); if (item._idleTimer && item._idleTimer.unref) item._idleTimer.unref(); }\n\
+             timers._unrefActive = _unrefActive; timers.active = active; timers.enroll = enroll; timers.unenroll = unenroll;\n\
+             Object.defineProperty(timers, 'promises', { enumerable: true, configurable: true, get: function () { return require('node:timers/promises'); } });\n\
              module.exports = timers;\n\
              module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
@@ -53,9 +59,20 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20if (signal) signal.addEventListener('abort', aborted, { once: true });\n\
              \x20\x20});\n\
              }\n\
-             function setTimeoutPromise(delay, value, options) { return promiseTimer(globalThis.setTimeout, delay, value, options); }\n\
-             function setImmediatePromise(value, options) { return promiseTimer(globalThis.setImmediate, 0, value, options); }\n\
+             function timerReceived(value) { if (value == null) return ' Received ' + value; if (typeof value === 'function') return ' Received function ' + value.name; if (typeof value === 'object') return ' Received an instance of ' + (value.constructor && value.constructor.name ? value.constructor.name : 'Object'); var text = typeof value === 'string' ? \"'\" + value + \"'\" : String(value); if (text.length > 28) text = text.slice(0, 25) + '...'; return ' Received type ' + typeof value + ' (' + text + ')'; }\n\
+             function timerArgError(delay, options) {\n\
+             \x20\x20function make(what, kind, expected, value) { var error = new TypeError('The \"' + what + '\" ' + kind + ' must be ' + expected + '.' + timerReceived(value)); error.code = 'ERR_INVALID_ARG_TYPE'; return error; }\n\
+             \x20\x20if (delay !== undefined && typeof delay !== 'number') return make('delay', 'argument', 'of type number', delay);\n\
+             \x20\x20if (options === undefined) return undefined;\n\
+             \x20\x20if (options === null || typeof options !== 'object') return make('options', 'argument', 'of type object', options);\n\
+             \x20\x20if (options.signal !== undefined && !(options.signal && typeof options.signal.aborted === 'boolean' && typeof options.signal.addEventListener === 'function')) return make('options.signal', 'property', 'an instance of AbortSignal', options.signal);\n\
+             \x20\x20if (options.ref !== undefined && typeof options.ref !== 'boolean') return make('options.ref', 'property', 'of type boolean', options.ref);\n\
+             \x20\x20return undefined;\n\
+             }\n\
+             function setTimeoutPromise(delay, value, options) { var invalid = timerArgError(delay, options); if (invalid) return Promise.reject(invalid); return promiseTimer(globalThis.setTimeout, delay, value, options); }\n\
+             function setImmediatePromise(value, options) { var invalid = timerArgError(undefined, options); if (invalid) return Promise.reject(invalid); return promiseTimer(globalThis.setImmediate, 0, value, options); }\n\
              function setIntervalPromise(delay, value, options) {\n\
+             \x20\x20var invalid = timerArgError(delay, options); if (invalid) return { next: function() { return Promise.reject(invalid); }, return: function() { return Promise.resolve({ value: undefined, done: true }); }, [Symbol.asyncIterator]: function() { return this; } };\n\
              \x20\x20options = options || {}; var signal = options.signal, ref = options.ref; var values = []; var waiters = []; var done = false; var failed = false; var failure; var id = null; var started = false; var listenerRegistered = false;\n\
              \x20\x20function aborted() { stop(abortReason(signal)); }\n\
              \x20\x20function stop(error) { if (done) return; done = true; failed = arguments.length !== 0; failure = error; if (id !== null) { var timer = id; id = null; globalThis.clearInterval(timer); } values.length = 0; if (signal && listenerRegistered) { listenerRegistered = false; signal.removeEventListener('abort', aborted); } while (waiters.length) { var waiter = waiters.shift(); if (failed) waiter.reject(error); else waiter.resolve({ value: undefined, done: true }); } }\n\

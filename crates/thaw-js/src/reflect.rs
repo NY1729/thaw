@@ -281,6 +281,14 @@ pub(crate) fn delete_own(it: &mut Interp, o: &Obj, key: &str) -> R<bool> {
     if crate::is_legacy_fn_key(o, key) {
         return Ok(false);
     }
+    // a closure's `name`/`length` is synthesized on read (no `Prop`): deleting it records a tombstone
+    if matches!(key, "name" | "length") && crate::synth_fn_own(o, key).is_some() {
+        if o.frozen.get() || o.ext.get() == 2 {
+            return Ok(false);
+        }
+        o.mark_synth_gone(key);
+        return Ok(true);
+    }
     if own_prop(it, o, key).is_none() {
         return Ok(true);
     }
