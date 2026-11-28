@@ -434,6 +434,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "registerNativeCallbackGraph"
                         | "getDynamicProperty"
                         | "callDynamicValueHandle"
+                        | "__thaw_dynamic_iterator_step_begin"
                         | "resolveDynamicValue" => return Some(HirType::JsValue),
                         "__thaw_js_await_handle" => return Some(HirType::Promise(Box::new(HirType::JsValue))),
                         "readDynamicValue"

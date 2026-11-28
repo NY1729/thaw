@@ -1240,7 +1240,11 @@ pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPro
             continue;
         }
         // thaw-js work (a socket, a timer, a watched Promise) is turned here, not slept through
-        let turned = JS_TURN_HOOK.with(Cell::get).map_or(0, |turn| turn());
+        // (a reported unhandled rejection is fatal: no further thaw-js timers may run)
+        let turned = JS_TURN_HOOK
+            .with(Cell::get)
+            .filter(|_| !UNHANDLED_FAILURE.with(Cell::get))
+            .map_or(0, |turn| turn());
         if turned == 2 {
             // a watched Promise settled: its continuation is queued
             continue;

@@ -657,7 +657,7 @@ impl<'a> FnLowerer<'a> {
         let forced_return = format!("{iterator_name}_forced_return");
         let channel = HirType::Array(Box::new(value_type.clone()));
         let producer_type = generator_function_type(
-            false,
+            asynchronous && !native_json,
             value_type.clone(),
             value_type.clone(),
             HirType::Undefined,
@@ -708,18 +708,30 @@ impl<'a> FnLowerer<'a> {
         // The iterator result is an ordinary JS object. Reading it through
         // callDynamicMethod would assimilate a Promise/thenable and snapshot
         // its value before the protocol's done/value property reads.
+        // `for await` steps suspend the frame: the step Promise comes back from the host unawaited, the
+        // producer awaits it (so native timers and IO run meanwhile) and a second host call reads `done`/`value`.
+        let suspending = asynchronous && native_calls.is_none();
         let call_method = |name: &str| if let Some(calls) = &native_calls {
             calls[match name { "next" => 0, "return" => 1, _ => 2 }].clone()
-        } else { HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_dynamic_iterator_step_exact".into())),
-            vec![HirExpr::Var(iterator_name.clone()),
-                HirExpr::Lit(HirLit::I64(match name {
-                    "next" => 0, "return" => 1, "throw" => 2,
-                    _ => unreachable!(),
-                } + if capture_completion { 3 } else { 0 }
-                    + if asynchronous { 6 } else { 0 })),
-                HirExpr::Var(error.clone())],
-        )};
+        } else {
+            let base = match name { "next" => 0, "return" => 1, "throw" => 2, _ => unreachable!() }
+                + if capture_completion { 3 } else { 0 };
+            let step = |mode: i64, receiver: HirExpr, function: &str| HirExpr::Call(
+                Box::new(HirExpr::Var(function.into())),
+                vec![receiver, HirExpr::Lit(HirLit::I64(mode)), HirExpr::Var(error.clone())],
+            );
+            if suspending {
+                let begun = step(base + 12, HirExpr::Var(iterator_name.clone()),
+                    "__thaw_dynamic_iterator_step_begin");
+                let awaited = HirExpr::AwaitPromise(Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_js_await_handle".into())), vec![begun])),
+                    HirType::JsValue);
+                step(base + 18, awaited, "__thaw_dynamic_iterator_step_exact")
+            } else {
+                step(base + if asynchronous { 6 } else { 0 },
+                    HirExpr::Var(iterator_name.clone()), "__thaw_dynamic_iterator_step_exact")
+            }
+        };
         let result_statements = |lowerer: &mut FnLowerer<'_>, name: Symbol, call: HirExpr|
             -> Result<Vec<HirStmt>, String> {
             let result = HirExpr::Var(name.clone());
@@ -806,7 +818,7 @@ impl<'a> FnLowerer<'a> {
                     ty: channel.clone(),
                 },
             ],
-            channel.clone(),
+            if suspending { HirType::Promise(Box::new(channel.clone())) } else { channel.clone() },
             Box::new(HirExpr::Block(producer_body)),
         );
         self.scope = saved_scope;

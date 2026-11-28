@@ -2160,9 +2160,8 @@ pub extern "C" fn thaw_tjs_class_call(
         if let Some(message) = symbol.strip_prefix('\u{1}') {
             return Err(message.to_string());
         }
-        let out = class_call(&symbol, &args, receiver, flags).map_err(|e| e.to_string());
-        pump_watches();
-        out
+        // watches settle at the loop's turns (`js_turn_hook`), not inside a call: a native callback is one task
+        class_call(&symbol, &args, receiver, flags).map_err(|e| e.to_string())
     })())
 }
 
@@ -5014,34 +5013,48 @@ pub extern "C" fn thaw_tjs_iterator_step_exact_result(
         eprintln!("thaw-js iterator_step({iterator}, {mode})");
     }
     let outcome: Result<Result<i64, (i64, bool)>, String> = (|| {
-        if mode > 11 {
+        if mode > 23 {
             return Err("Invalid iterator step mode".to_string());
         }
+        // 12..=17 begin an async step (the step Promise itself comes back, not awaited here), 18..=23 finish
+        // one: `iterator` is then the awaited step result and only its `done`/`value` are read
+        let (begin, finish) = ((12..18).contains(&mode), mode >= 18);
+        let mode = if begin || finish {
+            mode - if begin { 12 } else { 18 }
+        } else {
+            mode
+        };
         let (asynchronous, mode) = (mode >= 6, if mode >= 6 { mode - 6 } else { mode });
         let (capture, mode) = (mode >= 3, if mode >= 3 { mode - 3 } else { mode });
         let error = cstr(thrown_text);
         on_handle(iterator, |p, owner, iter| {
             let it = &mut p.interp;
             let step = (|it: &mut Interp| -> R<Value> {
-                let key = ["next", "return", "throw"][mode as usize];
-                let method = it.get(&iter, key)?;
-                if mode == 1 && matches!(method, Value::Undefined | Value::Null) {
-                    let o = Value::Object(it.plain());
-                    it.set(&o, "done", Value::Bool(true))?;
-                    if capture {
-                        it.set(&o, "value", Value::Undefined)?;
+                let mut step = iter.clone();
+                if !finish {
+                    let key = ["next", "return", "throw"][mode as usize];
+                    let method = it.get(&iter, key)?;
+                    if mode == 1 && matches!(method, Value::Undefined | Value::Null) {
+                        let o = Value::Object(it.plain());
+                        it.set(&o, "done", Value::Bool(true))?;
+                        if capture {
+                            it.set(&o, "value", Value::Undefined)?;
+                        }
+                        return Ok(o);
                     }
-                    return Ok(o);
+                    if !method.is_callable() {
+                        return it.throw_error("TypeError", "Iterator method is not callable");
+                    }
+                    let args = if mode == 2 {
+                        vec![Value::str(error.as_deref().unwrap_or(""))]
+                    } else {
+                        vec![]
+                    };
+                    step = it.call(&method, &iter, &args)?;
+                    if begin {
+                        return Ok(step);
+                    }
                 }
-                if !method.is_callable() {
-                    return it.throw_error("TypeError", "Iterator method is not callable");
-                }
-                let args = if mode == 2 {
-                    vec![Value::str(error.as_deref().unwrap_or(""))]
-                } else {
-                    vec![]
-                };
-                let mut step = it.call(&method, &iter, &args)?;
                 if asynchronous {
                     step = match it.await_settled(&step)? {
                         Some(Ok(v)) => v,
@@ -6637,7 +6650,7 @@ fn register_js_job_hooks() {
 /// has work. Answers 2 when a watched Promise settled (native continuations are queued: poll again at once), 1
 /// while a realm has work, 3 when only a Promise is watched (the wait must still wake to look again if it sleeps
 /// on file descriptors), else 0 (nothing in thaw-js can make progress, so a wait that can never finish ends).
-extern "C" fn js_turn_hook() -> u8 {
+pub(crate) extern "C" fn js_turn_hook() -> u8 {
     let settled = pump_watches();
     let ran = drive_other_realms_once(std::ptr::null());
     if settled > 0 {
@@ -8788,7 +8801,6 @@ pub extern "C" fn thaw_tjs_call_typed_result(
             e.to_string()
         });
         LAST_THROWN.with(|t| t.borrow_mut().take());
-        pump_watches();
         out
     })())
 }

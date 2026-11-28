@@ -2358,6 +2358,7 @@ var __thaw_bundle_entry_key = "pend/index.js";
     // nothing settles until a later thaw-js call resolves the promise; the call drains the watch
     assert!(SETTLED.with(|s| s.borrow().is_empty()));
     typed_call("pend::fire", "[42]").expect("fire");
+    crate::host::js_turn_hook();
     assert_eq!(
         SETTLED.with(|s| s.borrow().clone()),
         vec![(Some("42".to_string()), None)]
@@ -2373,6 +2374,7 @@ var __thaw_bundle_entry_key = "pend/index.js";
     SETTLED.with(|s| s.borrow_mut().clear());
     thaw_tjs_watch_promise(id, std::ptr::null_mut(), record_settle);
     typed_call("pend::boom", r#"["boom"]"#).expect("boom");
+    crate::host::js_turn_hook();
     let settled = SETTLED.with(|s| s.borrow().clone());
     assert_eq!(settled.len(), 1);
     assert_eq!(settled[0].0, None);
@@ -8161,6 +8163,8 @@ fn async_result_keeps_an_undefined_own_property() {
     SETTLED.with(|s| s.borrow_mut().clear());
     thaw_tjs_watch_promise(id, std::ptr::null_mut(), record_settle);
     typed_call("tjskpend::fire", "[]").expect("fire");
+    // watches settle at the loop's turn, not inside the call
+    crate::host::js_turn_hook();
     let marker = r#"{"$__thaw_napi_undefined$":true}"#;
     assert_eq!(
         SETTLED.with(|s| s.borrow().clone()),
