@@ -263,7 +263,10 @@ impl<'a> FnLowerer<'a> {
             node(&mut names);
             names.0
         };
-        let mut firsts: Vec<(usize, usize)> = Vec::new(); // (declaration index, insertion index)
+        // Only the true cycle `const f = <closure mentioning h>; const h = g(.. f ..)`: a closure
+        // declaration that mentions an unannotated later binding whose initializer mentions
+        // that closure, so neither can move. (declaration index, insertion index)
+        let mut firsts: Vec<(usize, usize)> = Vec::new();
         for (j, stmt) in stmts.iter().enumerate() {
             let Stmt::Decl(Decl::Var(var)) = stmt else { continue };
             if !matches!(var.kind, VarDeclKind::Const | VarDeclKind::Let) || var.declare {
@@ -271,19 +274,19 @@ impl<'a> FnLowerer<'a> {
             }
             let [declarator] = var.decls.as_slice() else { continue };
             let (Pat::Ident(binding), Some(init)) = (&declarator.name, declarator.init.as_deref()) else { continue };
-            if matches!(init, Expr::Arrow(_) | Expr::Fn(_)) {
+            if binding.type_ann.is_some() || !matches!(init, Expr::Call(_)) {
                 continue;
             }
             let name = binding.id.sym.to_string();
-            let earlier = stmts[..j].iter().position(|before| mentions(&|names| before.visit_with(names)).contains(&name));
-            // an earlier declaration of the same name is a different (shadowing) binding
-            if earlier.is_some_and(|_| {
-                stmts[..j].iter().any(|before| matches!(before, Stmt::Decl(Decl::Var(v))
-                    if v.decls.iter().any(|d| matches!(&d.name, Pat::Ident(b) if b.id.sym == name.as_str()))))
-            }) {
-                continue;
-            }
-            // (a self-reference inside the initializer is the `RecursiveClosure` path's job)
+            let init_names = mentions(&|names| init.visit_with(names));
+            let earlier = stmts[..j].iter().position(|before| {
+                let Stmt::Decl(Decl::Var(v)) = before else { return false };
+                let [d] = v.decls.as_slice() else { return false };
+                let (Pat::Ident(closure), Some(body)) = (&d.name, d.init.as_deref()) else { return false };
+                matches!(body, Expr::Arrow(_) | Expr::Fn(_))
+                    && init_names.contains(closure.id.sym.as_ref())
+                    && mentions(&|names| body.visit_with(names)).contains(&name)
+            });
             let Some(insert_at) = earlier else { continue };
             firsts.push((j, insert_at));
         }
