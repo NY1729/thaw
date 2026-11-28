@@ -6503,11 +6503,12 @@ fn abort_native_pending_work() {}
 pub(crate) fn drain_native_continuations(it: &mut Interp) -> bool {
     let http = poll_native_servers();
     let ran = drain_native();
+    let awaited = settle_handle_watches(it);
     // Node ends the process at the first drain that leaves a rejection unhandled, before a later timer runs
     if native_unhandled_failure() {
         it.yielded = true;
     }
-    ran || (http & 2) != 0
+    ran || awaited || (http & 2) != 0
 }
 
 /// Process-wide barrier ids (unique across threads and realms; 0 is "no barrier").
@@ -8473,6 +8474,8 @@ struct Watch {
     promise: Value,
     native: *mut c_void,
     settle: SettleFn,
+    /// The settled value is handed back as a new handle id (a `JsValue` await), not as JSON.
+    handle_result: bool,
 }
 
 thread_local! {
@@ -8497,6 +8500,7 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
                 promise,
                 native,
                 settle,
+                handle_result: false,
             })
         }),
         None => settle_native(
@@ -8505,6 +8509,53 @@ pub extern "C" fn thaw_tjs_watch_promise(handle: i64, native: *mut c_void, settl
             Err("thaw-js: invalid pending promise handle".into()),
         ),
     }
+}
+
+/// `await <JsValue>` of compiled code: links `native` (a fresh native promise) to the value behind `handle`.
+/// A Promise settles `native` once it leaves Pending (see `pump_watches`), a plain value at once; either way the
+/// result is a new handle id as decimal text. The input handle stays the caller's.
+#[no_mangle]
+pub extern "C" fn thaw_tjs_watch_handle(handle: i64, native: *mut c_void, settle: SettleFn) {
+    let Some((package, value)) = (handle >= 0).then(|| slot(handle as u64)).flatten() else {
+        settle_native(
+            native,
+            settle,
+            Err("thaw-js: invalid JsValue handle".into()),
+        );
+        return;
+    };
+    // a thenable (an object with a callable `then`, a query builder) is adopted as `Promise.resolve` does
+    let adopted = with_package(package, |p| {
+        let v = adopt_thenable(&mut p.interp, value.clone())?;
+        if p.interp.is_promise(&v) {
+            // observed by the awaiting frame: its rejection is delivered there, not reported as unhandled
+            p.interp.mark_handled(&v);
+        }
+        Ok(v)
+    });
+    let (is_promise, value) = match adopted {
+        Ok(v) => (
+            with_package(package, |p| Ok(p.interp.is_promise(&v))).unwrap_or(false),
+            v,
+        ),
+        Err(e) => {
+            settle_native(native, settle, Err(e.to_string()));
+            return;
+        }
+    };
+    if !is_promise {
+        settle_native(native, settle, Ok(store_handle(package, value).to_string()));
+        return;
+    }
+    WATCHES.with(|w| {
+        w.borrow_mut().push(Watch {
+            package,
+            promise: value,
+            native,
+            settle,
+            handle_result: true,
+        })
+    });
 }
 
 fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, String>) {
@@ -8523,6 +8574,47 @@ fn settle_native(native: *mut c_void, settle: SettleFn, result: Result<String, S
     );
     // SAFETY: `error` is null or the arena string made above, no longer used by the settler.
     unsafe { thaw_arena::destroy_string(error) };
+}
+
+/// From a loop turn of the realm `it` (which a realm's own loop keeps running while it waits on native work):
+/// settles the `await <JsValue>` watches (`thaw_tjs_watch_handle`) whose Promise has left Pending. They need no
+/// realm to convert the value (a handle is stored by id), so no re-entry into `with_package` is needed.
+/// Returns whether any settled.
+fn settle_handle_watches(it: &mut Interp) -> bool {
+    let watches = WATCHES.with(|w| std::mem::take(&mut *w.borrow_mut()));
+    if watches.is_empty() {
+        return false;
+    }
+    let mut waiting = Vec::new();
+    let mut settled = Vec::new();
+    for w in watches {
+        match it.promise_state(&w.promise).filter(|_| w.handle_result) {
+            Some(Ok(v)) => {
+                let id = store_handle(w.package, v).to_string();
+                settled.push((w, Ok(id)));
+            }
+            Some(Err(e)) => {
+                let text = match frame_error(it, &e).ok().flatten() {
+                    Some((_, framed, _)) => framed,
+                    None => from_value(it, &e, 0)
+                        .map(|n| n.to_json())
+                        .unwrap_or_default(),
+                };
+                settled.push((w, Err(text)));
+            }
+            None => waiting.push(w),
+        }
+    }
+    WATCHES.with(|w| {
+        let mut cur = w.borrow_mut();
+        waiting.append(&mut cur);
+        *cur = waiting;
+    });
+    let any = !settled.is_empty();
+    for (w, result) in settled {
+        settle_native(w.native, w.settle, result);
+    }
+    any
 }
 
 /// Drain the jobs of every package with a watched promise, then settle the watches that left Pending.
@@ -8550,6 +8642,7 @@ fn pump_watches() -> usize {
                 return Ok(None);
             };
             Ok(Some(match state {
+                Ok(v) if w.handle_result => Ok(store_handle(w.package, v).to_string()),
                 Ok(v) => from_value(&mut p.interp, &v, 0)
                     .map(|n| n.to_json_keeping_undefined())
                     .map_err(|e| e.to_string()),

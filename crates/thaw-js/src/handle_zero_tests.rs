@@ -98,6 +98,7 @@ const TABLE: &[(&str, Policy)] = &[
     ("thaw_tjs_set_property_result", Policy::Lenient),
     ("thaw_tjs_to_async_iterator_exact_result", Policy::Lenient),
     ("thaw_tjs_to_iterator_exact_result", Policy::Lenient),
+    ("thaw_tjs_watch_handle", Policy::Lenient),
     ("thaw_tjs_watch_promise", Policy::Lenient),
     ("thaw_tjs_release_handle", Policy::NoReference),
     ("thaw_tjs_retain_handle", Policy::NoReference),
