@@ -137,6 +137,28 @@ fn fsp_filehandle_async_arrows_match_node() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A top-level `await` of a Promise nothing can settle ends the program like Node: the warning on stderr and exit
+/// code 13, with the output so far kept (and nothing after the await run).
+#[test]
+fn unsettled_top_level_await_exits_13_like_node() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-unsettled-tla-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        "console.log(\"before\");\nawait new Promise<void>(() => {});\nconsole.log(\"after\");\n",
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert_eq!(result.status.code(), Some(13));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "before\n");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Detected unsettled top-level await"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn node_crypto_md5_sha3_hash_and_subtle_match_node() {
     let dir = std::env::temp_dir().join(format!("thaw-cli-node_crypto_md5_sha3_hash_and_subtle_match_node-{}", std::process::id()));
