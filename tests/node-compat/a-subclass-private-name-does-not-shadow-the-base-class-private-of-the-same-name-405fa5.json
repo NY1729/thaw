@@ -1,0 +1,5 @@
+{
+  "name": "a subclass private name does not shadow the base class private of the same name",
+  "expect": "matched",
+  "source": "class Base {\n  #i() { return 'B.i'; }\n  #x = 'B.x';\n  base(): string { return this.#i() + this.#x; }\n}\nclass Derived extends Base {\n  #i() { return 'D.i'; }\n  #x = 'D.x';\n  derived(): string { return this.#i() + this.#x; }\n}\nfunction main() {\n  const d = new Derived();\n  console.log(d.derived(), d.base());\n}\n"
+}

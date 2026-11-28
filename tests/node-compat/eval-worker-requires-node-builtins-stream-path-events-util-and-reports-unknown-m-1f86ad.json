@@ -1,0 +1,5 @@
+{
+  "name": "eval worker requires node builtins (stream, path, events, util) and reports unknown modules",
+  "expect": "matched",
+  "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const w = new Worker(`\n    const { parentPort } = require('node:worker_threads');\n    const { Readable } = require('node:stream');\n    const path = require('path');\n    const EventEmitter = require('node:events');\n    const util = require('node:util');\n    const r = new Readable({ read() {} });\n    const p = r.toArray();\n    setTimeout(() => { r.push('w'); r.push(null); }, 5);\n    const e = new EventEmitter();\n    e.on('x', (v) => parentPort.postMessage('event ' + v));\n    e.emit('x', path.basename('/a/b.txt'));\n    let missing = 'none';\n    try { require('node:no-such-module'); } catch (err) { missing = err.code; }\n    p.then((a) => parentPort.postMessage([a.map(String), util.format('%s-%d', 'f', 3), missing]));\n  `, { eval: true });\n  w.on('message', (m: any) => console.log('msg', JSON.stringify(m)));\n  await new Promise<void>((resolve) => w.on('exit', () => resolve()));\n  console.log('done');\n}\n"
+}

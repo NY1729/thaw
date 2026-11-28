@@ -3760,8 +3760,7 @@ fn registry_add_creates_and_extracts_a_real_tar_archive_when_enabled() {
     }
     let dir = std::env::temp_dir().join(format!("thaw-cli-auto-js-tar-{}", std::process::id()));
     let registry = dir.join("modules");
-    // pinned: tar 8 (2026-11-28) is ESM-only and not yet supported; unpin once it builds
-    thaw_registry::add(&registry, "tar@7.5.24").unwrap();
+    thaw_registry::add(&registry, "tar").unwrap();
     let source = dir.join("main.ts");
     let output = dir.join("app");
     std::fs::create_dir_all(&dir).unwrap();
