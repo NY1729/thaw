@@ -2175,7 +2175,7 @@ impl<'a> FnLowerer<'a> {
                                 // instanceof_json_sentinel` entry, since
                                 // that helper's single-key check doesn't
                                 // fit this two-field shape.
-                                if class.sym == *"Uint8Array" {
+                                if matches!(class.sym.as_ref(), "Uint8Array" | "ArrayBuffer" | "DataView") {
                                     // A real Buffer/Uint8Array crossing
                                     // into `any` via a *statically*-typed
                                     // (`HirType::Bytes`) source is caught
@@ -2241,13 +2241,25 @@ impl<'a> FnLowerer<'a> {
                                         HirExpr::Var(temp.clone()),
                                     )?;
                                     let live_check =
-                                        self.dynamic_value_check_by_name("Uint8Array", resolved)?;
-                                    let buffer_shape_check = HirExpr::Call(
-                                        Box::new(HirExpr::Var(
-                                            "__thaw_json_is_buffer_shape".to_string(),
-                                        )),
-                                        vec![HirExpr::Var(temp.clone())],
-                                    );
+                                        self.dynamic_value_check_by_name(class.sym.as_ref(), resolved)?;
+                                    // A native view held in `any` is a `Value::Bytes`: its kind is its tag.
+                                    let buffer_shape_check = if class.sym == *"Uint8Array" {
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var(
+                                                "__thaw_json_is_buffer_shape".to_string(),
+                                            )),
+                                            vec![HirExpr::Var(temp.clone())],
+                                        )
+                                    } else {
+                                        HirExpr::BinOp(
+                                            BinOp::EqEqEq,
+                                            Box::new(HirExpr::Call(
+                                                Box::new(HirExpr::Var("__thaw_json_object_tag".to_string())),
+                                                vec![HirExpr::Var(temp.clone())],
+                                            )),
+                                            Box::new(HirExpr::Lit(HirLit::Str(format!("[object {}]", class.sym)))),
+                                        )
+                                    };
                                     let body = HirExpr::Conditional(
                                         Box::new(is_handle),
                                         Box::new(live_check),
