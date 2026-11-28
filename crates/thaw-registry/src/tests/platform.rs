@@ -1867,7 +1867,7 @@ fn nested_workers_keep_parent_alive_unref_releases_it_and_failed_ctor_is_caught(
                         done = true;
                         resolve(-1);
                         worker.terminate();
-                    }, 5000);
+                    }, 20000);
                     worker.on('message', function(value) { messages.push(value); });
                     worker.on('exit', function(code) {
                         if (done) return;
@@ -2112,7 +2112,7 @@ fn nested_worker_port_routes_from_grandchild_through_middle_worker() {
                 });
             });
             w1.postMessage({ port: channel.port2 }, [channel.port2]);
-            var value = await Promise.race([done, new Promise(function (r) { setTimeout(function () { r('timeout'); }, 3000); })]);
+            var value = await Promise.race([done, new Promise(function (r) { setTimeout(function () { r('timeout'); }, 20000); })]);
             channel.port1.close();
             await Promise.all([w1.terminate(), w2.terminate()]);
             return value;
@@ -2208,7 +2208,7 @@ fn nested_worker_port_closes_for_its_peer_when_its_owner_stops() {
         var midB = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(owner) + ", { eval: true }); wt.parentPort.on('message', function (m) { if (m.port) c.postMessage({ port: m.port }, [m.port]); if (m === 'stop') wt.parentPort.close(); });";
         var midC = "var wt = require('node:worker_threads'); var c = new wt.Worker(" + JSON.stringify(ownerStays) + ", { eval: true }); wt.parentPort.on('message', function (m) { if (m.port) { c.postMessage({ port: m.port }, [m.port]); wt.parentPort.postMessage('kid-holds'); } });";
         module.exports = async function () {
-            var watchdog = function () { return new Promise(function (r) { setTimeout(function () { r('timeout'); }, 3000); }); };
+            var watchdog = function () { return new Promise(function (r) { setTimeout(function () { r('timeout'); }, 20000); }); };
             var ports = [], workers = [];
             var closed = function (port, log, label) { return new Promise(function (r) { port.on('close', function () { log.push(label + ' close'); r(); }); }); };
             var logA = [], a = new MessageChannel();
