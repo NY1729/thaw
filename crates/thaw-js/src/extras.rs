@@ -763,6 +763,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     } }['get' + name]);
     def(DataView.prototype, 'set' + name, { ['set' + name](index, value, little) {
       dvBrand(this, 'DataView.prototype.set' + name);
+      if (__thaw_ta_imm(this.__bytes)) throw new TypeError('Cannot modify an immutable ArrayBuffer');
       index = toIndex(index);
       value = +value;
       dvLive(this, 'DataView.prototype.set' + name, 'DataView.prototype.get' + name);
@@ -788,6 +789,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     } }['get' + k[0]]);
     def(DataView.prototype, 'set' + k[0], { ['set' + k[0]](index, value, little) {
       dvBrand(this, 'DataView.prototype.set' + k[0]);
+      if (__thaw_ta_imm(this.__bytes)) throw new TypeError('Cannot modify an immutable ArrayBuffer');
       index = toIndex(index);
       var v = BigInt.asUintN(64, BigInt(value));
       dvLive(this, 'DataView.prototype.set' + k[0], 'DataView.prototype.get' + k[0]);
