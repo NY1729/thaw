@@ -4125,35 +4125,19 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
-    /// The unboxed result of `any` arithmetic that may produce a BigInt: a number or a BigInt.
-    fn number_or_bigint_members() -> Vec<HirType> {
-        vec![HirType::F64, HirType::BigInt]
-    }
-
-    pub(super) fn is_number_or_bigint(ty: &HirType) -> bool {
-        matches!(ty, HirType::Union(members) if *members == Self::number_or_bigint_members())
-    }
-
-    /// An operand that may hold a BigInt at run time: `any`, or the unboxed number-or-BigInt result
-    /// of an earlier `any` operation.
-    fn bigint_dynamic_operand(ty: &HirType) -> bool {
-        *ty == HirType::Json || Self::is_number_or_bigint(ty)
-    }
-
-    /// One operand may hold a BigInt (`any` or an earlier result) and the other is such an operand,
-    /// a static BigInt or a number.
+    /// One operand is `any` and the other is `any` or a static BigInt: a BigInt may flow through.
     pub(super) fn json_bigint_pair(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Result<bool, String> {
         if !PROGRAM_USES_BIGINT.with(Cell::get) {
             return Ok(false);
         }
         let (l, r) = (self.infer_expr_type(lhs)?, self.infer_expr_type(rhs)?);
-        let other = |ty: &HirType| Self::bigint_dynamic_operand(ty) || matches!(ty, HirType::I64 | HirType::BigInt | HirType::F64);
-        Ok((Self::bigint_dynamic_operand(&l) && other(&r)) || (Self::bigint_dynamic_operand(&r) && other(&l)))
+        let bigint = |ty: &HirType| matches!(ty, HirType::I64 | HirType::BigInt);
+        Ok((l == HirType::Json && (r == HirType::Json || bigint(&r))) || (r == HirType::Json && bigint(&l)))
     }
 
-    /// `a op b` where an operand may hold a BigInt: both BigInt (or one static BigInt) runs the exact
-    /// BigInt operation, otherwise the number operation. Arithmetic yields an unboxed
-    /// number-or-BigInt (no `any` allocation per operation), comparisons a boolean.
+    /// `a op b` where an `any` operand may hold a BigInt: both BigInt (or one static BigInt) runs
+    /// the exact BigInt operation, otherwise the number operation. The result is `any` for the
+    /// arithmetic operators, `boolean` for the comparisons.
     pub(super) fn lower_json_bigint_binary(
         &mut self,
         op: BinaryOp,
@@ -4161,7 +4145,6 @@ impl<'a> FnLowerer<'a> {
         rhs: HirExpr,
     ) -> Result<HirExpr, String> {
         let (lhs_ty, rhs_ty) = (self.infer_expr_type(&lhs)?, self.infer_expr_type(&rhs)?);
-        let members = Self::number_or_bigint_members();
         let (ln, rn) = (
             format!("__thaw_bigint_lhs_{}", self.next_binding),
             format!("__thaw_bigint_rhs_{}", self.next_binding),
@@ -4170,18 +4153,11 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(ln.clone(), lhs_ty.clone());
         self.scope.insert(rn.clone(), rhs_ty.clone());
         let (l, r) = (HirExpr::Var(ln.clone()), HirExpr::Var(rn.clone()));
-        // Whether the operand holds a BigInt.
-        let is_bigint = |value: &HirExpr, ty: &HirType| -> HirExpr {
+        let is_bigint = |value: &HirExpr, ty: &HirType| {
             if *ty == HirType::Json {
                 HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_bigint".into())), vec![value.clone()])
-            } else if Self::is_number_or_bigint(ty) {
-                HirExpr::BinOp(
-                    BinOp::EqEqEq,
-                    Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
-                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                )
             } else {
-                HirExpr::Lit(HirLit::Bool(matches!(ty, HirType::I64 | HirType::BigInt)))
+                HirExpr::Lit(HirLit::Bool(true))
             }
         };
         let compare = matches!(op, BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq);
@@ -4192,12 +4168,10 @@ impl<'a> FnLowerer<'a> {
             BinaryOp::GtEq => BinOp::GtEq,
             other => lower_bin_op(other)?,
         };
-        // The operand as a BigInt (a static BigInt as is, an unboxed one by tag, `any` checked and exact).
-        let as_bigint = |value: &HirExpr, ty: &HirType| -> HirExpr {
+        // A static BigInt operand stays as is; an `any` one is checked and read exactly.
+        let as_bigint = |value: &HirExpr, ty: &HirType| {
             if *ty == HirType::Json {
                 HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_as_bigint_i64".into())), vec![value.clone()])
-            } else if Self::is_number_or_bigint(ty) {
-                HirExpr::UnionValue(Box::new(value.clone()), 1, members.clone())
             } else {
                 value.clone()
             }
@@ -4210,30 +4184,19 @@ impl<'a> FnLowerer<'a> {
         let big_l = as_bigint(&l, &lhs_ty);
         let big_r = as_bigint(&r, &rhs_ty);
         let big = HirExpr::BinOp(bin_op, Box::new(HirExpr::Var(bl.clone())), Box::new(HirExpr::Var(br.clone())));
-        let result_ty = if compare { HirType::Bool } else { HirType::Union(members.clone()) };
-        let big = if compare { big } else { HirExpr::UnionInject(Box::new(big), 1, members.clone()) };
+        let result_ty = if compare { HirType::Bool } else { HirType::Json };
+        let big = if compare { big } else { self.coerce_to_declared(&HirType::Json, big)? };
         let big = self.wrap_call_argument_bindings(
             big,
             &[(bl, HirType::BigInt, big_l), (br, HirType::BigInt, big_r)],
         )?;
-        let mix_value = if compare {
-            HirExpr::Lit(HirLit::Bool(false))
-        } else {
-            HirExpr::UnionInject(Box::new(HirExpr::Lit(HirLit::F64(0.0))), 0, members.clone())
-        };
-        let mix_error = HirExpr::ThrowValue(
-            Box::new(HirExpr::Lit(HirLit::Str(
-                "\u{1}TypeError\u{1}Cannot mix BigInt and other types, use explicit conversions".into(),
-            ))),
-            Box::new(mix_value),
-        );
-        let either = |l: &HirExpr, r: &HirExpr| {
-            HirExpr::Conditional(
-                Box::new(is_bigint(l, &lhs_ty)),
-                Box::new(HirExpr::Lit(HirLit::Bool(true))),
-                Box::new(is_bigint(r, &rhs_ty)),
-                HirType::Bool,
-            )
+        let mix_error = |this: &Self| -> Result<HirExpr, String> {
+            Ok(HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(
+                    "\u{1}TypeError\u{1}Cannot mix BigInt and other types, use explicit conversions".into(),
+                ))),
+                Box::new(Self::unreachable_value(&result_ty).map_err(|e| { let _ = this; e })?),
+            ))
         };
         let both = |l: &HirExpr, r: &HirExpr| {
             HirExpr::Conditional(
@@ -4244,31 +4207,27 @@ impl<'a> FnLowerer<'a> {
             )
         };
         // Both operands must be BigInts once either is.
-        let big = HirExpr::Conditional(Box::new(both(&l, &r)), Box::new(big), Box::new(mix_error), result_ty.clone());
-        // The number operation: an unboxed operand is read as its number.
-        let as_number = |this: &mut Self, value: &HirExpr, ty: &HirType| -> Result<HirExpr, String> {
-            if Self::is_number_or_bigint(ty) {
-                Ok(HirExpr::UnionValue(Box::new(value.clone()), 0, members.clone()))
-            } else {
-                this.coerce_primitive_to_number(value.clone())
-            }
-        };
-        let any_unboxed = Self::is_number_or_bigint(&lhs_ty) || Self::is_number_or_bigint(&rhs_ty);
-        let static_bigint = matches!(lhs_ty, HirType::I64 | HirType::BigInt) || matches!(rhs_ty, HirType::I64 | HirType::BigInt);
-        let result = if static_bigint {
+        let big = HirExpr::Conditional(Box::new(both(&l, &r)), Box::new(big), Box::new(mix_error(self)?), result_ty.clone());
+        let result = if lhs_ty != HirType::Json || rhs_ty != HirType::Json {
             big
         } else {
-            let number = if compare && !any_unboxed {
+            let number = if compare {
                 self.lower_relational(l.clone(), r.clone(), bin_op)?
             } else {
                 let number = HirExpr::BinOp(
                     bin_op,
-                    Box::new(as_number(self, &l, &lhs_ty)?),
-                    Box::new(as_number(self, &r, &rhs_ty)?),
+                    Box::new(self.coerce_primitive_to_number(l.clone())?),
+                    Box::new(self.coerce_primitive_to_number(r.clone())?),
                 );
-                if compare { number } else { HirExpr::UnionInject(Box::new(number), 0, members.clone()) }
+                self.coerce_to_declared(&HirType::Json, number)?
             };
-            HirExpr::Conditional(Box::new(either(&l, &r)), Box::new(big), Box::new(number), result_ty)
+            let either = HirExpr::Conditional(
+                Box::new(is_bigint(&l, &lhs_ty)),
+                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                Box::new(is_bigint(&r, &rhs_ty)),
+                HirType::Bool,
+            );
+            HirExpr::Conditional(Box::new(either), Box::new(big), Box::new(number), result_ty)
         };
         self.wrap_call_argument_bindings(result, &[(ln, lhs_ty, lhs), (rn, rhs_ty, rhs)])
     }

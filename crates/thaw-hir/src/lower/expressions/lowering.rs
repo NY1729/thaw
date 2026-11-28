@@ -3977,10 +3977,6 @@ impl<'a> FnLowerer<'a> {
                     UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::Json => {
                         self.lower_json_negate(value)?
                     }
-                    UnaryOp::Minus if Self::is_number_or_bigint(&self.infer_expr_type(&value)?) => {
-                        let value = self.coerce_to_declared(&HirType::Json, value)?;
-                        self.lower_json_negate(value)?
-                    }
                     UnaryOp::Minus if self.infer_expr_type(&value)? == HirType::JsValue => {
                         // A beyond-`i64` bigint handle: `0 - x` on decimal
                         // digits, wrapped back into a real BigInt.
