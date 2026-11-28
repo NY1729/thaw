@@ -1207,10 +1207,19 @@ impl Interp {
             }
             Ok(Value::Object(out))
         });
+        // Node 22 has no table rows for these, so their heads are set here
+        for (name, len) in [("transferToImmutable", 0.0), ("sliceToImmutable", 2.0)] {
+            if let Some((Slot::Data(Value::Object(f)), _)) = find_own(&ab_proto, name) {
+                crate::builtin_table::set_fn_head(&f, name, len);
+            }
+        }
         let immutable_get = self.native(|it, this, _| {
             let data = it.ab_receiver(this, "get ArrayBuffer.prototype.immutable")?;
             Ok(Value::Bool(is_immutable(&data)))
         });
+        if let Value::Object(g) = &immutable_get {
+            crate::builtin_table::set_fn_head(g, "get immutable", 0.0);
+        }
         define_accessor(&ab_proto, "immutable", Some(immutable_get), None, false);
         self.set_native(&ab_proto, "resize", |it, this, a| it.ab_resize(this, a));
         let detached_get = self.native(|it, this, _| {

@@ -361,27 +361,20 @@ ArrayBuffer.prototype	@@toStringTag	data	--c	string	-	-	-	-	ArrayBuffer
 ArrayBuffer.prototype	byteLength	accessor	--c	-	-	get byteLength|-	-	-	-
 ArrayBuffer.prototype	constructor	data	w-c	function	1	ArrayBuffer	1	16	-
 ArrayBuffer.prototype	detached	accessor	--c	-	-	get detached|-	-	-	-
-ArrayBuffer.prototype	immutable	accessor	--c	-	-	get immutable|-	-	-	-
 ArrayBuffer.prototype	maxByteLength	accessor	--c	-	-	get maxByteLength|-	-	-	-
 ArrayBuffer.prototype	resizable	accessor	--c	-	-	get resizable|-	-	-	-
 ArrayBuffer.prototype	resize	data	w-c	function	1	resize	0	-	-
 ArrayBuffer.prototype	slice	data	w-c	function	2	slice	0	-	-
-ArrayBuffer.prototype	sliceToImmutable	data	w-c	function	2	sliceToImmutable	0	-	-
 ArrayBuffer.prototype	transfer	data	w-c	function	0	transfer	0	-	-
 ArrayBuffer.prototype	transferToFixedLength	data	w-c	function	0	transferToFixedLength	0	-	-
-ArrayBuffer.prototype	transferToImmutable	data	w-c	function	0	transferToImmutable	0	-	-
 ArrayBuffer.prototype.resize	length	data	--c	number	1	-	-	-	-
 ArrayBuffer.prototype.resize	name	data	--c	string	-	resize	-	-	-
 ArrayBuffer.prototype.slice	length	data	--c	number	2	-	-	-	-
 ArrayBuffer.prototype.slice	name	data	--c	string	-	slice	-	-	-
-ArrayBuffer.prototype.sliceToImmutable	length	data	--c	number	2	-	-	-	-
-ArrayBuffer.prototype.sliceToImmutable	name	data	--c	string	-	sliceToImmutable	-	-	-
 ArrayBuffer.prototype.transfer	length	data	--c	number	0	-	-	-	-
 ArrayBuffer.prototype.transfer	name	data	--c	string	-	transfer	-	-	-
 ArrayBuffer.prototype.transferToFixedLength	length	data	--c	number	0	-	-	-	-
 ArrayBuffer.prototype.transferToFixedLength	name	data	--c	string	-	transferToFixedLength	-	-	-
-ArrayBuffer.prototype.transferToImmutable	length	data	--c	number	0	-	-	-	-
-ArrayBuffer.prototype.transferToImmutable	name	data	--c	string	-	transferToImmutable	-	-	-
 Atomics	@@toStringTag	data	--c	string	-	-	-	-	Atomics
 Atomics	add	data	w-c	function	3	add	0	-	-
 Atomics	and	data	w-c	function	3	and	0	-	-
