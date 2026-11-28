@@ -1,0 +1,5 @@
+{
+  "name": "http server answers 400 and fires no body listeners for a malformed chunk size",
+  "expect": "matched",
+  "source": "import * as http from 'node:http';\nimport * as net from 'node:net';\nfunction main(): void {\n  const server = http.createServer((req: any, res: any): void => {\n    req.on('data', (): void => { console.log('data'); });\n    req.on('end', (): void => { console.log('end'); });\n  });\n  server.listen(0, (): void => {\n    const client = net.connect((server.address() as any).port);\n    let response = '';\n    client.setEncoding('utf8');\n    client.on('data', (chunk: any): void => { response += chunk; });\n    client.on('end', (): void => {\n      console.log(JSON.stringify(response));\n      server.close();\n    });\n    client.write('POST / HTTP/1.1\\r\\nHost: a\\r\\nConnection: close\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n5\\r\\r;ABCD\\r\\n34\\r\\nE\\r\\n0\\r\\n\\r\\n');\n    client.resume();\n  });\n}\n"
+}
