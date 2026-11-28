@@ -1,0 +1,5 @@
+{
+  "name": "bare events import is the node builtin",
+  "expect": "matched",
+  "source": "import { EventEmitter } from 'events';\nfunction main() {\n  const e = new EventEmitter();\n  e.on('x', (v) => console.log('got', v));\n  e.emit('x', 1);\n  console.log(EventEmitter.defaultMaxListeners);\n}\n"
+}

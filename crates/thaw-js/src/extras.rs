@@ -648,9 +648,9 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   function DataView(buffer, byteOffset, byteLength) {
     if (new.target === undefined) throw new TypeError("Constructor DataView requires 'new'");
     if (!(buffer instanceof ArrayBuffer || buffer instanceof SharedArrayBuffer)) throw new TypeError('First argument to DataView constructor must be an ArrayBuffer');
-    var off = byteOffset === undefined ? 0 : (Math.trunc(byteOffset) || 0), total = buffer.byteLength;
+    var off = toIndex(byteOffset), total = buffer.byteLength;
     if (off < 0 || off > total) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
-    var len = byteLength === undefined ? total - off : (Math.trunc(byteLength) || 0);
+    var len = byteLength === undefined ? total - off : toIndex(byteLength);
     if (len < 0 || off + len > total) throw new RangeError('Invalid DataView length ' + len);
     if (buffer instanceof ArrayBuffer && detGet.call(buffer)) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
     // no length on a resizable buffer: the view tracks the buffer's end (spec: length-tracking)
@@ -672,8 +672,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     if (dv.__off > b.byteLength || (!dv.__track && dv.__off + dv.__len > b.byteLength)) throw new TypeError('Cannot perform ' + (oobWhat || what) + ' on a detached ArrayBuffer');
   }
   Object.defineProperty(DataView.prototype, 'buffer', { enumerable: false, configurable: true, get: function () { if (!Object.prototype.hasOwnProperty.call(this, '__buf')) throw new TypeError('Method get DataView.prototype.buffer called on incompatible receiver'); return this.__buf; } });
-  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { brand(this, 'get DataView.prototype.byteLength'); dvLive(this, 'get DataView.prototype.byteLength'); return dvLen(this); } });
-  Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { brand(this, 'get DataView.prototype.byteOffset'); dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
+  Object.defineProperty(DataView.prototype, 'byteLength', { enumerable: false, configurable: true, get: function () { dvBrand(this, 'get DataView.prototype.byteLength'); dvLive(this, 'get DataView.prototype.byteLength'); return dvLen(this); } });
+  Object.defineProperty(DataView.prototype, 'byteOffset', { enumerable: false, configurable: true, get: function () { dvBrand(this, 'get DataView.prototype.byteOffset'); dvLive(this, 'get DataView.prototype.byteOffset'); return this.__off; } });
   var detGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get;
   var resizableGet = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'resizable').get;
   var scratch = new Uint8Array(8);
@@ -682,7 +682,7 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     Int32: [4, Int32Array], Uint32: [4, Uint32Array], Float16: [2, Float16Array], Float32: [4, Float32Array], Float64: [8, Float64Array]
   };
   var hasOwn = Object.prototype.hasOwnProperty;
-  function brand(dv, what) {
+  function dvBrand(dv, what) {
     if (typeof dv !== 'object' || dv === null || !hasOwn.call(dv, '__buf')) throw new TypeError('Method ' + what + ' called on incompatible receiver');
   }
   // ToIndex (RangeError for a negative or too large integer), before any detach / bounds check
@@ -698,23 +698,23 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   }
   Object.keys(kinds).forEach(function (name) {
     var size = kinds[name][0], View = kinds[name][1], view = new View(scratch.buffer, 0, 1);
-    def(DataView.prototype, 'get' + name, function (index, little) {
-      brand(this, 'DataView.prototype.get' + name);
+    def(DataView.prototype, 'get' + name, { ['get' + name](index, little) {
+      dvBrand(this, 'DataView.prototype.get' + name);
       index = toIndex(index);
       dvLive(this, 'DataView.prototype.get' + name);
       index = check(this, index, size);
       for (var i = 0; i < size; i++) scratch[little ? i : size - 1 - i] = this.__bytes[index + i];
       return view[0];
-    });
-    def(DataView.prototype, 'set' + name, function (index, value, little) {
-      brand(this, 'DataView.prototype.set' + name);
+    } }['get' + name]);
+    def(DataView.prototype, 'set' + name, { ['set' + name](index, value, little) {
+      dvBrand(this, 'DataView.prototype.set' + name);
       index = toIndex(index);
       value = +value;
       dvLive(this, 'DataView.prototype.set' + name, 'DataView.prototype.get' + name);
       index = check(this, index, size);
       view[0] = value;
       for (var i = 0; i < size; i++) this.__bytes[index + i] = scratch[little ? i : size - 1 - i];
-    });
+    } }['set' + name]);
   });
   ['get', 'set'].forEach(function (p) {
     var f = DataView.prototype[p + 'Float16'];
@@ -722,23 +722,23 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     Object.defineProperty(f, 'length', { value: p === 'get' ? 1 : 2, configurable: true });
   });
   [['BigInt64', true], ['BigUint64', false]].forEach(function (k) {
-    def(DataView.prototype, 'get' + k[0], function (index, little) {
-      brand(this, 'DataView.prototype.get' + k[0]);
+    def(DataView.prototype, 'get' + k[0], { ['get' + k[0]](index, little) {
+      dvBrand(this, 'DataView.prototype.get' + k[0]);
       index = toIndex(index);
       dvLive(this, 'DataView.prototype.get' + k[0]);
       index = check(this, index, 8);
       var v = 0n;
       for (var i = 0; i < 8; i++) v = (v << 8n) | BigInt(this.__bytes[index + (little ? 7 - i : i)]);
       return k[1] ? BigInt.asIntN(64, v) : v;
-    });
-    def(DataView.prototype, 'set' + k[0], function (index, value, little) {
-      brand(this, 'DataView.prototype.set' + k[0]);
+    } }['get' + k[0]]);
+    def(DataView.prototype, 'set' + k[0], { ['set' + k[0]](index, value, little) {
+      dvBrand(this, 'DataView.prototype.set' + k[0]);
       index = toIndex(index);
       var v = BigInt.asUintN(64, BigInt(value));
       dvLive(this, 'DataView.prototype.set' + k[0], 'DataView.prototype.get' + k[0]);
       index = check(this, index, 8);
       for (var i = 7; i >= 0; i--) { this.__bytes[index + (little ? 7 - i : i)] = Number(v & 255n); v >>= 8n; }
-    });
+    } }['set' + k[0]]);
   });
   def(DataView.prototype, Symbol.toStringTag, 'DataView');
   def(DataView.prototype, 'constructor', DataView);
@@ -999,12 +999,25 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   }
   function toLimit(limit) {
     var n = Number(limit);
-    if (n !== n || (n = Math.trunc(n)) < 0) throw new RangeError(String(limit) + ' must be positive');
+    if (n !== n || (n = Math.trunc(n)) < 0 || (n !== Infinity && n > 9007199254740991)) throw new RangeError(String(limit) + ' is out of range');
     return n;
+  }
+  // `this` is an object; `validate()` checks the arguments and, when it throws, the receiver is closed
+  // (a close error is masked by the validation error) before GetIteratorDirect reads `next`.
+  function direct(self, name, validate) {
+    var it = requireObj(self, name);
+    if (validate) {
+      try { validate(); } catch (e) { try { closeIt(it); } catch (_) {} throw e; }
+    }
+    return it;
+  }
+  // close after an abrupt completion: the original error wins over a throwing `return`
+  function closeQuiet(it) {
+    try { closeIt(it); } catch (_) {}
   }
   function closeIt(it) {
     var r = it.return;
-    if (r !== undefined && r !== null) r.call(it);
+    if (r !== undefined && r !== null && !isObj(r.call(it))) throw new TypeError('iterator return() result is not an object');
   }
   function stepOf(it) {
     var next = it.next;
@@ -1017,56 +1030,75 @@ pub(crate) const EXTRAS_LATE: &str = r#"
   // a lazy helper: `pull()` yields {value, done}; `under` (and `cur()`, the active inner iterator) are closed by return()
   var HelperProto = Object.create(ITP);
   def(HelperProto, Symbol.toStringTag, 'Iterator Helper');
-  function helper(under, pull, cur) {
-    var h = Object.create(HelperProto), done = false, running = false;
-    def(h, 'next', function next() {
-      if (done) return { value: undefined, done: true };
-      if (running) throw new TypeError('Generator is already running');
-      running = true;
-      var r;
-      try { r = pull(); } catch (e) { done = true; throw e; } finally { running = false; }
-      if (r.done) done = true;
-      return r;
-    });
-    def(h, 'return', function () {
-      if (!done) {
-        done = true;
-        var c = cur && cur();
+  var hstate = new WeakMap();
+  function helperState(h) {
+    var st = hstate.get(h);
+    if (st === undefined) throw new TypeError('method called on incompatible receiver');
+    return st;
+  }
+  def(HelperProto, 'next', function next() {
+    'use strict';
+    var st = helperState(this);
+    if (st.done) return { value: undefined, done: true };
+    if (st.running) throw new TypeError('Generator is already running');
+    st.running = st.started = true;
+    var r;
+    try { r = st.pull(); } catch (e) { st.done = true; throw e; } finally { st.running = false; }
+    if (r.done) { st.done = true; return { value: undefined, done: true }; }
+    return r;
+  });
+  def(HelperProto, 'return', function () {
+    'use strict';
+    var st = helperState(this);
+    if (st.running) throw new TypeError('Generator is already running');
+    if (!st.done) {
+      // a suspended-start generator completes first; a suspended-yield one is "executing" while it closes
+      if (st.started) st.running = true; else st.done = true;
+      try {
+        var c = st.cur && st.cur();
         if (c) {
           // an inner close error wins, but the outer source is still closed (its own error is suppressed)
-          try { closeIt(c); } catch (e) { try { closeIt(under); } catch (_) {} throw e; }
+          try { closeIt(c); } catch (e) { try { closeIt(st.under); } catch (_) {} throw e; }
         }
-        closeIt(under);
-      }
-      return { value: undefined, done: true };
-    });
+        closeIt(st.under);
+      } finally { st.running = false; st.done = true; }
+    }
+    return { value: undefined, done: true };
+  });
+  function helper(under, pull, cur) {
+    var h = Object.create(HelperProto);
+    hstate.set(h, { under: under, pull: pull, cur: cur, done: false, running: false, started: false });
     return h;
   }
   var DONE = { value: undefined, done: true };
   def(ITP, 'map', function map(fn) {
-    var it = requireObj(this, 'map'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'map', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     return helper(it, function () {
       var r = step();
       if (r.done) return DONE;
-      try { return { value: fn(r.value, n++), done: false }; } catch (e) { closeIt(it); throw e; }
+      var v = r.value;
+      try { return { value: fn(v, n++), done: false }; } catch (e) { closeQuiet(it); throw e; }
     });
   });
   def(ITP, 'filter', function filter(fn) {
-    var it = requireObj(this, 'filter'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'filter', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     return helper(it, function () {
       for (;;) {
         var r = step();
         if (r.done) return DONE;
-        var ok;
-        try { ok = fn(r.value, n++); } catch (e) { closeIt(it); throw e; }
+        var ok, v = r.value;
+        try { ok = fn(v, n++); } catch (e) { closeQuiet(it); throw e; }
         if (ok) return { value: r.value, done: false };
       }
     });
   });
   def(ITP, 'take', function take(limit) {
-    var it = requireObj(this, 'take'), left = toLimit(limit), step = stepOf(it);
+    'use strict';
+    var left, it = direct(this, 'take', function () { left = toLimit(limit); }), step = stepOf(it);
     return helper(it, function () {
       if (left <= 0) { closeIt(it); return DONE; }
       left--;
@@ -1075,7 +1107,8 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'drop', function drop(limit) {
-    var it = requireObj(this, 'drop'), left = toLimit(limit), step = stepOf(it);
+    'use strict';
+    var left, it = direct(this, 'drop', function () { left = toLimit(limit); }), step = stepOf(it);
     return helper(it, function () {
       while (left > 0) { left--; if (step().done) return DONE; }
       var r = step();
@@ -1083,31 +1116,34 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     });
   });
   def(ITP, 'flatMap', function flatMap(fn) {
-    var it = requireObj(this, 'flatMap'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'flatMap', function () { requireFn(fn); });
     var step = stepOf(it), n = 0, inner = null;
     return helper(it, function () {
       for (;;) {
         if (inner) {
           var s;
-          try { s = inner.step(); } catch (e) { closeIt(it); throw e; }
+          try { s = inner.step(); } catch (e) { closeQuiet(it); throw e; }
           if (!s.done) return { value: s.value, done: false };
           inner = null;
         }
         var r = step();
         if (r.done) return DONE;
+        var v = r.value;
         try {
-          var m = fn(r.value, n++);
+          var m = fn(v, n++);
           if (!isObj(m)) throw new TypeError(String(m) + ' is not an object');
           var f = m[Symbol.iterator];
           var src = f === undefined || f === null ? m : f.call(m);
           if (!isObj(src)) throw new TypeError(String(src) + ' is not an object');
           inner = { it: src, step: stepOf(src) };
-        } catch (e) { closeIt(it); throw e; }
+        } catch (e) { closeQuiet(it); throw e; }
       }
     }, function () { return inner && inner.it; });
   });
   def(ITP, 'reduce', function reduce(fn) {
-    var it = requireObj(this, 'reduce'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'reduce', function () { requireFn(fn); });
     var step = stepOf(it), acc, c = 0;
     if (arguments.length < 2) {
       var first = step();
@@ -1117,10 +1153,12 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     for (;;) {
       var r = step();
       if (r.done) return acc;
-      try { acc = fn(acc, r.value, c++); } catch (e) { closeIt(it); throw e; }
+      var v = r.value;
+      try { acc = fn(acc, v, c++); } catch (e) { closeQuiet(it); throw e; }
     }
   });
   def(ITP, 'toArray', function toArray() {
+    'use strict';
     var step = stepOf(requireObj(this, 'toArray')), out = [];
     for (;;) {
       var r = step();
@@ -1129,51 +1167,328 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     }
   });
   def(ITP, 'forEach', function forEach(fn) {
-    var it = requireObj(this, 'forEach'); requireFn(fn);
+    'use strict';
+    var it = direct(this, 'forEach', function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     for (;;) {
       var r = step();
       if (r.done) return undefined;
-      try { fn(r.value, n++); } catch (e) { closeIt(it); throw e; }
+      var v = r.value;
+      try { fn(v, n++); } catch (e) { closeQuiet(it); throw e; }
     }
   });
   // some / every / find: stop at the first decisive value and close the iterator
   function search(self, name, fn, decide) {
-    var it = requireObj(self, name); requireFn(fn);
+    var it = direct(self, name, function () { requireFn(fn); });
     var step = stepOf(it), n = 0;
     for (;;) {
       var r = step();
       if (r.done) return decide.none;
-      var ok;
-      try { ok = fn(r.value, n++); } catch (e) { closeIt(it); throw e; }
+      var ok, v = r.value;
+      try { ok = fn(v, n++); } catch (e) { closeQuiet(it); throw e; }
       if (!!ok === decide.on) { closeIt(it); return decide.hit(r.value); }
     }
   }
   def(ITP, 'some', function some(fn) {
+    'use strict';
     return search(this, 'some', fn, { on: true, none: false, hit: function () { return true; } });
   });
   def(ITP, 'every', function every(fn) {
+    'use strict';
     return search(this, 'every', fn, { on: false, none: true, hit: function () { return false; } });
   });
   def(ITP, 'find', function find(fn) {
+    'use strict';
     return search(this, 'find', fn, { on: true, none: undefined, hit: function (v) { return v; } });
   });
+
+  // ---- iterator-includes / iterator-join / iterator-chunking (windows, chunks) ----
+  var MAX_SAFE = 9007199254740991;
+  var meth = {
+    includes(value) {
+      'use strict';
+      var skipped = arguments[1];
+      var it = direct(this, 'includes', function () {
+        if (skipped === undefined) { skipped = 0; return; }
+        if (typeof skipped !== 'number' || skipped !== skipped) throw new TypeError('skippedElements must be an integral Number');
+        if (skipped === Infinity) return;
+        if (skipped === -Infinity) throw new RangeError('skippedElements must not be negative');
+        if (Math.trunc(skipped) !== skipped) throw new TypeError('skippedElements must be an integral Number');
+        if (skipped < 0 || skipped > MAX_SAFE) throw new RangeError('skippedElements is out of range');
+      });
+      var step = stepOf(it);
+      while (skipped > 0) { if (step().done) return false; skipped--; }
+      for (;;) {
+        var r = step();
+        if (r.done) return false;
+        var v = r.value;
+        if (v === value || (v !== v && value !== value)) { closeIt(it); return true; }
+      }
+    },
+    join(separator) {
+      'use strict';
+      var sep;
+      var it = direct(this, 'join', function () { sep = separator === undefined ? ',' : `${separator}`; });
+      var step = stepOf(it), out = '', first = true;
+      for (;;) {
+        var r = step();
+        if (r.done) return out;
+        var part = '', v = r.value;
+        if (v !== undefined && v !== null) {
+          try { part = `${v}`; } catch (e) { closeQuiet(it); throw e; }
+        }
+        out = first ? part : out + sep + part;
+        first = false;
+      }
+    },
+    chunks(chunkSize) {
+      'use strict';
+      var size = sizeArg(this, 'chunks', chunkSize, 'chunkSize');
+      var it = size.it, n = size.n, step = stepOf(it), ended = false;
+      return helper(it, function () {
+        if (ended) return DONE;
+        var buf = [];
+        while (buf.length < n) {
+          var r = step();
+          if (r.done) { ended = true; break; }
+          buf.push(r.value);
+        }
+        return buf.length === 0 ? DONE : { value: buf, done: false };
+      });
+    },
+    windows(windowSize) {
+      'use strict';
+      var mode = arguments[1], partial = false;
+      var size = sizeArg(this, 'windows', windowSize, 'windowSize', function () {
+        if (mode === undefined || mode === 'only-full') return;
+        if (mode === 'allow-partial') { partial = true; return; }
+        throw new TypeError('undersized must be "only-full" or "allow-partial"');
+      });
+      var it = size.it, n = size.n, step = stepOf(it), buf = [], ended = false;
+      return helper(it, function () {
+        if (ended) return DONE;
+        for (;;) {
+          var r = step();
+          if (r.done) {
+            ended = true;
+            if (partial && buf.length > 0 && buf.length < n) return { value: buf.slice(), done: false };
+            return DONE;
+          }
+          buf.push(r.value);
+          if (buf.length > n) buf.shift();
+          if (buf.length === n) return { value: buf.slice(), done: false };
+        }
+      });
+    },
+  };
+  function sizeArg(self, name, v, label, extra) {
+    var n;
+    var it = direct(self, name, function () {
+      if (typeof v !== 'number' || v !== v || v === Infinity || v === -Infinity || Math.trunc(v) !== v) {
+        throw new TypeError(label + ' must be an integral Number');
+      }
+      if (v < 1 || v > 4294967295) throw new RangeError(label + ' must be between 1 and 2^32 - 1');
+      n = v;
+      if (extra) extra();
+    });
+    return { it: it, n: n };
+  }
+  def(ITP, 'includes', meth.includes);
+  def(ITP, 'join', meth.join);
+  def(ITP, 'chunks', meth.chunks);
+  def(ITP, 'windows', meth.windows);
+  // %WrapForValidIteratorPrototype%: one shared prototype, the wrapped record lives in a WeakMap
+  var wraps = new WeakMap();
+  var WrapProto = Object.create(ITP);
+  def(WrapProto, 'next', function next() {
+    'use strict';
+    var rec = wraps.get(this);
+    if (rec === undefined) throw new TypeError('next method called on incompatible receiver');
+    return rec.next.call(rec.it);
+  });
+  def(WrapProto, 'return', function () {
+    'use strict';
+    var rec = wraps.get(this);
+    if (rec === undefined) throw new TypeError('return method called on incompatible receiver');
+    var r = rec.it.return;
+    return r === undefined || r === null ? { value: undefined, done: true } : r.call(rec.it);
+  });
   def(Iterator, 'from', function from(o) {
+    'use strict';
     var it;
     if (typeof o === 'string' || isObj(o)) {
       var m = o[Symbol.iterator];
       it = m === undefined || m === null ? o : m.call(o);
     }
     if (!isObj(it)) throw new TypeError(String(o) + ' is not an object');
+    var nx = it.next;
     if (ITP.isPrototypeOf(it)) return it;
-    var nx = it.next, w = Object.create(ITP);
-    def(w, 'next', function next() { return nx.call(it); });
-    def(w, 'return', function () {
-      var r = it.return;
-      return r === undefined || r === null ? { value: undefined, done: true } : r.call(it);
-    });
+    var w = Object.create(WrapProto);
+    wraps.set(w, { it: it, next: nx });
     return w;
   });
+
+  // ---- Iterator.prototype[Symbol.dispose] ----
+  if (Symbol.dispose) {
+    def(ITP, Symbol.dispose, {
+      [Symbol.dispose]() {
+        'use strict';
+        var r = this.return;
+        if (r !== undefined && r !== null) r.call(this);
+      },
+    }[Symbol.dispose]);
+  }
+  // GetIteratorFlattenable(obj, reject-strings): an object that is its own iterator or has @@iterator
+  function flatten(o) {
+    if (!isObj(o)) throw new TypeError('value is not an object');
+    var m = o[Symbol.iterator], it = o;
+    if (m !== undefined && m !== null) {
+      if (typeof m !== 'function') throw new TypeError('@@iterator is not callable');
+      it = m.call(o);
+    }
+    if (!isObj(it)) throw new TypeError('iterator is not an object');
+    return { it: it, step: stepOf(it) };
+  }
+  // IteratorCloseAll: reverse order; the first error (or the given one) is rethrown after every close ran
+  function closeAll(list, hasErr, err) {
+    for (var i = list.length - 1; i >= 0; i--) {
+      try { closeIt(list[i].it); } catch (e) { if (!hasErr) { hasErr = true; err = e; } }
+    }
+    if (hasErr) throw err;
+  }
+  function without(list, rec) {
+    var i = list.indexOf(rec);
+    if (i >= 0) list.splice(i, 1);
+  }
+  function zipImpl(iterables, opts, keyed, name) {
+    if (!isObj(iterables)) throw new TypeError('Iterator.' + name + ' requires an object');
+    if (opts !== undefined && !isObj(opts)) throw new TypeError('options must be an object');
+    var mode = opts === undefined ? undefined : opts.mode;
+    if (mode === undefined) mode = 'shortest';
+    else if (mode !== 'shortest' && mode !== 'longest' && mode !== 'strict') throw new TypeError('invalid mode');
+    var padOpt;
+    if (mode === 'longest' && opts !== undefined) {
+      padOpt = opts.padding;
+      if (padOpt !== undefined && !isObj(padOpt)) throw new TypeError('padding must be an object');
+    }
+    var recs = [], keys = [];
+    if (!keyed) {
+      var m = iterables[Symbol.iterator];
+      if (typeof m !== 'function') throw new TypeError('iterables is not iterable');
+      var inIt = m.call(iterables);
+      if (!isObj(inIt)) throw new TypeError('iterator is not an object');
+      var inRec = { it: inIt, step: stepOf(inIt) };
+      for (;;) {
+        var r, v;
+        try { r = inRec.step(); if (r.done) break; v = r.value; } catch (e) { closeAll(recs, true, e); }
+        try { recs.push(flatten(v)); } catch (e) { closeAll(recs.concat([inRec]), true, e); }
+      }
+    } else {
+      var all = Reflect.ownKeys(iterables);
+      for (var n = 0; n < all.length; n++) {
+        try {
+          var key = all[n], d = Object.getOwnPropertyDescriptor(iterables, key);
+          if (d === undefined || !d.enumerable) continue;
+          var val = iterables[key];
+          if (val === undefined) continue;
+          recs.push(flatten(val));
+          keys.push(key);
+        } catch (e) { closeAll(recs, true, e); }
+      }
+    }
+    var count = recs.length, pad = [];
+    if (mode === 'longest') {
+      if (padOpt === undefined) { for (var q = 0; q < count; q++) pad.push(undefined); }
+      else if (keyed) {
+        try { for (var q = 0; q < count; q++) pad.push(padOpt[keys[q]]); } catch (e) { closeAll(recs, true, e); }
+      } else {
+        var pIt, pStep, using = true;
+        try {
+          var pm = padOpt[Symbol.iterator];
+          if (typeof pm !== 'function') throw new TypeError('padding is not iterable');
+          pIt = pm.call(padOpt);
+          if (!isObj(pIt)) throw new TypeError('iterator is not an object');
+          pStep = stepOf(pIt);
+        } catch (e) { closeAll(recs, true, e); }
+        for (var q = 0; q < count; q++) {
+          if (using) {
+            try {
+              var pr = pStep();
+              if (pr.done) { using = false; pad.push(undefined); } else pad.push(pr.value);
+            } catch (e) { closeAll(recs, true, e); }
+          } else pad.push(undefined);
+        }
+        if (using) { try { closeIt(pIt); } catch (e) { closeAll(recs, true, e); } }
+      }
+    }
+    var open = recs.slice();
+    var owner = { return: function () { closeAll(open, false); return {}; } };
+    return helper(owner, function () {
+      if (count === 0) return DONE;
+      var results = [];
+      for (var i = 0; i < count; i++) {
+        var rec = recs[i], value;
+        if (rec === null) { results.push(pad[i]); continue; }
+        var r, finished;
+        try { r = rec.step(); finished = r.done; if (!finished) value = r.value; } catch (e) { without(open, rec); closeAll(open, true, e); }
+        if (finished) {
+          without(open, rec);
+          if (mode === 'shortest') { closeAll(open, false); return DONE; }
+          if (mode === 'strict') {
+            if (i !== 0) closeAll(open, true, new TypeError('iterators have different lengths'));
+            for (var k = 1; k < count; k++) {
+              var rk = recs[k], kd;
+              try { kd = rk.step().done; } catch (e) { without(open, rk); closeAll(open, true, e); }
+              if (kd) without(open, rk); else closeAll(open, true, new TypeError('iterators have different lengths'));
+            }
+            return DONE;
+          }
+          if (open.length === 0) return DONE;
+          recs[i] = null;
+          results.push(pad[i]);
+          continue;
+        }
+        results.push(value);
+      }
+      if (!keyed) return { value: results, done: false };
+      var out = Object.create(null);
+      for (var j = 0; j < count; j++) out[keys[j]] = results[j];
+      return { value: out, done: false };
+    });
+  }
+  var statics = {
+    concat() {
+      'use strict';
+      var items = arguments, list = [];
+      for (var x = 0; x < items.length; x++) {
+        var item = items[x];
+        if (!isObj(item)) throw new TypeError('concat argument is not an object');
+        var m = item[Symbol.iterator];
+        if (typeof m !== 'function') throw new TypeError('concat argument is not iterable');
+        list.push({ o: item, m: m });
+      }
+      var idx = 0, cur = null, step = null;
+      return helper({}, function () {
+        for (;;) {
+          if (cur === null) {
+            if (idx >= list.length) return DONE;
+            var e = list[idx++], it = e.m.call(e.o);
+            if (!isObj(it)) throw new TypeError('iterator is not an object');
+            cur = it;
+            step = stepOf(it);
+          }
+          var r = step();
+          if (r.done) { cur = null; continue; }
+          return { value: r.value, done: false };
+        }
+      }, function () { return cur; });
+    },
+    zip(iterables) { 'use strict'; return zipImpl(iterables, arguments[1], false, 'zip'); },
+    zipKeyed(iterables) { 'use strict'; return zipImpl(iterables, arguments[1], true, 'zipKeyed'); },
+  };
+  def(Iterator, 'concat', statics.concat);
+  def(Iterator, 'zip', statics.zip);
+  def(Iterator, 'zipKeyed', statics.zipKeyed);
   // the native lowering of `Iterator.from` calls this platform global (thaw-hir static_builtins.rs)
   globalThis.__thaw_iterator_from = function (source) {
     // a projected native generator keeps its `next(value)` / `return(value)` / `throw(reason)` protocol
@@ -1458,137 +1773,6 @@ pub(crate) const EXTRAS_LATE: &str = r#"
     if (typeof globalThis.DisposableStack === 'undefined') stackClass('DisposableStack', false);
     if (typeof globalThis.AsyncDisposableStack === 'undefined') stackClass('AsyncDisposableStack', true);
 
-    // Iterator sequencing / joint iteration: helper objects inherit Iterator.prototype.
-    var ITPr = Iterator.prototype;
-    var HelperProto = Object.create(ITPr);
-    Object.defineProperty(HelperProto, Symbol.toStringTag, { value: 'Iterator Helper', configurable: true });
-    function helper(step, close) {
-      var o = Object.create(HelperProto), running = false, finished = false;
-      def(o, 'next', function next() {
-        if (running) throw new TypeError('Generator is already running');
-        if (finished) return { value: undefined, done: true };
-        running = true;
-        try {
-          var r = step();
-          if (r.done) finished = true;
-          return r;
-        } catch (e) { finished = true; throw e; } finally { running = false; }
-      });
-      def(o, 'return', function () {
-        if (running) throw new TypeError('Generator is already running');
-        if (!finished) { finished = true; close(); }
-        return { value: undefined, done: true };
-      });
-      return o;
-    }
-    function closeQuietly(it) { try { var r = it.return; if (r !== undefined && r !== null) r.call(it); } catch (e) {} }
-    def(Iterator, 'concat', function concat() {
-      var items = [];
-      for (var i = 0; i < arguments.length; i++) {
-        var item = arguments[i];
-        if (!isObject(item)) throw new TypeError(String(item) + ' is not an object');
-        var method = item[Symbol.iterator];
-        if (!callable(method)) throw new TypeError(String(item) + ' is not iterable');
-        items.push({ iterable: item, method: method });
-      }
-      var index = 0, current = null;
-      return helper(function () {
-        for (;;) {
-          if (current === null) {
-            if (index >= items.length) return { value: undefined, done: true };
-            var entry = items[index++];
-            var it = entry.method.call(entry.iterable);
-            if (!isObject(it)) throw new TypeError('Result of the Symbol.iterator method is not an object');
-            current = { it: it, next: it.next };
-          }
-          var r = current.next.call(current.it);
-          if (!isObject(r)) throw new TypeError('Iterator result is not an object');
-          if (r.done) { current = null; continue; }
-          return { value: r.value, done: false };
-        }
-      }, function () { if (current !== null) { var it = current.it; current = null; var r = it.return; if (r !== undefined && r !== null) r.call(it); } });
-    });
-    function zipImpl(sources, keys, options) {
-      if (options !== undefined && !isObject(options)) throw new TypeError('The options argument is not an object');
-      var mode = options === undefined ? undefined : options.mode;
-      if (mode === undefined) mode = 'shortest';
-      if (mode !== 'shortest' && mode !== 'longest' && mode !== 'strict') throw new TypeError('Invalid mode');
-      var padding = mode === 'longest' && options !== undefined ? options.padding : undefined;
-      if (mode === 'longest' && padding !== undefined && !isObject(padding)) throw new TypeError('The padding option is not an object');
-      var iters = [];
-      var fail = function (e) { for (var k = iters.length - 1; k >= 0; k--) closeQuietly(iters[k].it); throw e; };
-      try {
-        for (var i = 0; i < sources.length; i++) {
-          var src = sources[i];
-          if (!isObject(src) && typeof src !== 'string') throw new TypeError(String(src) + ' is not iterable');
-          var m = src[Symbol.iterator];
-          var it = callable(m) ? m.call(src) : src;
-          if (!isObject(it)) throw new TypeError('Result of the Symbol.iterator method is not an object');
-          iters.push({ it: it, next: it.next, done: false });
-        }
-      } catch (e) { fail(e); }
-      var pads = [];
-      if (mode === 'longest') {
-        try {
-          if (padding === undefined) { for (var p = 0; p < iters.length; p++) pads.push(undefined); }
-          else {
-            var pit = padding[Symbol.iterator]();
-            for (var q = 0; q < iters.length; q++) {
-              var pr = pit.next();
-              if (pr.done) { for (; q < iters.length; q++) pads.push(undefined); break; }
-              pads.push(pr.value);
-            }
-            closeQuietly(pit);
-          }
-        } catch (e) { fail(e); }
-      }
-      var build = function (values) {
-        if (keys === null) return values;
-        var obj = Object.create(null);
-        for (var k = 0; k < keys.length; k++) obj[keys[k]] = values[k];
-        return obj;
-      };
-      var finishedAll = false;
-      return helper(function () {
-        if (iters.length === 0) return { value: undefined, done: true };
-        var values = [];
-        for (var i = 0; i < iters.length; i++) {
-          var s = iters[i];
-          if (s.done) { values.push(pads[i]); continue; }
-          var r;
-          try { r = s.next.call(s.it); if (!isObject(r)) throw new TypeError('Iterator result is not an object'); }
-          catch (e) { s.done = true; for (var j = 0; j < iters.length; j++) if (j !== i && !iters[j].done) closeQuietly(iters[j].it); throw e; }
-          if (r.done) {
-            s.done = true;
-            if (mode === 'shortest') { for (var j2 = 0; j2 < iters.length; j2++) if (!iters[j2].done) closeQuietly(iters[j2].it); return { value: undefined, done: true }; }
-            if (mode === 'strict') {
-              if (i !== 0) { for (var j3 = 0; j3 < iters.length; j3++) if (!iters[j3].done) closeQuietly(iters[j3].it); throw new TypeError('Iterators have different lengths'); }
-              for (var j4 = 1; j4 < iters.length; j4++) {
-                var r4 = iters[j4].next.call(iters[j4].it);
-                if (!r4.done) { for (var j5 = j4; j5 < iters.length; j5++) closeQuietly(iters[j5].it); throw new TypeError('Iterators have different lengths'); }
-                iters[j4].done = true;
-              }
-              return { value: undefined, done: true };
-            }
-            if (iters.every(function (x) { return x.done; })) return { value: undefined, done: true };
-            values.push(pads[i]);
-          } else values.push(r.value);
-        }
-        return { value: build(values), done: false };
-      }, function () { for (var k = iters.length - 1; k >= 0; k--) if (!iters[k].done) closeQuietly(iters[k].it); });
-    }
-    def(Iterator, 'zip', function zip(iterables, options) {
-      if (!isObject(iterables)) throw new TypeError(String(iterables) + ' is not an object');
-      return zipImpl(Array.from(iterables), null, options);
-    });
-    def(Iterator, 'zipKeyed', function zipKeyed(iterables, options) {
-      if (!isObject(iterables)) throw new TypeError(String(iterables) + ' is not an object');
-      var keys = Reflect.ownKeys(iterables).filter(function (k) {
-        var d = Object.getOwnPropertyDescriptor(iterables, k);
-        return d !== undefined && d.enumerable;
-      });
-      return zipImpl(keys.map(function (k) { return iterables[k]; }), keys, options);
-    });
   })();
 })();
 "#;

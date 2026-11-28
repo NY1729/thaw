@@ -1,0 +1,5 @@
+{
+  "name": "closure may mention a const declared after it or by its own statement",
+  "expect": "matched",
+  "source": "function main() {\n  const fn = () => { clearImmediate(immediate); console.log('cleared'); };\n  const immediate = setImmediate(fn);\n  setTimeout(() => {\n    const timer = setInterval(() => { console.log('tick'); clearInterval(timer); }, 1);\n  }, 20);\n}\n"
+}

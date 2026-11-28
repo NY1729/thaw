@@ -1220,6 +1220,33 @@ fn is_symbol_object(v: &Value) -> bool {
     matches!(v, Value::Object(o) if matches!(&*o.kind.borrow(), Kind::Symbol { .. }))
 }
 
+/// The first proxy on `o`'s prototype chain when no object before it owns `key` (and `o` does not).
+fn proxy_before_holder(o: &Obj, key: &str) -> Option<Obj> {
+    let mut cur = o.proto.borrow().clone();
+    let mut any = false;
+    while let Some(c) = cur.clone() {
+        if matches!(&*c.kind.borrow(), Kind::Proxy(_)) {
+            any = true;
+            break;
+        }
+        cur = c.proto.borrow().clone();
+    }
+    if !any || find_own(o, key).is_some() {
+        return None;
+    }
+    let mut cur = o.proto.borrow().clone();
+    while let Some(c) = cur {
+        if matches!(&*c.kind.borrow(), Kind::Proxy(_)) {
+            return Some(c);
+        }
+        if find_own(&c, key).is_some() {
+            return None;
+        }
+        cur = c.proto.borrow().clone();
+    }
+    None
+}
+
 /// Arithmetic and relational operators on two numbers, without `binary()`'s coercion chain.
 fn number_binop(op: a::BinaryOp, x: f64, y: f64) -> Option<Value> {
     use a::BinaryOp as B;
@@ -1519,12 +1546,21 @@ impl Value {
     }
     /// Whether `new` accepts this value: the same test `construct_with` applies.
     pub(crate) fn is_constructor(&self) -> bool {
-        matches!(self, Value::Object(o) if !o.no_ctor.get() && match &*o.kind.borrow() {
-            Kind::Closure { def, .. } => !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype,
+        let Value::Object(o) = self else {
+            return false;
+        };
+        if o.no_ctor.get() {
+            return false;
+        }
+        let native = match &*o.kind.borrow() {
+            Kind::Closure { def, .. } => {
+                return !def.arrow && !def.is_async && !def.is_gen && !def.no_prototype
+            }
             Kind::Native(_) => true,
-            Kind::Proxy(p) => p.callable,
-            _ => false,
-        })
+            Kind::Proxy(p) => return p.callable && p.target.is_constructor(),
+            _ => return false,
+        };
+        native && native_is_constructor(o)
     }
 
     fn is_callable(&self) -> bool {
@@ -1534,6 +1570,15 @@ impl Value {
             _ => false,
         })
     }
+}
+
+/// Whether a native function has a [[Construct]]: the constructors carry an own `prototype` (Proxy and bound
+/// functions are marked `@@ctor`, a host callback `@@hostcb`); every other native (a method, a getter, a
+/// resolving function, `eval`) is not a constructor.
+fn native_is_constructor(o: &Obj) -> bool {
+    ["prototype", "@@ctor", "@@hostcb"]
+        .iter()
+        .any(|k| find_own(o, k).is_some())
 }
 
 fn new_obj(proto: Option<Obj>, kind: Kind) -> Obj {
@@ -2040,6 +2085,7 @@ impl Interp {
             .unwrap_or_else(|_| panic!("thaw-js late extras prelude must evaluate"));
         web_console::install(&mut it);
         it.apply_builtin_table();
+        it.mark_methods_non_constructors();
         it.order_array_proto();
         // the preludes redefine `navigator`, `crypto` and `performance` as data; their Node form is an
         // accessor, so only a redefinition by user code counts (`node_accessor`)
@@ -3345,7 +3391,7 @@ impl Interp {
             }
             return self.refuse_primitive_write(strict, target, key);
         };
-        if self.proxy_set(o, key, &value, target)? {
+        if self.proxy_set(o, key, &value, target, strict)? {
             return Ok(());
         }
         if matches!(&*o.kind.borrow(), Kind::Global) {
@@ -3499,6 +3545,10 @@ impl Interp {
         }
         if is_legacy_fn_key(o, key) {
             return self.refuse_write(strict, o, key, Refusal::ReadOnly);
+        }
+        // a proxy further up the prototype chain, before any holder of `key`, takes the write
+        if let Some(p) = proxy_before_holder(o, key) {
+            return self.proxy_set_chain(&p, key, &value, target, strict);
         }
         match find_in_chain(o, key) {
             Some(Slot::Accessor { set, .. }) => {
@@ -3803,6 +3853,16 @@ impl Interp {
     }
 
     /// [[Construct]](f, args, newTarget): the instance takes its prototype from `new_target.prototype`.
+    /// For a native constructor that must read `newTarget.prototype` before it allocates (GetPrototypeFromConstructor
+    /// comes first in the spec): reads it now; `construct_with` then reuses the value instead of reading again.
+    pub(crate) fn native_proto(&mut self) -> R<()> {
+        if let Some(nt) = self.rt.native_nt.take() {
+            let p = self.get(&nt, "prototype")?;
+            self.rt.native_proto = Some(p);
+        }
+        Ok(())
+    }
+
     pub(crate) fn construct_with(
         &mut self,
         f: &Value,
@@ -3822,18 +3882,35 @@ impl Interp {
         let is_native = !is_hostcb && matches!(&*fo.kind.borrow(), Kind::Native(_));
         let is_class =
             matches!(&*fo.kind.borrow(), Kind::Closure { def, .. } if def.class.is_some());
-        if !is_closure && !is_native && !is_hostcb || fo.no_ctor.get() {
+        if !is_closure && !is_native && !is_hostcb
+            || fo.no_ctor.get()
+            || (is_native && !native_is_constructor(fo))
+        {
             return self.throw_error("TypeError", "value is not a constructor");
         }
-        let proto = match self.get(new_target, "prototype")? {
-            Value::Object(p) => p,
-            _ => self.object_proto.clone(),
-        };
         if is_native {
-            // natives that act as constructors (Array, RegExp, Object, ...) return their own object
+            // natives that act as constructors (Array, RegExp, Object, ...) return their own object.
+            // The new target's `prototype` is read after the native's own argument checks (the typed array and
+            // ArrayBuffer constructors validate before GetPrototypeFromConstructor).
+            self.rt.native_nt = Some(new_target.clone());
+            self.rt.native_proto = None;
             let r = self.call_as(f, &Value::Undefined, args, true);
             self.rt.constructing = false;
+            self.rt.native_nt = None;
+            let early = self.rt.native_proto.take();
             let r = r?;
+            // a non-object `prototype` falls back to the constructor's own default prototype
+            let read = match early {
+                Some(p) => p,
+                None => self.get(new_target, "prototype")?,
+            };
+            let proto = match read {
+                Value::Object(p) if !is_symbol_object(&Value::Object(p.clone())) => p,
+                _ => match self.get(f, "prototype")? {
+                    Value::Object(p) => p,
+                    _ => self.object_proto.clone(),
+                },
+            };
             if !matches!(r, Value::Object(_)) && find_own(fo, "@@wrap").is_some() {
                 return Ok(Value::Object(new_obj(Some(proto), Kind::Wrapper(r))));
             }
@@ -3849,6 +3926,10 @@ impl Interp {
             }
             return Ok(r);
         }
+        let proto = match self.get(new_target, "prototype")? {
+            Value::Object(p) => p,
+            _ => self.object_proto.clone(),
+        };
         let this_obj = new_obj(Some(proto), Kind::Plain);
         let ctor_def = match &*fo.kind.borrow() {
             Kind::Closure { def, .. } => Some(def.clone()),
@@ -6616,14 +6697,25 @@ impl Interp {
                 &format!("Function has non-object prototype '{shown}' in instanceof check"),
             );
         };
-        let mut cur = o.proto.borrow().clone();
+        let mut cur = self.proto_step(o)?;
         while let Some(c) = cur {
             if Rc::ptr_eq(&c, p) {
                 return Ok(true);
             }
-            cur = c.proto.borrow().clone();
+            cur = self.proto_step(&c)?;
         }
         Ok(false)
+    }
+
+    /// `o.[[GetPrototypeOf]]()`, running a proxy's trap.
+    fn proto_step(&mut self, o: &Obj) -> R<Option<Obj>> {
+        if matches!(&*o.kind.borrow(), Kind::Proxy(_)) {
+            return Ok(match self.proxy_get_prototype_of(o)? {
+                Some(Value::Object(p)) => Some(p),
+                _ => None,
+            });
+        }
+        Ok(o.proto.borrow().clone())
     }
 
     fn loose_equals(&mut self, l: &Value, r: &Value) -> bool {
