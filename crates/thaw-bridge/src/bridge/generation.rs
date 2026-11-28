@@ -304,6 +304,7 @@ pub fn generate_shim(
             }
         }
     }
+    out.push_str(&take_rendered_recursive_aliases());
     out
 }
 

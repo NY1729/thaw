@@ -4118,11 +4118,16 @@ unsafe extern "C" fn server_address(environment: *const c_void) -> NativeNullabl
     }
 }
 
-unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_char {
+unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_void {
     listen_on(environment, "127.0.0.1", port)
 }
 
-unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const c_char {
+/// Node's `listen` returns the server: the native record this closure belongs to.
+fn server_record(state: &ServerState) -> *const c_void {
+    state.record.load(Ordering::Acquire) as *const c_void
+}
+
+unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     if !port.is_finite() || port < 0.0 || port > u16::MAX as f64 {
@@ -4132,7 +4137,7 @@ unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const
             "ERR_SOCKET_BAD_PORT".into(),
             port,
         );
-        return CString::new("").unwrap().into_raw();
+        return server_record(state);
     }
     let listener = match TcpListener::bind((host, port as u16)) {
         Ok(listener) => listener,
@@ -4147,7 +4152,7 @@ unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const
                 (message.clone(), message)
             };
             fail_server_listen(state, message, code, port);
-            return CString::new("").unwrap().into_raw();
+            return server_record(state);
         }
     };
     if listener.set_nonblocking(true).is_err() {
@@ -4157,7 +4162,7 @@ unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const
             "ERR_SERVER_LISTEN".into(),
             port,
         );
-        return CString::new("").unwrap().into_raw();
+        return server_record(state);
     }
     state.closed.store(false, Ordering::Release);
     *state.listener.lock().unwrap() = Some(listener);
@@ -4179,19 +4184,19 @@ unsafe fn listen_on(environment: *const c_void, host: &str, port: f64) -> *const
             "ERR_SERVER_LISTEN".into(),
             port,
         );
-        return CString::new("").unwrap().into_raw();
+        return server_record(state);
     }
     state.watcher.store(watcher, Ordering::Release);
     state.pending_listening.store(true, Ordering::Release);
     register_server(state);
-    CString::new("").unwrap().into_raw()
+    server_record(state)
 }
 
 unsafe extern "C" fn server_listen_with_callback(
     environment: *const c_void,
     port: f64,
     callback: *const c_void,
-) -> *const c_char {
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     add_event_listener(&state.listening_listeners, callback, true);
@@ -4203,7 +4208,7 @@ unsafe extern "C" fn server_listen_with_host_callback(
     port: f64,
     host: *const c_char,
     callback: *const c_void,
-) -> *const c_char {
+) -> *const c_void {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     add_event_listener(&state.listening_listeners, callback, true);
@@ -6130,7 +6135,7 @@ mod tests {
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
-            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+            let _ = result;
         }
 
         let client = thread::spawn(move || {
@@ -6224,7 +6229,7 @@ mod tests {
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
-            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+            let _ = result;
         }
 
         let client = thread::spawn(move || {
@@ -6360,7 +6365,7 @@ mod tests {
         let listen = NativeClosure::new(server_listen as *const c_void, state.cast());
         unsafe {
             let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
-            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+            let _ = result;
         }
 
         let client = thread::spawn(move || {
