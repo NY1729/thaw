@@ -1,0 +1,5 @@
+{
+  "name": "server.on and server.close return the server so calls chain",
+  "expect": "matched",
+  "source": "import http from 'http';\nfunction main(): void {\n  const events: string[] = [];\n  const srv = http.createServer((req: any, res: any) => { res.end('x'); });\n  srv.on('listening', () => events.push('listening')).on('close', () => events.push('close'));\n  srv.listen(0, '127.0.0.1', () => {\n    const closed = srv.close();\n    events.push('close-returns-server:' + typeof closed.listen + ',' + closed.listening);\n  });\n  setTimeout(() => console.log(events.join(',')), 300);\n}\n"
+}
