@@ -7,7 +7,6 @@ use crate::*;
 /// `Reflect`. They are proxy-aware themselves.
 pub(crate) struct Intrinsics {
     gopd: Value,
-    define: Value,
     gopn: Value,
     gops: Value,
 }
@@ -24,7 +23,6 @@ pub(crate) fn intrinsics(it: &mut Interp) -> Rc<Intrinsics> {
     let grab = |it: &mut Interp, name: &str| it.get(&object, name).unwrap_or(Value::Undefined);
     Rc::new(Intrinsics {
         gopd: grab(it, "getOwnPropertyDescriptor"),
-        define: grab(it, "defineProperty"),
         gopn: grab(it, "getOwnPropertyNames"),
         gops: grab(it, "getOwnPropertySymbols"),
     })
@@ -205,6 +203,19 @@ pub(crate) fn set(
         if is_proxy(&cur) {
             return set_via_proxy(it, &cur, key, v, recv, intr);
         }
+        // a typed array on the chain owns every canonical numeric key: its [[Set]] never reaches the prototypes
+        if !Rc::ptr_eq(&cur, o) {
+            if let Some(valid) = crate::typed::typed_own_key(&cur, key) {
+                if matches!(recv, Value::Object(r) if Rc::ptr_eq(r, &cur)) {
+                    it.set(&Value::Object(cur.clone()), key, v)?;
+                    return Ok(true);
+                }
+                if !valid {
+                    return Ok(true);
+                }
+                break true;
+            }
+        }
         match own_prop(it, &cur, key) {
             Some((Slot::Accessor { set, .. }, _)) => {
                 return match set {
@@ -231,8 +242,8 @@ pub(crate) fn set(
     let Value::Object(r) = recv else {
         return Ok(false);
     };
-    let k = Value::Str(key.into());
-    let existing = it.call(&intr.gopd, &Value::Undefined, &[recv.clone(), k.clone()])?;
+    let k = it.key_value(key);
+    let existing = it.call(&intr.gopd, &Value::Undefined, &[recv.clone(), k])?;
     if let Value::Object(_) = &existing {
         let accessor = !matches!(it.get(&existing, "get")?, Value::Undefined)
             || !matches!(it.get(&existing, "set")?, Value::Undefined);
@@ -241,12 +252,7 @@ pub(crate) fn set(
         }
         let d = it.plain();
         put(&d, "value", v);
-        it.call(
-            &intr.define,
-            &Value::Undefined,
-            &[recv.clone(), k, Value::Object(d)],
-        )?;
-        return Ok(true);
+        return define(it, r, key, &Value::Object(d));
     }
     if !is_extensible(it, r)? {
         return Ok(false);
@@ -256,12 +262,7 @@ pub(crate) fn set(
     put(&d, "writable", Value::Bool(true));
     put(&d, "enumerable", Value::Bool(true));
     put(&d, "configurable", Value::Bool(true));
-    it.call(
-        &intr.define,
-        &Value::Undefined,
-        &[recv.clone(), k, Value::Object(d)],
-    )?;
-    Ok(true)
+    define(it, r, key, &Value::Object(d))
 }
 
 fn set_via_proxy(
@@ -414,7 +415,6 @@ impl Interp {
         let grab = |it: &mut Interp, name: &str| it.get(&object, name).unwrap_or(Value::Undefined);
         let intr = Rc::new(Intrinsics {
             gopd: grab(self, "getOwnPropertyDescriptor"),
-            define: grab(self, "defineProperty"),
             gopn: grab(self, "getOwnPropertyNames"),
             gops: grab(self, "getOwnPropertySymbols"),
         });
