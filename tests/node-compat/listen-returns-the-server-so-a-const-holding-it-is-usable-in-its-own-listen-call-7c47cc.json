@@ -1,0 +1,5 @@
+{
+  "name": "listen returns the server so a const holding it is usable in its own listen callback",
+  "expect": "matched",
+  "source": "import http from 'http';\nasync function main(): Promise<void> {\n  const s0 = http.createServer((req, res) => { res.end(); });\n  const s = s0.listen(0, '127.0.0.1', () => {\n    console.log('L', s.address().port > 0, s0.address().port > 0);\n    s.close();\n  });\n  await new Promise<void>((r) => setTimeout(r, 300));\n}\n"
+}
